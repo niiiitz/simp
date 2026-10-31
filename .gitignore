@@ -1,0 +1,26 @@
+# Secrets & Environment
+.env
+.env.*
+*.pem
+*.key
+
+# Local Reference Documentation (Private)
+reference_documentation/
+
+# Rust / Cargo / Tauri
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
