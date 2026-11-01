@@ -559,12 +559,11 @@ export const App: React.FC = () => {
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 />
               ) : (
-                <div style={{ textAlign: 'center', padding: 16 }}>
-                  <div style={{ fontSize: 28, fontWeight: 900, letterSpacing: -1 }}>SIMP</div>
-                  <div style={{ fontSize: 12, color: '#71717a', marginTop: 4 }}>
-                    {track?.source?.toUpperCase() || 'READY'}
-                  </div>
-                </div>
+                <img
+                  src="/simp-icon-dark.png"
+                  alt="SIMP"
+                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                />
               )}
             </div>
 
