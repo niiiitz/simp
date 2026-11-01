@@ -66,3 +66,23 @@ export interface SimpStateSnapshot {
   apple_authenticated: boolean;
 }
 
+export interface AppleMusicAuthConfig {
+  configured: boolean;
+  team_id: string;
+  key_id: string;
+  private_key_path: string;
+  has_private_key: boolean;
+  developer_token: string | null;
+  music_user_token: string | null;
+  apple_authenticated: boolean;
+  status_error: string | null;
+}
+
+export interface AppleSinkCommandPayload {
+  action: 'load_and_play' | 'play' | 'pause' | 'seek' | 'set_volume';
+  uri?: string | null;
+  position_ms?: number | null;
+  volume?: number | null;
+}
+
+

@@ -155,6 +155,9 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
                             AudioCommand::SetVolume { .. }
                                 | AudioCommand::AddLibraryPath { .. }
                                 | AudioCommand::RemoveLibraryPath { .. }
+                                | AudioCommand::ConfigureAppleMusic { .. }
+                                | AudioCommand::SetAppleMusicUserToken { .. }
+                                | AudioCommand::DisconnectAppleMusic
                         );
                         let _ = state.cmd_tx.send(command);
                         if persist {
@@ -172,8 +175,18 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
                             let _ = direct_tx.send(json);
                         }
                     }
-                    ClientEnvelope::AppleWorkerEvent { .. } => {
-                        // Phase 4 Apple Music relay
+                    ClientEnvelope::AppleWorkerEvent {
+                        state: worker_state,
+                        track,
+                        position_ms,
+                        duration_ms,
+                    } => {
+                        let _ = state.cmd_tx.send(AudioCommand::AppleWorkerReport {
+                            state: worker_state,
+                            track,
+                            position_ms,
+                            duration_ms,
+                        });
                     }
                 }
             }
@@ -338,6 +351,34 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                 req_id,
                 ok: true,
                 data: serde_json::to_value(cfg).unwrap_or_default(),
+                error: None,
+            }
+        }
+        LibraryQuery::GetAppleMusicAuthConfig => {
+            let cfg = state.settings.lock().unwrap().clone();
+            let creds = simp_core::sinks::apple::AppleMusicSink::resolve_credentials(&cfg);
+            let has_private_key = creds.private_key_pem.is_some();
+            let (dev_token, status_error) =
+                match simp_core::sinks::apple::AppleMusicSink::get_or_sign_developer_token(&cfg) {
+                    Ok(tok) => (Some(tok), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
+            let apple_authenticated = creds.music_user_token.is_some();
+
+            ServerEnvelope::QueryResponse {
+                req_id,
+                ok: true,
+                data: serde_json::json!({
+                    "configured": dev_token.is_some(),
+                    "team_id": creds.team_id,
+                    "key_id": creds.key_id,
+                    "private_key_path": creds.private_key_path,
+                    "has_private_key": has_private_key,
+                    "developer_token": dev_token,
+                    "music_user_token": creds.music_user_token,
+                    "apple_authenticated": apple_authenticated,
+                    "status_error": status_error,
+                }),
                 error: None,
             }
         }

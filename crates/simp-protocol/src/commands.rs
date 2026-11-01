@@ -1,4 +1,4 @@
-use crate::models::{RepeatMode, TrackMetadata};
+use crate::models::{AlbumRecord, PlaylistRecord, RepeatMode, TrackMetadata};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -22,6 +22,28 @@ pub enum AudioCommand {
     AddLibraryPath { path: String },
     RemoveLibraryPath { path: String },
     RescanStorage,
+    ConfigureAppleMusic {
+        team_id: String,
+        key_id: String,
+        private_key_path: String,
+        developer_token: Option<String>,
+    },
+    SetAppleMusicUserToken {
+        music_user_token: String,
+    },
+    DisconnectAppleMusic,
+    ImportCatalogTracks {
+        source: String,
+        album: Option<AlbumRecord>,
+        playlist: Option<PlaylistRecord>,
+        tracks: Vec<TrackMetadata>,
+    },
+    AppleWorkerReport {
+        state: String,
+        track: Option<TrackMetadata>,
+        position_ms: u32,
+        duration_ms: Option<u32>,
+    },
     SuspendForSleep,
     ShutdownDaemon,
 }
@@ -61,6 +83,7 @@ pub enum LibraryQuery {
     },
     GetMountRoots,
     GetSettings,
+    GetAppleMusicAuthConfig,
     StartSpotifyAuth,
 }
 
@@ -80,6 +103,8 @@ pub enum ClientEnvelope {
         state: String,
         track: Option<TrackMetadata>,
         position_ms: u32,
+        #[serde(default)]
+        duration_ms: Option<u32>,
     },
 }
 

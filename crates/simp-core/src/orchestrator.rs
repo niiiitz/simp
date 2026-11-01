@@ -62,6 +62,13 @@ impl AudioOrchestrator {
 
         let mut apple_sink = AppleMusicSink::new();
         apple_sink.set_volume(initial_vol);
+        let initial_apple_auth = {
+            let cfg = settings.lock().unwrap();
+            AppleMusicSink::resolve_credentials(&cfg)
+                .music_user_token
+                .is_some()
+        };
+        apple_sink.is_authenticated = initial_apple_auth;
 
         let mpris_controls = initialize_mpris(cmd_tx);
 
@@ -76,7 +83,7 @@ impl AudioOrchestrator {
             queue: Vec::new(),
             queue_index: 0,
             spotify_authenticated: false,
-            apple_authenticated: false,
+            apple_authenticated: initial_apple_auth,
         }));
 
         let mut orchestrator = Self {
@@ -188,7 +195,12 @@ impl AudioOrchestrator {
                         let pos = self.local_engine.get_position_ms();
                         self.set_playing_state(true, pos);
                     }
-                    ActiveEngine::Spotify | ActiveEngine::AppleMusic => {
+                    ActiveEngine::Spotify => {
+                        let pos = self.state.lock().unwrap().position_ms;
+                        self.set_playing_state(true, pos);
+                    }
+                    ActiveEngine::AppleMusic => {
+                        self.apple_sink.emit_play(&self.broadcast_tx);
                         let pos = self.state.lock().unwrap().position_ms;
                         self.set_playing_state(true, pos);
                     }
@@ -251,6 +263,8 @@ impl AudioOrchestrator {
                         self.transition_epoch,
                         self.internal_event_tx.clone(),
                     );
+                } else if engine == ActiveEngine::AppleMusic {
+                    self.apple_sink.emit_seek(&self.broadcast_tx, clamped_pos);
                 }
                 let is_playing = self.state.lock().unwrap().is_playing;
                 self.state.lock().unwrap().position_ms = clamped_pos;
@@ -271,6 +285,7 @@ impl AudioOrchestrator {
                 self.local_engine.set_volume(clamped);
                 self.spotify_engine.set_volume(clamped);
                 self.apple_sink.set_volume(clamped);
+                self.apple_sink.emit_volume(&self.broadcast_tx, clamped);
                 self.state.lock().unwrap().volume = clamped;
                 self.settings.lock().unwrap().audio.master_volume = clamped;
                 let _ = self
@@ -393,6 +408,154 @@ impl AudioOrchestrator {
                     }
                 });
             }
+            AudioCommand::ConfigureAppleMusic {
+                team_id,
+                key_id,
+                private_key_path,
+                developer_token,
+            } => {
+                let norm_path = if private_key_path.trim().is_empty() {
+                    String::new()
+                } else {
+                    crate::library::vdf::normalize_platform_path(&private_key_path)
+                        .to_string_lossy()
+                        .to_string()
+                };
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    cfg.services.apple_team_id = team_id.trim().to_string();
+                    cfg.services.apple_key_id = key_id.trim().to_string();
+                    cfg.services.apple_private_key_path = norm_path;
+                    if let Some(tok) = developer_token {
+                        cfg.services.apple_developer_token = tok.trim().to_string();
+                    }
+                    cfg.services.apple_music_enabled = true;
+                }
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
+            AudioCommand::SetAppleMusicUserToken { music_user_token } => {
+                let trimmed = music_user_token.trim().to_string();
+                let is_auth = !trimmed.is_empty();
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    cfg.services.apple_music_user_token = trimmed;
+                    cfg.services.apple_music_enabled = is_auth;
+                }
+                self.apple_sink.is_authenticated = is_auth;
+                self.state.lock().unwrap().apple_authenticated = is_auth;
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
+            AudioCommand::DisconnectAppleMusic => {
+                if self.state.lock().unwrap().active_engine == ActiveEngine::AppleMusic {
+                    self.pause_active_engine();
+                }
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    cfg.services.apple_music_user_token.clear();
+                    cfg.services.apple_music_enabled = false;
+                }
+                self.apple_sink.is_authenticated = false;
+                self.state.lock().unwrap().apple_authenticated = false;
+                let _ = self
+                    .db
+                    .remove_streaming_source("apple_music", "apple_remote");
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
+            AudioCommand::ImportCatalogTracks {
+                source,
+                album,
+                playlist,
+                tracks,
+            } => {
+                if let Err(e) = self.db.import_catalog_bundle(
+                    &source,
+                    album.as_ref(),
+                    playlist.as_ref(),
+                    &tracks,
+                ) {
+                    tracing::warn!("Failed to import catalog tracks for {source}: {e}");
+                }
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
+            AudioCommand::AppleWorkerReport {
+                state,
+                track,
+                position_ms,
+                duration_ms,
+            } => {
+                let is_apple_active =
+                    self.state.lock().unwrap().active_engine == ActiveEngine::AppleMusic;
+                if !is_apple_active && state != "authorized" {
+                    return;
+                }
+
+                if let Some(meta) = track {
+                    {
+                        let mut st = self.state.lock().unwrap();
+                        st.current_track = Some(meta.clone());
+                    }
+                    update_mpris_metadata(&mut self.mpris_controls, &meta);
+                    let _ = self.broadcast_tx.send(PlaybackEvent::TrackChanged {
+                        metadata: meta,
+                        position_ms,
+                    });
+                } else if let Some(dur) = duration_ms {
+                    if dur > 0 {
+                        let mut updated_meta = None;
+                        {
+                            let mut st = self.state.lock().unwrap();
+                            if let Some(ref mut cur) = st.current_track {
+                                if cur.duration_ms == 0 {
+                                    cur.duration_ms = dur;
+                                    updated_meta = Some(cur.clone());
+                                }
+                            }
+                        }
+                        if let Some(meta) = updated_meta {
+                            update_mpris_metadata(&mut self.mpris_controls, &meta);
+                            let _ = self.broadcast_tx.send(PlaybackEvent::TrackChanged {
+                                metadata: meta,
+                                position_ms,
+                            });
+                        }
+                    }
+                }
+
+                match state.as_str() {
+                    "playing" => {
+                        self.set_playing_state(true, position_ms);
+                    }
+                    "paused" => {
+                        self.set_playing_state(false, position_ms);
+                    }
+                    "ended" | "completed" => {
+                        self.advance_queue(false);
+                    }
+                    "time_update" => {
+                        self.state.lock().unwrap().position_ms = position_ms;
+                        let _ = self
+                            .broadcast_tx
+                            .send(PlaybackEvent::ProgressTick { position_ms });
+                    }
+                    _ => {}
+                }
+            }
             AudioCommand::SuspendForSleep => {
                 tracing::info!("System entering sleep — safe-pausing audio & releasing PipeWire");
                 self.pause_active_engine();
@@ -429,7 +592,7 @@ impl AudioOrchestrator {
         match engine {
             ActiveEngine::Local => self.local_engine.pause(),
             ActiveEngine::Spotify => self.spotify_engine.pause(),
-            ActiveEngine::AppleMusic => self.apple_sink.pause(),
+            ActiveEngine::AppleMusic => self.apple_sink.emit_pause(&self.broadcast_tx),
             ActiveEngine::None => {}
         }
         let pos = self.get_live_position_ms();
@@ -465,7 +628,7 @@ impl AudioOrchestrator {
             match prev_engine {
                 ActiveEngine::Local => self.local_engine.release_pipewire_stream(),
                 ActiveEngine::Spotify => self.spotify_engine.pause(),
-                ActiveEngine::AppleMusic => self.apple_sink.pause(),
+                ActiveEngine::AppleMusic => self.apple_sink.emit_pause(&self.broadcast_tx),
                 ActiveEngine::None => {}
             }
         }
@@ -494,8 +657,12 @@ impl AudioOrchestrator {
                     }
                 }
             }
-            ActiveEngine::Spotify | ActiveEngine::AppleMusic => {
-                // Phase 3/4 streaming activation
+            ActiveEngine::Spotify => {
+                self.consecutive_failures = 0;
+            }
+            ActiveEngine::AppleMusic => {
+                self.apple_sink
+                    .emit_load_and_play(&self.broadcast_tx, &track.uri, 0);
                 self.consecutive_failures = 0;
             }
             ActiveEngine::None => {}

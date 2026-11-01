@@ -1,7 +1,16 @@
-import type { RepeatMode, SimpStateSnapshot } from './types';
+import type {
+  AlbumRecord,
+  AppleMusicAuthConfig,
+  AppleSinkCommandPayload,
+  PlaylistRecord,
+  RepeatMode,
+  SimpStateSnapshot,
+  TrackMetadata,
+} from './types';
 
 type StateListener = (state: SimpStateSnapshot) => void;
 type ProgressListener = (positionMs: number, syncPerfTime: number, isPlaying: boolean) => void;
+type AppleSinkListener = (cmd: AppleSinkCommandPayload) => void;
 
 /**
  * Shared auto-reconnecting WebSocket client connecting to `simp --daemon` (`ws://127.0.0.1:18888/ws`).
@@ -14,6 +23,7 @@ export class SimpDaemonClient {
   private pendingQueries = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void }>();
   private stateListeners = new Set<StateListener>();
   private progressListeners = new Set<ProgressListener>();
+  private appleSinkListeners = new Set<AppleSinkListener>();
   private state: SimpStateSnapshot = {
     active_engine: 'none',
     is_playing: false,
@@ -146,6 +156,11 @@ export class SimpDaemonClient {
           this.state = { ...this.state, power: msg.data.power };
           this.notifyState();
           break;
+        case 'apple_sink_command':
+          for (const fn of this.appleSinkListeners) {
+            fn(msg.data as AppleSinkCommandPayload);
+          }
+          break;
       }
     }
   }
@@ -190,6 +205,52 @@ export class SimpDaemonClient {
   public removeLibraryPath = (path: string) => this.sendCommand('remove_library_path', { path });
   public rescanStorage = () => this.sendCommand('rescan_storage');
   public shutdownDaemon = () => this.sendCommand('shutdown_daemon');
+
+  // Apple Music Virtual Sink & Developer Token helpers
+  public configureAppleMusic = (params: {
+    team_id: string;
+    key_id: string;
+    private_key_path: string;
+    developer_token?: string | null;
+  }) => this.sendCommand('configure_apple_music', params);
+
+  public setAppleMusicUserToken = (music_user_token: string) =>
+    this.sendCommand('set_apple_music_user_token', { music_user_token });
+
+  public disconnectAppleMusic = () => this.sendCommand('disconnect_apple_music');
+
+  public importCatalogTracks = (params: {
+    source: string;
+    album?: AlbumRecord | null;
+    playlist?: PlaylistRecord | null;
+    tracks: TrackMetadata[];
+  }) => this.sendCommand('import_catalog_tracks', params);
+
+  public getAppleMusicAuthConfig = (): Promise<AppleMusicAuthConfig> =>
+    this.query<AppleMusicAuthConfig>('get_apple_music_auth_config');
+
+  public reportAppleWorkerEvent = (
+    state: 'playing' | 'paused' | 'ended' | 'time_update' | 'authorized',
+    position_ms: number,
+    track?: TrackMetadata | null,
+    duration_ms?: number | null
+  ): void => {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(
+      JSON.stringify({
+        kind: 'apple_worker_event',
+        state,
+        position_ms: Math.max(0, Math.round(position_ms)),
+        ...(track ? { track } : { track: null }),
+        ...(duration_ms != null ? { duration_ms: Math.round(duration_ms) } : {}),
+      })
+    );
+  };
+
+  public subscribeAppleSink(fn: AppleSinkListener): () => void {
+    this.appleSinkListeners.add(fn);
+    return () => this.appleSinkListeners.delete(fn);
+  }
 
   public subscribeState(fn: StateListener): () => void {
     this.stateListeners.add(fn);

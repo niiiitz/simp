@@ -38,6 +38,13 @@ pub enum PlaybackEvent {
     EndOfTrack {
         epoch: u64,
     },
+    /// Emitted by `AudioOrchestrator` to drive the `<AppleMusicDriver />` MusicKit JS worker
+    AppleSinkCommand {
+        action: String,
+        uri: Option<String>,
+        position_ms: Option<u32>,
+        volume: Option<f64>,
+    },
 
     // High-Frequency Event (500ms tick — suppressed when 0 WebSocket clients connected)
     ProgressTick {

@@ -109,10 +109,24 @@ pub struct LibrarySettings {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceSettings {
+    #[serde(default)]
     pub spotify_client_id: String,
+    #[serde(default)]
     pub spotify_connect_enabled: bool,
+    #[serde(default)]
     pub spotify_device_name: String,
+    #[serde(default)]
     pub apple_music_enabled: bool,
+    #[serde(default)]
+    pub apple_team_id: String,
+    #[serde(default)]
+    pub apple_key_id: String,
+    #[serde(default)]
+    pub apple_private_key_path: String,
+    #[serde(default)]
+    pub apple_developer_token: String,
+    #[serde(default)]
+    pub apple_music_user_token: String,
 }
 
 impl Default for SimpSettings {
@@ -147,6 +161,11 @@ impl Default for SimpSettings {
                 spotify_connect_enabled: true,
                 spotify_device_name: "SIMP (SteamOS)".to_string(),
                 apple_music_enabled: false,
+                apple_team_id: String::new(),
+                apple_key_id: String::new(),
+                apple_private_key_path: String::new(),
+                apple_developer_token: String::new(),
+                apple_music_user_token: String::new(),
             },
         }
     }

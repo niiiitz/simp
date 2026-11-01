@@ -1,12 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   AlbumRecord,
+  AppleMusicAuthConfig,
   defaultSimpClient,
   PlaylistRecord,
   SimpStateSnapshot,
   TrackMetadata,
 } from '@simp/client';
 import { ProgressBarRaf } from './components/ProgressBarRaf';
+import {
+  AppleMusicDriver,
+  authorizeAppleMusic,
+  syncAppleMusicCatalog,
+} from './drivers/AppleMusicDriver';
 
 export const App: React.FC = () => {
   const [snap, setSnap] = useState<SimpStateSnapshot | null>(null);
@@ -30,6 +36,14 @@ export const App: React.FC = () => {
   // Custom folder input inside Source Modal
   const [customFolderPath, setCustomFolderPath] = useState('');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  // Apple Music Developer Key & Auth Modal state
+  const [appleAuthCfg, setAppleAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
+  const [appleConfigOpen, setAppleConfigOpen] = useState(false);
+  const [appleTeamId, setAppleTeamId] = useState('');
+  const [appleKeyId, setAppleKeyId] = useState('');
+  const [appleKeyPath, setAppleKeyPath] = useState('');
+  const [appleBusy, setAppleBusy] = useState(false);
 
   // Volume mute memory, OLED auto-dim, active luminance cap & sub-pixel orbit state
   const [preMuteVolume, setPreMuteVolume] = useState<number>(0.8);
@@ -96,6 +110,17 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (view === 'browser' || sourceModalOpen) {
       refreshLibraryData();
+    }
+    if (sourceModalOpen) {
+      defaultSimpClient
+        .getAppleMusicAuthConfig()
+        .then((cfg) => {
+          setAppleAuthCfg(cfg);
+          setAppleTeamId((prev) => prev || cfg.team_id || '');
+          setAppleKeyId((prev) => prev || cfg.key_id || '');
+          setAppleKeyPath((prev) => prev || cfg.private_key_path || '');
+        })
+        .catch(() => {});
     }
   }, [view, sourceModalOpen, snap?.mounts, refreshLibraryData]);
 
@@ -326,6 +351,9 @@ export const App: React.FC = () => {
         position: 'relative',
       }}
     >
+      {/* Headless Apple Music Virtual Sink Bridge (MusicKit v3) */}
+      <AppleMusicDriver />
+
       {/* Wake-Tap Guard: intercepts the first tap when dimmed so no button is misfired */}
       {isDimmed && (
         <div
@@ -1410,6 +1438,250 @@ export const App: React.FC = () => {
                 </div>
               </div>
               <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>Browse</span>
+            </div>
+
+            {/* Apple Music (MusicKit v3 + ES256 Developer JWT) */}
+            <div
+              style={{
+                padding: '12px 14px',
+                borderRadius: 12,
+                background: snap?.apple_authenticated ? '#141018' : '#121218',
+                border: snap?.apple_authenticated ? '1px solid #f43f5e' : '1px solid #24242e',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 10,
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 10,
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>
+                    🍎 Apple Music (MusicKit v3 • ES256)
+                  </div>
+                  <div style={{ fontSize: 11, color: '#8e8e99' }}>
+                    {snap?.apple_authenticated
+                      ? '🟢 Connected — Playlists & Library synced to SQLite'
+                      : appleAuthCfg?.configured
+                      ? '🟡 ES256 Developer Token Ready — Click Authorize'
+                      : 'Configure Team ID, Key ID & .p8 Key (or set in .env)'}
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <button
+                    onClick={() => setAppleConfigOpen((prev) => !prev)}
+                    style={{
+                      minHeight: 34,
+                      padding: '0 10px',
+                      borderRadius: 8,
+                      background: '#181822',
+                      border: '1px solid #2e2e3c',
+                      color: '#c8c8d2',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {appleConfigOpen ? 'Hide Key' : '⚙️ Key Setup'}
+                  </button>
+
+                  {appleAuthCfg?.configured && !snap?.apple_authenticated && (
+                    <button
+                      disabled={appleBusy}
+                      onClick={async () => {
+                        setAppleBusy(true);
+                        try {
+                          await authorizeAppleMusic(showToast);
+                          const updated = await defaultSimpClient.getAppleMusicAuthConfig();
+                          setAppleAuthCfg(updated);
+                          refreshLibraryData();
+                        } catch (err: any) {
+                          showToast(err?.message || 'Apple Music auth failed');
+                        } finally {
+                          setAppleBusy(false);
+                        }
+                      }}
+                      style={{
+                        minHeight: 34,
+                        padding: '0 12px',
+                        borderRadius: 8,
+                        background: '#31101b',
+                        border: '1px solid #f43f5e',
+                        color: '#fda4af',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {appleBusy ? 'Working...' : 'Authorize Apple ID'}
+                    </button>
+                  )}
+
+                  {snap?.apple_authenticated && (
+                    <>
+                      <button
+                        disabled={appleBusy}
+                        onClick={async () => {
+                          setAppleBusy(true);
+                          try {
+                            await syncAppleMusicCatalog(showToast);
+                            refreshLibraryData();
+                          } catch (err: any) {
+                            showToast(err?.message || 'Apple Music sync failed');
+                          } finally {
+                            setAppleBusy(false);
+                          }
+                        }}
+                        style={{
+                          minHeight: 34,
+                          padding: '0 10px',
+                          borderRadius: 8,
+                          background: '#0f222a',
+                          border: '1px solid #2aa3c4',
+                          color: '#bfeaf5',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {appleBusy ? 'Syncing...' : '🔄 Sync'}
+                      </button>
+                      <button
+                        onClick={() => {
+                          defaultSimpClient.disconnectAppleMusic();
+                          showToast('Disconnected Apple Music');
+                        }}
+                        style={{
+                          minHeight: 34,
+                          padding: '0 10px',
+                          borderRadius: 8,
+                          background: '#1f1216',
+                          border: '1px solid #4c2228',
+                          color: '#f87171',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Disconnect
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {appleConfigOpen && (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                    paddingTop: 8,
+                    borderTop: '1px solid #22222e',
+                  }}
+                >
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <input
+                      type="text"
+                      placeholder="APPLE_TEAM_ID (10 chars)"
+                      value={appleTeamId}
+                      onChange={(e) => setAppleTeamId(e.target.value)}
+                      style={{
+                        minHeight: 36,
+                        padding: '0 10px',
+                        borderRadius: 8,
+                        background: '#07070a',
+                        border: '1px solid #2e2e3c',
+                        color: '#d4d4dc',
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      }}
+                    />
+                    <input
+                      type="text"
+                      placeholder="APPLE_KEY_ID (10 chars)"
+                      value={appleKeyId}
+                      onChange={(e) => setAppleKeyId(e.target.value)}
+                      style={{
+                        minHeight: 36,
+                        padding: '0 10px',
+                        borderRadius: 8,
+                        background: '#07070a',
+                        border: '1px solid #2e2e3c',
+                        color: '#d4d4dc',
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input
+                      type="text"
+                      placeholder="/path/to/AuthKey_XXXXXXXXXX.p8"
+                      value={appleKeyPath}
+                      onChange={(e) => setAppleKeyPath(e.target.value)}
+                      style={{
+                        flex: 1,
+                        minHeight: 36,
+                        padding: '0 10px',
+                        borderRadius: 8,
+                        background: '#07070a',
+                        border: '1px solid #2e2e3c',
+                        color: '#d4d4dc',
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      }}
+                    />
+                    <button
+                      onClick={() => {
+                        defaultSimpClient.configureAppleMusic({
+                          team_id: appleTeamId,
+                          key_id: appleKeyId,
+                          private_key_path: appleKeyPath,
+                        });
+                        window.setTimeout(() => {
+                          defaultSimpClient
+                            .getAppleMusicAuthConfig()
+                            .then((cfg) => {
+                              setAppleAuthCfg(cfg);
+                              if (cfg.configured) {
+                                showToast('ES256 Developer Token signed & ready!');
+                                setAppleConfigOpen(false);
+                              } else if (cfg.status_error) {
+                                showToast(cfg.status_error);
+                              }
+                            })
+                            .catch(() => {});
+                        }, 150);
+                      }}
+                      style={{
+                        minHeight: 36,
+                        padding: '0 14px',
+                        borderRadius: 8,
+                        background: '#0f222a',
+                        border: '1px solid #2aa3c4',
+                        color: '#bfeaf5',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Save & Sign ES256
+                    </button>
+                  </div>
+                  {appleAuthCfg?.status_error && !appleAuthCfg.configured && (
+                    <div style={{ fontSize: 11, color: '#f87171', fontFamily: 'monospace' }}>
+                      ⚠️ {appleAuthCfg.status_error}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div

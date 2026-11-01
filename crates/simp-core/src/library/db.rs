@@ -551,5 +551,114 @@ impl LibraryDatabase {
         let tracks: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
         Ok((albums as usize, tracks as usize))
     }
+
+    /// Imports a batch of streaming tracks (and optional album / playlist container) from
+    /// Apple Music (`source = "apple_music"`) or Spotify (`source = "spotify"`) into SQLite.
+    pub fn import_catalog_bundle(
+        &self,
+        source: &str,
+        album: Option<&AlbumRecord>,
+        playlist: Option<&PlaylistRecord>,
+        tracks: &[TrackMetadata],
+    ) -> Result<()> {
+        if let Some(alb) = album {
+            self.upsert_album(
+                &alb.id,
+                &alb.title,
+                &alb.album_artist,
+                alb.release_year,
+                alb.steam_app_id,
+                alb.art_url.as_deref(),
+            )?;
+        }
+
+        let mut normalized_uris = Vec::with_capacity(tracks.len());
+        for raw_track in tracks {
+            let mut t = raw_track.clone();
+            if t.source.is_empty() {
+                t.source = source.to_string();
+            }
+            let artist_primary = t
+                .artists
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Unknown Artist".to_string());
+            let album_title = if t.album.trim().is_empty() {
+                "Apple Music Library".to_string()
+            } else {
+                t.album.clone()
+            };
+            let alb_id = t.album_id.clone().unwrap_or_else(|| {
+                let hash_key = format!(
+                    "album::{}::{}::{}",
+                    t.source,
+                    album_title.trim().to_lowercase(),
+                    artist_primary.trim().to_lowercase()
+                );
+                blake3::hash(hash_key.as_bytes()).to_hex()[..16].to_string()
+            });
+            t.album_id = Some(alb_id.clone());
+
+            self.upsert_album(
+                &alb_id,
+                &album_title,
+                &artist_primary,
+                None,
+                None,
+                t.art_url.as_deref(),
+            )?;
+            self.upsert_track(&t, None, None)?;
+            normalized_uris.push(t.uri.clone());
+        }
+
+        if let Some(pl) = playlist {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO playlists (id, name, description, origin, cover_art_url, track_count, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s', 'now'))
+                 ON CONFLICT(id) DO UPDATE SET
+                   name = excluded.name,
+                   description = excluded.description,
+                   cover_art_url = COALESCE(excluded.cover_art_url, playlists.cover_art_url),
+                   track_count = excluded.track_count,
+                   updated_at = strftime('%s', 'now')",
+                params![
+                    pl.id,
+                    pl.name,
+                    pl.description,
+                    pl.origin,
+                    pl.cover_art_url,
+                    normalized_uris.len() as i64
+                ],
+            )?;
+            conn.execute(
+                "DELETE FROM playlist_items WHERE playlist_id = ?1",
+                params![pl.id],
+            )?;
+            for (pos, uri) in normalized_uris.iter().enumerate() {
+                let _ = conn.execute(
+                    "INSERT INTO playlist_items (playlist_id, position, track_uri, added_at)
+                     VALUES (?1, ?2, ?3, strftime('%s', 'now'))",
+                    params![pl.id, pos as i64, uri],
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_streaming_source(&self, source: &str, playlist_origin: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM playlists WHERE origin = ?1",
+            params![playlist_origin],
+        )?;
+        conn.execute("DELETE FROM tracks WHERE source = ?1", params![source])?;
+        conn.execute(
+            "DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)",
+            [],
+        )?;
+        Ok(())
+    }
 }
 
