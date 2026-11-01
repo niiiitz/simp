@@ -135,10 +135,35 @@ impl AudioOrchestrator {
                 }
                 self.transition_to_index(0);
             }
-            AudioCommand::LoadQueue { uris, start_index } => {
+            AudioCommand::LoadQueue {
+                uris,
+                start_index,
+                tracks,
+            } => {
+                // If full `TrackMetadata` objects were supplied (e.g., pure streaming of an unpinned
+                // Apple Music catalog album, cloud playlist, or search result), upsert their metadata
+                // into the `tracks` table (without creating an AlbumRecord or PlaylistRecord) and
+                // use them directly in the queue so artwork, title, and artist display immediately.
+                let mut provided_map = std::collections::HashMap::new();
+                for t in tracks {
+                    let mut clean = t.clone();
+                    if clean.source == "apple_music" {
+                        // Do not attach unpinned streaming tracks to an album_id unless already pinned
+                        if self.db.get_track_by_uri(&clean.uri).ok().flatten().is_none() {
+                            clean.album_id = None;
+                            let _ = self.db.upsert_track(&clean, None, None);
+                        }
+                    }
+                    provided_map.insert(t.uri.clone(), t);
+                }
+
                 let queue: Vec<TrackMetadata> = uris
                     .iter()
-                    .map(|u| self.resolve_track_from_uri(u))
+                    .map(|u| {
+                        provided_map
+                            .remove(u)
+                            .unwrap_or_else(|| self.resolve_track_from_uri(u))
+                    })
                     .collect();
                 if queue.is_empty() {
                     return;
@@ -502,7 +527,14 @@ impl AudioOrchestrator {
                     {
                         let mut st = self.state.lock().unwrap();
                         st.current_track = Some(meta.clone());
+                        let q_idx = st.queue_index;
+                        if q_idx < st.queue.len() {
+                            st.queue[q_idx] = meta.clone();
+                        }
                     }
+                    let mut clean = meta.clone();
+                    clean.album_id = None;
+                    let _ = self.db.upsert_track(&clean, None, None);
                     update_mpris_metadata(&mut self.mpris_controls, &meta);
                     let _ = self.broadcast_tx.send(PlaybackEvent::TrackChanged {
                         metadata: meta,

@@ -10,7 +10,12 @@ pub enum AudioCommand {
     Next,
     Previous,
     Load { uri: String },
-    LoadQueue { uris: Vec<String>, start_index: usize },
+    LoadQueue {
+        uris: Vec<String>,
+        start_index: usize,
+        #[serde(default)]
+        tracks: Vec<TrackMetadata>,
+    },
     PlayAlbum { album_id: String, shuffle: bool },
     PlayPlaylist { playlist_id: String, shuffle: bool },
     Seek { position_ms: u32 },
@@ -84,6 +89,16 @@ pub enum LibraryQuery {
     AddTracksToPlaylist {
         playlist_id: String,
         uris: Vec<String>,
+    },
+    RemoveTrackFromPlaylist {
+        playlist_id: String,
+        track_uri: String,
+    },
+    DeletePlaylist {
+        playlist_id: String,
+    },
+    DeleteAlbum {
+        album_id: String,
     },
     GetMountRoots,
     GetSettings,

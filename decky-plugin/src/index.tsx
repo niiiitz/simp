@@ -15,88 +15,169 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
 let cachedSteamFocusable: any = null;
+let cachedSteamButtonItem: any = null;
 
-/**
- * Discovers Valve's native `Focusable` React component inside `window.webpackChunksteamui`
- * using the exact prop-signature matcher from `@decky/ui` (`flow-children`, `onActivate`, `onCancel`,
- * `focusClassName`, `focusWithinClassName`).
- */
-function resolveSteamFocusable(): any {
-  if (cachedSteamFocusable) return cachedSteamFocusable;
-  if ((window as any).DFL?.Focusable) {
-    cachedSteamFocusable = (window as any).DFL.Focusable;
-    return cachedSteamFocusable;
-  }
-
+function getSteamWebpackModules(): any[] {
+  const modules: any[] = [];
   try {
     const chunk = (window as any).webpackChunksteamui;
-    if (!Array.isArray(chunk)) return null;
+    if (!Array.isArray(chunk)) return modules;
 
     let webpackRequire: any;
     chunk.push([
-      [Symbol('simp-decky-focusable')],
+      [Symbol('simp-decky-webpack')],
       {},
       (r: any) => {
         webpackRequire = r;
       },
     ]);
-    if (!webpackRequire || !webpackRequire.m) return null;
+    if (!webpackRequire) return modules;
 
-    const requiredProps = [
-      'flow-children',
-      'onActivate',
-      'onCancel',
-      'focusClassName',
-      'focusWithinClassName',
-    ];
-    const matchesFocusable = (fn: any): boolean => {
-      const str =
-        (typeof fn === 'function' && fn.toString?.()) ||
-        (fn?.render && typeof fn.render === 'function' && fn.render.toString?.()) ||
-        '';
-      if (!str) return false;
-      return requiredProps.every((p) => str.includes(p));
-    };
-
-    for (const id of Object.keys(webpackRequire.m)) {
-      let mod: any;
-      try {
-        mod = webpackRequire(id);
-      } catch {
-        continue;
+    // 1. Check already-loaded module cache (`webpackRequire.c`) first
+    if (webpackRequire.c) {
+      for (const key of Object.keys(webpackRequire.c)) {
+        const exp = webpackRequire.c[key]?.exports;
+        if (exp) modules.push(exp);
       }
-      if (!mod) continue;
-      for (const candidate of [mod.default, mod]) {
-        if (!candidate || candidate === window) continue;
-        if (matchesFocusable(candidate)) {
-          cachedSteamFocusable = candidate;
-          return cachedSteamFocusable;
-        }
-        if (typeof candidate === 'object') {
-          for (const key of Object.keys(candidate)) {
-            try {
-              const exp = candidate[key];
-              if (exp && matchesFocusable(exp)) {
-                cachedSteamFocusable = exp;
-                return cachedSteamFocusable;
-              }
-            } catch {
-              // Ignore getter errors
-            }
-          }
+    }
+
+    // 2. Also scan module factories (`webpackRequire.m`) if not yet instantiated
+    if (webpackRequire.m) {
+      for (const id of Object.keys(webpackRequire.m)) {
+        try {
+          const exp = webpackRequire(id);
+          if (exp) modules.push(exp);
+        } catch {
+          // Ignore factory init errors
         }
       }
     }
   } catch (err) {
-    console.warn('[SIMP Decky] Failed to resolve Focusable from webpackChunksteamui:', err);
+    console.warn('[SIMP Decky] Failed to inspect webpackChunksteamui:', err);
+  }
+  return modules;
+}
+
+/**
+ * Discovers Valve's native `Focusable` React component inside `window.DFL`, `window.deckyFrontendLib`,
+ * or `window.webpackChunksteamui` (supporting both standard functions and `React.forwardRef` objects
+ * where `typeof candidate === 'object'` and `candidate.render` holds the implementation).
+ */
+function resolveSteamFocusable(): any {
+  if (cachedSteamFocusable) return cachedSteamFocusable;
+  const globalDfl = (window as any).DFL || (window as any).deckyFrontendLib;
+  if (globalDfl?.Focusable) {
+    cachedSteamFocusable = globalDfl.Focusable;
+    return cachedSteamFocusable;
+  }
+
+  const matchesFocusable = (fn: any): boolean => {
+    if (!fn) return false;
+    const str =
+      (typeof fn === 'function' && fn.toString?.()) ||
+      (fn?.render && typeof fn.render === 'function' && fn.render.toString?.()) ||
+      (fn?.type && typeof fn.type === 'function' && fn.type.toString?.()) ||
+      '';
+    if (!str) return false;
+    return (
+      str.includes('flow-children') &&
+      str.includes('onActivate') &&
+      (str.includes('focusClassName') || str.includes('navRef'))
+    );
+  };
+
+  for (const mod of getSteamWebpackModules()) {
+    for (const candidate of [mod?.default, mod]) {
+      if (!candidate || candidate === window) continue;
+      if (matchesFocusable(candidate)) {
+        cachedSteamFocusable = candidate;
+        return cachedSteamFocusable;
+      }
+      if (typeof candidate === 'object') {
+        for (const key of Object.keys(candidate)) {
+          try {
+            const exp = candidate[key];
+            if (exp && matchesFocusable(exp)) {
+              cachedSteamFocusable = exp;
+              return cachedSteamFocusable;
+            }
+          } catch {
+            // Ignore getter errors
+          }
+        }
+      }
+    }
   }
   return null;
 }
 
 /**
- * Gamepad-navigable Focusable component.
- * Uses Valve's native Focusable from `window.webpackChunksteamui` (`@decky/ui` method),
- * and falls back gracefully to a focusable HTML container with standard Steam `Focusable` class & handlers.
+ * Discovers Valve's native `DialogButton` component for 100% native SteamOS QAM button focus.
+ */
+function resolveSteamDialogButton(): any {
+  if (cachedSteamButtonItem) return cachedSteamButtonItem;
+  const globalDfl = (window as any).DFL || (window as any).deckyFrontendLib;
+  if (globalDfl?.DialogButton) {
+    cachedSteamButtonItem = globalDfl.DialogButton;
+    return cachedSteamButtonItem;
+  }
+
+  const matchesDialogButton = (fn: any): boolean => {
+    if (!fn) return false;
+    const str =
+      (typeof fn === 'function' && fn.toString?.()) ||
+      (fn?.render && typeof fn.render === 'function' && fn.render.toString?.()) ||
+      '';
+    return (
+      str.includes('DialogButton') &&
+      str.includes('onClick') &&
+      (str.includes('noFocusRing') || str.includes('focusable'))
+    );
+  };
+
+  for (const mod of getSteamWebpackModules()) {
+    if (typeof mod === 'object' && mod) {
+      for (const key of Object.keys(mod)) {
+        try {
+          const exp = mod[key];
+          if (exp && matchesDialogButton(exp)) {
+            cachedSteamButtonItem = exp;
+            return cachedSteamButtonItem;
+          }
+        } catch {
+          // Ignore
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Opens the Full SIMP Console (`http://127.0.0.1:18888`) using Steam's native
+ * `Navigation.NavigateToExternalWeb` (with `SteamClient.System.OpenInSystemBrowser` and `window.open` fallbacks).
+ */
+function openFullSimpConsole(url = 'http://127.0.0.1:18888') {
+  try {
+    const globalDfl = (window as any).DFL || (window as any).deckyFrontendLib;
+    if (globalDfl?.Navigation?.NavigateToExternalWeb) {
+      globalDfl.Navigation.NavigateToExternalWeb(url);
+      return;
+    }
+    const steamClient = (window as any).SteamClient;
+    if (steamClient?.System?.OpenInSystemBrowser) {
+      steamClient.System.OpenInSystemBrowser(url);
+      return;
+    }
+  } catch {
+    // Fall through
+  }
+  window.open(url, '_blank');
+}
+
+/**
+ * Gamepad-navigable Focusable container & button component.
+ * Uses Valve's native `Focusable` / `DialogButton` from `window.DFL` or `window.webpackChunksteamui`.
  */
 const Focusable: ReactTypes.FC<any> = ({
   onActivate,
@@ -108,17 +189,41 @@ const Focusable: ReactTypes.FC<any> = ({
   ...rest
 }) => {
   const SteamFocusable = resolveSteamFocusable();
+  const SteamDialogButton = resolveSteamDialogButton();
+  const isInteractive = Boolean(onActivate || onClick);
   const handleClick = (e: any) => {
     if (onActivate) onActivate(e);
     if (onClick) onClick(e);
   };
 
+  // For leaf interactive buttons (no flowChildren), prefer DialogButton or Focusable with explicit focusable=true
+  if (!flowChildren && SteamDialogButton && isInteractive) {
+    return SP_REACT.createElement(
+      SteamDialogButton,
+      {
+        onClick: handleClick,
+        onOKButton: handleClick,
+        onActivate: handleClick,
+        focusable: true,
+        className: `Focusable ${className}`.trim(),
+        style: {
+          minWidth: 0,
+          ...style,
+        },
+        ...rest,
+      },
+      children
+    );
+  }
+
   if (SteamFocusable) {
     return SP_REACT.createElement(
       SteamFocusable,
       {
-        onActivate: handleClick,
-        onClick: handleClick,
+        onActivate: isInteractive ? handleClick : undefined,
+        onOKButton: isInteractive ? handleClick : undefined,
+        onClick: isInteractive ? handleClick : undefined,
+        focusable: isInteractive,
         className: `Focusable ${className}`.trim(),
         focusClassName: 'gpfocus',
         focusWithinClassName: 'gpfocuswithin',
@@ -314,7 +419,8 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
   };
 
   return (
-    <div
+    <Focusable
+      flowChildren="vertical"
       style={{
         padding: 10,
         color: '#d4d4dc',
@@ -333,7 +439,8 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       `}</style>
 
       {/* Now Playing Card */}
-      <div
+      <Focusable
+        flowChildren="vertical"
         style={{
           padding: 12,
           borderRadius: 12,
@@ -560,7 +667,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
             {volumePct}%
           </span>
         </Focusable>
-      </div>
+      </Focusable>
 
       {/* Quick Switcher Drawer Tabs */}
       <Focusable
@@ -747,8 +854,8 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       {/* Open Full SIMP Console + Reload Row */}
       <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 6 }}>
         <Focusable
-          onActivate={() => window.open('http://127.0.0.1:18888', '_blank')}
-          onClick={() => window.open('http://127.0.0.1:18888', '_blank')}
+          onActivate={() => openFullSimpConsole('http://127.0.0.1:18888')}
+          onClick={() => openFullSimpConsole('http://127.0.0.1:18888')}
           style={{
             ...btnStyle,
             minHeight: 40,
@@ -774,7 +881,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
           {reloading ? '⏳' : '🔄 Reload'}
         </Focusable>
       </Focusable>
-    </div>
+    </Focusable>
   );
 };
 

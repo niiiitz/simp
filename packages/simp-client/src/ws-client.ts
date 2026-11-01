@@ -203,8 +203,12 @@ export class SimpDaemonClient {
   public setRepeat = (mode: RepeatMode) => this.sendCommand('set_repeat', { mode });
   public cycleRepeat = () => this.sendCommand('cycle_repeat');
   public loadUri = (uri: string) => this.sendCommand('load', { uri });
-  public loadQueue = (uris: string[], start_index = 0) =>
-    this.sendCommand('load_queue', { uris, start_index });
+  public loadQueue = (uris: string[], start_index = 0, tracks?: TrackMetadata[]) =>
+    this.sendCommand('load_queue', {
+      uris,
+      start_index,
+      ...(tracks && tracks.length > 0 ? { tracks } : {}),
+    });
   public playAlbum = (album_id: string, shuffle = false) =>
     this.sendCommand('play_album', { album_id, shuffle });
   public playPlaylist = (playlist_id: string, shuffle = false) =>

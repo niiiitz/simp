@@ -11,8 +11,19 @@ import { ProgressBarRaf } from './components/ProgressBarRaf';
 import { CompanionPairView } from './components/CompanionPairView';
 import { QrCodeSvg } from './components/QrCodeSvg';
 import {
+  AppleCatalogSearchResults,
+  AppleCloudAlbumSummary,
+  AppleCloudPlaylistSummary,
   AppleMusicDriver,
+  AppleRadioStationSummary,
   authorizeAppleMusic,
+  fetchAppleCloudPlaylists,
+  fetchApplePlaylistTracks,
+  fetchAppleRadioAndForYou,
+  fetchFullAppleAlbum,
+  pinAppleAlbumToSimp,
+  pinApplePlaylistToSimp,
+  searchAppleMusicCatalog,
   syncAppleMusicCatalog,
 } from './drivers/AppleMusicDriver';
 
@@ -39,15 +50,35 @@ const ConsoleMainApp: React.FC = () => {
   const [browserSourceFilter, setBrowserSourceFilter] = useState<'all' | 'local' | 'apple_music'>('all');
   const [browserSearch, setBrowserSearch] = useState('');
   const [browserTarget, setBrowserTarget] = useState<{
-    kind: 'album' | 'playlist' | 'mount';
+    kind: 'album' | 'playlist' | 'mount' | 'cloud_playlist' | 'cloud_album';
     id: string;
+    title?: string;
+    subtitle?: string;
+    art_url?: string | null;
   } | null>(null);
   const [browserTracks, setBrowserTracks] = useState<TrackMetadata[]>([]);
 
-  // Playlist creation & target state (restricted to user-writable `simp_local` playlists)
+  // Apple Music Cloud Hub state (Opt-In Cloud Playlists, Radio & For You Mixes, Live Catalog Search)
+  const [appleSubTab, setAppleSubTab] = useState<'pinned' | 'cloud_playlists' | 'radio' | 'search'>('radio');
+  const [cloudPlaylists, setCloudPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
+  const [radioStations, setRadioStations] = useState<AppleRadioStationSummary[]>([]);
+  const [forYouPlaylists, setForYouPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
+  const [forYouAlbums, setForYouAlbums] = useState<AppleCloudAlbumSummary[]>([]);
+  const [catalogSearchResults, setCatalogSearchResults] = useState<AppleCatalogSearchResults>({
+    songs: [],
+    albums: [],
+    playlists: [],
+    stations: [],
+  });
+  const [cloudLoading, setCloudLoading] = useState(false);
+  const [activeCloudAlbum, setActiveCloudAlbum] = useState<AppleCloudAlbumSummary | null>(null);
+  const [activeCloudPlaylist, setActiveCloudPlaylist] = useState<AppleCloudPlaylistSummary | null>(null);
+
+  // Playlist creation, active playback context & target state
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [activePlaylistId, setActivePlaylistId] = useState<string>('');
+  const [playingContextId, setPlayingContextId] = useState<string>('');
 
   // Custom folder input inside Source Modal
   const [customFolderPath, setCustomFolderPath] = useState('');
@@ -156,7 +187,7 @@ const ConsoleMainApp: React.FC = () => {
     }
   }, [view, sourceModalOpen, snap?.mounts, refreshLibraryData]);
 
-  // 3. Load tracks for whichever Album, Playlist, or Storage Mount is selected in the Browser
+  // 3. Load tracks for whichever Album, Playlist, Storage Mount, or Apple Cloud item is selected in the Browser
   useEffect(() => {
     if (!browserTarget) {
       setBrowserTracks([]);
@@ -189,6 +220,149 @@ const ConsoleMainApp: React.FC = () => {
         .catch(() => {});
     }
   }, [browserTarget, browserSearch]);
+
+  // 3b. Apple Music Cloud Hub data loader (Radio & For You, Cloud Playlists, Live Catalog Search)
+  useEffect(() => {
+    if (view !== 'browser' || browserSourceFilter !== 'apple_music' || !snap?.apple_authenticated) {
+      return;
+    }
+    if (appleSubTab === 'cloud_playlists' && cloudPlaylists.length === 0) {
+      setCloudLoading(true);
+      fetchAppleCloudPlaylists()
+        .then(setCloudPlaylists)
+        .catch((err: any) => showToast(err?.message || 'Failed to load Cloud Playlists'))
+        .finally(() => setCloudLoading(false));
+    } else if (
+      appleSubTab === 'radio' &&
+      radioStations.length === 0 &&
+      forYouPlaylists.length === 0 &&
+      forYouAlbums.length === 0
+    ) {
+      setCloudLoading(true);
+      fetchAppleRadioAndForYou()
+        .then((res) => {
+          setRadioStations(res.stations);
+          setForYouPlaylists(res.playlists);
+          setForYouAlbums(res.albums);
+        })
+        .catch((err: any) => showToast(err?.message || 'Failed to load Radio & For You'))
+        .finally(() => setCloudLoading(false));
+    }
+  }, [
+    view,
+    browserSourceFilter,
+    snap?.apple_authenticated,
+    appleSubTab,
+    cloudPlaylists.length,
+    radioStations.length,
+    forYouPlaylists.length,
+    forYouAlbums.length,
+    showToast,
+  ]);
+
+  // Debounced live Apple Music Catalog Search
+  useEffect(() => {
+    const term = browserSearch.trim();
+    if (!term || !snap?.apple_authenticated) {
+      setCatalogSearchResults({ songs: [], albums: [], playlists: [], stations: [] });
+      return;
+    }
+    if (browserSourceFilter === 'local') {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setCloudLoading(true);
+      searchAppleMusicCatalog(term)
+        .then((res) => {
+          setCatalogSearchResults(res);
+          if (browserSourceFilter === 'apple_music') {
+            setAppleSubTab('search');
+          }
+        })
+        .catch(() => {})
+        .finally(() => setCloudLoading(false));
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [browserSearch, browserSourceFilter, snap?.apple_authenticated]);
+
+  const handleOpenCloudPlaylist = useCallback(
+    async (pl: AppleCloudPlaylistSummary) => {
+      setActiveCloudPlaylist(pl);
+      setActiveCloudAlbum(null);
+      setBrowserTarget({
+        kind: 'cloud_playlist',
+        id: pl.id,
+        title: pl.name,
+        subtitle: pl.description,
+        art_url: pl.art_url,
+      });
+      setCloudLoading(true);
+      try {
+        const tracks = await fetchApplePlaylistTracks(pl.id, pl.kind);
+        setBrowserTracks(tracks);
+      } catch (err: any) {
+        showToast(err?.message || 'Could not load playlist tracks');
+      } finally {
+        setCloudLoading(false);
+      }
+    },
+    [showToast]
+  );
+
+  const handleOpenFullAppleAlbum = useCallback(
+    async (params: { albumId?: string | null; songUri?: string | null; fallbackTitle?: string }) => {
+      setCloudLoading(true);
+      if (params.fallbackTitle) {
+        showToast(`Loading full album for "${params.fallbackTitle}"...`);
+      }
+      try {
+        const { album, tracks } = await fetchFullAppleAlbum({
+          albumId: params.albumId,
+          songUri: params.songUri,
+        });
+        setActiveCloudAlbum(album);
+        setActiveCloudPlaylist(null);
+        setBrowserTarget({
+          kind: 'cloud_album',
+          id: album.id,
+          title: `🍎 ${album.title}`,
+          subtitle: `${album.artist}${album.release_year ? ` • ${album.release_year}` : ''}`,
+          art_url: album.art_url,
+        });
+        setBrowserTracks(tracks);
+        setView('browser');
+      } catch (err: any) {
+        showToast(err?.message || 'Could not resolve full catalog album');
+      } finally {
+        setCloudLoading(false);
+      }
+    },
+    [showToast]
+  );
+
+  const handleStartAppleStation = useCallback(
+    (st: AppleRadioStationSummary) => {
+      const stationUri = `applemusic:station:${st.id}`;
+      const stationTrack: TrackMetadata = {
+        uri: stationUri,
+        title: `📻 ${st.name}`,
+        artists: [st.tagline || 'Apple Music Radio'],
+        album: 'Apple Music Radio',
+        album_id: null,
+        track_number: 1,
+        disc_number: 1,
+        art_url: st.art_url,
+        duration_ms: 0,
+        source: 'apple_music',
+        mount_root: null,
+      };
+      setPlayingContextId(`station:${st.id}`);
+      defaultSimpClient.loadQueue([stationUri], 0, [stationTrack]);
+      showToast(`Tuning into 📻 ${st.name}...`);
+      setView('lock');
+    },
+    [showToast]
+  );
 
   // 4. Volume helpers (interactive slider, mute toggle, wheel, keyboard & gamepad D-Pad Up/Down)
   const currentVolume = snap?.volume ?? 0.8;
@@ -438,9 +612,27 @@ const ConsoleMainApp: React.FC = () => {
     }
   };
 
-  const handleAddTracksToPlaylist = async (uris: string[], label: string) => {
+  const handleAddTracksToPlaylist = async (
+    uris: string[],
+    label: string,
+    trackMetadata?: TrackMetadata[]
+  ) => {
     if (uris.length === 0) return;
     try {
+      // Ensure any unpinned Apple Music cloud tracks have their metadata cached in SQLite `tracks`
+      // (without creating fake AlbumRecords) before linking them into a Hybrid Playlist.
+      const appleTracks = (trackMetadata || browserTracks).filter(
+        (t) => t.source === 'apple_music' && uris.includes(t.uri)
+      );
+      if (appleTracks.length > 0) {
+        defaultSimpClient.importCatalogTracks({
+          source: 'apple_music',
+          album: null,
+          playlist: null,
+          tracks: appleTracks,
+        });
+      }
+
       const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
       const selectedWritable = writablePlaylists.find((p) => p.id === activePlaylistId);
       let targetPlId = selectedWritable?.id || '';
@@ -472,6 +664,89 @@ const ConsoleMainApp: React.FC = () => {
       showToast(`Added ${label} to "${targetPlName}"`);
     } catch {
       showToast('Could not add tracks to playlist');
+    }
+  };
+
+  const handleRemoveTrackFromPlaylist = async (playlistId: string, trackUri: string, title: string) => {
+    try {
+      await defaultSimpClient.query('remove_track_from_playlist', {
+        playlist_id: playlistId,
+        track_uri: trackUri,
+      });
+      refreshLibraryData();
+      if (browserTarget?.kind === 'playlist' && browserTarget.id === playlistId) {
+        const updated = await defaultSimpClient.query<TrackMetadata[]>('get_playlist_items', {
+          playlist_id: playlistId,
+          limit: 2000,
+          offset: 0,
+        });
+        setBrowserTracks(updated);
+      }
+      showToast(`Removed "${title}" from playlist`);
+    } catch {
+      showToast('Could not remove track from playlist');
+    }
+  };
+
+  const handleDeletePlaylist = async (playlistId: string, playlistName: string) => {
+    try {
+      await defaultSimpClient.query('delete_playlist', { playlist_id: playlistId });
+      setBrowserTarget((prev) =>
+        prev?.kind === 'playlist' && prev.id === playlistId
+          ? albums.length > 0
+            ? { kind: 'album', id: albums[0].id }
+            : null
+          : prev
+      );
+      setActivePlaylistId((prev) => (prev === playlistId ? '' : prev));
+      refreshLibraryData();
+      showToast(`Removed playlist "${playlistName}" from SIMP`);
+    } catch {
+      showToast('Could not remove playlist');
+    }
+  };
+
+  const handleDeleteAlbum = async (albumId: string, albumTitle: string) => {
+    try {
+      await defaultSimpClient.query('delete_album', { album_id: albumId });
+      setBrowserTarget((prev) =>
+        prev?.kind === 'album' && prev.id === albumId
+          ? albums.length > 1
+            ? { kind: 'album', id: albums.find((a) => a.id !== albumId)?.id || '' }
+            : null
+          : prev
+      );
+      refreshLibraryData();
+      showToast(`Unpinned album "${albumTitle}" from SIMP`);
+    } catch {
+      showToast('Could not remove album');
+    }
+  };
+
+  const handlePinCloudPlaylist = async (
+    pl: AppleCloudPlaylistSummary,
+    preloadedTracks?: TrackMetadata[]
+  ) => {
+    setCloudLoading(true);
+    try {
+      await pinApplePlaylistToSimp(pl, preloadedTracks, showToast);
+      refreshLibraryData();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to pin playlist to SIMP');
+    } finally {
+      setCloudLoading(false);
+    }
+  };
+
+  const handlePinCloudAlbum = async (album: AppleCatalogAlbumSummary, tracks: TrackMetadata[]) => {
+    setCloudLoading(true);
+    try {
+      await pinAppleAlbumToSimp(album, tracks, showToast);
+      refreshLibraryData();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to pin album to SIMP');
+    } finally {
+      setCloudLoading(false);
     }
   };
 
@@ -530,6 +805,18 @@ const ConsoleMainApp: React.FC = () => {
     >
       {/* Headless Apple Music Virtual Sink Bridge (MusicKit v3) */}
       <AppleMusicDriver />
+
+      {/* Gamepad & Keyboard Focus Ring Style */}
+      <style>{`
+        button:focus, button:focus-visible,
+        input:focus, input:focus-visible,
+        select:focus, select:focus-visible,
+        [data-focusable="true"]:focus, [data-focusable="true"]:focus-visible {
+          outline: 2px solid #2aa3c4 !important;
+          outline-offset: 2px !important;
+          box-shadow: 0 0 0 3px rgba(42, 163, 196, 0.28) !important;
+        }
+      `}</style>
 
       {/* Wake-Tap Guard: intercepts the first tap when dimmed so no button is misfired */}
       {isDimmed && (
@@ -840,7 +1127,7 @@ const ConsoleMainApp: React.FC = () => {
               )}
             </div>
 
-            {/* Queue Mode Controls: Shuffle (X) & Loop/Repeat (Y) directly under Album Art */}
+            {/* Queue Mode Controls: Shuffle (X), Loop/Repeat (Y), & Full Album (💿) directly under Album Art */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
               <TransportIconButton
                 icon="🔀"
@@ -860,6 +1147,18 @@ const ConsoleMainApp: React.FC = () => {
                 active={snap?.repeat_mode !== 'off'}
                 onClick={() => defaultSimpClient.cycleRepeat()}
               />
+              {track?.source === 'apple_music' && (
+                <TransportIconButton
+                  icon="💿"
+                  badge="ALB"
+                  onClick={() =>
+                    handleOpenFullAppleAlbum({
+                      songUri: track.uri,
+                      fallbackTitle: track.album || track.title,
+                    })
+                  }
+                />
+              )}
             </div>
           </div>
 
@@ -910,6 +1209,7 @@ const ConsoleMainApp: React.FC = () => {
                 onClick={() => defaultSimpClient.previous()}
               />
               <button
+                data-default-focus="true"
                 onClick={() => defaultSimpClient.togglePlayPause()}
                 style={{
                   width: 96,
@@ -1048,7 +1348,11 @@ const ConsoleMainApp: React.FC = () => {
 
               <input
                 type="text"
-                placeholder="🔍 Filter playlists, albums, or tracks..."
+                placeholder={
+                  browserSourceFilter === 'apple_music'
+                    ? '🔍 Search Apple Music catalog, albums, playlists, or radio...'
+                    : '🔍 Filter playlists, albums, or tracks...'
+                }
                 value={browserSearch}
                 onChange={(e) => setBrowserSearch(e.target.value)}
                 style={{
@@ -1063,7 +1367,957 @@ const ConsoleMainApp: React.FC = () => {
               />
             </div>
 
-            {browserSourceFilter !== 'apple_music' && (
+            {browserSourceFilter === 'apple_music' ? (
+              /* 🍎 APPLE MUSIC CLOUD HUB: Radio & Mixes | Cloud Playlists (Opt-In) | Live Catalog Search | Pinned in SIMP */
+              <>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr',
+                    gap: 6,
+                    marginTop: 2,
+                  }}
+                >
+                  {(
+                    [
+                      { id: 'radio', label: '📻 Radio & For You' },
+                      {
+                        id: 'cloud_playlists',
+                        label: `☁️ Cloud Playlists${cloudPlaylists.length ? ` (${cloudPlaylists.length})` : ''}`,
+                      },
+                      { id: 'search', label: '🔍 Catalog Search' },
+                      {
+                        id: 'pinned',
+                        label: `📌 Pinned in SIMP (${filteredPlaylists.length + albums.length})`,
+                      },
+                    ] as const
+                  ).map((st) => {
+                    const active = appleSubTab === st.id;
+                    return (
+                      <button
+                        key={st.id}
+                        onClick={() => setAppleSubTab(st.id)}
+                        style={{
+                          minHeight: 34,
+                          padding: '0 8px',
+                          borderRadius: 8,
+                          background: active ? '#28111b' : '#0a0a0e',
+                          border: active ? '1px solid #fa243c' : '1px solid #1e1e26',
+                          color: active ? '#fecdd3' : '#9ca3af',
+                          fontSize: 11,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {st.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {!snap?.apple_authenticated && (
+                  <div
+                    style={{
+                      padding: 12,
+                      borderRadius: 10,
+                      background: '#160d12',
+                      border: '1px solid #4c1d2e',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                    }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#fda4af' }}>
+                      🍎 Apple Music Not Signed In
+                    </div>
+                    <div style={{ fontSize: 11, color: '#a1a1aa' }}>
+                      Sign in or scan the QR code in Sources to browse Radio, Cloud Playlists, and Full Catalog Albums.
+                    </div>
+                    <button
+                      onClick={() => setSourceModalOpen(true)}
+                      style={{
+                        minHeight: 34,
+                        padding: '0 12px',
+                        borderRadius: 8,
+                        background: '#2a131c',
+                        border: '1px solid #fa243c',
+                        color: '#fecdd3',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                        alignSelf: 'flex-start',
+                      }}
+                    >
+                      Open Apple Music Setup
+                    </button>
+                  </div>
+                )}
+
+                {cloudLoading && (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color: '#fda4af',
+                      padding: '4px 2px',
+                    }}
+                  >
+                    ⏳ Fetching from Apple Music Cloud...
+                  </div>
+                )}
+
+                {/* SUB-TAB 1: RADIO & FOR YOU */}
+                {appleSubTab === 'radio' && snap?.apple_authenticated && (
+                  <>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginTop: 4,
+                      }}
+                    >
+                      <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#fda4af' }}>
+                        📻 RADIO STATIONS ({radioStations.length})
+                      </span>
+                      <button
+                        onClick={() => {
+                          setCloudLoading(true);
+                          fetchAppleRadioAndForYou()
+                            .then((res) => {
+                              setRadioStations(res.stations);
+                              setForYouPlaylists(res.playlists);
+                              setForYouAlbums(res.albums);
+                            })
+                            .catch(() => {})
+                            .finally(() => setCloudLoading(false));
+                        }}
+                        style={{
+                          padding: '3px 8px',
+                          borderRadius: 6,
+                          background: '#161620',
+                          border: '1px solid #2a2a38',
+                          color: '#fda4af',
+                          fontSize: 10,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        ↻ Refresh
+                      </button>
+                    </div>
+                    {radioStations.map((st) => (
+                      <button
+                        key={st.id}
+                        onClick={() => handleStartAppleStation(st)}
+                        style={{
+                          minHeight: 48,
+                          padding: '8px 10px',
+                          borderRadius: 12,
+                          background:
+                            playingContextId === `station:${st.id}` ? '#28111b' : '#0a0a0e',
+                          border:
+                            playingContextId === `station:${st.id}`
+                              ? '1px solid #fa243c'
+                              : '1px solid #1e1e26',
+                          color: '#d4d4dc',
+                          textAlign: 'left',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 8,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div
+                            style={{
+                              fontSize: 13,
+                              fontWeight: 700,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            📻 {st.name}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 11,
+                              color: '#8e8e99',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {st.tagline || 'Apple Music Live / Personal Station'}
+                          </div>
+                        </div>
+                        <span
+                          style={{
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            color: '#fda4af',
+                            fontWeight: 800,
+                            flexShrink: 0,
+                          }}
+                        >
+                          ▶ TUNE IN
+                        </span>
+                      </button>
+                    ))}
+
+                    {forYouPlaylists.length > 0 && (
+                      <>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                            color: '#fda4af',
+                            marginTop: 8,
+                          }}
+                        >
+                          ✨ MADE FOR YOU & HEAVY ROTATION ({forYouPlaylists.length})
+                        </div>
+                        {forYouPlaylists.map((pl) => {
+                          const isSelected =
+                            browserTarget?.kind === 'cloud_playlist' && browserTarget.id === pl.id;
+                          const isPinned = playlists.some(
+                            (p) => p.id === `applemusic:playlist:${pl.id}`
+                          );
+                          return (
+                            <div
+                              key={pl.id}
+                              style={{
+                                minHeight: 48,
+                                padding: '6px 10px',
+                                borderRadius: 12,
+                                background: isSelected ? '#28111b' : '#0a0a0e',
+                                border: isSelected
+                                  ? '1px solid #fa243c'
+                                  : '1px solid #181820',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: 8,
+                              }}
+                            >
+                              <button
+                                onClick={() => handleOpenCloudPlaylist(pl)}
+                                style={{
+                                  flex: 1,
+                                  minWidth: 0,
+                                  background: 'transparent',
+                                  border: 'none',
+                                  color: '#d4d4dc',
+                                  textAlign: 'left',
+                                  cursor: 'pointer',
+                                  padding: '2px 0',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    fontSize: 13,
+                                    fontWeight: 700,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {pl.name}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    color: '#8e8e99',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {pl.description || 'Apple Music Mix'}
+                                </div>
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (isPinned) {
+                                    handleDeletePlaylist(
+                                      `applemusic:playlist:${pl.id}`,
+                                      pl.name
+                                    );
+                                  } else {
+                                    handlePinCloudPlaylist(pl);
+                                  }
+                                }}
+                                style={{
+                                  padding: '4px 8px',
+                                  borderRadius: 8,
+                                  background: isPinned ? '#0f222a' : '#251018',
+                                  border: isPinned
+                                    ? '1px solid #2aa3c4'
+                                    : '1px solid #4c1d2e',
+                                  color: isPinned ? '#67e8f9' : '#fda4af',
+                                  fontSize: 10,
+                                  fontWeight: 800,
+                                  cursor: 'pointer',
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {isPinned ? '✓ Pinned' : '📌 Pin'}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
+
+                    {forYouAlbums.length > 0 && (
+                      <>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                            color: '#fda4af',
+                            marginTop: 8,
+                          }}
+                        >
+                          💿 RECOMMENDED FULL ALBUMS ({forYouAlbums.length})
+                        </div>
+                        {forYouAlbums.map((alb) => {
+                          const isSelected =
+                            browserTarget?.kind === 'cloud_album' && browserTarget.id === alb.id;
+                          return (
+                            <button
+                              key={alb.id}
+                              onClick={() =>
+                                handleOpenFullAppleAlbum({
+                                  albumId: alb.id,
+                                  fallbackTitle: alb.title,
+                                })
+                              }
+                              style={{
+                                minHeight: 50,
+                                padding: '8px 10px',
+                                borderRadius: 12,
+                                background: isSelected ? '#28111b' : '#0a0a0e',
+                                border: isSelected
+                                  ? '1px solid #fa243c'
+                                  : '1px solid #181820',
+                                color: '#d4d4dc',
+                                textAlign: 'left',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: 8,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div
+                                  style={{
+                                    fontSize: 13,
+                                    fontWeight: 700,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  💿 {alb.title}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    color: '#8e8e99',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {alb.artist}
+                                </div>
+                              </div>
+                              <span
+                                style={{
+                                  fontSize: 10,
+                                  fontFamily: 'monospace',
+                                  color: '#fda4af',
+                                  flexShrink: 0,
+                                }}
+                              >
+                                Full Album →
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </>
+                    )}
+                  </>
+                )}
+
+                {/* SUB-TAB 2: CLOUD PLAYLISTS (META-PLAYLIST OPT-IN BROWSER) */}
+                {appleSubTab === 'cloud_playlists' && snap?.apple_authenticated && (
+                  <>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginTop: 4,
+                      }}
+                    >
+                      <span style={{ fontSize: 11, color: '#9ca3af' }}>
+                        Click any Cloud Playlist to preview tracks, or click <strong>📌 Pin</strong> to add it to SIMP.
+                      </span>
+                      <button
+                        onClick={() => {
+                          setCloudLoading(true);
+                          fetchAppleCloudPlaylists()
+                            .then(setCloudPlaylists)
+                            .catch(() => {})
+                            .finally(() => setCloudLoading(false));
+                        }}
+                        style={{
+                          padding: '3px 8px',
+                          borderRadius: 6,
+                          background: '#161620',
+                          border: '1px solid #2a2a38',
+                          color: '#fda4af',
+                          fontSize: 10,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          flexShrink: 0,
+                        }}
+                      >
+                        ↻ Reload
+                      </button>
+                    </div>
+                    {cloudPlaylists
+                      .filter((pl) =>
+                        browserSearch.trim()
+                          ? pl.name.toLowerCase().includes(browserSearch.trim().toLowerCase())
+                          : true
+                      )
+                      .map((pl) => {
+                        const isSelected =
+                          browserTarget?.kind === 'cloud_playlist' && browserTarget.id === pl.id;
+                        const isPinned = playlists.some(
+                          (p) => p.id === `applemusic:playlist:${pl.id}`
+                        );
+                        return (
+                          <div
+                            key={pl.id}
+                            style={{
+                              minHeight: 48,
+                              padding: '6px 10px',
+                              borderRadius: 12,
+                              background: isSelected ? '#28111b' : '#0a0a0e',
+                              border: isSelected ? '1px solid #fa243c' : '1px solid #181820',
+                              color: '#d4d4dc',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: 8,
+                            }}
+                          >
+                            <button
+                              onClick={() => handleOpenCloudPlaylist(pl)}
+                              style={{
+                                flex: 1,
+                                minWidth: 0,
+                                background: 'transparent',
+                                border: 'none',
+                                color: '#d4d4dc',
+                                textAlign: 'left',
+                                cursor: 'pointer',
+                                padding: '2px 0',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontSize: 13,
+                                  fontWeight: 700,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                ☁️ {pl.name}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: '#8e8e99',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {pl.description || 'iCloud Music Library Playlist'}
+                              </div>
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (isPinned) {
+                                  handleDeletePlaylist(
+                                    `applemusic:playlist:${pl.id}`,
+                                    pl.name
+                                  );
+                                } else {
+                                  handlePinCloudPlaylist(pl);
+                                }
+                              }}
+                              title={
+                                isPinned
+                                  ? 'Unpin from SIMP'
+                                  : 'Pin this playlist to SIMP Library'
+                              }
+                              style={{
+                                padding: '5px 10px',
+                                borderRadius: 8,
+                                background: isPinned ? '#0f222a' : '#251018',
+                                border: isPinned ? '1px solid #2aa3c4' : '1px solid #4c1d2e',
+                                color: isPinned ? '#67e8f9' : '#fda4af',
+                                fontSize: 11,
+                                fontWeight: 800,
+                                cursor: 'pointer',
+                                flexShrink: 0,
+                              }}
+                            >
+                              {isPinned ? '✓ Pinned' : '📌 Pin'}
+                            </button>
+                          </div>
+                        );
+                      })}
+                  </>
+                )}
+
+                {/* SUB-TAB 3: LIVE APPLE MUSIC CATALOG SEARCH */}
+                {appleSubTab === 'search' && snap?.apple_authenticated && (
+                  <>
+                    {!browserSearch.trim() && (
+                      <div style={{ fontSize: 12, color: '#8e8e99', padding: '8px 2px' }}>
+                        Type an artist, album, song, or station in the search box above to search the full Apple Music Catalog.
+                      </div>
+                    )}
+
+                    {catalogSearchResults.stations.length > 0 && (
+                      <>
+                        <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
+                          📻 STATIONS ({catalogSearchResults.stations.length})
+                        </div>
+                        {catalogSearchResults.stations.map((st) => (
+                          <button
+                            key={st.id}
+                            onClick={() => handleStartAppleStation(st)}
+                            style={{
+                              minHeight: 44,
+                              padding: '6px 10px',
+                              borderRadius: 10,
+                              background: '#0a0a0e',
+                              border: '1px solid #1e1e26',
+                              color: '#d4d4dc',
+                              textAlign: 'left',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <span style={{ fontSize: 12, fontWeight: 700 }}>📻 {st.name}</span>
+                            <span style={{ fontSize: 10, color: '#fda4af', fontFamily: 'monospace' }}>
+                              ▶ TUNE IN
+                            </span>
+                          </button>
+                        ))}
+                      </>
+                    )}
+
+                    {catalogSearchResults.albums.length > 0 && (
+                      <>
+                        <div
+                          style={{
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            color: '#fda4af',
+                            marginTop: 6,
+                          }}
+                        >
+                          💿 FULL CATALOG ALBUMS ({catalogSearchResults.albums.length})
+                        </div>
+                        {catalogSearchResults.albums.map((alb) => {
+                          const isSelected =
+                            browserTarget?.kind === 'cloud_album' && browserTarget.id === alb.id;
+                          return (
+                            <button
+                              key={alb.id}
+                              onClick={() =>
+                                handleOpenFullAppleAlbum({
+                                  albumId: alb.id,
+                                  fallbackTitle: alb.title,
+                                })
+                              }
+                              style={{
+                                minHeight: 48,
+                                padding: '6px 10px',
+                                borderRadius: 10,
+                                background: isSelected ? '#28111b' : '#0a0a0e',
+                                border: isSelected
+                                  ? '1px solid #fa243c'
+                                  : '1px solid #181820',
+                                color: '#d4d4dc',
+                                textAlign: 'left',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: 8,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div
+                                  style={{
+                                    fontSize: 13,
+                                    fontWeight: 700,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  💿 {alb.title}
+                                </div>
+                                <div style={{ fontSize: 11, color: '#8e8e99' }}>
+                                  {alb.artist}
+                                  {alb.release_year ? ` • ${alb.release_year}` : ''}
+                                </div>
+                              </div>
+                              <span
+                                style={{
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                  color: '#fda4af',
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {alb.track_count} trk
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </>
+                    )}
+
+                    {catalogSearchResults.playlists.length > 0 && (
+                      <>
+                        <div
+                          style={{
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            color: '#fda4af',
+                            marginTop: 6,
+                          }}
+                        >
+                          🎶 CATALOG PLAYLISTS ({catalogSearchResults.playlists.length})
+                        </div>
+                        {catalogSearchResults.playlists.map((pl) => (
+                          <div
+                            key={pl.id}
+                            style={{
+                              minHeight: 46,
+                              padding: '6px 10px',
+                              borderRadius: 10,
+                              background: '#0a0a0e',
+                              border: '1px solid #181820',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: 8,
+                            }}
+                          >
+                            <button
+                              onClick={() => handleOpenCloudPlaylist(pl)}
+                              style={{
+                                flex: 1,
+                                minWidth: 0,
+                                background: 'transparent',
+                                border: 'none',
+                                color: '#d4d4dc',
+                                textAlign: 'left',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {pl.name}
+                              </div>
+                            </button>
+                            <button
+                              onClick={() => handlePinCloudPlaylist(pl)}
+                              style={{
+                                padding: '4px 8px',
+                                borderRadius: 6,
+                                background: '#251018',
+                                border: '1px solid #4c1d2e',
+                                color: '#fda4af',
+                                fontSize: 10,
+                                fontWeight: 800,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              📌 Pin
+                            </button>
+                          </div>
+                        ))}
+                      </>
+                    )}
+
+                    {catalogSearchResults.songs.length > 0 && (
+                      <>
+                        <div
+                          style={{
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            color: '#fda4af',
+                            marginTop: 6,
+                          }}
+                        >
+                          🎵 SONGS ({catalogSearchResults.songs.length})
+                        </div>
+                        {catalogSearchResults.songs.map((s) => (
+                          <div
+                            key={s.uri}
+                            style={{
+                              minHeight: 46,
+                              padding: '6px 10px',
+                              borderRadius: 10,
+                              background: '#0a0a0e',
+                              border: '1px solid #181820',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: 6,
+                            }}
+                          >
+                            <button
+                              onClick={() => {
+                                setPlayingContextId(`search:${s.uri}`);
+                                defaultSimpClient.loadQueue(
+                                  catalogSearchResults.songs.map((tr) => tr.uri),
+                                  catalogSearchResults.songs.findIndex((tr) => tr.uri === s.uri),
+                                  catalogSearchResults.songs
+                                );
+                                setView('lock');
+                              }}
+                              style={{
+                                flex: 1,
+                                minWidth: 0,
+                                background: 'transparent',
+                                border: 'none',
+                                color: '#d4d4dc',
+                                textAlign: 'left',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                ▶ {s.title}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: '#8e8e99',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {s.artists.join(', ')} • {s.album}
+                              </div>
+                            </button>
+                            <button
+                              onClick={() =>
+                                handleOpenFullAppleAlbum({
+                                  songUri: s.uri,
+                                  fallbackTitle: s.album || s.title,
+                                })
+                              }
+                              title="Open Full Album"
+                              style={{
+                                padding: '4px 7px',
+                                borderRadius: 6,
+                                background: '#181824',
+                                border: '1px solid #2e2e3e',
+                                color: '#fda4af',
+                                fontSize: 11,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              💿
+                            </button>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </>
+                )}
+
+                {/* SUB-TAB 4: PINNED IN SIMP (OPT-IN APPLE PLAYLISTS & ALBUMS) */}
+                {appleSubTab === 'pinned' && (
+                  <>
+                    <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
+                      Only Apple Music playlists and full albums you explicitly pin appear in SIMP.
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontFamily: 'monospace',
+                        color: '#71717a',
+                        marginTop: 4,
+                      }}
+                    >
+                      PINNED PLAYLISTS ({filteredPlaylists.length})
+                    </div>
+                    {filteredPlaylists.map((pl) => {
+                      const isSelected =
+                        browserTarget?.kind === 'playlist' && browserTarget.id === pl.id;
+                      return (
+                        <div
+                          key={pl.id}
+                          style={{
+                            minHeight: 48,
+                            padding: '6px 10px',
+                            borderRadius: 12,
+                            background: isSelected ? '#0d1b22' : '#0a0a0e',
+                            border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
+                            color: '#d4d4dc',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: 8,
+                          }}
+                        >
+                          <button
+                            onClick={() => setBrowserTarget({ kind: 'playlist', id: pl.id })}
+                            style={{
+                              flex: 1,
+                              minWidth: 0,
+                              background: 'transparent',
+                              border: 'none',
+                              color: '#d4d4dc',
+                              textAlign: 'left',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <div style={{ fontSize: 13, fontWeight: 700 }}>{pl.name}</div>
+                            <div style={{ fontSize: 11, color: '#8e8e99' }}>
+                              Pinned Apple Music Playlist • {pl.track_count} tracks
+                            </div>
+                          </button>
+                          <button
+                            onClick={() => handleDeletePlaylist(pl.id, pl.name)}
+                            title="Unpin playlist from SIMP"
+                            style={{
+                              padding: '3px 7px',
+                              borderRadius: 6,
+                              background: '#1f1216',
+                              border: '1px solid #4c2228',
+                              color: '#f87171',
+                              fontSize: 11,
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      );
+                    })}
+
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontFamily: 'monospace',
+                        color: '#71717a',
+                        marginTop: 8,
+                      }}
+                    >
+                      PINNED FULL ALBUMS ({albums.length})
+                    </div>
+                    {albums.map((alb) => {
+                      const isSelected =
+                        browserTarget?.kind === 'album' && browserTarget.id === alb.id;
+                      return (
+                        <div
+                          key={alb.id}
+                          style={{
+                            minHeight: 48,
+                            padding: '6px 10px',
+                            borderRadius: 12,
+                            background: isSelected ? '#0d1b22' : '#0a0a0e',
+                            border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
+                            color: '#d4d4dc',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: 8,
+                          }}
+                        >
+                          <button
+                            onClick={() => setBrowserTarget({ kind: 'album', id: alb.id })}
+                            style={{
+                              flex: 1,
+                              minWidth: 0,
+                              background: 'transparent',
+                              border: 'none',
+                              color: '#d4d4dc',
+                              textAlign: 'left',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <div style={{ fontSize: 13, fontWeight: 700 }}>{alb.title}</div>
+                            <div style={{ fontSize: 11, color: '#8e8e99' }}>
+                              {alb.album_artist} • {alb.track_count} tracks
+                            </div>
+                          </button>
+                          <button
+                            onClick={() => handleDeleteAlbum(alb.id, alb.title)}
+                            title="Unpin album from SIMP"
+                            style={{
+                              padding: '3px 7px',
+                              borderRadius: 6,
+                              background: '#1f1216',
+                              border: '1px solid #4c2228',
+                              color: '#f87171',
+                              fontSize: 11,
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+              </>
+            ) : (
+              /* 🌐 ALL SOURCES & 💾 LOCAL / STEAM VIEW */
               <>
                 <div
                   style={{
@@ -1159,191 +2413,261 @@ const ConsoleMainApp: React.FC = () => {
                     </button>
                   );
                 })}
+
+                {/* Playlists Section */}
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginTop: 8,
+                  }}
+                >
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
+                    PLAYLISTS ({filteredPlaylists.length})
+                  </span>
+                  <button
+                    onClick={() => setCreatingPlaylist((v) => !v)}
+                    style={{
+                      padding: '4px 10px',
+                      borderRadius: 8,
+                      background: '#12121a',
+                      border: '1px solid #262634',
+                      color: '#2aa3c4',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {creatingPlaylist ? 'Cancel' : '+ New Hybrid Playlist'}
+                  </button>
+                </div>
+
+                {creatingPlaylist && (
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input
+                      type="text"
+                      placeholder="Playlist name (mixes Local + Apple Music)..."
+                      value={newPlaylistName}
+                      onChange={(e) => setNewPlaylistName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleCreatePlaylist();
+                      }}
+                      style={{
+                        flex: 1,
+                        minHeight: 40,
+                        padding: '0 10px',
+                        borderRadius: 10,
+                        background: '#08080c',
+                        border: '1px solid #2e2e3c',
+                        color: '#d4d4dc',
+                        fontSize: 12,
+                      }}
+                    />
+                    <button
+                      onClick={handleCreatePlaylist}
+                      style={{
+                        minHeight: 40,
+                        padding: '0 14px',
+                        borderRadius: 10,
+                        background: '#0f222a',
+                        color: '#bfeaf5',
+                        border: '1px solid #2aa3c4',
+                        fontWeight: 800,
+                        fontSize: 12,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Save
+                    </button>
+                  </div>
+                )}
+
+                {filteredPlaylists.map((pl) => {
+                  const isSelected =
+                    browserTarget?.kind === 'playlist' && browserTarget.id === pl.id;
+                  const isLocalPlaylist = pl.origin === 'simp_local';
+                  return (
+                    <div
+                      key={pl.id}
+                      style={{
+                        minHeight: 48,
+                        padding: '6px 10px',
+                        borderRadius: 12,
+                        background: isSelected ? '#0d1b22' : '#0a0a0e',
+                        border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
+                        color: '#d4d4dc',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
+                    >
+                      <button
+                        onClick={() => {
+                          if (isLocalPlaylist) {
+                            setActivePlaylistId(pl.id);
+                          }
+                          setBrowserTarget({ kind: 'playlist', id: pl.id });
+                        }}
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          background: 'transparent',
+                          border: 'none',
+                          color: '#d4d4dc',
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          padding: '2px 0',
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 700,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {isLocalPlaylist ? `🎵 ${pl.name}` : `📌 ${pl.name}`}
+                        </div>
+                        <div
+                          style={{ fontSize: 11, color: isLocalPlaylist ? '#2aa3c4' : '#fda4af' }}
+                        >
+                          {isLocalPlaylist
+                            ? '★ SIMP Hybrid Playlist (Local + Apple Music)'
+                            : 'Pinned Apple Music Playlist'}
+                        </div>
+                      </button>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                        <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                          {pl.track_count}
+                        </span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeletePlaylist(pl.id, pl.name);
+                          }}
+                          title={
+                            isLocalPlaylist
+                              ? `Delete playlist "${pl.name}"`
+                              : `Unpin "${pl.name}" from SIMP`
+                          }
+                          style={{
+                            padding: '3px 7px',
+                            borderRadius: 6,
+                            background: '#1f1216',
+                            border: '1px solid #4c2228',
+                            color: '#f87171',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Albums & Soundtracks Section */}
+                <div style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a', marginTop: 8 }}>
+                  ALBUMS & SOUNDTRACKS ({albums.length})
+                  {browserTarget?.kind === 'mount' && selectedMountObj
+                    ? ` — ${selectedMountObj.label}`
+                    : ''}
+                </div>
+                {albums.map((alb) => {
+                  const isSelected =
+                    browserTarget?.kind === 'album' && browserTarget.id === alb.id;
+                  const isAppleAlbum = alb.id.startsWith('applemusic:album:');
+                  return (
+                    <div
+                      key={alb.id}
+                      style={{
+                        minHeight: 52,
+                        padding: '8px 12px',
+                        borderRadius: 12,
+                        background: isSelected ? '#0d1b22' : '#0a0a0e',
+                        border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
+                        color: '#d4d4dc',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
+                    >
+                      <button
+                        onClick={() => setBrowserTarget({ kind: 'album', id: alb.id })}
+                        style={{
+                          minWidth: 0,
+                          flex: 1,
+                          background: 'transparent',
+                          border: 'none',
+                          color: '#d4d4dc',
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 700,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {alb.title}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            color: '#8e8e99',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {alb.album_artist}
+                        </div>
+                      </button>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                        <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                          {alb.track_count}
+                        </span>
+                        {isAppleAlbum && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAlbum(alb.id, alb.title);
+                            }}
+                            title={`Unpin album "${alb.title}" from SIMP`}
+                            style={{
+                              padding: '3px 7px',
+                              borderRadius: 6,
+                              background: '#1f1216',
+                              border: '1px solid #4c2228',
+                              color: '#f87171',
+                              fontSize: 11,
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </>
             )}
-
-            {/* Playlists Section */}
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginTop: 8,
-              }}
-            >
-              <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
-                PLAYLISTS ({filteredPlaylists.length})
-              </span>
-              <button
-                onClick={() => setCreatingPlaylist((v) => !v)}
-                style={{
-                  padding: '4px 10px',
-                  borderRadius: 8,
-                  background: '#12121a',
-                  border: '1px solid #262634',
-                  color: '#2aa3c4',
-                  fontSize: 11,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                }}
-              >
-                {creatingPlaylist ? 'Cancel' : '+ New Hybrid Playlist'}
-              </button>
-            </div>
-
-            {creatingPlaylist && (
-              <div style={{ display: 'flex', gap: 6 }}>
-                <input
-                  type="text"
-                  placeholder="Playlist name (mixes Local + Apple Music)..."
-                  value={newPlaylistName}
-                  onChange={(e) => setNewPlaylistName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleCreatePlaylist();
-                  }}
-                  style={{
-                    flex: 1,
-                    minHeight: 40,
-                    padding: '0 10px',
-                    borderRadius: 10,
-                    background: '#08080c',
-                    border: '1px solid #2e2e3c',
-                    color: '#d4d4dc',
-                    fontSize: 12,
-                  }}
-                />
-                <button
-                  onClick={handleCreatePlaylist}
-                  style={{
-                    minHeight: 40,
-                    padding: '0 14px',
-                    borderRadius: 10,
-                    background: '#0f222a',
-                    color: '#bfeaf5',
-                    border: '1px solid #2aa3c4',
-                    fontWeight: 800,
-                    fontSize: 12,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Save
-                </button>
-              </div>
-            )}
-
-            {filteredPlaylists.map((pl) => {
-              const isSelected =
-                browserTarget?.kind === 'playlist' && browserTarget.id === pl.id;
-              const isLocalPlaylist = pl.origin === 'simp_local';
-              return (
-                <button
-                  key={pl.id}
-                  onClick={() => {
-                    if (isLocalPlaylist) {
-                      setActivePlaylistId(pl.id);
-                    }
-                    setBrowserTarget({ kind: 'playlist', id: pl.id });
-                  }}
-                  style={{
-                    minHeight: 48,
-                    padding: '8px 12px',
-                    borderRadius: 12,
-                    background: isSelected ? '#0d1b22' : '#0a0a0e',
-                    border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
-                    color: '#d4d4dc',
-                    textAlign: 'left',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 700,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {isLocalPlaylist ? `🎵 ${pl.name}` : pl.name}
-                    </div>
-                    <div style={{ fontSize: 11, color: isLocalPlaylist ? '#2aa3c4' : '#8e8e99' }}>
-                      {isLocalPlaylist
-                        ? '★ SIMP Hybrid Playlist (Local + Apple Music)'
-                        : 'Apple Music Library Playlist'}
-                    </div>
-                  </div>
-                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4', flexShrink: 0 }}>
-                    {pl.track_count}
-                  </span>
-                </button>
-              );
-            })}
-
-            {/* Albums & Soundtracks Section */}
-            <div style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a', marginTop: 8 }}>
-              ALBUMS & SOUNDTRACKS ({albums.length})
-              {browserTarget?.kind === 'mount' && selectedMountObj
-                ? ` — ${selectedMountObj.label}`
-                : ''}
-            </div>
-            {albums.map((alb) => {
-              const isSelected =
-                browserTarget?.kind === 'album' && browserTarget.id === alb.id;
-              return (
-                <button
-                  key={alb.id}
-                  onClick={() => setBrowserTarget({ kind: 'album', id: alb.id })}
-                  style={{
-                    minHeight: 52,
-                    padding: '8px 12px',
-                    borderRadius: 12,
-                    background: isSelected ? '#0d1b22' : '#0a0a0e',
-                    border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
-                    color: '#d4d4dc',
-                    textAlign: 'left',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 700,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {alb.title}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: '#8e8e99',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {alb.album_artist}
-                    </div>
-                  </div>
-                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4', flexShrink: 0 }}>
-                    {alb.track_count}
-                  </span>
-                </button>
-              );
-            })}
           </div>
 
-          {/* Right Column: Tracks for Selected Album, Playlist, or Storage Mount */}
+          {/* Right Column: Tracks for Selected Album, Playlist, Cloud Item, or Storage Mount */}
           <div
             style={{
               padding: 20,
@@ -1365,19 +2689,65 @@ const ConsoleMainApp: React.FC = () => {
                   gap: 10,
                 }}
               >
-                <div>
-                  <div style={{ fontSize: 16, fontWeight: 800 }}>
-                    {selectedAlbumObj
-                      ? selectedAlbumObj.title
-                      : selectedPlaylistObj
-                      ? selectedPlaylistObj.name
-                      : selectedMountObj
-                      ? `💾 ${selectedMountObj.label}`
-                      : 'Tracks'}
-                  </div>
-                  <div style={{ fontSize: 12, color: '#8e8e99' }}>
-                    {browserTracks.length} tracks
-                    {selectedMountObj ? ` in ${selectedMountObj.mount_root}` : ''}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+                  {(selectedAlbumObj?.art_url ||
+                    (browserTarget &&
+                      (browserTarget.kind === 'cloud_album' ||
+                        browserTarget.kind === 'cloud_playlist') &&
+                      browserTarget.art_url)) && (
+                    <img
+                      src={
+                        selectedAlbumObj?.art_url ||
+                        (browserTarget &&
+                        (browserTarget.kind === 'cloud_album' ||
+                          browserTarget.kind === 'cloud_playlist')
+                          ? browserTarget.art_url || ''
+                          : '')
+                      }
+                      alt=""
+                      style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: 10,
+                        objectFit: 'cover',
+                        border: '1px solid #242430',
+                        flexShrink: 0,
+                      }}
+                    />
+                  )}
+                  <div style={{ minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: 16,
+                        fontWeight: 800,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {selectedAlbumObj
+                        ? selectedAlbumObj.title
+                        : selectedPlaylistObj
+                        ? selectedPlaylistObj.name
+                        : selectedMountObj
+                        ? `💾 ${selectedMountObj.label}`
+                        : browserTarget &&
+                          (browserTarget.kind === 'cloud_album' ||
+                            browserTarget.kind === 'cloud_playlist')
+                        ? browserTarget.title
+                        : 'Tracks'}
+                    </div>
+                    <div style={{ fontSize: 12, color: '#8e8e99' }}>
+                      {browserTracks.length} tracks
+                      {selectedAlbumObj ? ` • ${selectedAlbumObj.album_artist}` : ''}
+                      {selectedMountObj ? ` in ${selectedMountObj.mount_root}` : ''}
+                      {browserTarget &&
+                      (browserTarget.kind === 'cloud_album' ||
+                        browserTarget.kind === 'cloud_playlist') &&
+                      browserTarget.subtitle
+                        ? ` • ${browserTarget.subtitle}`
+                        : ''}
+                    </div>
                   </div>
                 </div>
 
@@ -1423,7 +2793,106 @@ const ConsoleMainApp: React.FC = () => {
                       )}
                     </div>
 
-                    {(browserTarget.kind === 'album' || browserTarget.kind === 'mount') && (
+                    {/* Pin / Unpin Cloud Playlist to SIMP */}
+                    {browserTarget.kind === 'cloud_playlist' && activeCloudPlaylist && (
+                      <button
+                        onClick={() => {
+                          const isPinned = playlists.some(
+                            (p) => p.id === `applemusic:playlist:${activeCloudPlaylist.id}`
+                          );
+                          if (isPinned) {
+                            handleDeletePlaylist(
+                              `applemusic:playlist:${activeCloudPlaylist.id}`,
+                              activeCloudPlaylist.name
+                            );
+                          } else {
+                            handlePinCloudPlaylist(activeCloudPlaylist, browserTracks);
+                          }
+                        }}
+                        style={{
+                          minHeight: 44,
+                          padding: '0 12px',
+                          borderRadius: 12,
+                          background: '#28111b',
+                          color: '#fecdd3',
+                          border: '1px solid #fa243c',
+                          fontWeight: 800,
+                          fontSize: 12,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {playlists.some(
+                          (p) => p.id === `applemusic:playlist:${activeCloudPlaylist.id}`
+                        )
+                          ? '✓ Pinned in SIMP (Unpin)'
+                          : '📌 Pin Playlist to SIMP'}
+                      </button>
+                    )}
+
+                    {/* Pin / Unpin Full Catalog Album to SIMP */}
+                    {browserTarget.kind === 'cloud_album' && activeCloudAlbum && (
+                      <button
+                        onClick={() => {
+                          const isPinned = albums.some(
+                            (a) => a.id === `applemusic:album:${activeCloudAlbum.id}`
+                          );
+                          if (isPinned) {
+                            handleDeleteAlbum(
+                              `applemusic:album:${activeCloudAlbum.id}`,
+                              activeCloudAlbum.title
+                            );
+                          } else {
+                            handlePinCloudAlbum(activeCloudAlbum, browserTracks);
+                          }
+                        }}
+                        style={{
+                          minHeight: 44,
+                          padding: '0 12px',
+                          borderRadius: 12,
+                          background: '#28111b',
+                          color: '#fecdd3',
+                          border: '1px solid #fa243c',
+                          fontWeight: 800,
+                          fontSize: 12,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {albums.some((a) => a.id === `applemusic:album:${activeCloudAlbum.id}`)
+                          ? '✓ Pinned in SIMP (Unpin)'
+                          : '📌 Pin Full Album to SIMP'}
+                      </button>
+                    )}
+
+                    {browserTarget.kind === 'playlist' && selectedPlaylistObj && (
+                      <button
+                        onClick={() =>
+                          handleDeletePlaylist(
+                            selectedPlaylistObj.id,
+                            selectedPlaylistObj.name
+                          )
+                        }
+                        style={{
+                          minHeight: 44,
+                          padding: '0 12px',
+                          borderRadius: 12,
+                          background: '#221116',
+                          color: '#f87171',
+                          border: '1px solid #5c222d',
+                          fontWeight: 700,
+                          fontSize: 12,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {selectedPlaylistObj.origin === 'simp_local'
+                          ? '🗑 Delete Playlist'
+                          : '✕ Unpin Playlist'}
+                      </button>
+                    )}
+
+                    {(browserTarget.kind === 'album' ||
+                      browserTarget.kind === 'mount' ||
+                      browserTarget.kind === 'cloud_album' ||
+                      browserTarget.kind === 'cloud_playlist') && (
                       <button
                         onClick={() =>
                           handleAddTracksToPlaylist(
@@ -1443,12 +2912,14 @@ const ConsoleMainApp: React.FC = () => {
                           cursor: 'pointer',
                         }}
                       >
-                        + Add All to Playlist
+                        + Add All to Hybrid Playlist
                       </button>
                     )}
 
                     <button
                       onClick={() => {
+                        const ctxKey = `${browserTarget.kind}:${browserTarget.id}`;
+                        setPlayingContextId(ctxKey);
                         if (browserTarget.kind === 'album') {
                           defaultSimpClient.playAlbum(browserTarget.id, false);
                         } else if (browserTarget.kind === 'playlist') {
@@ -1456,7 +2927,8 @@ const ConsoleMainApp: React.FC = () => {
                         } else if (browserTracks.length > 0) {
                           defaultSimpClient.loadQueue(
                             browserTracks.map((tr) => tr.uri),
-                            0
+                            0,
+                            browserTracks
                           );
                         }
                         setView('lock');
@@ -1477,6 +2949,8 @@ const ConsoleMainApp: React.FC = () => {
                     </button>
                     <button
                       onClick={() => {
+                        const ctxKey = `${browserTarget.kind}:${browserTarget.id}`;
+                        setPlayingContextId(ctxKey);
                         if (browserTarget.kind === 'album') {
                           defaultSimpClient.playAlbum(browserTarget.id, true);
                         } else if (browserTarget.kind === 'playlist') {
@@ -1485,7 +2959,8 @@ const ConsoleMainApp: React.FC = () => {
                           defaultSimpClient.setShuffle(true);
                           defaultSimpClient.loadQueue(
                             browserTracks.map((tr) => tr.uri),
-                            0
+                            0,
+                            browserTracks
                           );
                         }
                         setView('lock');
@@ -1508,17 +2983,36 @@ const ConsoleMainApp: React.FC = () => {
                 )}
               </div>
 
-              {browserTracks.map((t, i) => (
+              {browserTracks.map((t, i) => {
+                const currentCtxKey = browserTarget
+                  ? `${browserTarget.kind}:${browserTarget.id}`
+                  : '';
+                const isViewingLocalPlaylist =
+                  browserTarget?.kind === 'playlist' &&
+                  selectedPlaylistObj?.origin === 'simp_local';
+                return (
                 <div
                   key={`${t.uri}-${i}`}
+                  role="button"
+                  tabIndex={0}
+                  data-focusable="true"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      (e.currentTarget as HTMLElement).click();
+                    }
+                  }}
                   onClick={() => {
-                    if (track?.uri === t.uri) {
-                      // Already active: return to player view preserving position & playback state
+                    if (track?.uri === t.uri && playingContextId === currentCtxKey) {
+                      // Already playing this exact track from this exact collection: return to player view
                       setView('lock');
                     } else {
+                      // Switched to a different Album / Mount / Playlist: replace queue with this collection!
+                      setPlayingContextId(currentCtxKey);
                       defaultSimpClient.loadQueue(
                         browserTracks.map((tr) => tr.uri),
-                        i
+                        i,
+                        browserTracks
                       );
                       setView('lock');
                     }
@@ -1535,16 +3029,37 @@ const ConsoleMainApp: React.FC = () => {
                     cursor: 'pointer',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
                     <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
                       {String(t.track_number ?? i + 1).padStart(2, '0')}
                     </span>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 700 }}>{t.title}</div>
-                      <div style={{ fontSize: 12, color: '#8e8e99' }}>{t.artists.join(', ')}</div>
+                    <div style={{ minWidth: 0 }}>
+                      <div
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 700,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {t.title}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: '#8e8e99',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {t.artists.join(', ')}
+                        {t.album ? ` • ${t.album}` : ''}
+                      </div>
                     </div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                     <span
                       style={{
                         fontSize: 10,
@@ -1565,29 +3080,79 @@ const ConsoleMainApp: React.FC = () => {
                       {Math.floor(t.duration_ms / 60000)}:
                       {String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, '0')}
                     </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleAddTracksToPlaylist([t.uri], `"${t.title}"`);
-                      }}
-                      title="Add track to hybrid playlist"
-                      style={{
-                        width: 34,
-                        height: 34,
-                        borderRadius: 8,
-                        background: '#14141d',
-                        border: '1px solid #282836',
-                        color: '#2aa3c4',
-                        fontWeight: 800,
-                        fontSize: 14,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      +
-                    </button>
+                    {t.source === 'apple_music' &&
+                      browserTarget?.kind !== 'cloud_album' && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenFullAppleAlbum({
+                              songUri: t.uri,
+                              fallbackTitle: t.album || t.title,
+                            });
+                          }}
+                          title={`Open full catalog album "${t.album || t.title}"`}
+                          style={{
+                            width: 34,
+                            height: 34,
+                            borderRadius: 8,
+                            background: '#221218',
+                            border: '1px solid #4c1d2e',
+                            color: '#fda4af',
+                            fontWeight: 800,
+                            fontSize: 13,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          💿
+                        </button>
+                      )}
+                    {isViewingLocalPlaylist && browserTarget ? (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveTrackFromPlaylist(browserTarget.id, t.uri, t.title);
+                        }}
+                        title="Remove track from playlist"
+                        style={{
+                          width: 34,
+                          height: 34,
+                          borderRadius: 8,
+                          background: '#221116',
+                          border: '1px solid #5c222d',
+                          color: '#f87171',
+                          fontWeight: 800,
+                          fontSize: 13,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        ✕
+                      </button>
+                    ) : (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleAddTracksToPlaylist([t.uri], `"${t.title}"`);
+                        }}
+                        title="Add track to hybrid playlist"
+                        style={{
+                          width: 34,
+                          height: 34,
+                          borderRadius: 8,
+                          background: '#14141d',
+                          border: '1px solid #282836',
+                          color: '#2aa3c4',
+                          fontWeight: 800,
+                          fontSize: 14,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        +
+                      </button>
+                    )}
                   </div>
                 </div>
-              ))}
+              );
+              })}
             </div>
           </div>
         </main>
@@ -1832,9 +3397,9 @@ const ConsoleMainApp: React.FC = () => {
                   </div>
                   <div style={{ fontSize: 11, color: '#8e8e99' }}>
                     {snap?.apple_authenticated
-                      ? '🟢 Connected — Playlists & Library synced to SQLite'
+                      ? '🟢 Connected — Browse Cloud Playlists, Radio & Full Albums'
                       : appleAuthCfg?.configured
-                      ? 'Sign in with your Apple ID to stream & sync playlists'
+                      ? 'Sign in with your Apple ID to stream & browse Cloud Library'
                       : 'Publisher setup: add Apple Developer Key (.p8) to enable'}
                   </div>
                 </div>
@@ -1892,17 +3457,11 @@ const ConsoleMainApp: React.FC = () => {
                   {snap?.apple_authenticated && (
                     <>
                       <button
-                        disabled={appleBusy}
-                        onClick={async () => {
-                          setAppleBusy(true);
-                          try {
-                            await syncAppleMusicCatalog(showToast);
-                            refreshLibraryData();
-                          } catch (err: any) {
-                            showToast(err?.message || 'Apple Music sync failed');
-                          } finally {
-                            setAppleBusy(false);
-                          }
+                        onClick={() => {
+                          setBrowserSourceFilter('apple_music');
+                          setAppleSubTab('cloud_playlists');
+                          setView('browser');
+                          setSourceModalOpen(false);
                         }}
                         style={{
                           minHeight: 34,
@@ -1916,7 +3475,7 @@ const ConsoleMainApp: React.FC = () => {
                           cursor: 'pointer',
                         }}
                       >
-                        {appleBusy ? 'Syncing...' : '🔄 Sync'}
+                        ☁️ Cloud Hub
                       </button>
                       <button
                         onClick={() => {

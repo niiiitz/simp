@@ -379,6 +379,53 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                 },
             }
         }
+        LibraryQuery::RemoveTrackFromPlaylist {
+            playlist_id,
+            track_uri,
+        } => match state.db.remove_track_from_playlist(&playlist_id, &track_uri) {
+            Ok(new_count) => ServerEnvelope::QueryResponse {
+                req_id,
+                ok: true,
+                data: serde_json::json!({ "playlist_id": playlist_id, "track_count": new_count }),
+                error: None,
+            },
+            Err(e) => ServerEnvelope::QueryResponse {
+                req_id,
+                ok: false,
+                data: serde_json::Value::Null,
+                error: Some(e.to_string()),
+            },
+        },
+        LibraryQuery::DeletePlaylist { playlist_id } => {
+            match state.db.delete_playlist(&playlist_id) {
+                Ok(()) => ServerEnvelope::QueryResponse {
+                    req_id,
+                    ok: true,
+                    data: serde_json::json!({ "deleted": playlist_id }),
+                    error: None,
+                },
+                Err(e) => ServerEnvelope::QueryResponse {
+                    req_id,
+                    ok: false,
+                    data: serde_json::Value::Null,
+                    error: Some(e.to_string()),
+                },
+            }
+        }
+        LibraryQuery::DeleteAlbum { album_id } => match state.db.delete_album(&album_id) {
+            Ok(()) => ServerEnvelope::QueryResponse {
+                req_id,
+                ok: true,
+                data: serde_json::json!({ "deleted": album_id }),
+                error: None,
+            },
+            Err(e) => ServerEnvelope::QueryResponse {
+                req_id,
+                ok: false,
+                data: serde_json::Value::Null,
+                error: Some(e.to_string()),
+            },
+        },
         LibraryQuery::GetMountRoots => match state.db.get_mounts() {
             Ok(mounts) => ServerEnvelope::QueryResponse {
                 req_id,

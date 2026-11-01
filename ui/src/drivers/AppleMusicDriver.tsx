@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import {
+  AlbumRecord,
   defaultSimpClient,
   PlaylistRecord,
   TrackMetadata,
@@ -11,10 +12,43 @@ declare global {
   }
 }
 
+export interface AppleCloudPlaylistSummary {
+  id: string;
+  name: string;
+  description: string;
+  art_url: string | null;
+  kind: 'library' | 'catalog';
+}
+
+export interface AppleCloudAlbumSummary {
+  id: string;
+  title: string;
+  artist: string;
+  art_url: string | null;
+  track_count: number;
+  release_year: number | null;
+  kind: 'catalog' | 'library';
+}
+
+export interface AppleRadioStationSummary {
+  id: string;
+  name: string;
+  subtitle: string;
+  art_url: string | null;
+}
+
+export interface AppleCatalogSearchResults {
+  songs: TrackMetadata[];
+  albums: AppleCloudAlbumSummary[];
+  playlists: AppleCloudPlaylistSummary[];
+  stations: AppleRadioStationSummary[];
+}
+
 let musicKitLoadPromise: Promise<any> | null = null;
 let configuredToken: string | null = null;
+let cachedStorefront: string | null = null;
 
-function formatAppleArtUrl(rawUrl?: string | null, size = 400): string | null {
+export function formatAppleArtUrl(rawUrl?: string | null, size = 400): string | null {
   if (!rawUrl) return null;
   return rawUrl
     .replace('{w}', String(size))
@@ -22,19 +56,22 @@ function formatAppleArtUrl(rawUrl?: string | null, size = 400): string | null {
     .replace('{f}', 'jpg');
 }
 
-function mapAppleItemToTrack(item: any): TrackMetadata | null {
+export function mapAppleItemToTrack(item: any): TrackMetadata | null {
   if (!item) return null;
-  const attrs = item.attributes || {};
-  const playParams = attrs.playParams || {};
-  // Prefer catalogId so MusicKit can stream full catalog or library items reliably
-  const trackId = playParams.catalogId || playParams.id || item.id;
+  const attrs = item.attributes || item;
+  const playParams = attrs.playParams || item.playParams || {};
+  // Prefer catalogId so MusicKit can stream full catalog or library items and resolve full albums reliably
+  const trackId = playParams.catalogId || playParams.id || item.id || attrs.id;
   if (!trackId) return null;
 
-  const title = attrs.name || 'Unknown Track';
-  const artistName = attrs.artistName || 'Unknown Artist';
-  const albumName = attrs.albumName || 'Apple Music';
-  const durationMs = Math.round(Number(attrs.durationInMillis || 0));
-  const artUrl = formatAppleArtUrl(attrs.artwork?.url, 400);
+  const title = attrs.name || attrs.title || item.title || 'Unknown Track';
+  const artistName = attrs.artistName || item.artistName || 'Unknown Artist';
+  const albumName = attrs.albumName || item.albumName || 'Apple Music';
+  const durationMs = Math.round(
+    Number(attrs.durationInMillis || item.durationInMillis || item.playbackDuration || 0)
+  );
+  const rawArt = attrs.artwork?.url || item.artwork?.url || item.artworkURL || null;
+  const artUrl = formatAppleArtUrl(rawArt, 400);
 
   return {
     uri: `applemusic:song:${trackId}`,
@@ -124,13 +161,10 @@ export async function ensureMusicKitConfigured(
     configuredToken = developerToken;
   }
   const instance = MK.getInstance();
-  // Hydrate pre-authorized Music-User-Token (e.g. transferred from PC/FIDO2 or Firefox session)
-  // directly into MusicKit's StoreKit & Store session so `hasAuthorization()` is true without a popup!
   const effectiveToken = musicUserToken || instance.musicUserToken;
   if (effectiveToken) {
     try {
       if (instance.storekit) {
-        // Force StoreKit transition so `authorizationStatusDidChange` fires and sets `Store._hasAuthorized = true`
         instance.storekit._authorizationStatus = 0;
       }
       instance.musicUserToken = effectiveToken;
@@ -142,6 +176,40 @@ export async function ensureMusicKitConfigured(
     }
   }
   return instance;
+}
+
+async function getAppleAuthHeaders(): Promise<{
+  headers: Record<string, string>;
+  storefront: string;
+}> {
+  const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
+  if (!cfg.developer_token) {
+    throw new Error(cfg.status_error || 'Missing Apple Developer Token');
+  }
+  const mk = await ensureMusicKitConfigured(cfg.developer_token, cfg.music_user_token);
+  const userToken = cfg.music_user_token || mk?.musicUserToken;
+  if (!userToken) {
+    throw new Error('Please authorize with your Apple ID first');
+  }
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${cfg.developer_token}`,
+    'Music-User-Token': userToken,
+  };
+
+  if (!cachedStorefront) {
+    try {
+      const sfResp = await fetch('https://api.music.apple.com/v1/me/storefront', { headers });
+      if (sfResp.ok) {
+        const sfJson = await sfResp.json();
+        cachedStorefront = sfJson?.data?.[0]?.id || 'us';
+      }
+    } catch {
+      cachedStorefront = 'us';
+    }
+  }
+
+  return { headers, storefront: cachedStorefront || 'us' };
 }
 
 export async function authorizeAppleMusic(
@@ -165,135 +233,429 @@ export async function authorizeAppleMusic(
 
   defaultSimpClient.setAppleMusicUserToken(userToken);
   defaultSimpClient.reportAppleWorkerEvent('authorized', 0, null, null);
-  onToast?.('Apple Music connected! Syncing library & playlists...');
-  await syncAppleMusicCatalog(onToast);
+  onToast?.('Apple Music connected! Browse Cloud Playlists, Radio, or Search to Pin to SIMP.');
   return true;
 }
 
-export async function syncAppleMusicCatalog(
-  onToast?: (msg: string) => void
-): Promise<{ playlists: number; tracks: number }> {
-  const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
-  if (!cfg.developer_token) {
-    throw new Error(cfg.status_error || 'Missing Apple Developer Token');
-  }
+/**
+ * Fetches the user's Cloud Playlists on-demand (headers only) without auto-dumping them into SQLite.
+ * Users can preview any playlist or click "📌 Pin to SIMP" to add it to SIMP's sidebar & Decky QAM.
+ */
+export async function fetchAppleCloudPlaylists(): Promise<AppleCloudPlaylistSummary[]> {
+  const { headers } = await getAppleAuthHeaders();
+  let nextUrl: string | null = 'https://api.music.apple.com/v1/me/library/playlists?limit=100';
+  const items: AppleCloudPlaylistSummary[] = [];
 
-  const mk = await ensureMusicKitConfigured(cfg.developer_token, cfg.music_user_token);
-  const userToken = cfg.music_user_token || mk.musicUserToken;
-  if (!userToken) {
-    throw new Error('Please authorize with your Apple ID first');
-  }
-
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${cfg.developer_token}`,
-    'Music-User-Token': userToken,
-  };
-
-  let importedPlaylists = 0;
-  let importedTracks = 0;
-
-  // 1. Fetch User's Apple Music Library Playlists (paginated up to 300 playlists)
-  let nextPlaylistUrl: string | null =
-    'https://api.music.apple.com/v1/me/library/playlists?limit=100';
-  const playlistsData: any[] = [];
-  for (let page = 0; page < 3 && nextPlaylistUrl; page++) {
-    const plResp = await fetch(nextPlaylistUrl, { headers });
-    if (!plResp.ok) break;
-    const plJson = await plResp.json();
-    if (Array.isArray(plJson.data)) {
-      playlistsData.push(...plJson.data);
-    }
-    nextPlaylistUrl = plJson.next
-      ? `https://api.music.apple.com${plJson.next}`
-      : null;
-  }
-
-  for (const plItem of playlistsData) {
-    const plId = plItem.id;
-    const plAttrs = plItem.attributes || {};
-    let nextTracksUrl: string | null = `https://api.music.apple.com/v1/me/library/playlists/${encodeURIComponent(
-      plId
-    )}/tracks?limit=100`;
-    const tracks: TrackMetadata[] = [];
-
-    for (let tPage = 0; tPage < 5 && nextTracksUrl; tPage++) {
-      const trResp = await fetch(nextTracksUrl, { headers });
-      if (!trResp.ok) break;
-      const trJson = await trResp.json();
-      const pageTracks: TrackMetadata[] = (trJson.data || [])
-        .map(mapAppleItemToTrack)
-        .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
-      tracks.push(...pageTracks);
-      nextTracksUrl = trJson.next
-        ? `https://api.music.apple.com${trJson.next}`
-        : null;
-    }
-
-    if (tracks.length > 0) {
-      const playlistRecord: PlaylistRecord = {
-        id: `applemusic:playlist:${plId}`,
-        name: `🍎 ${plAttrs.name || 'Apple Playlist'}`,
-        description: plAttrs.description?.standard || 'Apple Music Library Playlist',
-        origin: 'apple_remote',
-        cover_art_url:
-          formatAppleArtUrl(plAttrs.artwork?.url, 400) || tracks[0]?.art_url || null,
-        track_count: tracks.length,
-        updated_at: Math.floor(Date.now() / 1000),
-      };
-      defaultSimpClient.importCatalogTracks({
-        source: 'apple_music',
-        playlist: playlistRecord,
-        tracks,
+  for (let page = 0; page < 3 && nextUrl; page++) {
+    const resp = await fetch(nextUrl, { headers });
+    if (!resp.ok) break;
+    const json = await resp.json();
+    for (const pl of json.data || []) {
+      const attrs = pl.attributes || {};
+      items.push({
+        id: pl.id,
+        name: attrs.name || 'Apple Playlist',
+        description: attrs.description?.standard || 'iCloud Music Library Playlist',
+        art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
+        kind: pl.id.startsWith('pl.') ? 'catalog' : 'library',
       });
-      importedPlaylists += 1;
-      importedTracks += tracks.length;
+    }
+    nextUrl = json.next ? `https://api.music.apple.com${json.next}` : null;
+  }
+
+  return items;
+}
+
+/**
+ * Fetches the full tracklist for a specific Apple Music Playlist (either `p.xxxx` library or `pl.xxxx` catalog).
+ */
+export async function fetchApplePlaylistTracks(
+  playlistId: string,
+  kind: 'library' | 'catalog' = playlistId.startsWith('pl.') ? 'catalog' : 'library'
+): Promise<TrackMetadata[]> {
+  const { headers, storefront } = await getAppleAuthHeaders();
+  const cleanId = playlistId.replace(/^applemusic:playlist:/, '');
+  let nextUrl: string | null =
+    kind === 'catalog' || cleanId.startsWith('pl.')
+      ? `https://api.music.apple.com/v1/catalog/${storefront}/playlists/${encodeURIComponent(
+          cleanId
+        )}/tracks?limit=100`
+      : `https://api.music.apple.com/v1/me/library/playlists/${encodeURIComponent(
+          cleanId
+        )}/tracks?limit=100`;
+
+  const tracks: TrackMetadata[] = [];
+  for (let page = 0; page < 5 && nextUrl; page++) {
+    const resp = await fetch(nextUrl, { headers });
+    if (!resp.ok) break;
+    const json = await resp.json();
+    const mapped: TrackMetadata[] = (json.data || [])
+      .map(mapAppleItemToTrack)
+      .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
+    tracks.push(...mapped);
+    nextUrl = json.next ? `https://api.music.apple.com${json.next}` : null;
+  }
+  return tracks;
+}
+
+/**
+ * Pins a chosen Apple Music playlist into SIMP's local SQLite `PLAYLISTS` table (`origin = 'apple_remote'`).
+ */
+export async function pinApplePlaylistToSimp(
+  pl: AppleCloudPlaylistSummary,
+  preloadedTracks?: TrackMetadata[],
+  onToast?: (msg: string) => void
+): Promise<PlaylistRecord> {
+  const tracks = preloadedTracks || (await fetchApplePlaylistTracks(pl.id, pl.kind));
+  if (tracks.length === 0) {
+    throw new Error('Playlist has no playable tracks');
+  }
+  const record: PlaylistRecord = {
+    id: `applemusic:playlist:${pl.id.replace(/^applemusic:playlist:/, '')}`,
+    name: pl.name.startsWith('🍎') ? pl.name : `🍎 ${pl.name}`,
+    description: pl.description || 'Pinned Apple Music Playlist',
+    origin: 'apple_remote',
+    cover_art_url: pl.art_url || tracks[0]?.art_url || null,
+    track_count: tracks.length,
+    updated_at: Math.floor(Date.now() / 1000),
+  };
+  defaultSimpClient.importCatalogTracks({
+    source: 'apple_music',
+    playlist: record,
+    tracks,
+  });
+  onToast?.(`Pinned "${pl.name}" (${tracks.length} tracks) to SIMP!`);
+  return record;
+}
+
+/**
+ * Resolves the FULL Master Catalog Album from either:
+ * - A Catalog Album ID (`1440857781`)
+ * - A Library Album ID (`l.xxxxxx`)
+ * - Or a Song URI (`applemusic:song:1440857785` or `i.xxxxxx`)
+ * So the user always sees all 100% of the album's tracks instead of a 1-track partial library stub!
+ */
+export async function fetchFullAppleAlbum(params: {
+  albumId?: string | null;
+  songUri?: string | null;
+}): Promise<{ album: AppleCloudAlbumSummary; tracks: TrackMetadata[] }> {
+  const { headers, storefront } = await getAppleAuthHeaders();
+
+  let catalogAlbumId: string | null = null;
+
+  if (params.albumId) {
+    const cleanAlb = params.albumId.replace(/^applemusic:album:/, '');
+    if (cleanAlb.startsWith('l.')) {
+      const catResp = await fetch(
+        `https://api.music.apple.com/v1/me/library/albums/${encodeURIComponent(cleanAlb)}/catalog`,
+        { headers }
+      );
+      if (catResp.ok) {
+        const catJson = await catResp.json();
+        catalogAlbumId = catJson?.data?.[0]?.id || null;
+      }
+    } else {
+      catalogAlbumId = cleanAlb;
     }
   }
 
-  // 2. Fetch User's Saved Apple Music Library Albums (only albums with >= 2 tracks)
-  const albumsResp = await fetch(
-    'https://api.music.apple.com/v1/me/library/albums?limit=50&include=tracks',
-    { headers }
-  );
-  if (albumsResp.ok) {
-    const albumsJson = await albumsResp.json();
-    const albumsData: any[] = albumsJson.data || [];
-    for (const albItem of albumsData) {
-      const albAttrs = albItem.attributes || {};
-      const relTracks = albItem.relationships?.tracks?.data || [];
-      const tracks: TrackMetadata[] = relTracks
-        .map(mapAppleItemToTrack)
-        .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
-      if (tracks.length >= 2) {
-        const albId = `applemusic:album:${albItem.id}`;
-        defaultSimpClient.importCatalogTracks({
-          source: 'apple_music',
-          album: {
-            id: albId,
-            title: `🍎 ${albAttrs.name || 'Apple Album'}`,
-            album_artist: albAttrs.artistName || 'Unknown Artist',
-            release_year: null,
-            steam_app_id: null,
-            art_url: formatAppleArtUrl(albAttrs.artwork?.url, 400) || tracks[0]?.art_url || null,
-            track_count: tracks.length,
-          },
-          tracks: tracks.map((t) => ({ ...t, album_id: albId })),
-        });
-        importedTracks += tracks.length;
+  if (!catalogAlbumId && params.songUri) {
+    const rawSongId = params.songUri
+      .replace(/^applemusic:(song|track):/, '')
+      .replace(/^applemusic:/, '');
+
+    if (rawSongId.startsWith('i.')) {
+      const libSongResp = await fetch(
+        `https://api.music.apple.com/v1/me/library/songs/${encodeURIComponent(
+          rawSongId
+        )}/catalog?include=albums`,
+        { headers }
+      );
+      if (libSongResp.ok) {
+        const libSongJson = await libSongResp.json();
+        const catSong = libSongJson?.data?.[0];
+        catalogAlbumId = catSong?.relationships?.albums?.data?.[0]?.id || null;
+      }
+    } else {
+      const songResp = await fetch(
+        `https://api.music.apple.com/v1/catalog/${storefront}/songs/${encodeURIComponent(
+          rawSongId
+        )}?include=albums`,
+        { headers }
+      );
+      if (songResp.ok) {
+        const songJson = await songResp.json();
+        catalogAlbumId =
+          songJson?.data?.[0]?.relationships?.albums?.data?.[0]?.id || null;
       }
     }
   }
 
-  onToast?.(
-    `Synced ${importedPlaylists} Apple Music playlists (${importedTracks} tracks)`
+  if (!catalogAlbumId) {
+    throw new Error('Could not resolve full catalog album on Apple Music');
+  }
+
+  const albResp = await fetch(
+    `https://api.music.apple.com/v1/catalog/${storefront}/albums/${encodeURIComponent(
+      catalogAlbumId
+    )}?include=tracks`,
+    { headers }
   );
-  return { playlists: importedPlaylists, tracks: importedTracks };
+  if (!albResp.ok) {
+    throw new Error('Failed to load catalog album from Apple Music');
+  }
+  const albJson = await albResp.json();
+  const albData = albJson?.data?.[0];
+  if (!albData) {
+    throw new Error('Catalog album not found');
+  }
+
+  const attrs = albData.attributes || {};
+  const relTracks = albData.relationships?.tracks?.data || [];
+  const tracks: TrackMetadata[] = relTracks
+    .map(mapAppleItemToTrack)
+    .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
+
+  const releaseYear = attrs.releaseDate
+    ? Number(String(attrs.releaseDate).slice(0, 4)) || null
+    : null;
+
+  const summary: AppleCloudAlbumSummary = {
+    id: String(albData.id),
+    title: attrs.name || 'Apple Music Album',
+    artist: attrs.artistName || 'Unknown Artist',
+    art_url: formatAppleArtUrl(attrs.artwork?.url, 400) || tracks[0]?.art_url || null,
+    track_count: tracks.length || Number(attrs.trackCount || 0),
+    release_year: releaseYear,
+    kind: 'catalog',
+  };
+
+  return { album: summary, tracks };
+}
+
+/**
+ * Pins a full Apple Music Catalog Album into SIMP's local SQLite `ALBUMS & SOUNDTRACKS` list.
+ */
+export async function pinAppleAlbumToSimp(
+  album: AppleCloudAlbumSummary,
+  tracks: TrackMetadata[],
+  onToast?: (msg: string) => void
+): Promise<AlbumRecord> {
+  const albId = `applemusic:album:${album.id.replace(/^applemusic:album:/, '')}`;
+  const record: AlbumRecord = {
+    id: albId,
+    title: album.title.startsWith('🍎') ? album.title : `🍎 ${album.title}`,
+    album_artist: album.artist,
+    release_year: album.release_year,
+    steam_app_id: null,
+    art_url: album.art_url,
+    track_count: tracks.length,
+  };
+  defaultSimpClient.importCatalogTracks({
+    source: 'apple_music',
+    album: record,
+    tracks: tracks.map((t) => ({ ...t, album_id: albId })),
+  });
+  onToast?.(`Pinned full album "${album.title}" (${tracks.length} tracks) to SIMP!`);
+  return record;
+}
+
+/**
+ * Fetches the user's Apple Music Radio Stations, Personal Mixes, and Heavy Rotation.
+ */
+export async function fetchAppleRadioAndForYou(): Promise<{
+  stations: AppleRadioStationSummary[];
+  playlists: AppleCloudPlaylistSummary[];
+  albums: AppleCloudAlbumSummary[];
+}> {
+  const { headers, storefront } = await getAppleAuthHeaders();
+
+  const stations: AppleRadioStationSummary[] = [];
+  const playlists: AppleCloudPlaylistSummary[] = [];
+  const albums: AppleCloudAlbumSummary[] = [];
+  const seenStationIds = new Set<string>();
+  const seenPlaylistIds = new Set<string>();
+  const seenAlbumIds = new Set<string>();
+
+  const pushStation = (st: any, fallbackSub = 'Apple Music Radio') => {
+    if (!st?.id || seenStationIds.has(st.id)) return;
+    seenStationIds.add(st.id);
+    const attrs = st.attributes || {};
+    stations.push({
+      id: st.id,
+      name: attrs.name || 'Radio Station',
+      subtitle: attrs.editorialNotes?.short || fallbackSub,
+      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
+    });
+  };
+
+  const pushItem = (item: any, groupTitle = '') => {
+    if (!item?.id) return;
+    const type = item.type;
+    const attrs = item.attributes || {};
+    if (type === 'stations') {
+      pushStation(item, groupTitle || 'Personal Station');
+    } else if (type === 'playlists' || type === 'library-playlists') {
+      if (seenPlaylistIds.has(item.id)) return;
+      seenPlaylistIds.add(item.id);
+      playlists.push({
+        id: item.id,
+        name: attrs.name || 'Mix',
+        description: attrs.curatorName || groupTitle || 'Made For You',
+        art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
+        kind: item.id.startsWith('pl.') ? 'catalog' : 'library',
+      });
+    } else if (type === 'albums' || type === 'library-albums') {
+      if (seenAlbumIds.has(item.id)) return;
+      seenAlbumIds.add(item.id);
+      albums.push({
+        id: item.id,
+        title: attrs.name || 'Album',
+        artist: attrs.artistName || 'Apple Music',
+        art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
+        track_count: Number(attrs.trackCount || 0),
+        release_year: attrs.releaseDate ? Number(String(attrs.releaseDate).slice(0, 4)) || null : null,
+        kind: item.id.startsWith('l.') ? 'library' : 'catalog',
+      });
+    }
+  };
+
+  await Promise.allSettled([
+    // 1. Personal & Recent Radio Stations
+    fetch('https://api.music.apple.com/v1/me/recent/radio-stations?limit=12', { headers })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        for (const st of json?.data || []) pushStation(st, 'Recent Radio Station');
+      }),
+    // 2. Heavy Rotation (Albums, Playlists, Stations)
+    fetch('https://api.music.apple.com/v1/me/history/heavy-rotation?limit=15', { headers })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        for (const item of json?.data || []) pushItem(item, 'Heavy Rotation');
+      }),
+    // 3. Personal Recommendations ("Made For You" Mixes, Personal Station, New Releases)
+    fetch('https://api.music.apple.com/v1/me/recommendations?limit=10', { headers })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        for (const rec of json?.data || []) {
+          const title = rec.attributes?.title?.stringForDisplay || 'For You';
+          for (const item of rec.relationships?.contents?.data || []) {
+            pushItem(item, title);
+          }
+        }
+      }),
+    // 4. Featured Live Apple Music Radio Stations fallback
+    fetch(
+      `https://api.music.apple.com/v1/catalog/${storefront}/stations?filter[featured]=apple-music-live-radio`,
+      { headers }
+    )
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        for (const st of json?.data || []) pushStation(st, 'Live Global Radio');
+      }),
+  ]);
+
+  return { stations, playlists, albums };
+}
+
+/**
+ * Live Apple Music Catalog Search (Songs, Full Albums, Playlists, and Radio Stations).
+ */
+export async function searchAppleMusicCatalog(
+  term: string
+): Promise<AppleCatalogSearchResults> {
+  const cleaned = term.trim();
+  if (!cleaned) {
+    return { songs: [], albums: [], playlists: [], stations: [] };
+  }
+  const { headers, storefront } = await getAppleAuthHeaders();
+  const url = `https://api.music.apple.com/v1/catalog/${storefront}/search?term=${encodeURIComponent(
+    cleaned
+  )}&types=songs,albums,playlists,stations&limit=15`;
+
+  const resp = await fetch(url, { headers });
+  if (!resp.ok) {
+    throw new Error('Apple Music catalog search failed');
+  }
+  const json = await resp.json();
+  const results = json?.results || {};
+
+  const songs: TrackMetadata[] = (results.songs?.data || [])
+    .map(mapAppleItemToTrack)
+    .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
+
+  const albums: AppleCloudAlbumSummary[] = (results.albums?.data || []).map((alb: any) => {
+    const attrs = alb.attributes || {};
+    return {
+      id: String(alb.id),
+      title: attrs.name || 'Album',
+      artist: attrs.artistName || 'Unknown Artist',
+      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
+      track_count: Number(attrs.trackCount || 0),
+      release_year: attrs.releaseDate ? Number(String(attrs.releaseDate).slice(0, 4)) || null : null,
+      kind: 'catalog' as const,
+    };
+  });
+
+  const playlists: AppleCloudPlaylistSummary[] = (results.playlists?.data || []).map((pl: any) => {
+    const attrs = pl.attributes || {};
+    return {
+      id: String(pl.id),
+      name: attrs.name || 'Playlist',
+      description: attrs.curatorName || 'Apple Music Playlist',
+      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
+      kind: 'catalog' as const,
+    };
+  });
+
+  const stations: AppleRadioStationSummary[] = (results.stations?.data || []).map((st: any) => {
+    const attrs = st.attributes || {};
+    return {
+      id: String(st.id),
+      name: attrs.name || 'Station',
+      subtitle: attrs.editorialNotes?.short || 'Apple Music Radio',
+      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
+    };
+  });
+
+  return { songs, albums, playlists, stations };
+}
+
+/**
+ * Refresh any already-pinned `apple_remote` playlists in SIMP (opt-in only; never dumps unpinned playlists).
+ */
+export async function syncAppleMusicCatalog(
+  onToast?: (msg: string) => void
+): Promise<{ playlists: number; tracks: number }> {
+  const existing = await defaultSimpClient.query<PlaylistRecord[]>('get_playlists').catch(() => []);
+  const pinnedApple = existing.filter((p) => p.origin === 'apple_remote');
+  let syncedTracks = 0;
+
+  for (const pl of pinnedApple) {
+    const rawId = pl.id.replace(/^applemusic:playlist:/, '');
+    const tracks = await fetchApplePlaylistTracks(rawId).catch(() => []);
+    if (tracks.length > 0) {
+      defaultSimpClient.importCatalogTracks({
+        source: 'apple_music',
+        playlist: { ...pl, track_count: tracks.length },
+        tracks,
+      });
+      syncedTracks += tracks.length;
+    }
+  }
+
+  onToast?.(
+    pinnedApple.length > 0
+      ? `Refreshed ${pinnedApple.length} pinned Apple Music playlists (${syncedTracks} tracks)`
+      : 'Connected! Use the 🍎 Apple Music tab to browse & Pin Playlists, Full Albums, or Radio.'
+  );
+  return { playlists: pinnedApple.length, tracks: syncedTracks };
 }
 
 /**
  * Headless `<AppleMusicDriver />` Virtual Sink Bridge.
  * Listens for `AppleSinkCommand` events from `simp --daemon` (`AudioOrchestrator`)
- * and drives `MusicKit JS` playback, relaying state/time/completion back to Rust & MPRIS2.
+ * and drives `MusicKit JS` playback (Songs & Radio Stations), relaying state/time/completion back to Rust & MPRIS2.
  */
 export const AppleMusicDriver: React.FC = () => {
   const mkRef = useRef<any>(null);
@@ -308,13 +670,29 @@ export const AppleMusicDriver: React.FC = () => {
       const Events = window.MusicKit.Events;
       const States = window.MusicKit.PlaybackStates;
 
+      const reportCurrentItemIfAny = (stateName: 'playing' | 'paused' = 'playing') => {
+        const item = mk.nowPlayingItem;
+        const posMs = Math.round(Number(mk.currentPlaybackTime || 0) * 1000);
+        const durMs = Math.round(Number(mk.currentPlaybackDuration || 0) * 1000);
+        const mapped = item ? mapAppleItemToTrack(item) : null;
+        if (mapped && durMs > 0 && mapped.duration_ms === 0) {
+          mapped.duration_ms = durMs;
+        }
+        defaultSimpClient.reportAppleWorkerEvent(
+          stateName,
+          posMs,
+          mapped,
+          mapped?.duration_ms || durMs || null
+        );
+      };
+
       mk.addEventListener(Events.playbackStateDidChange, () => {
         const st = mk.playbackState;
         const posMs = Math.round(Number(mk.currentPlaybackTime || 0) * 1000);
         const durMs = Math.round(Number(mk.currentPlaybackDuration || 0) * 1000);
 
         if (st === States.playing) {
-          defaultSimpClient.reportAppleWorkerEvent('playing', posMs, null, durMs);
+          reportCurrentItemIfAny('playing');
         } else if (st === States.paused || st === States.stopped) {
           defaultSimpClient.reportAppleWorkerEvent('paused', posMs, null, durMs);
         } else if (st === States.completed || st === States.ended) {
@@ -329,18 +707,7 @@ export const AppleMusicDriver: React.FC = () => {
       });
 
       mk.addEventListener(Events.nowPlayingItemDidChange, () => {
-        const item = mk.nowPlayingItem;
-        if (!item) return;
-        const mapped = mapAppleItemToTrack(item);
-        const posMs = Math.round(Number(mk.currentPlaybackTime || 0) * 1000);
-        if (mapped) {
-          defaultSimpClient.reportAppleWorkerEvent(
-            'playing',
-            posMs,
-            mapped,
-            mapped.duration_ms
-          );
-        }
+        reportCurrentItemIfAny('playing');
       });
     };
 
@@ -353,9 +720,6 @@ export const AppleMusicDriver: React.FC = () => {
       const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
       if (!cfg.configured || !cfg.developer_token || cancelled) return null;
 
-      // If a dedicated background Widevine worker (`?worker=apple`) is running on this host,
-      // foreground UI windows (including `steamwebhelper` in Gamescope) act strictly as UI remotes
-      // so `steamwebhelper` never falls back to 30-second previews or double-plays audio.
       if (cfg.headless_worker_active && !isDedicatedWorker) {
         return null;
       }
@@ -375,17 +739,11 @@ export const AppleMusicDriver: React.FC = () => {
       return mk;
     };
 
-    // Pre-initialize and auto-sync if Apple Music is already authenticated (e.g., via embedded/transferred token)
     defaultSimpClient
       .getAppleMusicAuthConfig()
       .then(async (cfg) => {
         if (cfg.configured && cfg.apple_authenticated && cfg.developer_token) {
           await ensureInstance().catch(() => {});
-          const pls = await defaultSimpClient.query<PlaylistRecord[]>('get_playlists').catch(() => []);
-          const hasApplePlaylists = Array.isArray(pls) && pls.some((p) => p.origin === 'apple_remote');
-          if (!hasApplePlaylists) {
-            syncAppleMusicCatalog().catch(() => {});
-          }
         }
       })
       .catch(() => {});
@@ -402,6 +760,22 @@ export const AppleMusicDriver: React.FC = () => {
         switch (cmd.action) {
           case 'load_and_play': {
             if (!cmd.uri) return;
+            if (cmd.uri.startsWith('applemusic:station:')) {
+              const stationId = cmd.uri.replace(/^applemusic:station:/, '');
+              await mk.setQueue({
+                station: stationId,
+                startPlaying: true,
+              });
+              await mk.play();
+              const item = mk.nowPlayingItem;
+              if (item) {
+                const mapped = mapAppleItemToTrack(item);
+                if (mapped) {
+                  defaultSimpClient.reportAppleWorkerEvent('playing', 0, mapped, mapped.duration_ms);
+                }
+              }
+              break;
+            }
             const rawId = cmd.uri
               .replace(/^applemusic:(song|track):/, '')
               .replace(/^applemusic:/, '');
@@ -413,6 +787,18 @@ export const AppleMusicDriver: React.FC = () => {
               await mk.seekToTime(cmd.position_ms / 1000);
             }
             await mk.play();
+            const item = mk.nowPlayingItem;
+            if (item) {
+              const mapped = mapAppleItemToTrack(item);
+              if (mapped) {
+                defaultSimpClient.reportAppleWorkerEvent(
+                  'playing',
+                  cmd.position_ms || 0,
+                  mapped,
+                  mapped.duration_ms
+                );
+              }
+            }
             break;
           }
           case 'play':
@@ -445,4 +831,3 @@ export const AppleMusicDriver: React.FC = () => {
 
   return null;
 };
-
