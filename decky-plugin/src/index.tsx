@@ -208,7 +208,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
 
   const refreshCatalogs = () => {
     defaultSimpClient
-      .query<AlbumRecord[]>('get_albums', { limit: 40, offset: 0 })
+      .query<AlbumRecord[]>('get_albums', { limit: 200, offset: 0 })
       .then((res) => {
         setConnected(true);
         if (Array.isArray(res)) setAlbums(res);
@@ -266,7 +266,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
     setDrawerTab(next);
     if (next === 'albums') {
       defaultSimpClient
-        .query<AlbumRecord[]>('get_albums', { limit: 40, offset: 0 })
+        .query<AlbumRecord[]>('get_albums', { limit: 200, offset: 0 })
         .then((res) => Array.isArray(res) && setAlbums(res))
         .catch(() => {});
     } else if (next === 'playlists') {

@@ -36,13 +36,15 @@ const ConsoleMainApp: React.FC = () => {
   // Library & Playlist Browser state
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
+  const [browserSourceFilter, setBrowserSourceFilter] = useState<'all' | 'local' | 'apple_music'>('all');
+  const [browserSearch, setBrowserSearch] = useState('');
   const [browserTarget, setBrowserTarget] = useState<{
-    kind: 'album' | 'playlist';
+    kind: 'album' | 'playlist' | 'mount';
     id: string;
   } | null>(null);
   const [browserTracks, setBrowserTracks] = useState<TrackMetadata[]>([]);
 
-  // Playlist creation & target state
+  // Playlist creation & target state (restricted to user-writable `simp_local` playlists)
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [activePlaylistId, setActivePlaylistId] = useState<string>('');
@@ -98,8 +100,20 @@ const ConsoleMainApp: React.FC = () => {
 
   // 2. Refresh Albums & Playlists helper
   const refreshLibraryData = useCallback(() => {
+    const sourceParam =
+      browserSourceFilter === 'all' ? null : browserSourceFilter;
+    const mountParam =
+      browserTarget?.kind === 'mount' ? browserTarget.id : null;
+    const searchParam = browserSearch.trim() ? browserSearch.trim() : null;
+
     defaultSimpClient
-      .query<AlbumRecord[]>('get_albums', { limit: 200, offset: 0 })
+      .query<AlbumRecord[]>('get_albums', {
+        source: sourceParam,
+        mount_root: mountParam,
+        search: searchParam,
+        limit: 1000,
+        offset: 0,
+      })
       .then((res) => {
         setAlbums(res);
         setBrowserTarget((prev) => {
@@ -115,12 +129,15 @@ const ConsoleMainApp: React.FC = () => {
       .query<PlaylistRecord[]>('get_playlists')
       .then((pls) => {
         setPlaylists(pls);
-        if (pls.length > 0) {
-          setActivePlaylistId((prev) => prev || pls[0].id);
+        const writable = pls.filter((p) => p.origin === 'simp_local');
+        if (writable.length > 0) {
+          setActivePlaylistId((prev) =>
+            writable.some((w) => w.id === prev) ? prev : writable[0].id
+          );
         }
       })
       .catch(() => {});
-  }, []);
+  }, [browserSourceFilter, browserTarget?.kind, browserTarget?.id, browserSearch]);
 
   useEffect(() => {
     if (view === 'browser' || sourceModalOpen) {
@@ -139,7 +156,7 @@ const ConsoleMainApp: React.FC = () => {
     }
   }, [view, sourceModalOpen, snap?.mounts, refreshLibraryData]);
 
-  // 3. Load tracks for whichever Album or Playlist is selected in the Browser
+  // 3. Load tracks for whichever Album, Playlist, or Storage Mount is selected in the Browser
   useEffect(() => {
     if (!browserTarget) {
       setBrowserTracks([]);
@@ -150,17 +167,28 @@ const ConsoleMainApp: React.FC = () => {
         .query<TrackMetadata[]>('get_album_tracks', { album_id: browserTarget.id })
         .then(setBrowserTracks)
         .catch(() => {});
-    } else {
+    } else if (browserTarget.kind === 'playlist') {
       defaultSimpClient
         .query<TrackMetadata[]>('get_playlist_items', {
           playlist_id: browserTarget.id,
-          limit: 500,
+          limit: 2000,
+          offset: 0,
+        })
+        .then(setBrowserTracks)
+        .catch(() => {});
+    } else if (browserTarget.kind === 'mount') {
+      defaultSimpClient
+        .query<TrackMetadata[]>('get_tracks', {
+          source: null,
+          mount_root: browserTarget.id,
+          search: browserSearch.trim() ? browserSearch.trim() : null,
+          limit: 2000,
           offset: 0,
         })
         .then(setBrowserTracks)
         .catch(() => {});
     }
-  }, [browserTarget]);
+  }, [browserTarget, browserSearch]);
 
   // 4. Volume helpers (interactive slider, mute toggle, wheel, keyboard & gamepad D-Pad Up/Down)
   const currentVolume = snap?.volume ?? 0.8;
@@ -413,13 +441,15 @@ const ConsoleMainApp: React.FC = () => {
   const handleAddTracksToPlaylist = async (uris: string[], label: string) => {
     if (uris.length === 0) return;
     try {
-      let targetPlId = activePlaylistId;
-      let targetPlName = playlists.find((p) => p.id === targetPlId)?.name || 'Favorites';
+      const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
+      const selectedWritable = writablePlaylists.find((p) => p.id === activePlaylistId);
+      let targetPlId = selectedWritable?.id || '';
+      let targetPlName = selectedWritable?.name || 'Favorites';
 
       if (!targetPlId) {
         const created = await defaultSimpClient.query<PlaylistRecord>('create_playlist', {
           name: 'Favorites',
-          description: 'Default SIMP playlist',
+          description: 'Hybrid Local + Apple Music SIMP playlist',
         });
         targetPlId = created.id;
         targetPlName = created.name;
@@ -434,7 +464,7 @@ const ConsoleMainApp: React.FC = () => {
       if (browserTarget?.kind === 'playlist' && browserTarget.id === targetPlId) {
         const updated = await defaultSimpClient.query<TrackMetadata[]>('get_playlist_items', {
           playlist_id: targetPlId,
-          limit: 500,
+          limit: 2000,
           offset: 0,
         });
         setBrowserTracks(updated);
@@ -465,6 +495,19 @@ const ConsoleMainApp: React.FC = () => {
     browserTarget?.kind === 'album' ? albums.find((a) => a.id === browserTarget.id) : null;
   const selectedPlaylistObj =
     browserTarget?.kind === 'playlist' ? playlists.find((p) => p.id === browserTarget.id) : null;
+  const selectedMountObj =
+    browserTarget?.kind === 'mount'
+      ? snap?.mounts.find((m) => m.mount_root === browserTarget.id)
+      : null;
+  const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
+  const filteredPlaylists = playlists.filter((pl) => {
+    if (browserSourceFilter === 'local' && pl.origin === 'apple_remote') return false;
+    if (browserSourceFilter === 'apple_music' && pl.origin !== 'apple_remote') return false;
+    if (browserSearch.trim()) {
+      return pl.name.toLowerCase().includes(browserSearch.trim().toLowerCase());
+    }
+    return true;
+  });
 
   return (
     <div
@@ -950,7 +993,7 @@ const ConsoleMainApp: React.FC = () => {
       ) : (
         /* Split Library, Playlists & Queue Browser */
         <main style={{ flex: 1, display: 'grid', gridTemplateColumns: '38% 62%', overflow: 'hidden', boxSizing: 'border-box', width: '100%' }}>
-          {/* Left Column: Storage Mounts, Playlists & Albums */}
+          {/* Left Column: Source Filter Pills, Storage Mounts, Playlists & Albums */}
           <div
             style={{
               borderRight: '1px solid #16161c',
@@ -961,85 +1004,163 @@ const ConsoleMainApp: React.FC = () => {
               gap: 10,
             }}
           >
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-              }}
-            >
-              <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
-                STORAGE MOUNTS ({snap?.mounts.length ?? 0})
-              </span>
-              <button
-                onClick={() => setSourceModalOpen(true)}
-                style={{
-                  padding: '4px 10px',
-                  borderRadius: 8,
-                  background: '#12121a',
-                  border: '1px solid #262634',
-                  color: '#2aa3c4',
-                  fontSize: 11,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                }}
-              >
-                Manage Sources
-              </button>
-            </div>
-            {snap?.mounts.map((m) => (
+            {/* Source Filter Tabs + Quick Search */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div
-                key={m.mount_root}
                 style={{
-                  padding: '8px 10px',
-                  borderRadius: 10,
-                  background: '#0a0a0e',
-                  border: '1px solid #1e1e26',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: 8,
-                  fontSize: 12,
-                  opacity: m.is_online ? 1 : 0.65,
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr 1fr',
+                  gap: 6,
                 }}
               >
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div
-                    style={{
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      fontWeight: 600,
-                    }}
-                  >
-                    {m.is_online ? '🟢' : '⚫'} {m.label}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 10,
-                      fontFamily: 'monospace',
-                      color: '#71717a',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                    title={m.mount_root}
-                  >
-                    {m.mount_root}
-                  </div>
-                </div>
-                <span
+                {([
+                  { id: 'all', label: '🌐 All Sources' },
+                  { id: 'local', label: '💾 Local / Steam' },
+                  { id: 'apple_music', label: '🍎 Apple Music' },
+                ] as const).map((tab) => {
+                  const active = browserSourceFilter === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => {
+                        setBrowserSourceFilter(tab.id);
+                        if (tab.id === 'apple_music' && browserTarget?.kind === 'mount') {
+                          setBrowserTarget(null);
+                        }
+                      }}
+                      style={{
+                        minHeight: 36,
+                        padding: '0 8px',
+                        borderRadius: 8,
+                        background: active ? '#0f222a' : '#0a0a0e',
+                        border: active ? '1px solid #2aa3c4' : '1px solid #1e1e26',
+                        color: active ? '#bfeaf5' : '#9ca3af',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <input
+                type="text"
+                placeholder="🔍 Filter playlists, albums, or tracks..."
+                value={browserSearch}
+                onChange={(e) => setBrowserSearch(e.target.value)}
+                style={{
+                  minHeight: 36,
+                  padding: '0 12px',
+                  borderRadius: 8,
+                  background: '#08080c',
+                  border: '1px solid #242430',
+                  color: '#d4d4dc',
+                  fontSize: 12,
+                }}
+              />
+            </div>
+
+            {browserSourceFilter !== 'apple_music' && (
+              <>
+                <div
                   style={{
-                    fontFamily: 'monospace',
-                    color: '#2aa3c4',
-                    fontWeight: 700,
-                    flexShrink: 0,
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginTop: 4,
                   }}
                 >
-                  {m.track_count}
-                </span>
-              </div>
-            ))}
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
+                    STORAGE MOUNTS ({snap?.mounts.length ?? 0})
+                  </span>
+                  <button
+                    onClick={() => setSourceModalOpen(true)}
+                    style={{
+                      padding: '4px 10px',
+                      borderRadius: 8,
+                      background: '#12121a',
+                      border: '1px solid #262634',
+                      color: '#2aa3c4',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Manage Sources
+                  </button>
+                </div>
+                {snap?.mounts.map((m) => {
+                  const isMountSelected =
+                    browserTarget?.kind === 'mount' && browserTarget.id === m.mount_root;
+                  return (
+                    <button
+                      key={m.mount_root}
+                      onClick={() =>
+                        setBrowserTarget((prev) =>
+                          prev?.kind === 'mount' && prev.id === m.mount_root
+                            ? null
+                            : { kind: 'mount', id: m.mount_root }
+                        )
+                      }
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: 10,
+                        background: isMountSelected ? '#0d1b22' : '#0a0a0e',
+                        border: isMountSelected ? '1px solid #2aa3c4' : '1px solid #1e1e26',
+                        color: '#d4d4dc',
+                        textAlign: 'left',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                        fontSize: 12,
+                        opacity: m.is_online ? 1 : 0.65,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div
+                          style={{
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            fontWeight: 700,
+                          }}
+                        >
+                          {m.is_online ? '🟢' : '⚫'} {m.label}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 10,
+                            fontFamily: 'monospace',
+                            color: '#71717a',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                          title={m.mount_root}
+                        >
+                          {m.mount_root}
+                        </div>
+                      </div>
+                      <span
+                        style={{
+                          fontFamily: 'monospace',
+                          color: '#2aa3c4',
+                          fontWeight: 700,
+                          flexShrink: 0,
+                        }}
+                      >
+                        {m.track_count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </>
+            )}
 
             {/* Playlists Section */}
             <div
@@ -1051,7 +1172,7 @@ const ConsoleMainApp: React.FC = () => {
               }}
             >
               <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
-                PLAYLISTS ({playlists.length})
+                PLAYLISTS ({filteredPlaylists.length})
               </span>
               <button
                 onClick={() => setCreatingPlaylist((v) => !v)}
@@ -1066,7 +1187,7 @@ const ConsoleMainApp: React.FC = () => {
                   cursor: 'pointer',
                 }}
               >
-                {creatingPlaylist ? 'Cancel' : '+ New Playlist'}
+                {creatingPlaylist ? 'Cancel' : '+ New Hybrid Playlist'}
               </button>
             </div>
 
@@ -1074,7 +1195,7 @@ const ConsoleMainApp: React.FC = () => {
               <div style={{ display: 'flex', gap: 6 }}>
                 <input
                   type="text"
-                  placeholder="Playlist name (e.g. Deck Mix)..."
+                  placeholder="Playlist name (mixes Local + Apple Music)..."
                   value={newPlaylistName}
                   onChange={(e) => setNewPlaylistName(e.target.value)}
                   onKeyDown={(e) => {
@@ -1110,14 +1231,17 @@ const ConsoleMainApp: React.FC = () => {
               </div>
             )}
 
-            {playlists.map((pl) => {
+            {filteredPlaylists.map((pl) => {
               const isSelected =
                 browserTarget?.kind === 'playlist' && browserTarget.id === pl.id;
+              const isLocalPlaylist = pl.origin === 'simp_local';
               return (
                 <button
                   key={pl.id}
                   onClick={() => {
-                    setActivePlaylistId(pl.id);
+                    if (isLocalPlaylist) {
+                      setActivePlaylistId(pl.id);
+                    }
                     setBrowserTarget({ kind: 'playlist', id: pl.id });
                   }}
                   style={{
@@ -1134,11 +1258,25 @@ const ConsoleMainApp: React.FC = () => {
                     cursor: 'pointer',
                   }}
                 >
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 700 }}>🎵 {pl.name}</div>
-                    <div style={{ fontSize: 11, color: '#8e8e99' }}>Local SQLite Playlist</div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 700,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {isLocalPlaylist ? `🎵 ${pl.name}` : pl.name}
+                    </div>
+                    <div style={{ fontSize: 11, color: isLocalPlaylist ? '#2aa3c4' : '#8e8e99' }}>
+                      {isLocalPlaylist
+                        ? '★ SIMP Hybrid Playlist (Local + Apple Music)'
+                        : 'Apple Music Library Playlist'}
+                    </div>
                   </div>
-                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4', flexShrink: 0 }}>
                     {pl.track_count}
                   </span>
                 </button>
@@ -1148,6 +1286,9 @@ const ConsoleMainApp: React.FC = () => {
             {/* Albums & Soundtracks Section */}
             <div style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a', marginTop: 8 }}>
               ALBUMS & SOUNDTRACKS ({albums.length})
+              {browserTarget?.kind === 'mount' && selectedMountObj
+                ? ` — ${selectedMountObj.label}`
+                : ''}
             </div>
             {albums.map((alb) => {
               const isSelected =
@@ -1170,11 +1311,31 @@ const ConsoleMainApp: React.FC = () => {
                     cursor: 'pointer',
                   }}
                 >
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 700 }}>{alb.title}</div>
-                    <div style={{ fontSize: 12, color: '#8e8e99' }}>{alb.album_artist}</div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 700,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {alb.title}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: '#8e8e99',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {alb.album_artist}
+                    </div>
                   </div>
-                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4', flexShrink: 0 }}>
                     {alb.track_count}
                   </span>
                 </button>
@@ -1182,7 +1343,7 @@ const ConsoleMainApp: React.FC = () => {
             })}
           </div>
 
-          {/* Right Column: Tracks for Selected Album or Playlist */}
+          {/* Right Column: Tracks for Selected Album, Playlist, or Storage Mount */}
           <div
             style={{
               padding: 20,
@@ -1209,17 +1370,60 @@ const ConsoleMainApp: React.FC = () => {
                     {selectedAlbumObj
                       ? selectedAlbumObj.title
                       : selectedPlaylistObj
-                      ? `🎵 ${selectedPlaylistObj.name}`
+                      ? selectedPlaylistObj.name
+                      : selectedMountObj
+                      ? `💾 ${selectedMountObj.label}`
                       : 'Tracks'}
                   </div>
                   <div style={{ fontSize: 12, color: '#8e8e99' }}>
                     {browserTracks.length} tracks
+                    {selectedMountObj ? ` in ${selectedMountObj.mount_root}` : ''}
                   </div>
                 </div>
 
                 {browserTarget && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    {browserTarget.kind === 'album' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    {/* Target Hybrid Playlist Selector for `+` Button */}
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        background: '#0c0c12',
+                        border: '1px solid #262634',
+                        borderRadius: 10,
+                        padding: '0 8px',
+                        minHeight: 40,
+                      }}
+                    >
+                      <span style={{ fontSize: 11, color: '#8e8e99' }}>Add `+` to:</span>
+                      {writablePlaylists.length > 0 ? (
+                        <select
+                          value={activePlaylistId}
+                          onChange={(e) => setActivePlaylistId(e.target.value)}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#67e8f9',
+                            fontSize: 12,
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {writablePlaylists.map((wp) => (
+                            <option key={wp.id} value={wp.id} style={{ background: '#0c0c12' }}>
+                              {wp.name} ({wp.track_count})
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span style={{ fontSize: 11, color: '#67e8f9', fontWeight: 700 }}>
+                          Favorites (auto-create)
+                        </span>
+                      )}
+                    </div>
+
+                    {(browserTarget.kind === 'album' || browserTarget.kind === 'mount') && (
                       <button
                         onClick={() =>
                           handleAddTracksToPlaylist(
@@ -1239,7 +1443,7 @@ const ConsoleMainApp: React.FC = () => {
                           cursor: 'pointer',
                         }}
                       >
-                        + Add Album to Playlist
+                        + Add All to Playlist
                       </button>
                     )}
 
@@ -1247,8 +1451,13 @@ const ConsoleMainApp: React.FC = () => {
                       onClick={() => {
                         if (browserTarget.kind === 'album') {
                           defaultSimpClient.playAlbum(browserTarget.id, false);
-                        } else {
+                        } else if (browserTarget.kind === 'playlist') {
                           defaultSimpClient.playPlaylist(browserTarget.id, false);
+                        } else if (browserTracks.length > 0) {
+                          defaultSimpClient.loadQueue(
+                            browserTracks.map((tr) => tr.uri),
+                            0
+                          );
                         }
                         setView('lock');
                       }}
@@ -1270,8 +1479,14 @@ const ConsoleMainApp: React.FC = () => {
                       onClick={() => {
                         if (browserTarget.kind === 'album') {
                           defaultSimpClient.playAlbum(browserTarget.id, true);
-                        } else {
+                        } else if (browserTarget.kind === 'playlist') {
                           defaultSimpClient.playPlaylist(browserTarget.id, true);
+                        } else if (browserTracks.length > 0) {
+                          defaultSimpClient.setShuffle(true);
+                          defaultSimpClient.loadQueue(
+                            browserTracks.map((tr) => tr.uri),
+                            0
+                          );
                         }
                         setView('lock');
                       }}
@@ -1329,7 +1544,23 @@ const ConsoleMainApp: React.FC = () => {
                       <div style={{ fontSize: 12, color: '#8e8e99' }}>{t.artists.join(', ')}</div>
                     </div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        padding: '2px 6px',
+                        borderRadius: 6,
+                        background: t.source === 'apple_music' ? '#251018' : '#0f1e26',
+                        border:
+                          t.source === 'apple_music'
+                            ? '1px solid #4c1d2e'
+                            : '1px solid #1e3a4a',
+                        color: t.source === 'apple_music' ? '#fda4af' : '#67e8f9',
+                      }}
+                    >
+                      {t.source === 'apple_music' ? '🍎 APPLE' : '💾 LOCAL'}
+                    </span>
                     <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#8e8e99' }}>
                       {Math.floor(t.duration_ms / 60000)}:
                       {String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, '0')}
@@ -1339,7 +1570,7 @@ const ConsoleMainApp: React.FC = () => {
                         e.stopPropagation();
                         handleAddTracksToPlaylist([t.uri], `"${t.title}"`);
                       }}
-                      title="Add track to playlist"
+                      title="Add track to hybrid playlist"
                       style={{
                         width: 34,
                         height: 34,

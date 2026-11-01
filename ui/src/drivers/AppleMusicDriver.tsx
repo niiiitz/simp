@@ -192,68 +192,95 @@ export async function syncAppleMusicCatalog(
   let importedPlaylists = 0;
   let importedTracks = 0;
 
-  // 1. Fetch User's Apple Music Library Playlists
-  const plResp = await fetch(
-    'https://api.music.apple.com/v1/me/library/playlists?limit=50',
-    { headers }
-  );
-  if (plResp.ok) {
+  // 1. Fetch User's Apple Music Library Playlists (paginated up to 300 playlists)
+  let nextPlaylistUrl: string | null =
+    'https://api.music.apple.com/v1/me/library/playlists?limit=100';
+  const playlistsData: any[] = [];
+  for (let page = 0; page < 3 && nextPlaylistUrl; page++) {
+    const plResp = await fetch(nextPlaylistUrl, { headers });
+    if (!plResp.ok) break;
     const plJson = await plResp.json();
-    const playlistsData: any[] = plJson.data || [];
-    for (const plItem of playlistsData) {
-      const plId = plItem.id;
-      const plAttrs = plItem.attributes || {};
-      const trResp = await fetch(
-        `https://api.music.apple.com/v1/me/library/playlists/${encodeURIComponent(
-          plId
-        )}/tracks?limit=100`,
-        { headers }
-      );
-      if (!trResp.ok) continue;
+    if (Array.isArray(plJson.data)) {
+      playlistsData.push(...plJson.data);
+    }
+    nextPlaylistUrl = plJson.next
+      ? `https://api.music.apple.com${plJson.next}`
+      : null;
+  }
+
+  for (const plItem of playlistsData) {
+    const plId = plItem.id;
+    const plAttrs = plItem.attributes || {};
+    let nextTracksUrl: string | null = `https://api.music.apple.com/v1/me/library/playlists/${encodeURIComponent(
+      plId
+    )}/tracks?limit=100`;
+    const tracks: TrackMetadata[] = [];
+
+    for (let tPage = 0; tPage < 5 && nextTracksUrl; tPage++) {
+      const trResp = await fetch(nextTracksUrl, { headers });
+      if (!trResp.ok) break;
       const trJson = await trResp.json();
-      const tracks: TrackMetadata[] = (trJson.data || [])
+      const pageTracks: TrackMetadata[] = (trJson.data || [])
         .map(mapAppleItemToTrack)
         .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
+      tracks.push(...pageTracks);
+      nextTracksUrl = trJson.next
+        ? `https://api.music.apple.com${trJson.next}`
+        : null;
+    }
 
-      if (tracks.length > 0) {
-        const playlistRecord: PlaylistRecord = {
-          id: `applemusic:playlist:${plId}`,
-          name: `🍎 ${plAttrs.name || 'Apple Playlist'}`,
-          description: plAttrs.description?.standard || 'Apple Music Library Playlist',
-          origin: 'apple_remote',
-          cover_art_url:
-            formatAppleArtUrl(plAttrs.artwork?.url, 400) || tracks[0]?.art_url || null,
-          track_count: tracks.length,
-          updated_at: Math.floor(Date.now() / 1000),
-        };
-        defaultSimpClient.importCatalogTracks({
-          source: 'apple_music',
-          playlist: playlistRecord,
-          tracks,
-        });
-        importedPlaylists += 1;
-        importedTracks += tracks.length;
-      }
+    if (tracks.length > 0) {
+      const playlistRecord: PlaylistRecord = {
+        id: `applemusic:playlist:${plId}`,
+        name: `🍎 ${plAttrs.name || 'Apple Playlist'}`,
+        description: plAttrs.description?.standard || 'Apple Music Library Playlist',
+        origin: 'apple_remote',
+        cover_art_url:
+          formatAppleArtUrl(plAttrs.artwork?.url, 400) || tracks[0]?.art_url || null,
+        track_count: tracks.length,
+        updated_at: Math.floor(Date.now() / 1000),
+      };
+      defaultSimpClient.importCatalogTracks({
+        source: 'apple_music',
+        playlist: playlistRecord,
+        tracks,
+      });
+      importedPlaylists += 1;
+      importedTracks += tracks.length;
     }
   }
 
-  // 2. Fetch User's Apple Music Library Songs (up to 100 recent songs grouped into albums)
-  const songsResp = await fetch(
-    'https://api.music.apple.com/v1/me/library/songs?limit=100',
+  // 2. Fetch User's Saved Apple Music Library Albums (only albums with >= 2 tracks)
+  const albumsResp = await fetch(
+    'https://api.music.apple.com/v1/me/library/albums?limit=50&include=tracks',
     { headers }
   );
-  if (songsResp.ok) {
-    const songsJson = await songsResp.json();
-    const libraryTracks: TrackMetadata[] = (songsJson.data || [])
-      .map(mapAppleItemToTrack)
-      .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
-
-    if (libraryTracks.length > 0) {
-      defaultSimpClient.importCatalogTracks({
-        source: 'apple_music',
-        tracks: libraryTracks,
-      });
-      importedTracks += libraryTracks.length;
+  if (albumsResp.ok) {
+    const albumsJson = await albumsResp.json();
+    const albumsData: any[] = albumsJson.data || [];
+    for (const albItem of albumsData) {
+      const albAttrs = albItem.attributes || {};
+      const relTracks = albItem.relationships?.tracks?.data || [];
+      const tracks: TrackMetadata[] = relTracks
+        .map(mapAppleItemToTrack)
+        .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
+      if (tracks.length >= 2) {
+        const albId = `applemusic:album:${albItem.id}`;
+        defaultSimpClient.importCatalogTracks({
+          source: 'apple_music',
+          album: {
+            id: albId,
+            title: `🍎 ${albAttrs.name || 'Apple Album'}`,
+            album_artist: albAttrs.artistName || 'Unknown Artist',
+            release_year: null,
+            steam_app_id: null,
+            art_url: formatAppleArtUrl(albAttrs.artwork?.url, 400) || tracks[0]?.art_url || null,
+            track_count: tracks.length,
+          },
+          tracks: tracks.map((t) => ({ ...t, album_id: albId })),
+        });
+        importedTracks += tracks.length;
+      }
     }
   }
 

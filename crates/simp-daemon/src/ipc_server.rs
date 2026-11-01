@@ -248,13 +248,15 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
         }
         LibraryQuery::GetAlbums {
             source,
+            mount_root,
             search,
             limit,
             offset,
-        } => match state.db.get_albums(
+        } => match state.db.get_albums_filtered(
             source.as_deref(),
+            mount_root.as_deref(),
             search.as_deref(),
-            limit.max(1).min(500),
+            limit.max(1).min(2000),
             offset,
         ) {
             Ok(albums) => ServerEnvelope::QueryResponse {
@@ -286,13 +288,15 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
         },
         LibraryQuery::GetTracks {
             source,
+            mount_root,
             search,
             limit,
             offset,
-        } => match state.db.get_tracks(
+        } => match state.db.get_tracks_filtered(
             source.as_deref(),
+            mount_root.as_deref(),
             search.as_deref(),
-            limit.max(1).min(500),
+            limit.max(1).min(5000),
             offset,
         ) {
             Ok(tracks) => ServerEnvelope::QueryResponse {

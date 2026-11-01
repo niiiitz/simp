@@ -54,6 +54,8 @@ pub enum LibraryQuery {
     GetStateSnapshot,
     GetAlbums {
         source: Option<String>,
+        #[serde(default)]
+        mount_root: Option<String>,
         search: Option<String>,
         limit: usize,
         offset: usize,
@@ -63,6 +65,8 @@ pub enum LibraryQuery {
     },
     GetTracks {
         source: Option<String>,
+        #[serde(default)]
+        mount_root: Option<String>,
         search: Option<String>,
         limit: usize,
         offset: usize,
