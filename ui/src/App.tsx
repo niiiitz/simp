@@ -43,6 +43,7 @@ export const App: React.FC = () => {
   const [appleTeamId, setAppleTeamId] = useState('');
   const [appleKeyId, setAppleKeyId] = useState('');
   const [appleKeyPath, setAppleKeyPath] = useState('');
+  const [appleManualUserToken, setAppleManualUserToken] = useState('');
   const [appleBusy, setAppleBusy] = useState(false);
 
   // Volume mute memory, OLED auto-dim, active luminance cap & sub-pixel orbit state
@@ -1675,6 +1676,105 @@ export const App: React.FC = () => {
                       Save & Sign ES256
                     </button>
                   </div>
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6,
+                      paddingTop: 6,
+                      borderTop: '1px dashed #22222e',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 700 }}>
+                        🔑 Companion Music-User-Token (Bypass FIDO / YubiKey Popup on Handheld)
+                      </span>
+                      {appleAuthCfg?.music_user_token && (
+                        <button
+                          onClick={() => {
+                            navigator.clipboard
+                              .writeText(appleAuthCfg.music_user_token)
+                              .then(() => showToast('Copied Music-User-Token to clipboard!'))
+                              .catch(() => showToast('Clipboard copy failed'));
+                          }}
+                          style={{
+                            minHeight: 24,
+                            padding: '0 8px',
+                            borderRadius: 6,
+                            background: '#171722',
+                            border: '1px solid #2e2e3c',
+                            color: '#67e8f9',
+                            fontSize: 10,
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          📋 Copy Active Token
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input
+                        type="text"
+                        placeholder="Paste Music-User-Token from PC (0.ArOY...)"
+                        value={appleManualUserToken}
+                        onChange={(e) => setAppleManualUserToken(e.target.value)}
+                        style={{
+                          flex: 1,
+                          minHeight: 36,
+                          padding: '0 10px',
+                          borderRadius: 8,
+                          background: '#07070a',
+                          border: '1px solid #2e2e3c',
+                          color: '#d4d4dc',
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                        }}
+                      />
+                      <button
+                        onClick={async () => {
+                          const token = appleManualUserToken.trim();
+                          if (!token) {
+                            showToast('Paste a valid Music-User-Token first');
+                            return;
+                          }
+                          setAppleBusy(true);
+                          defaultSimpClient.setAppleMusicUserToken(token);
+                          window.setTimeout(async () => {
+                            try {
+                              const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
+                              setAppleAuthCfg(cfg);
+                              setAppleConfigOpen(false);
+                              await syncAppleMusicCatalog(showToast);
+                            } finally {
+                              setAppleBusy(false);
+                            }
+                          }, 250);
+                        }}
+                        style={{
+                          minHeight: 36,
+                          padding: '0 12px',
+                          borderRadius: 8,
+                          background: '#2a131c',
+                          border: '1px solid #fa243c',
+                          color: '#fda4af',
+                          fontSize: 11,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Apply Token & Sync
+                      </button>
+                    </div>
+                  </div>
+
                   {appleAuthCfg?.status_error && !appleAuthCfg.configured && (
                     <div style={{ fontSize: 11, color: '#f87171', fontFamily: 'monospace' }}>
                       ⚠️ {appleAuthCfg.status_error}

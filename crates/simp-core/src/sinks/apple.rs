@@ -154,10 +154,17 @@ impl AppleMusicSink {
             Some(dev_token)
         };
 
-        let user_token = get_val(
+        let mut user_token = get_val(
             &settings.services.apple_music_user_token,
             "APPLE_MUSIC_USER_TOKEN",
         );
+        if user_token.is_empty() {
+            if let Some(embedded_user) = option_env!("SIMP_EMBEDDED_APPLE_USER_TOKEN") {
+                if !embedded_user.trim().is_empty() {
+                    user_token = embedded_user.trim().to_string();
+                }
+            }
+        }
         let music_user_token = if user_token.is_empty() {
             None
         } else {

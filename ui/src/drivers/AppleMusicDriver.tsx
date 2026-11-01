@@ -51,7 +51,10 @@ function mapAppleItemToTrack(item: any): TrackMetadata | null {
   };
 }
 
-export async function ensureMusicKitConfigured(developerToken: string): Promise<any> {
+export async function ensureMusicKitConfigured(
+  developerToken: string,
+  musicUserToken?: string | null
+): Promise<any> {
   if (!window.MusicKit) {
     if (!musicKitLoadPromise) {
       musicKitLoadPromise = new Promise((resolve, reject) => {
@@ -99,7 +102,17 @@ export async function ensureMusicKitConfigured(developerToken: string): Promise<
     });
     configuredToken = developerToken;
   }
-  return MK.getInstance();
+  const instance = MK.getInstance();
+  // Hydrate pre-authorized Music-User-Token (e.g. transferred from PC/FIDO2 session)
+  // directly into MusicKit's StoreKit session so no login popup is required on the Deck!
+  if (musicUserToken && instance.musicUserToken !== musicUserToken) {
+    try {
+      instance.musicUserToken = musicUserToken;
+    } catch {
+      // Ignore if read-only in a future MusicKit build
+    }
+  }
+  return instance;
 }
 
 export async function authorizeAppleMusic(
@@ -136,8 +149,8 @@ export async function syncAppleMusicCatalog(
     throw new Error(cfg.status_error || 'Missing Apple Developer Token');
   }
 
-  const mk = await ensureMusicKitConfigured(cfg.developer_token);
-  const userToken = mk.musicUserToken || cfg.music_user_token;
+  const mk = await ensureMusicKitConfigured(cfg.developer_token, cfg.music_user_token);
+  const userToken = cfg.music_user_token || mk.musicUserToken;
   if (!userToken) {
     throw new Error('Please authorize with your Apple ID first');
   }
@@ -279,18 +292,23 @@ export const AppleMusicDriver: React.FC = () => {
       if (mkRef.current) return mkRef.current;
       const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
       if (!cfg.configured || !cfg.developer_token || cancelled) return null;
-      const mk = await ensureMusicKitConfigured(cfg.developer_token);
+      const mk = await ensureMusicKitConfigured(cfg.developer_token, cfg.music_user_token);
       mkRef.current = mk;
       bindMusicKitEvents(mk);
       return mk;
     };
 
-    // Pre-initialize if Apple Music is already authenticated
+    // Pre-initialize and auto-sync if Apple Music is already authenticated (e.g., via embedded/transferred token)
     defaultSimpClient
       .getAppleMusicAuthConfig()
-      .then((cfg) => {
+      .then(async (cfg) => {
         if (cfg.configured && cfg.apple_authenticated && cfg.developer_token) {
-          ensureInstance().catch(() => {});
+          await ensureInstance().catch(() => {});
+          const pls = await defaultSimpClient.query<PlaylistRecord[]>('get_playlists').catch(() => []);
+          const hasApplePlaylists = Array.isArray(pls) && pls.some((p) => p.origin === 'apple_remote');
+          if (!hasApplePlaylists) {
+            syncAppleMusicCatalog().catch(() => {});
+          }
         }
       })
       .catch(() => {});
