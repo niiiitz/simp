@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SIMP
+GenericName=Simple Integrated Media Player
+Comment=Console-first hybrid media player for SteamOS, Steam Deck, Steam Machine & Steam Frame
+Exec=__SIMP_BIN__
+Icon=__SIMP_ICON__
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=org.simp.player
+Keywords=music;audio;soundtrack;steam;player;mpris;
+

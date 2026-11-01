@@ -1,4 +1,6 @@
+use anyhow::Result;
 use keyvalues_parser::Value;
+use simp_protocol::SessionState;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -100,18 +102,42 @@ pub fn parse_library_roots_from_vdf(vdf_text: &str) -> Vec<PathBuf> {
     roots
 }
 
-/// Converts Windows VDF paths (`"C:\\Program Files (x86)\\Steam"` or `"D:\\SteamLibrary"`)
-/// into WSL2 mount paths (`"/mnt/c/Program Files (x86)/Steam"`) when running on Linux/WSL,
-/// while leaving native Linux paths (`"/home/deck/.local/share/Steam"`) untouched.
+/// Converts Windows VDF/Explorer paths (`"C:\\Users\\...\\Music"` or `"D:\\SteamLibrary"`),
+/// bash-escaped paths (`"/mnt/c/Users/.../Apple\\ Music/"`), and `~/...` paths into clean
+/// canonical platform paths on Linux/WSL2.
 pub fn normalize_platform_path(raw_path: &str) -> PathBuf {
-    let unescaped = raw_path.replace("\\\\", "\\");
-    let bytes = unescaped.as_bytes();
+    let trimmed = raw_path.trim().trim_matches('"').trim_matches('\'').trim();
 
-    // Detect Windows drive letter prefix like `C:\` or `D:/`
-    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+    // 1. Expand leading `~/` to the user's home directory
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest.replace("\\ ", " ").trim_end_matches('/'));
+        }
+    }
+
+    // 2. If it starts with `/` (POSIX / WSL `/mnt/c/...` path), unescape shell `\ ` spaces
+    if trimmed.starts_with('/') {
+        let unescaped_spaces = trimmed.replace("\\\\ ", " ").replace("\\ ", " ");
+        let clean = if unescaped_spaces.len() > 1 {
+            unescaped_spaces.trim_end_matches('/')
+        } else {
+            &unescaped_spaces
+        };
+        return PathBuf::from(clean);
+    }
+
+    // 3. Detect Windows drive letter prefix like `C:\` or `D:/`
+    let unescaped = trimmed.replace("\\\\", "\\");
+    let bytes = unescaped.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
         let drive_letter = (bytes[0] as char).to_ascii_lowercase();
         let rest = unescaped[3..].replace('\\', "/");
-        let wsl_path = PathBuf::from(format!("/mnt/{drive_letter}/{rest}"));
+        let rest_clean = rest.trim_end_matches('/');
+        let wsl_path = PathBuf::from(format!("/mnt/{drive_letter}/{rest_clean}"));
         if Path::new("/mnt").is_dir() {
             return wsl_path;
         }
@@ -120,9 +146,39 @@ pub fn normalize_platform_path(raw_path: &str) -> PathBuf {
     PathBuf::from(unescaped)
 }
 
+/// Path to `~/.local/share/simp/session_state.vdf`.
+pub fn session_state_vdf_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("simp")
+        .join("session_state.vdf")
+}
+
+/// Loads persisted session state (`~/.local/share/simp/session_state.vdf`) if present.
+pub fn load_session_state() -> Option<SessionState> {
+    let path = session_state_vdf_path();
+    let text = fs::read_to_string(path).ok()?;
+    keyvalues_serde::from_str::<SessionState>(&text).ok()
+}
+
+/// Atomically writes `SessionState` to `~/.local/share/simp/session_state.vdf` via `.vdf.tmp` rename.
+pub fn save_session_state(session: &SessionState) -> Result<()> {
+    let path = session_state_vdf_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let vdf_str = keyvalues_serde::to_string_with_key(session, "SimpSession")?;
+    let tmp_path = path.with_extension("vdf.tmp");
+    fs::write(&tmp_path, vdf_str)?;
+    fs::rename(&tmp_path, &path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simp_protocol::RepeatMode;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_windows_to_wsl_vdf_path_normalization() {
@@ -138,5 +194,46 @@ mod tests {
             normalize_platform_path(linux_path),
             PathBuf::from("/home/deck/.local/share/Steam")
         );
+
+        let escaped_wsl_path = r"/mnt/c/Users/niiii/Music/Apple\ Music/Media/Music/";
+        assert_eq!(
+            normalize_platform_path(escaped_wsl_path),
+            PathBuf::from("/mnt/c/Users/niiii/Music/Apple Music/Media/Music")
+        );
+
+        let win_apple_path = r"C:\Users\niiii\Music\Apple Music\Media\Music";
+        assert_eq!(
+            normalize_platform_path(win_apple_path),
+            PathBuf::from("/mnt/c/Users/niiii/Music/Apple Music/Media/Music")
+        );
+    }
+
+    #[test]
+    fn test_session_state_vdf_numeric_queue_order() {
+        let mut queue_uris = BTreeMap::new();
+        for i in 0..12 {
+            queue_uris.insert(i.to_string(), format!("file:///music/track_{i:02}.mp3"));
+        }
+        let session = SessionState {
+            current_uri: Some("file:///music/track_03.mp3".to_string()),
+            position_ms: 42_500,
+            queue_index: 3,
+            shuffle: true,
+            repeat_mode: RepeatMode::Queue,
+            queue_uris,
+        };
+        let vdf_str = keyvalues_serde::to_string_with_key(&session, "SimpSession")
+            .expect("serialize session_state.vdf");
+        let parsed: SessionState =
+            keyvalues_serde::from_str(&vdf_str).expect("deserialize session_state.vdf");
+        assert_eq!(parsed.position_ms, 42_500);
+        assert_eq!(parsed.queue_index, 3);
+        assert!(parsed.shuffle);
+        assert_eq!(parsed.repeat_mode, RepeatMode::Queue);
+
+        let ordered = parsed.ordered_queue_uris();
+        assert_eq!(ordered.len(), 12);
+        assert_eq!(ordered[2], "file:///music/track_02.mp3");
+        assert_eq!(ordered[10], "file:///music/track_10.mp3");
     }
 }

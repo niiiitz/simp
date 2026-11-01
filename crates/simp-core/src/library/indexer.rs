@@ -1,7 +1,7 @@
 use crate::library::artwork::resolve_and_cache_artwork;
 use crate::library::db::LibraryDatabase;
 use crate::library::mounts::discover_removable_mounts;
-use crate::library::vdf::discover_steam_music_directories;
+use crate::library::vdf::{discover_steam_music_directories, normalize_platform_path};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
@@ -11,22 +11,38 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
-const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "wav", "m4a", "ogg", "opus"];
+const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "flac", "mp3", "wav", "m4a", "aac", "ogg", "opus", "aiff", "aif",
+];
 
 /// Crawls configured local directories, Steam OST directories (`libraryfolders.vdf`),
 /// and removable USB/MicroSD mounts (`/run/media`), incrementally indexing tracks into SQLite.
 pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize, usize) {
-    // 1. User-configured custom paths
-    for (_key, path_str) in &settings.library.custom_paths {
-        let path = Path::new(path_str);
-        let online = path.is_dir();
-        let label = path
+    // 1. User-configured custom paths (normalized for Windows C:\ and bash-escaped spaces)
+    let mut active_custom_roots = HashSet::new();
+    for (_key, raw_path_str) in &settings.library.custom_paths {
+        let norm_path = normalize_platform_path(raw_path_str);
+        let norm_str = norm_path.to_string_lossy().to_string();
+        if ! active_custom_roots.insert(norm_str.clone()) {
+            continue;
+        }
+        let online = norm_path.is_dir();
+        let label = norm_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path_str.clone());
-        let _ = db.upsert_mount(path_str, &label, "user_custom", online);
+            .unwrap_or_else(|| norm_str.clone());
+        let _ = db.upsert_mount(&norm_str, &label, "user_custom", online);
         if online {
-            scan_mount_directory(db, path, path_str, "local");
+            scan_mount_directory(db, &norm_path, &norm_str, "local");
+        }
+    }
+
+    // Prune any stale `user_custom` mounts in SQLite that are no longer in `custom_paths`
+    if let Ok(existing_mounts) = db.get_mounts() {
+        for m in existing_mounts {
+            if m.mount_kind == "user_custom" && !active_custom_roots.contains(&m.mount_root) {
+                let _ = db.remove_mount(&m.mount_root);
+            }
         }
     }
 
@@ -75,7 +91,7 @@ fn scan_mount_directory(db: &LibraryDatabase, dir: &Path, mount_root: &str, sour
     // Collect candidate files and deduplicate dual-format Steam OSTs (e.g., identical `.mp3` and `.wav` stems in the same folder)
     let mut audio_files: Vec<PathBuf> = WalkDir::new(dir)
         .follow_links(false)
-        .max_depth(6)
+        .max_depth(10)
         .into_iter()
         .filter_map(Result::ok)
         .map(|e| e.into_path())
@@ -159,12 +175,20 @@ fn parse_audio_file(
         .and_then(|p| p.file_name())
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "Unknown Album".to_string());
+    let grandparent_artist = path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|gp| gp.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("music") && !s.eq_ignore_ascii_case("media"));
 
-    // Parse filename patterns like "01 - kidkanevil - Big City Life" or "11 - Hideki Naganuma - JACK DA FUNK"
+    // Parse filename patterns like "01 - kidkanevil - Big City Life" or "01 Death&Pleasure"
     let (parsed_track_no, parsed_artist, parsed_title) = parse_stem_metadata(&raw_stem);
 
     let mut title = parsed_title;
-    let mut artist = parsed_artist.unwrap_or_else(|| "Unknown Artist".to_string());
+    let mut artist = parsed_artist
+        .or(grandparent_artist)
+        .unwrap_or_else(|| "Unknown Artist".to_string());
     let mut album = folder_album.clone();
     let mut track_number = parsed_track_no;
     let mut disc_number = Some(1);
@@ -258,6 +282,20 @@ pub fn parse_stem_metadata(stem: &str) -> (Option<u32>, Option<String>, String) 
             return (Some(num), None, parts[1].to_string());
         }
     }
+
+    // Also handle space-prefixed track numbers like "01 Death&Pleasure" or "02. Face the Music"
+    if let Some((first_word, rest)) = stem.trim().split_once(' ') {
+        let clean_num = first_word.trim_end_matches('.');
+        if clean_num.len() <= 3 && clean_num.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(num) = clean_num.parse::<u32>() {
+                let rest_trimmed = rest.trim_start_matches(['-', '.', ' ']);
+                if !rest_trimmed.is_empty() {
+                    return (Some(num), None, rest_trimmed.to_string());
+                }
+            }
+        }
+    }
+
     (None, None, stem.to_string())
 }
 

@@ -136,6 +136,24 @@ impl LibraryDatabase {
         Ok(())
     }
 
+    /// Removes a storage mount and its associated tracks, cleaning up any orphaned albums.
+    pub fn remove_mount(&self, mount_root: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM tracks WHERE mount_root = ?1",
+            params![mount_root],
+        )?;
+        conn.execute(
+            "DELETE FROM storage_mounts WHERE mount_root = ?1",
+            params![mount_root],
+        )?;
+        conn.execute(
+            "DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn get_mounts(&self) -> Result<Vec<MountStatus>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -160,11 +178,12 @@ impl LibraryDatabase {
     }
 
     /// Returns a map of `uri -> (mtime, size)` for fast incremental indexing of a mount root.
+    /// Tracks with `art_url IS NULL` are excluded so newly added folder artwork (`cover.jpg`) is picked up on rescan.
     pub fn get_mount_file_fingerprints(&self, mount_root: &str) -> Result<HashMap<String, (i64, i64)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT uri, COALESCE(file_mtime, 0), COALESCE(file_size, 0)
-             FROM tracks WHERE mount_root = ?1",
+             FROM tracks WHERE mount_root = ?1 AND art_url IS NOT NULL",
         )?;
         let mut map = HashMap::new();
         let rows = stmt.query_map(params![mount_root], |row| {

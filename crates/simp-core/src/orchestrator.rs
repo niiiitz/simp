@@ -1,15 +1,17 @@
 use crate::library::db::LibraryDatabase;
 use crate::library::indexer::scan_all_storage;
 use crate::library::mounts::read_power_state;
+use crate::library::vdf::{load_session_state, save_session_state};
 use crate::mpris::{initialize_mpris, update_mpris_metadata, update_mpris_playback};
 use crate::sinks::apple::AppleMusicSink;
 use crate::sinks::local::LocalAudioEngine;
 use crate::sinks::spotify::SpotifyEngine;
 use simp_protocol::{
-    ActiveEngine, AudioCommand, PlaybackEvent, RepeatMode, ServerEnvelope, SimpSettings,
-    TrackMetadata,
+    ActiveEngine, AudioCommand, PlaybackEvent, RepeatMode, ServerEnvelope, SessionState,
+    SimpSettings, TrackMetadata,
 };
 use souvlaki::MediaControls;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -77,7 +79,7 @@ impl AudioOrchestrator {
             apple_authenticated: false,
         }));
 
-        Self {
+        let mut orchestrator = Self {
             db,
             settings,
             state,
@@ -89,7 +91,10 @@ impl AudioOrchestrator {
             consecutive_failures: 0,
             internal_event_tx,
             broadcast_tx,
-        }
+        };
+
+        orchestrator.restore_session_from_vdf();
+        orchestrator
     }
 
     pub async fn run_loop(
@@ -109,6 +114,9 @@ impl AudioOrchestrator {
                 }
                 _ = idle_check_interval.tick() => {
                     self.local_engine.check_idle_suspend();
+                    if self.state.lock().unwrap().is_playing {
+                        self.persist_session_to_vdf();
+                    }
                 }
             }
         }
@@ -250,6 +258,7 @@ impl AudioOrchestrator {
                 let _ = self
                     .broadcast_tx
                     .send(PlaybackEvent::ProgressTick { position_ms: clamped_pos });
+                self.persist_session_to_vdf();
             }
             AudioCommand::SeekRelative { delta_ms } => {
                 let current = self.get_live_position_ms() as i64;
@@ -271,10 +280,12 @@ impl AudioOrchestrator {
             AudioCommand::SetShuffle { enabled } => {
                 self.state.lock().unwrap().shuffle = enabled;
                 self.emit_queue_updated();
+                self.persist_session_to_vdf();
             }
             AudioCommand::SetRepeat { mode } => {
                 self.state.lock().unwrap().repeat_mode = mode;
                 self.emit_queue_updated();
+                self.persist_session_to_vdf();
             }
             AudioCommand::CycleRepeat => {
                 let next_mode = {
@@ -288,23 +299,91 @@ impl AudioOrchestrator {
                 self.handle_command(AudioCommand::SetRepeat { mode: next_mode });
             }
             AudioCommand::AddLibraryPath { path } => {
-                let trimmed = path.trim().to_string();
-                if !trimmed.is_empty() {
+                let normalized = crate::library::vdf::normalize_platform_path(&path)
+                    .to_string_lossy()
+                    .to_string();
+                if !normalized.is_empty() {
                     let mut cfg = self.settings.lock().unwrap();
-                    let already_exists = cfg.library.custom_paths.values().any(|p| p == &trimmed);
-                    if !already_exists {
-                        let next_key = cfg.library.custom_paths.len().to_string();
-                        cfg.library.custom_paths.insert(next_key, trimmed);
+                    let mut unique_paths: Vec<String> = Vec::new();
+                    for existing in cfg.library.custom_paths.values() {
+                        let norm_existing = crate::library::vdf::normalize_platform_path(existing)
+                            .to_string_lossy()
+                            .to_string();
+                        if !norm_existing.is_empty() && !unique_paths.contains(&norm_existing) {
+                            unique_paths.push(norm_existing);
+                        }
+                    }
+                    if !unique_paths.contains(&normalized) {
+                        unique_paths.push(normalized);
+                    }
+                    cfg.library.custom_paths.clear();
+                    for (idx, p) in unique_paths.into_iter().enumerate() {
+                        cfg.library.custom_paths.insert(idx.to_string(), p);
                     }
                 }
                 self.handle_command(AudioCommand::RescanStorage);
+            }
+            AudioCommand::RemoveLibraryPath { path } => {
+                let target_norm = crate::library::vdf::normalize_platform_path(&path)
+                    .to_string_lossy()
+                    .to_string();
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    let mut remaining: Vec<String> = Vec::new();
+                    for existing in cfg.library.custom_paths.values() {
+                        let norm_existing = crate::library::vdf::normalize_platform_path(existing)
+                            .to_string_lossy()
+                            .to_string();
+                        if existing != &path
+                            && norm_existing != target_norm
+                            && !remaining.contains(&norm_existing)
+                        {
+                            remaining.push(norm_existing);
+                        }
+                    }
+                    cfg.library.custom_paths.clear();
+                    for (idx, p) in remaining.into_iter().enumerate() {
+                        cfg.library.custom_paths.insert(idx.to_string(), p);
+                    }
+                }
+                let _ = self.db.remove_mount(&path);
+                let _ = self.db.remove_mount(&target_norm);
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+                if let Ok(mounts) = self.db.get_mounts() {
+                    let _ = self
+                        .broadcast_tx
+                        .send(PlaybackEvent::StorageMountsChanged { mounts });
+                }
             }
             AudioCommand::RescanStorage => {
                 let db = self.db.clone();
                 let cfg = self.settings.lock().unwrap().clone();
                 let bcast = self.broadcast_tx.clone();
+                let state_ref = self.state.clone();
                 tokio::task::spawn_blocking(move || {
                     let (total_albums, total_tracks) = scan_all_storage(&db, &cfg);
+                    // Refresh current_track metadata (e.g., if cover.jpg was just added to the album folder)
+                    let cur_uri = state_ref
+                        .lock()
+                        .unwrap()
+                        .current_track
+                        .as_ref()
+                        .map(|t| t.uri.clone());
+                    if let Some(uri) = cur_uri {
+                        if let Ok(Some(updated_track)) = db.get_track_by_uri(&uri) {
+                            let mut st = state_ref.lock().unwrap();
+                            st.current_track = Some(updated_track.clone());
+                            for q_item in &mut st.queue {
+                                if q_item.uri == uri {
+                                    *q_item = updated_track.clone();
+                                }
+                            }
+                        }
+                    }
                     let _ = bcast.send(PlaybackEvent::LibraryUpdated {
                         total_albums,
                         total_tracks,
@@ -355,6 +434,7 @@ impl AudioOrchestrator {
         }
         let pos = self.get_live_position_ms();
         self.set_playing_state(false, pos);
+        self.persist_session_to_vdf();
     }
 
     fn transition_to_index(&mut self, index: usize) {
@@ -441,6 +521,7 @@ impl AudioOrchestrator {
             is_playing: true,
             position_ms: 0,
         });
+        self.persist_session_to_vdf();
     }
 
     /// Implements the Anti-Runaway-Skip Circuit Breaker (Section 13.5 of SPEC.md).
@@ -542,6 +623,102 @@ impl AudioOrchestrator {
             },
             mount_root: None,
         }
+    }
+
+    /// Restores the last active queue, current track, and paused playback position from
+    /// `~/.local/share/simp/session_state.vdf` when `simp --daemon` starts up.
+    fn restore_session_from_vdf(&mut self) {
+        let Some(session) = load_session_state() else {
+            return;
+        };
+
+        let mut uris = session.ordered_queue_uris();
+        if uris.is_empty() {
+            if let Some(ref cur) = session.current_uri {
+                uris.push(cur.clone());
+            }
+        }
+        if uris.is_empty() {
+            return;
+        }
+
+        let queue: Vec<TrackMetadata> = uris
+            .iter()
+            .map(|u| self.resolve_track_from_uri(u))
+            .collect();
+        let idx = session.queue_index.min(queue.len().saturating_sub(1));
+        let current_track = queue.get(idx).cloned();
+
+        let Some(track) = current_track else {
+            return;
+        };
+
+        let engine = if track.uri.starts_with("spotify:") {
+            ActiveEngine::Spotify
+        } else if track.uri.starts_with("applemusic:") {
+            ActiveEngine::AppleMusic
+        } else {
+            ActiveEngine::Local
+        };
+
+        let clamped_pos = if track.duration_ms > 0 {
+            session.position_ms.min(track.duration_ms.saturating_sub(250))
+        } else {
+            session.position_ms
+        };
+
+        if engine == ActiveEngine::Local {
+            self.local_engine
+                .prime_restored_session(track.uri.clone(), clamped_pos);
+        }
+
+        {
+            let mut st = self.state.lock().unwrap();
+            st.active_engine = engine;
+            st.is_playing = false;
+            st.position_ms = clamped_pos;
+            st.shuffle = session.shuffle;
+            st.repeat_mode = session.repeat_mode;
+            st.current_track = Some(track.clone());
+            st.queue = queue;
+            st.queue_index = idx;
+        }
+
+        update_mpris_metadata(&mut self.mpris_controls, &track);
+        update_mpris_playback(&mut self.mpris_controls, false, clamped_pos);
+
+        tracing::info!(
+            "Restored session from session_state.vdf: '{}' at {}ms (queue: {} tracks)",
+            track.title,
+            clamped_pos,
+            uris.len()
+        );
+    }
+
+    /// Snapshots the live queue, current track, shuffle/repeat mode, and millisecond position
+    /// and writes them atomically to `~/.local/share/simp/session_state.vdf`.
+    fn persist_session_to_vdf(&self) {
+        let live_pos = self.get_live_position_ms();
+        let session = {
+            let st = self.state.lock().unwrap();
+            if st.queue.is_empty() && st.current_track.is_none() {
+                return;
+            }
+            let mut queue_uris = BTreeMap::new();
+            for (i, t) in st.queue.iter().enumerate() {
+                queue_uris.insert(i.to_string(), t.uri.clone());
+            }
+            SessionState {
+                current_uri: st.current_track.as_ref().map(|t| t.uri.clone()),
+                position_ms: live_pos,
+                queue_index: st.queue_index,
+                shuffle: st.shuffle,
+                repeat_mode: st.repeat_mode,
+                queue_uris,
+            }
+        };
+
+        let _ = save_session_state(&session);
     }
 }
 

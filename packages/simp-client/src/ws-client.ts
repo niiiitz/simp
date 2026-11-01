@@ -138,7 +138,9 @@ export class SimpDaemonClient {
           this.notifyState();
           break;
         case 'library_updated':
-          this.notifyState();
+          this.query('get_state_snapshot')
+            .then((snap) => this.handleEnvelope(snap))
+            .catch(() => this.notifyState());
           break;
         case 'power_state_changed':
           this.state = { ...this.state, power: msg.data.power };
@@ -185,6 +187,7 @@ export class SimpDaemonClient {
   public playPlaylist = (playlist_id: string, shuffle = false) =>
     this.sendCommand('play_playlist', { playlist_id, shuffle });
   public addLibraryPath = (path: string) => this.sendCommand('add_library_path', { path });
+  public removeLibraryPath = (path: string) => this.sendCommand('remove_library_path', { path });
   public rescanStorage = () => this.sendCommand('rescan_storage');
   public shutdownDaemon = () => this.sendCommand('shutdown_daemon');
 

@@ -163,3 +163,18 @@ pub struct SessionState {
     pub queue_uris: BTreeMap<String, String>,
 }
 
+impl SessionState {
+    /// Returns `queue_uris` sorted by numeric index (`0, 1, 2, ..., 10, 11...`)
+    /// rather than lexicographical string key order (`"0", "1", "10", "2"`).
+    pub fn ordered_queue_uris(&self) -> Vec<String> {
+        let mut pairs: Vec<(usize, &String)> = self
+            .queue_uris
+            .iter()
+            .map(|(k, v)| (k.parse::<usize>().unwrap_or(usize::MAX), v))
+            .collect();
+        pairs.sort_by_key(|(idx, _)| *idx);
+        pairs.into_iter().map(|(_, v)| v.clone()).collect()
+    }
+}
+
+

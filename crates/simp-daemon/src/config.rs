@@ -1,5 +1,8 @@
+pub use simp_core::library::vdf::{
+    load_session_state, save_session_state, session_state_vdf_path,
+};
 use anyhow::Result;
-use simp_protocol::{SessionState, SimpSettings};
+use simp_protocol::SimpSettings;
 use std::fs;
 use std::path::PathBuf;
 
@@ -8,13 +11,6 @@ pub fn settings_vdf_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("simp")
         .join("settings.vdf")
-}
-
-pub fn session_state_vdf_path() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("simp")
-        .join("session_state.vdf")
 }
 
 pub fn library_db_path() -> PathBuf {
@@ -42,24 +38,6 @@ pub fn save_settings(settings: &SimpSettings) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let vdf_str = keyvalues_serde::to_string_with_key(settings, "SimpSettings")?;
-    let tmp_path = path.with_extension("vdf.tmp");
-    fs::write(&tmp_path, vdf_str)?;
-    fs::rename(&tmp_path, &path)?;
-    Ok(())
-}
-
-pub fn load_session_state() -> Option<SessionState> {
-    let path = session_state_vdf_path();
-    let text = fs::read_to_string(path).ok()?;
-    keyvalues_serde::from_str::<SessionState>(&text).ok()
-}
-
-pub fn save_session_state(session: &SessionState) -> Result<()> {
-    let path = session_state_vdf_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let vdf_str = keyvalues_serde::to_string_with_key(session, "SimpSession")?;
     let tmp_path = path.with_extension("vdf.tmp");
     fs::write(&tmp_path, vdf_str)?;
     fs::rename(&tmp_path, &path)?;

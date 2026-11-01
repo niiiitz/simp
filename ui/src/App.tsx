@@ -31,9 +31,25 @@ export const App: React.FC = () => {
   const [customFolderPath, setCustomFolderPath] = useState('');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-  // Volume mute memory & battery auto-dim state
+  // Volume mute memory, OLED auto-dim, active luminance cap & sub-pixel orbit state
   const [preMuteVolume, setPreMuteVolume] = useState<number>(0.8);
   const [isDimmed, setIsDimmed] = useState(false);
+  const [oledCap, setOledCap] = useState<'soft' | 'low' | 'night'>('soft');
+  const [orbitStep, setOrbitStep] = useState(0);
+
+  // 8-point ±2px circular sub-pixel orbit to prevent static OLED sub-pixel image retention
+  const ORBIT_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+    [0, 0],
+    [1, 1],
+    [2, 0],
+    [1, -1],
+    [0, -2],
+    [-1, -1],
+    [-2, 0],
+    [-1, 1],
+  ];
+  const [orbitX, orbitY] = ORBIT_OFFSETS[orbitStep % ORBIT_OFFSETS.length];
+  const activeOpacity = oledCap === 'soft' ? 0.86 : oledCap === 'low' ? 0.68 : 0.48;
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -127,26 +143,35 @@ export const App: React.FC = () => {
     }
   }, [currentVolume, preMuteVolume]);
 
-  // 5. 30-second Battery Auto-Dim + Wake-Tap Guard (SPEC.md Section 13.6)
+  // 5. Continuous OLED Sub-Pixel Shifter (rotates ±2px every 20s) + Universal 30s Idle Auto-Dim
+  useEffect(() => {
+    const orbitTimer = window.setInterval(() => {
+      setOrbitStep((s) => (s + 1) % 8);
+    }, 20_000);
+    return () => window.clearInterval(orbitTimer);
+  }, []);
+
   useEffect(() => {
     let timerId: number | undefined;
     const resetIdleTimer = () => {
       setIsDimmed(false);
       if (timerId) window.clearTimeout(timerId);
-      if (snap?.power.on_battery) {
-        timerId = window.setTimeout(() => setIsDimmed(true), 30_000);
-      }
+      timerId = window.setTimeout(() => setIsDimmed(true), 30_000);
     };
 
     resetIdleTimer();
     window.addEventListener('pointerdown', resetIdleTimer);
+    window.addEventListener('pointermove', resetIdleTimer);
+    window.addEventListener('wheel', resetIdleTimer, { passive: true });
     window.addEventListener('keydown', resetIdleTimer);
     return () => {
       if (timerId) window.clearTimeout(timerId);
       window.removeEventListener('pointerdown', resetIdleTimer);
+      window.removeEventListener('pointermove', resetIdleTimer);
+      window.removeEventListener('wheel', resetIdleTimer);
       window.removeEventListener('keydown', resetIdleTimer);
     };
-  }, [snap?.power.on_battery]);
+  }, []);
 
   // 6. Keyboard shortcuts (ArrowUp/ArrowDown volume on Lock Screen, Space Play/Pause)
   useEffect(() => {
@@ -270,6 +295,12 @@ export const App: React.FC = () => {
     window.setTimeout(() => refreshLibraryData(), 700);
   };
 
+  const handleRemoveFolder = (mountRoot: string, label: string) => {
+    defaultSimpClient.removeLibraryPath(mountRoot);
+    showToast(`Removed mount: ${label}`);
+    window.setTimeout(() => refreshLibraryData(), 350);
+  };
+
   const track = snap?.current_track;
   const selectedAlbumObj =
     browserTarget?.kind === 'album' ? albums.find((a) => a.id === browserTarget.id) : null;
@@ -282,15 +313,16 @@ export const App: React.FC = () => {
         width: '100vw',
         height: '100vh',
         background: '#000000',
-        color: '#ffffff',
+        color: '#d4d4dc',
         display: 'flex',
         flexDirection: 'column',
-        opacity: isDimmed ? 0.15 : 1,
-        transition: 'opacity 300ms ease',
+        opacity: isDimmed ? 0.3 : activeOpacity,
+        transform: `translate3d(${orbitX}px, ${orbitY}px, 0)`,
+        transition: 'opacity 350ms ease, transform 4000ms linear',
         position: 'relative',
       }}
     >
-      {/* Wake-Tap Guard: intercepts the first tap when dimmed on battery so no button is misfired */}
+      {/* Wake-Tap Guard: intercepts the first tap when dimmed so no button is misfired */}
       {isDimmed && (
         <div
           onPointerDown={(e) => {
@@ -315,8 +347,8 @@ export const App: React.FC = () => {
             left: '50%',
             transform: 'translateX(-50%)',
             background: '#0d0d14',
-            border: '1px solid #00e5ff',
-            color: '#ffffff',
+            border: '1px solid #2aa3c4',
+            color: '#d4d4dc',
             padding: '10px 18px',
             borderRadius: 99,
             fontSize: 13,
@@ -329,7 +361,7 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Top Action Bar: Source Pop-Up Trigger | View Switcher (L1/R1) | Interactive Volume & Power */}
+      {/* Top Action Bar: Source Pop-Up Trigger | View Switcher (L1/R1) | Interactive Volume & OLED Saver */}
       <header
         style={{
           height: 58,
@@ -348,8 +380,8 @@ export const App: React.FC = () => {
             padding: '0 14px',
             borderRadius: 12,
             background: '#0a0a0e',
-            border: '1px solid #262630',
-            color: '#f4f4f6',
+            border: '1px solid #22222c',
+            color: '#d4d4dc',
             display: 'flex',
             alignItems: 'center',
             gap: 10,
@@ -363,7 +395,7 @@ export const App: React.FC = () => {
               width: 9,
               height: 9,
               borderRadius: 99,
-              background: '#10b981',
+              background: '#0d9488',
             }}
           />
           <span>Source: {track?.source?.toUpperCase() || 'LOCAL / USB'}</span>
@@ -372,11 +404,11 @@ export const App: React.FC = () => {
             style={{
               padding: '2px 6px',
               borderRadius: 6,
-              background: '#18181f',
-              border: '1px solid #2e2e38',
+              background: '#14141b',
+              border: '1px solid #262630',
               fontSize: 11,
               fontFamily: 'monospace',
-              color: '#a1a1aa',
+              color: '#9ca3af',
             }}
           >
             Select
@@ -403,12 +435,12 @@ export const App: React.FC = () => {
               minHeight: 36,
               padding: '0 16px',
               borderRadius: 8,
-              border: 'none',
+              border: view === 'lock' ? '1px solid #2aa3c4' : '1px solid transparent',
               fontSize: 12,
               fontWeight: 700,
               cursor: 'pointer',
-              background: view === 'lock' ? '#00e5ff' : 'transparent',
-              color: view === 'lock' ? '#000000' : '#a1a1aa',
+              background: view === 'lock' ? '#0f222a' : 'transparent',
+              color: view === 'lock' ? '#bfeaf5' : '#8e8e99',
             }}
           >
             🎵 Player
@@ -419,12 +451,12 @@ export const App: React.FC = () => {
               minHeight: 36,
               padding: '0 16px',
               borderRadius: 8,
-              border: 'none',
+              border: view === 'browser' ? '1px solid #2aa3c4' : '1px solid transparent',
               fontSize: 12,
               fontWeight: 700,
               cursor: 'pointer',
-              background: view === 'browser' ? '#00e5ff' : 'transparent',
-              color: view === 'browser' ? '#000000' : '#a1a1aa',
+              background: view === 'browser' ? '#0f222a' : 'transparent',
+              color: view === 'browser' ? '#bfeaf5' : '#8e8e99',
             }}
           >
             📚 Library & Queue
@@ -434,8 +466,8 @@ export const App: React.FC = () => {
           </span>
         </div>
 
-        {/* Interactive Volume Slider + Mute Toggle + Battery Status + Power Button */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {/* Interactive Volume Slider + OLED Luminance Cap + Power Button */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <div
             onWheel={(e) => {
               e.preventDefault();
@@ -462,7 +494,7 @@ export const App: React.FC = () => {
               style={{
                 background: 'transparent',
                 border: 'none',
-                color: volPct === 0 ? '#ef4444' : '#00e5ff',
+                color: volPct === 0 ? '#ef4444' : '#2aa3c4',
                 fontSize: 16,
                 cursor: 'pointer',
                 padding: 0,
@@ -480,22 +512,45 @@ export const App: React.FC = () => {
               value={volPct}
               onChange={(e) => applyVolume(Number(e.target.value) / 100)}
               style={{
-                width: 96,
-                accentColor: '#00e5ff',
+                width: 88,
+                accentColor: '#2aa3c4',
                 cursor: 'pointer',
               }}
             />
 
-            <span style={{ minWidth: 36, textAlign: 'right', color: '#f4f4f6', fontWeight: 700 }}>
+            <span style={{ minWidth: 34, textAlign: 'right', color: '#c8c8d2', fontWeight: 700 }}>
               {volPct}%
             </span>
 
             {snap?.power.on_battery && (
-              <span style={{ color: '#10b981', marginLeft: 4 }}>
+              <span style={{ color: '#0d9488', marginLeft: 4 }}>
                 🔋 {snap.power.battery_pct ?? ''}%
               </span>
             )}
           </div>
+
+          <button
+            onClick={() =>
+              setOledCap((prev) =>
+                prev === 'soft' ? 'low' : prev === 'low' ? 'night' : 'soft'
+              )
+            }
+            title="Cycle OLED anti-burn-in luminance cap (Soft 86% / Low 68% / Night 48%)"
+            style={{
+              height: 44,
+              padding: '0 10px',
+              borderRadius: 12,
+              background: '#0a0a0e',
+              border: '1px solid #22222c',
+              color: '#9ca3af',
+              fontSize: 11,
+              fontFamily: 'monospace',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            {oledCap === 'soft' ? '🔅86%' : oledCap === 'low' ? '🌙68%' : '🌑48%'}
+          </button>
 
           <button
             onClick={() => setSourceModalOpen(true)}
@@ -505,8 +560,8 @@ export const App: React.FC = () => {
               height: 44,
               borderRadius: 12,
               background: '#0a0a0e',
-              border: '1px solid #262630',
-              color: '#e4e4e7',
+              border: '1px solid #22222c',
+              color: '#c8c8d2',
               fontSize: 16,
               cursor: 'pointer',
             }}
@@ -542,8 +597,8 @@ export const App: React.FC = () => {
                 width: 240,
                 height: 240,
                 borderRadius: 20,
-                background: '#0d0d12',
-                border: '1px solid #262630',
+                background: '#0a0a0e',
+                border: '1px solid #1e1e28',
                 overflow: 'hidden',
                 display: 'flex',
                 flexDirection: 'column',
@@ -556,13 +611,13 @@ export const App: React.FC = () => {
                 <img
                   src={track.art_url}
                   alt={track.album}
-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  style={{ width: '100%', height: '100%', objectFit: 'cover', filter: 'brightness(0.88)' }}
                 />
               ) : (
                 <img
                   src="/simp-icon-dark.png"
                   alt="SIMP"
-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  style={{ width: '100%', height: '100%', objectFit: 'cover', filter: 'brightness(0.82)' }}
                 />
               )}
             </div>
@@ -593,10 +648,10 @@ export const App: React.FC = () => {
           {/* Right Column: Track Info + Tall Scrub Bar + Aligned Player Transport Row */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
             <div>
-              <h1 style={{ margin: 0, fontSize: 32, fontWeight: 800, letterSpacing: -0.5 }}>
+              <h1 style={{ margin: 0, fontSize: 32, fontWeight: 800, letterSpacing: -0.5, color: '#d4d4dc' }}>
                 {track?.title || 'No Track Loaded'}
               </h1>
-              <p style={{ margin: '6px 0 0', fontSize: 18, color: '#a1a1aa' }}>
+              <p style={{ margin: '6px 0 0', fontSize: 18, color: '#8e8e99' }}>
                 {track?.artists?.join(', ') || 'Select a track from Library & Queue (R1)'}
                 {track?.album ? ` • ${track.album}` : ''}
               </p>
@@ -622,9 +677,9 @@ export const App: React.FC = () => {
                   width: 96,
                   height: 92,
                   borderRadius: 24,
-                  background: '#00e5ff',
-                  color: '#000000',
-                  border: 'none',
+                  background: '#0f222a',
+                  color: '#bfeaf5',
+                  border: '2px solid #2aa3c4',
                   display: 'flex',
                   flexDirection: 'column',
                   alignItems: 'center',
@@ -639,7 +694,8 @@ export const App: React.FC = () => {
                   style={{
                     padding: '2px 10px',
                     borderRadius: 99,
-                    background: 'rgba(0,0,0,0.18)',
+                    background: '#16313c',
+                    color: '#7dd3fc',
                     fontSize: 12,
                     fontFamily: 'monospace',
                   }}
@@ -668,7 +724,7 @@ export const App: React.FC = () => {
                   background: '#08080c',
                   border: '1px solid #181820',
                   fontSize: 12,
-                  color: '#a1a1aa',
+                  color: '#8e8e99',
                   display: 'flex',
                   justifyContent: 'space-between',
                 }}
@@ -679,7 +735,7 @@ export const App: React.FC = () => {
                   </strong>
                   {snap.up_next[0].title} — {snap.up_next[0].artists.join(', ')}
                 </span>
-                <span style={{ fontFamily: 'monospace', color: '#00e5ff' }}>
+                <span style={{ fontFamily: 'monospace', color: '#2aa3c4' }}>
                   {snap.up_next[0].source.toUpperCase()}
                 </span>
               </div>
@@ -717,33 +773,66 @@ export const App: React.FC = () => {
                   borderRadius: 8,
                   background: '#12121a',
                   border: '1px solid #262634',
-                  color: '#00e5ff',
+                  color: '#2aa3c4',
                   fontSize: 11,
                   fontWeight: 700,
                   cursor: 'pointer',
                 }}
               >
-                + Add Folder
+                Manage Sources
               </button>
             </div>
             {snap?.mounts.map((m) => (
               <div
                 key={m.mount_root}
                 style={{
-                  padding: '10px 12px',
+                  padding: '8px 10px',
                   borderRadius: 10,
                   background: '#0a0a0e',
                   border: '1px solid #1e1e26',
                   display: 'flex',
                   justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 8,
                   fontSize: 12,
-                  opacity: m.is_online ? 1 : 0.5,
+                  opacity: m.is_online ? 1 : 0.65,
                 }}
               >
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {m.is_online ? '🟢' : '⚫'} {m.label}
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div
+                    style={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {m.is_online ? '🟢' : '⚫'} {m.label}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                      color: '#71717a',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={m.mount_root}
+                  >
+                    {m.mount_root}
+                  </div>
+                </div>
+                <span
+                  style={{
+                    fontFamily: 'monospace',
+                    color: '#2aa3c4',
+                    fontWeight: 700,
+                    flexShrink: 0,
+                  }}
+                >
+                  {m.track_count}
                 </span>
-                <span style={{ fontFamily: 'monospace', color: '#00e5ff' }}>{m.track_count}</span>
               </div>
             ))}
 
@@ -766,7 +855,7 @@ export const App: React.FC = () => {
                   borderRadius: 8,
                   background: '#12121a',
                   border: '1px solid #262634',
-                  color: '#00e5ff',
+                  color: '#2aa3c4',
                   fontSize: 11,
                   fontWeight: 700,
                   cursor: 'pointer',
@@ -793,7 +882,7 @@ export const App: React.FC = () => {
                     borderRadius: 10,
                     background: '#08080c',
                     border: '1px solid #2e2e3c',
-                    color: '#fff',
+                    color: '#d4d4dc',
                     fontSize: 12,
                   }}
                 />
@@ -803,9 +892,9 @@ export const App: React.FC = () => {
                     minHeight: 40,
                     padding: '0 14px',
                     borderRadius: 10,
-                    background: '#00e5ff',
-                    color: '#000',
-                    border: 'none',
+                    background: '#0f222a',
+                    color: '#bfeaf5',
+                    border: '1px solid #2aa3c4',
                     fontWeight: 800,
                     fontSize: 12,
                     cursor: 'pointer',
@@ -830,9 +919,9 @@ export const App: React.FC = () => {
                     minHeight: 48,
                     padding: '8px 12px',
                     borderRadius: 12,
-                    background: isSelected ? 'rgba(0,229,255,0.12)' : '#0a0a0e',
-                    border: isSelected ? '1px solid #00e5ff' : '1px solid #181820',
-                    color: '#ffffff',
+                    background: isSelected ? '#0d1b22' : '#0a0a0e',
+                    border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
+                    color: '#d4d4dc',
                     textAlign: 'left',
                     display: 'flex',
                     justifyContent: 'space-between',
@@ -844,7 +933,7 @@ export const App: React.FC = () => {
                     <div style={{ fontSize: 13, fontWeight: 700 }}>🎵 {pl.name}</div>
                     <div style={{ fontSize: 11, color: '#8e8e99' }}>Local SQLite Playlist</div>
                   </div>
-                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#00e5ff' }}>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>
                     {pl.track_count}
                   </span>
                 </button>
@@ -866,9 +955,9 @@ export const App: React.FC = () => {
                     minHeight: 52,
                     padding: '8px 12px',
                     borderRadius: 12,
-                    background: isSelected ? 'rgba(0,229,255,0.12)' : '#0a0a0e',
-                    border: isSelected ? '1px solid #00e5ff' : '1px solid #181820',
-                    color: '#ffffff',
+                    background: isSelected ? '#0d1b22' : '#0a0a0e',
+                    border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
+                    color: '#d4d4dc',
                     textAlign: 'left',
                     display: 'flex',
                     justifyContent: 'space-between',
@@ -880,7 +969,7 @@ export const App: React.FC = () => {
                     <div style={{ fontSize: 13, fontWeight: 700 }}>{alb.title}</div>
                     <div style={{ fontSize: 12, color: '#8e8e99' }}>{alb.album_artist}</div>
                   </div>
-                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#00e5ff' }}>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>
                     {alb.track_count}
                   </span>
                 </button>
@@ -938,7 +1027,7 @@ export const App: React.FC = () => {
                           padding: '0 12px',
                           borderRadius: 12,
                           background: '#14141c',
-                          color: '#00e5ff',
+                          color: '#2aa3c4',
                           border: '1px solid #2e2e3a',
                           fontWeight: 700,
                           fontSize: 12,
@@ -962,9 +1051,9 @@ export const App: React.FC = () => {
                         minHeight: 44,
                         padding: '0 16px',
                         borderRadius: 12,
-                        background: '#00e5ff',
-                        color: '#000',
-                        border: 'none',
+                        background: '#0f222a',
+                        color: '#bfeaf5',
+                        border: '1px solid #2aa3c4',
                         fontWeight: 800,
                         fontSize: 12,
                         cursor: 'pointer',
@@ -986,7 +1075,7 @@ export const App: React.FC = () => {
                         padding: '0 16px',
                         borderRadius: 12,
                         background: '#14141c',
-                        color: '#fff',
+                        color: '#d4d4dc',
                         border: '1px solid #2e2e3a',
                         fontWeight: 700,
                         fontSize: 12,
@@ -1013,8 +1102,8 @@ export const App: React.FC = () => {
                     minHeight: 50,
                     padding: '0 12px',
                     borderRadius: 12,
-                    background: track?.uri === t.uri ? 'rgba(0,229,255,0.12)' : '#0a0a0e',
-                    border: track?.uri === t.uri ? '1px solid #00e5ff' : '1px solid #16161e',
+                    background: track?.uri === t.uri ? '#0d1b22' : '#0a0a0e',
+                    border: track?.uri === t.uri ? '1px solid #2aa3c4' : '1px solid #16161e',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
@@ -1047,7 +1136,7 @@ export const App: React.FC = () => {
                         borderRadius: 8,
                         background: '#14141d',
                         border: '1px solid #282836',
-                        color: '#00e5ff',
+                        color: '#2aa3c4',
                         fontWeight: 800,
                         fontSize: 14,
                         cursor: 'pointer',
@@ -1098,7 +1187,7 @@ export const App: React.FC = () => {
                   borderRadius: 10,
                   background: '#16161f',
                   border: '1px solid #2e2e3a',
-                  color: '#fff',
+                  color: '#d4d4dc',
                   fontFamily: 'monospace',
                   cursor: 'pointer',
                 }}
@@ -1119,7 +1208,7 @@ export const App: React.FC = () => {
                 gap: 10,
               }}
             >
-              <div style={{ fontSize: 12, fontWeight: 700, color: '#00e5ff' }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#2aa3c4' }}>
                 ➕ Add Local / Windows / USB Music Folder
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
@@ -1138,7 +1227,7 @@ export const App: React.FC = () => {
                     borderRadius: 10,
                     background: '#07070a',
                     border: '1px solid #2e2e3c',
-                    color: '#fff',
+                    color: '#d4d4dc',
                     fontSize: 12,
                     fontFamily: 'monospace',
                   }}
@@ -1149,9 +1238,9 @@ export const App: React.FC = () => {
                     minHeight: 42,
                     padding: '0 16px',
                     borderRadius: 10,
-                    background: '#00e5ff',
-                    color: '#000',
-                    border: 'none',
+                    background: '#0f222a',
+                    color: '#bfeaf5',
+                    border: '1px solid #2aa3c4',
                     fontWeight: 800,
                     fontSize: 12,
                     cursor: 'pointer',
@@ -1165,6 +1254,7 @@ export const App: React.FC = () => {
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {[
                   { label: 'Steam OSTs (C:)', path: '/mnt/c/Program Files (x86)/Steam/steamapps/music' },
+                  { label: 'Apple Music (C:)', path: '/mnt/c/Users/niiii/Music/Apple Music/Media/Music' },
                   { label: 'Windows Public Music', path: '/mnt/c/Users/Public/Music' },
                   { label: 'SteamOS ~/Music', path: '/home/deck/Music' },
                 ].map((preset) => (
@@ -1176,7 +1266,7 @@ export const App: React.FC = () => {
                       borderRadius: 8,
                       background: '#161622',
                       border: '1px solid #2b2b3c',
-                      color: '#d4d4d8',
+                      color: '#c8c8d2',
                       fontSize: 11,
                       cursor: 'pointer',
                     }}
@@ -1185,6 +1275,65 @@ export const App: React.FC = () => {
                   </button>
                 ))}
               </div>
+
+              {/* Active Mounts List with 1-Tap Remove inside Modal */}
+              {snap?.mounts && snap.mounts.length > 0 && (
+                <div
+                  style={{
+                    maxHeight: 140,
+                    overflowY: 'auto',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 4,
+                    marginTop: 4,
+                  }}
+                >
+                  {snap.mounts.map((m) => (
+                    <div
+                      key={m.mount_root}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                        padding: '6px 10px',
+                        borderRadius: 8,
+                        background: '#08080c',
+                        border: '1px solid #1c1c26',
+                        fontSize: 11,
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontFamily: 'monospace',
+                          color: m.is_online ? '#c8c8d2' : '#71717a',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {m.is_online ? '🟢' : '⚫'} {m.mount_root} ({m.track_count} tracks)
+                      </span>
+                      <button
+                        onClick={() => handleRemoveFolder(m.mount_root, m.label)}
+                        style={{
+                          padding: '2px 8px',
+                          borderRadius: 6,
+                          background: '#1f1216',
+                          border: '1px solid #4c2228',
+                          color: '#f87171',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          flexShrink: 0,
+                        }}
+                      >
+                        Remove ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div
@@ -1196,8 +1345,8 @@ export const App: React.FC = () => {
                 minHeight: 54,
                 padding: '10px 14px',
                 borderRadius: 12,
-                background: 'rgba(0,229,255,0.12)',
-                border: '1px solid #00e5ff',
+                background: '#0d1b22',
+                border: '1px solid #2aa3c4',
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
@@ -1208,11 +1357,11 @@ export const App: React.FC = () => {
                 <div style={{ fontSize: 13, fontWeight: 700 }}>
                   📁 Local, Steam OSTs & Removable USB/SD
                 </div>
-                <div style={{ fontSize: 12, color: '#a1a1aa' }}>
+                <div style={{ fontSize: 12, color: '#8e8e99' }}>
                   {snap?.mounts.length ?? 0} storage mounts indexed • Click to browse
                 </div>
               </div>
-              <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#00e5ff' }}>Browse</span>
+              <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>Browse</span>
             </div>
 
             <div
@@ -1229,9 +1378,9 @@ export const App: React.FC = () => {
             >
               <div>
                 <div style={{ fontSize: 13, fontWeight: 700 }}>🟢 Spotify Premium</div>
-                <div style={{ fontSize: 12, color: '#a1a1aa' }}>PKCE OAuth + Spotify Connect</div>
+                <div style={{ fontSize: 12, color: '#8e8e99' }}>PKCE OAuth + Spotify Connect</div>
               </div>
-              <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#10b981' }}>Phase 3</span>
+              <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#0d9488' }}>Phase 3</span>
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6 }}>
@@ -1247,7 +1396,7 @@ export const App: React.FC = () => {
                   borderRadius: 12,
                   background: '#16161f',
                   border: '1px solid #2e2e3a',
-                  color: '#fff',
+                  color: '#d4d4dc',
                   fontSize: 12,
                   fontWeight: 700,
                   cursor: 'pointer',
@@ -1293,9 +1442,9 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({ icon, badge, active,
       width: 76,
       height: 76,
       borderRadius: 18,
-      background: '#0a0a0e',
-      border: active ? '2px solid #00e5ff' : '2px solid #22222c',
-      color: '#ffffff',
+      background: active ? '#0d1b22' : '#0a0a0e',
+      border: active ? '2px solid #2aa3c4' : '2px solid #1e1e28',
+      color: '#d4d4dc',
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
@@ -1309,11 +1458,11 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({ icon, badge, active,
       style={{
         padding: '2px 8px',
         borderRadius: 99,
-        background: '#16161f',
-        border: '1px solid #2e2e38',
+        background: '#14141c',
+        border: '1px solid #262632',
         fontSize: 12,
         fontFamily: 'monospace',
-        color: active ? '#00e5ff' : '#a1a1aa',
+        color: active ? '#7dd3fc' : '#8e8e99',
         fontWeight: 700,
       }}
     >
