@@ -310,8 +310,12 @@ export const App: React.FC = () => {
   return (
     <div
       style={{
-        width: '100vw',
-        height: '100vh',
+        width: '100%',
+        maxWidth: '100vw',
+        height: '100%',
+        maxHeight: '100vh',
+        boxSizing: 'border-box',
+        overflow: 'hidden',
         background: '#000000',
         color: '#d4d4dc',
         display: 'flex',
@@ -365,12 +369,15 @@ export const App: React.FC = () => {
       <header
         style={{
           height: 58,
-          padding: '0 22px',
+          boxSizing: 'border-box',
+          padding: '0 24px',
           borderBottom: '1px solid #16161c',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           background: '#000000',
+          width: '100%',
+          flexShrink: 0,
         }}
       >
         <button
@@ -576,11 +583,16 @@ export const App: React.FC = () => {
         <main
           style={{
             flex: 1,
+            boxSizing: 'border-box',
             display: 'grid',
-            gridTemplateColumns: '320px 1fr',
+            gridTemplateColumns: '260px 1fr',
             alignItems: 'center',
-            gap: 40,
-            padding: '0 48px',
+            gap: 36,
+            padding: '0 28px',
+            maxWidth: 1180,
+            width: '100%',
+            margin: '0 auto',
+            overflow: 'hidden',
           }}
         >
           {/* Left Column: Compact 240x240 Album Art + Shuffle (X) & Repeat (Y) Mode Controls Below */}
@@ -589,7 +601,8 @@ export const App: React.FC = () => {
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
-              gap: 18,
+              gap: 16,
+              flexShrink: 0,
             }}
           >
             <div
@@ -646,12 +659,32 @@ export const App: React.FC = () => {
           </div>
 
           {/* Right Column: Track Info + Tall Scrub Bar + Aligned Player Transport Row */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-            <div>
-              <h1 style={{ margin: 0, fontSize: 32, fontWeight: 800, letterSpacing: -0.5, color: '#d4d4dc' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 22, minWidth: 0, overflow: 'hidden' }}>
+            <div style={{ minWidth: 0 }}>
+              <h1
+                style={{
+                  margin: 0,
+                  fontSize: 30,
+                  fontWeight: 800,
+                  letterSpacing: -0.5,
+                  color: '#d4d4dc',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
                 {track?.title || 'No Track Loaded'}
               </h1>
-              <p style={{ margin: '6px 0 0', fontSize: 18, color: '#8e8e99' }}>
+              <p
+                style={{
+                  margin: '6px 0 0',
+                  fontSize: 16,
+                  color: '#8e8e99',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
                 {track?.artists?.join(', ') || 'Select a track from Library & Queue (R1)'}
                 {track?.album ? ` • ${track.album}` : ''}
               </p>
@@ -727,15 +760,25 @@ export const App: React.FC = () => {
                   color: '#8e8e99',
                   display: 'flex',
                   justifyContent: 'space-between',
+                  alignItems: 'center',
+                  minWidth: 0,
                 }}
               >
-                <span>
+                <span
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    minWidth: 0,
+                    marginRight: 12,
+                  }}
+                >
                   <strong style={{ fontFamily: 'monospace', color: '#71717a', marginRight: 8 }}>
                     NEXT:
                   </strong>
                   {snap.up_next[0].title} — {snap.up_next[0].artists.join(', ')}
                 </span>
-                <span style={{ fontFamily: 'monospace', color: '#2aa3c4' }}>
+                <span style={{ fontFamily: 'monospace', color: '#2aa3c4', flexShrink: 0 }}>
                   {snap.up_next[0].source.toUpperCase()}
                 </span>
               </div>
@@ -744,7 +787,7 @@ export const App: React.FC = () => {
         </main>
       ) : (
         /* Split Library, Playlists & Queue Browser */
-        <main style={{ flex: 1, display: 'grid', gridTemplateColumns: '38% 62%', overflow: 'hidden' }}>
+        <main style={{ flex: 1, display: 'grid', gridTemplateColumns: '38% 62%', overflow: 'hidden', boxSizing: 'border-box', width: '100%' }}>
           {/* Left Column: Storage Mounts, Playlists & Albums */}
           <div
             style={{

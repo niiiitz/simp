@@ -5,8 +5,29 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <title>SIMP — Simple Integrated Media Player</title>
+    <style>
+      *, *::before, *::after {
+        box-sizing: border-box;
+      }
+      html, body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #000000;
+        color: #d4d4dc;
+        font-family: system-ui, -apple-system, sans-serif;
+        user-select: none;
+      }
+      #root {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+    </style>
   </head>
-  <body style="margin:0;padding:0;background:#000000;color:#d4d4dc;font-family:system-ui,-apple-system,sans-serif;overflow:hidden;user-select:none;">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -13,6 +13,61 @@ import {
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
 /**
+ * Gamepad-navigable Focusable component.
+ * Uses Decky / Steam's native Focusable from `window.DFL` if available,
+ * and falls back gracefully to a focusable HTML container with standard Steam `Focusable` class & handlers.
+ */
+const Focusable: ReactTypes.FC<any> = ({
+  onActivate,
+  onClick,
+  className = '',
+  children,
+  style,
+  flowChildren,
+  ...rest
+}) => {
+  const DFLFocusable = (window as any).DFL?.Focusable;
+  const handleClick = (e: any) => {
+    if (onActivate) onActivate(e);
+    if (onClick) onClick(e);
+  };
+
+  if (DFLFocusable) {
+    return SP_REACT.createElement(
+      DFLFocusable,
+      {
+        onActivate: handleClick,
+        onClick: handleClick,
+        className: `Focusable ${className}`.trim(),
+        style,
+        'flow-children': flowChildren,
+        ...rest,
+      },
+      children
+    );
+  }
+
+  return SP_REACT.createElement(
+    'div',
+    {
+      role: 'button',
+      tabIndex: 0,
+      className: `Focusable ${className}`.trim(),
+      onClick: handleClick,
+      onKeyDown: (e: any) => {
+        if (e.key === 'Enter' || e.key === ' ' || e.keyCode === 13 || e.keyCode === 32) {
+          e.preventDefault();
+          handleClick(e);
+        }
+      },
+      style,
+      ...rest,
+    },
+    children
+  );
+};
+
+/**
  * Pilot Phase 2: Lightweight Decky Loader QAM (`...` Menu) Drawer.
  * Connects directly to `simp --daemon` over `ws://127.0.0.1:18888/ws` with zero Python audio glue.
  */
@@ -100,6 +155,8 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    boxSizing: 'border-box',
+    userSelect: 'none',
   };
 
   return (
@@ -113,6 +170,14 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
         fontFamily: 'system-ui, -apple-system, sans-serif',
       }}
     >
+      <style>{`
+        .Focusable:focus, .Focusable:focus-visible, .Focusable.gpfocus {
+          outline: 2px solid #2aa3c4 !important;
+          outline-offset: 1px !important;
+          background: #18333e !important;
+        }
+      `}</style>
+
       {/* Now Playing Card */}
       <div
         style={{
@@ -190,14 +255,25 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
         </div>
 
         {/* 5-Button Symmetrical Transport Row */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
-          <button onClick={() => defaultSimpClient.seekRelative(-10_000)} style={btnStyle} title="Rewind 10s">
+        <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
+          <Focusable
+            onActivate={() => defaultSimpClient.seekRelative(-10_000)}
+            onClick={() => defaultSimpClient.seekRelative(-10_000)}
+            style={btnStyle}
+            title="Rewind 10s"
+          >
             ⏪
-          </button>
-          <button onClick={() => defaultSimpClient.previous()} style={btnStyle} title="Previous">
+          </Focusable>
+          <Focusable
+            onActivate={() => defaultSimpClient.previous()}
+            onClick={() => defaultSimpClient.previous()}
+            style={btnStyle}
+            title="Previous"
+          >
             ⏮
-          </button>
-          <button
+          </Focusable>
+          <Focusable
+            onActivate={() => defaultSimpClient.togglePlayPause()}
             onClick={() => defaultSimpClient.togglePlayPause()}
             style={{
               ...btnStyle,
@@ -209,18 +285,29 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
             title="Play / Pause"
           >
             {snap?.is_playing ? '⏸' : '▶'}
-          </button>
-          <button onClick={() => defaultSimpClient.next()} style={btnStyle} title="Next">
+          </Focusable>
+          <Focusable
+            onActivate={() => defaultSimpClient.next()}
+            onClick={() => defaultSimpClient.next()}
+            style={btnStyle}
+            title="Next"
+          >
             ⏭
-          </button>
-          <button onClick={() => defaultSimpClient.seekRelative(10_000)} style={btnStyle} title="Fast-Forward 10s">
+          </Focusable>
+          <Focusable
+            onActivate={() => defaultSimpClient.seekRelative(10_000)}
+            onClick={() => defaultSimpClient.seekRelative(10_000)}
+            style={btnStyle}
+            title="Fast-Forward 10s"
+          >
             ⏩
-          </button>
-        </div>
+          </Focusable>
+        </Focusable>
 
         {/* Shuffle & Repeat Row */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-          <button
+        <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+          <Focusable
+            onActivate={() => defaultSimpClient.setShuffle(!snap?.shuffle)}
             onClick={() => defaultSimpClient.setShuffle(!snap?.shuffle)}
             style={{
               ...btnStyle,
@@ -231,8 +318,9 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
             }}
           >
             🔀 {snap?.shuffle ? 'Shuffle: ON' : 'Shuffle: OFF'}
-          </button>
-          <button
+          </Focusable>
+          <Focusable
+            onActivate={() => defaultSimpClient.cycleRepeat()}
             onClick={() => defaultSimpClient.cycleRepeat()}
             style={{
               ...btnStyle,
@@ -243,11 +331,12 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
             }}
           >
             🔁 Repeat: {repeatLabel}
-          </button>
-        </div>
+          </Focusable>
+        </Focusable>
 
-        {/* Volume Slider Row */}
-        <div
+        {/* Volume Slider Row with Gamepad-Accessible Step Buttons */}
+        <Focusable
+          flowChildren="horizontal"
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -258,7 +347,8 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
             border: '1px solid #262630',
           }}
         >
-          <button
+          <Focusable
+            onActivate={toggleMute}
             onClick={toggleMute}
             style={{
               background: 'transparent',
@@ -266,11 +356,28 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
               color: '#d4d4dc',
               fontSize: 15,
               cursor: 'pointer',
-              padding: 2,
+              padding: '4px 6px',
+              borderRadius: 6,
             }}
           >
             {volumePct === 0 ? '🔇' : volumePct < 45 ? '🔉' : '🔊'}
-          </button>
+          </Focusable>
+
+          <Focusable
+            onActivate={() => defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05))}
+            onClick={() => defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05))}
+            style={{
+              ...btnStyle,
+              minHeight: 32,
+              padding: '0 8px',
+              fontSize: 12,
+              background: '#181822',
+            }}
+            title="Volume -5%"
+          >
+            −5%
+          </Focusable>
+
           <input
             type="range"
             min={0}
@@ -279,15 +386,32 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
             onChange={(e) => defaultSimpClient.setVolume(Number(e.target.value) / 100)}
             style={{ flex: 1, accentColor: '#2aa3c4', cursor: 'pointer' }}
           />
+
+          <Focusable
+            onActivate={() => defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05))}
+            onClick={() => defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05))}
+            style={{
+              ...btnStyle,
+              minHeight: 32,
+              padding: '0 8px',
+              fontSize: 12,
+              background: '#181822',
+            }}
+            title="Volume +5%"
+          >
+            +5%
+          </Focusable>
+
           <span style={{ fontSize: 12, fontWeight: 700, minWidth: 34, textAlign: 'right' }}>
             {volumePct}%
           </span>
-        </div>
+        </Focusable>
       </div>
 
       {/* Quick Switcher Drawer Tabs */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-        <button
+      <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+        <Focusable
+          onActivate={() => toggleDrawerTab('albums')}
           onClick={() => toggleDrawerTab('albums')}
           style={{
             ...btnStyle,
@@ -298,8 +422,9 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
           }}
         >
           💿 Albums ({albums.length})
-        </button>
-        <button
+        </Focusable>
+        <Focusable
+          onActivate={() => toggleDrawerTab('playlists')}
           onClick={() => toggleDrawerTab('playlists')}
           style={{
             ...btnStyle,
@@ -310,11 +435,12 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
           }}
         >
           Queue / Playlists ({playlists.length})
-        </button>
-      </div>
+        </Focusable>
+      </Focusable>
 
       {drawerTab === 'albums' && (
-        <div
+        <Focusable
+          flowChildren="vertical"
           style={{
             maxHeight: 190,
             overflowY: 'auto',
@@ -328,8 +454,9 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
           }}
         >
           {albums.map((alb) => (
-            <button
+            <Focusable
               key={alb.id}
+              onActivate={() => defaultSimpClient.playAlbum(alb.id, false)}
               onClick={() => defaultSimpClient.playAlbum(alb.id, false)}
               style={{
                 display: 'flex',
@@ -348,13 +475,14 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
               <span style={{ fontSize: 11, color: '#a1a1aa' }}>
                 {alb.album_artist} • {alb.track_count} tracks
               </span>
-            </button>
+            </Focusable>
           ))}
-        </div>
+        </Focusable>
       )}
 
       {drawerTab === 'playlists' && (
-        <div
+        <Focusable
+          flowChildren="vertical"
           style={{
             maxHeight: 190,
             overflowY: 'auto',
@@ -373,8 +501,9 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
             </div>
           ) : (
             playlists.map((pl) => (
-              <button
+              <Focusable
                 key={pl.id}
+                onActivate={() => defaultSimpClient.playPlaylist(pl.id, false)}
                 onClick={() => defaultSimpClient.playPlaylist(pl.id, false)}
                 style={{
                   display: 'flex',
@@ -390,14 +519,15 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
               >
                 <span style={{ fontSize: 12, fontWeight: 700 }}>{pl.name}</span>
                 <span style={{ fontSize: 11, color: '#a1a1aa' }}>{pl.track_count} tracks</span>
-              </button>
+              </Focusable>
             ))
           )}
-        </div>
+        </Focusable>
       )}
 
       {/* Open Full SIMP Console Button */}
-      <button
+      <Focusable
+        onActivate={() => window.open('http://127.0.0.1:18888', '_blank')}
         onClick={() => window.open('http://127.0.0.1:18888', '_blank')}
         style={{
           ...btnStyle,
@@ -407,7 +537,7 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
         }}
       >
         ↗ Open Full SIMP Console (:18888)
-      </button>
+      </Focusable>
     </div>
   );
 };
