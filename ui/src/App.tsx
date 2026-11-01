@@ -779,7 +779,7 @@ export const App: React.FC = () => {
                   cursor: 'pointer',
                 }}
               >
-                + Add Folder
+                Manage Sources
               </button>
             </div>
             {snap?.mounts.map((m) => (
@@ -823,31 +823,16 @@ export const App: React.FC = () => {
                     {m.mount_root}
                   </div>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                  <span style={{ fontFamily: 'monospace', color: '#2aa3c4', fontWeight: 700 }}>
-                    {m.track_count}
-                  </span>
-                  <button
-                    onClick={() => handleRemoveFolder(m.mount_root, m.label)}
-                    title={`Remove mount: ${m.mount_root}`}
-                    style={{
-                      width: 28,
-                      height: 28,
-                      borderRadius: 8,
-                      background: '#181216',
-                      border: '1px solid #3f2228',
-                      color: '#f87171',
-                      fontSize: 12,
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    ✕
-                  </button>
-                </div>
+                <span
+                  style={{
+                    fontFamily: 'monospace',
+                    color: '#2aa3c4',
+                    fontWeight: 700,
+                    flexShrink: 0,
+                  }}
+                >
+                  {m.track_count}
+                </span>
               </div>
             ))}
 
