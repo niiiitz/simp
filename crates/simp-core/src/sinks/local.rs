@@ -142,12 +142,28 @@ impl LocalAudioEngine {
         }
     }
 
+    /// Primes the local audio engine with a restored URI and millisecond position on daemon startup
+    /// without opening a PipeWire/ALSA stream until `play()` is invoked.
+    pub fn prime_restored_session(&mut self, uri: String, position_ms: u32) {
+        self.current_uri = Some(uri);
+        let mut tracker = self.tracker.lock().unwrap();
+        tracker.reset();
+        tracker.seek(position_ms);
+        tracker.pause();
+    }
+
     pub fn seek(
         &mut self,
         position_ms: u32,
         epoch: u64,
         event_tx: mpsc::UnboundedSender<PlaybackEvent>,
     ) -> Result<()> {
+        // If stream is idle-suspended / restored-paused, just update the saved position
+        if self.sink.is_none() && !self.tracker.lock().unwrap().is_playing() {
+            self.tracker.lock().unwrap().seek(position_ms);
+            return Ok(());
+        }
+
         let target = Duration::from_millis(position_ms as u64);
 
         if let Some(sink) = &self.sink {

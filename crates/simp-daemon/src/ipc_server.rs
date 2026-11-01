@@ -36,6 +36,30 @@ pub struct DaemonIpcState {
     pub connected_clients: Arc<AtomicUsize>,
 }
 
+pub fn resolve_ui_dir() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(env_dir) = std::env::var("SIMP_UI_DIR") {
+        candidates.push(PathBuf::from(env_dir));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("ui").join("dist"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("../ui"));
+            candidates.push(exe_dir.join("../../ui/dist"));
+        }
+    }
+    if let Some(data_dir) = dirs::data_local_dir() {
+        candidates.push(data_dir.join("simp").join("ui"));
+    }
+
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("index.html").is_file())
+}
+
 pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
     let art_cache_dir = dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -43,25 +67,37 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .join("art");
     let _ = std::fs::create_dir_all(&art_cache_dir);
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/health", get(health_handler))
         .route("/ws", get(ws_handler))
-        .nest_service("/art", ServeDir::new(art_cache_dir))
-        .layer(CorsLayer::permissive())
-        .with_state(ipc_state);
+        .nest_service("/art", ServeDir::new(art_cache_dir));
+
+    if let Some(ui_dir) = resolve_ui_dir() {
+        tracing::info!("Serving SIMP Console UI from {}", ui_dir.display());
+        app = app.fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true));
+    } else {
+        tracing::warn!(
+            "No production UI bundle (index.html) found; run `npm run build:ui` or set SIMP_UI_DIR"
+        );
+    }
+
+    let app = app.layer(CorsLayer::permissive()).with_state(ipc_state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 18888));
-    tracing::info!("SIMP Daemon IPC & Art Server listening on http://{addr}");
+    tracing::info!("SIMP Daemon IPC, Art & UI Server listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
 
 async fn health_handler() -> impl IntoResponse {
+    let ui_dir = resolve_ui_dir().map(|p| p.to_string_lossy().to_string());
     Json(serde_json::json!({
         "status": "ok",
         "service": "simp-daemon",
-        "pid": std::process::id()
+        "pid": std::process::id(),
+        "ui_served": ui_dir.is_some(),
+        "ui_dir": ui_dir,
     }))
 }
 

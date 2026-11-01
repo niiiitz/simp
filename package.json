@@ -9,7 +9,9 @@
   ],
   "scripts": {
     "dev:ui": "npm --workspace=ui run dev",
-    "build:ui": "npm --workspace=ui run build"
+    "build:ui": "npm --workspace=ui run build",
+    "build:decky": "npm --workspace=decky-plugin run build",
+    "build:all": "npm run build:ui && npm run build:decky"
   }
 }
 

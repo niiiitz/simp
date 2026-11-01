@@ -1,11 +1,12 @@
 [Unit]
-Description=SIMP (Simple Integrated Media Player) Background Audio Daemon
+Description=SIMP (Simple Integrated Media Player) Background Audio & UI Daemon
 After=pipewire.service pipewire-pulse.service graphical-session.target
 Wants=pipewire.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/share/SIMP/simp --daemon
+ExecStart=%h/.local/share/simp/bin/simp --daemon
+Environment="SIMP_UI_DIR=%h/.local/share/simp/ui"
 Environment="XDG_RUNTIME_DIR=/run/user/%U"
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus"
 Environment="MIMALLOC_PURGE_DELAY=100"
@@ -17,4 +18,3 @@ StandardError=journal
 
 [Install]
 WantedBy=default.target
-
