@@ -350,3 +350,4 @@ export const AppleMusicDriver: React.FC = () => {
 
   return null;
 };
+

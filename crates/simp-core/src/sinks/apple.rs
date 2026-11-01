@@ -137,10 +137,17 @@ impl AppleMusicSink {
             }
         }
 
-        let dev_token = get_val(
+        let mut dev_token = get_val(
             &settings.services.apple_developer_token,
             "APPLE_DEVELOPER_TOKEN",
         );
+        if dev_token.is_empty() {
+            if let Some(embedded) = option_env!("SIMP_EMBEDDED_APPLE_DEV_TOKEN") {
+                if !embedded.trim().is_empty() {
+                    dev_token = embedded.trim().to_string();
+                }
+            }
+        }
         let pre_signed_dev_token = if dev_token.is_empty() {
             None
         } else {

@@ -1462,14 +1462,14 @@ export const App: React.FC = () => {
               >
                 <div>
                   <div style={{ fontSize: 13, fontWeight: 700 }}>
-                    🍎 Apple Music (MusicKit v3 • ES256)
+                    🍎 Apple Music
                   </div>
                   <div style={{ fontSize: 11, color: '#8e8e99' }}>
                     {snap?.apple_authenticated
                       ? '🟢 Connected — Playlists & Library synced to SQLite'
                       : appleAuthCfg?.configured
-                      ? '🟡 ES256 Developer Token Ready — Click Authorize'
-                      : 'Configure Team ID, Key ID & .p8 Key (or set in .env)'}
+                      ? 'Sign in with your Apple ID to stream & sync playlists'
+                      : 'Publisher setup: add Apple Developer Key (.p8) to enable'}
                   </div>
                 </div>
 

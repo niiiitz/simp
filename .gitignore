@@ -3,6 +3,8 @@
 .env.*
 *.pem
 *.key
+*.p8
+AuthKey_*
 
 # Local Reference Documentation (Private)
 reference_documentation/
