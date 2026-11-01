@@ -27,7 +27,9 @@ pub fn resolve_and_cache_artwork(audio_file_path: &Path) -> Option<ExtractedArtw
             "album_art.png",
             "album_art.jpg",
             "cover.jpg",
+            "cover.jpeg",
             "cover.png",
+            "cover.webp",
             "Cover.jpg",
             "Cover.png",
             "AlbumArt.jpg",
@@ -39,8 +41,11 @@ pub fn resolve_and_cache_artwork(audio_file_path: &Path) -> Option<ExtractedArtw
             let candidate_path = parent.join(name);
             if candidate_path.is_file() {
                 if let Ok(bytes) = fs::read(&candidate_path) {
-                    let ext = if name.to_lowercase().ends_with(".png") {
+                    let lower = name.to_lowercase();
+                    let ext = if lower.ends_with(".png") {
                         "png"
+                    } else if lower.ends_with(".webp") {
+                        "webp"
                     } else {
                         "jpg"
                     };
@@ -56,9 +61,19 @@ pub fn resolve_and_cache_artwork(audio_file_path: &Path) -> Option<ExtractedArtw
                 if path.is_file() {
                     if let Some(ext_os) = path.extension().and_then(|e| e.to_str()) {
                         let ext_lower = ext_os.to_lowercase();
-                        if ext_lower == "png" || ext_lower == "jpg" || ext_lower == "jpeg" {
+                        if ext_lower == "png"
+                            || ext_lower == "jpg"
+                            || ext_lower == "jpeg"
+                            || ext_lower == "webp"
+                        {
                             if let Ok(bytes) = fs::read(&path) {
-                                let ext = if ext_lower == "png" { "png" } else { "jpg" };
+                                let ext = if ext_lower == "png" {
+                                    "png"
+                                } else if ext_lower == "webp" {
+                                    "webp"
+                                } else {
+                                    "jpg"
+                                };
                                 return write_art_bytes(&bytes, ext);
                             }
                         }

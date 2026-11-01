@@ -138,7 +138,9 @@ export class SimpDaemonClient {
           this.notifyState();
           break;
         case 'library_updated':
-          this.notifyState();
+          this.query('get_state_snapshot')
+            .then((snap) => this.handleEnvelope(snap))
+            .catch(() => this.notifyState());
           break;
         case 'power_state_changed':
           this.state = { ...this.state, power: msg.data.power };

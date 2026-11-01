@@ -363,8 +363,27 @@ impl AudioOrchestrator {
                 let db = self.db.clone();
                 let cfg = self.settings.lock().unwrap().clone();
                 let bcast = self.broadcast_tx.clone();
+                let state_ref = self.state.clone();
                 tokio::task::spawn_blocking(move || {
                     let (total_albums, total_tracks) = scan_all_storage(&db, &cfg);
+                    // Refresh current_track metadata (e.g., if cover.jpg was just added to the album folder)
+                    let cur_uri = state_ref
+                        .lock()
+                        .unwrap()
+                        .current_track
+                        .as_ref()
+                        .map(|t| t.uri.clone());
+                    if let Some(uri) = cur_uri {
+                        if let Ok(Some(updated_track)) = db.get_track_by_uri(&uri) {
+                            let mut st = state_ref.lock().unwrap();
+                            st.current_track = Some(updated_track.clone());
+                            for q_item in &mut st.queue {
+                                if q_item.uri == uri {
+                                    *q_item = updated_track.clone();
+                                }
+                            }
+                        }
+                    }
                     let _ = bcast.send(PlaybackEvent::LibraryUpdated {
                         total_albums,
                         total_tracks,
