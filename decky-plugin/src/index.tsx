@@ -1,48 +1,82 @@
-import React, { useEffect, useState } from 'react';
+import type * as ReactTypes from 'react';
 import {
   defaultSimpClient,
-  AlbumSummary,
-  PlaylistSummary,
-  RepeatMode,
+  AlbumRecord,
+  PlaylistRecord,
   SimpStateSnapshot,
 } from '@simp/client';
+
+/**
+ * SteamOS Gaming Mode (`SharedJSContext`) exposes its active React instance on `window.SP_REACT`.
+ * Using `window.SP_REACT` directly avoids bundling a second copy of React with a null hook dispatcher.
+ */
+const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
 /**
  * Pilot Phase 2: Lightweight Decky Loader QAM (`...` Menu) Drawer.
  * Connects directly to `simp --daemon` over `ws://127.0.0.1:18888/ws` with zero Python audio glue.
  */
-export const SimpDeckyDrawer: React.FC = () => {
+const SimpDeckyDrawer: ReactTypes.FC = () => {
+  const { useState, useEffect } = SP_REACT;
   const [snap, setSnap] = useState<SimpStateSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
-  const [albums, setAlbums] = useState<AlbumSummary[]>([]);
-  const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
+  const [albums, setAlbums] = useState<AlbumRecord[]>([]);
+  const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
   const [drawerTab, setDrawerTab] = useState<'none' | 'albums' | 'playlists'>('none');
   const [preMuteVol, setPreMuteVol] = useState<number>(0.85);
 
   useEffect(() => {
     defaultSimpClient.connect();
-    const unsubConn = defaultSimpClient.subscribeConnection((isConn) => {
-      setConnected(isConn);
-      if (isConn) {
-        defaultSimpClient.getAlbums(undefined, undefined, 40, 0).then(setAlbums).catch(() => {});
-        defaultSimpClient.getPlaylists().then(setPlaylists).catch(() => {});
-      }
+
+    const refreshCatalogs = () => {
+      defaultSimpClient
+        .query<AlbumRecord[]>('get_albums', { limit: 40, offset: 0 })
+        .then((res) => {
+          setConnected(true);
+          if (Array.isArray(res)) setAlbums(res);
+        })
+        .catch(() => {});
+      defaultSimpClient
+        .query<PlaylistRecord[]>('get_playlists')
+        .then((res) => {
+          setConnected(true);
+          if (Array.isArray(res)) setPlaylists(res);
+        })
+        .catch(() => {});
+    };
+
+    const unsubState = defaultSimpClient.subscribeState((s) => {
+      setSnap({ ...s });
+      setConnected(true);
     });
-    const unsubState = defaultSimpClient.subscribeState((s) => setSnap({ ...s }));
+
+    const timer = window.setTimeout(refreshCatalogs, 350);
     return () => {
-      unsubConn();
+      window.clearTimeout(timer);
       unsubState();
     };
   }, []);
 
+  const toggleDrawerTab = (tab: 'albums' | 'playlists') => {
+    const next = drawerTab === tab ? 'none' : tab;
+    setDrawerTab(next);
+    if (next === 'albums') {
+      defaultSimpClient
+        .query<AlbumRecord[]>('get_albums', { limit: 40, offset: 0 })
+        .then((res) => Array.isArray(res) && setAlbums(res))
+        .catch(() => {});
+    } else if (next === 'playlists') {
+      defaultSimpClient
+        .query<PlaylistRecord[]>('get_playlists')
+        .then((res) => Array.isArray(res) && setPlaylists(res))
+        .catch(() => {});
+    }
+  };
+
   const track = snap?.current_track;
   const volumePct = Math.round((snap?.volume ?? 0.85) * 100);
-
-  const cycleRepeat = () => {
-    const nextMode: RepeatMode =
-      snap?.repeat === 'Off' ? 'All' : snap?.repeat === 'All' ? 'One' : 'Off';
-    defaultSimpClient.setRepeat(nextMode);
-  };
+  const repeatMode = snap?.repeat_mode ?? 'off';
+  const repeatLabel = repeatMode === 'queue' ? 'All' : repeatMode === 'track' ? 'One' : 'Off';
 
   const toggleMute = () => {
     const cur = snap?.volume ?? 0.85;
@@ -54,49 +88,12 @@ export const SimpDeckyDrawer: React.FC = () => {
     }
   };
 
-  const seekRelative = (deltaMs: number) => {
-    const pos = defaultSimpClient.getInterpolatedPositionMs();
-    const dur = track?.duration_ms ?? 0;
-    const target = Math.max(0, dur > 0 ? Math.min(dur, pos + deltaMs) : pos + deltaMs);
-    defaultSimpClient.seek(Math.round(target));
-  };
-
-  const playAlbum = async (album: AlbumSummary) => {
-    try {
-      const tracks = await defaultSimpClient.getAlbumTracks(album.album_id);
-      if (tracks.length > 0) {
-        defaultSimpClient.loadQueue(
-          tracks.map((t) => t.uri),
-          0,
-          true
-        );
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  const playPlaylist = async (pl: PlaylistSummary) => {
-    try {
-      const tracks = await defaultSimpClient.getPlaylistItems(pl.playlist_id, 500, 0);
-      if (tracks.length > 0) {
-        defaultSimpClient.loadQueue(
-          tracks.map((t) => t.uri),
-          0,
-          true
-        );
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  const btnStyle: React.CSSProperties = {
+  const btnStyle: ReactTypes.CSSProperties = {
     minHeight: 44,
     borderRadius: 10,
     border: '1px solid #262630',
     background: '#121216',
-    color: '#ffffff',
+    color: '#d4d4dc',
     fontWeight: 700,
     fontSize: 14,
     cursor: 'pointer',
@@ -109,7 +106,7 @@ export const SimpDeckyDrawer: React.FC = () => {
     <div
       style={{
         padding: 10,
-        color: '#ffffff',
+        color: '#d4d4dc',
         display: 'flex',
         flexDirection: 'column',
         gap: 10,
@@ -143,9 +140,9 @@ export const SimpDeckyDrawer: React.FC = () => {
               justifyContent: 'center',
             }}
           >
-            {track?.artwork_url ? (
+            {track?.art_url ? (
               <img
-                src={`http://127.0.0.1:18888${track.artwork_url}`}
+                src={track.art_url}
                 alt="Art"
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />
@@ -176,17 +173,17 @@ export const SimpDeckyDrawer: React.FC = () => {
             >
               {track?.artists?.join(', ') || (connected ? 'Daemon Online (:18888)' : 'Connecting...')}
             </div>
-            {track?.album_title && (
+            {track?.album && (
               <div
                 style={{
                   fontSize: 11,
-                  color: '#3b82f6',
+                  color: '#2aa3c4',
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                 }}
               >
-                {track.album_title}
+                {track.album}
               </div>
             )}
           </div>
@@ -194,7 +191,7 @@ export const SimpDeckyDrawer: React.FC = () => {
 
         {/* 5-Button Symmetrical Transport Row */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
-          <button onClick={() => seekRelative(-10_000)} style={btnStyle} title="Rewind 10s">
+          <button onClick={() => defaultSimpClient.seekRelative(-10_000)} style={btnStyle} title="Rewind 10s">
             ⏪
           </button>
           <button onClick={() => defaultSimpClient.previous()} style={btnStyle} title="Previous">
@@ -204,8 +201,9 @@ export const SimpDeckyDrawer: React.FC = () => {
             onClick={() => defaultSimpClient.togglePlayPause()}
             style={{
               ...btnStyle,
-              background: '#3b82f6',
-              borderColor: '#60a5fa',
+              background: '#0f222a',
+              borderColor: '#2aa3c4',
+              color: '#5bc0de',
               fontSize: 16,
             }}
             title="Play / Pause"
@@ -215,7 +213,7 @@ export const SimpDeckyDrawer: React.FC = () => {
           <button onClick={() => defaultSimpClient.next()} style={btnStyle} title="Next">
             ⏭
           </button>
-          <button onClick={() => seekRelative(10_000)} style={btnStyle} title="Fast-Forward 10s">
+          <button onClick={() => defaultSimpClient.seekRelative(10_000)} style={btnStyle} title="Fast-Forward 10s">
             ⏩
           </button>
         </div>
@@ -228,23 +226,23 @@ export const SimpDeckyDrawer: React.FC = () => {
               ...btnStyle,
               minHeight: 38,
               fontSize: 12,
-              borderColor: snap?.shuffle ? '#3b82f6' : '#262630',
-              color: snap?.shuffle ? '#60a5fa' : '#a1a1aa',
+              borderColor: snap?.shuffle ? '#2aa3c4' : '#262630',
+              color: snap?.shuffle ? '#5bc0de' : '#a1a1aa',
             }}
           >
             🔀 {snap?.shuffle ? 'Shuffle: ON' : 'Shuffle: OFF'}
           </button>
           <button
-            onClick={cycleRepeat}
+            onClick={() => defaultSimpClient.cycleRepeat()}
             style={{
               ...btnStyle,
               minHeight: 38,
               fontSize: 12,
-              borderColor: snap?.repeat && snap.repeat !== 'Off' ? '#3b82f6' : '#262630',
-              color: snap?.repeat && snap.repeat !== 'Off' ? '#60a5fa' : '#a1a1aa',
+              borderColor: repeatMode !== 'off' ? '#2aa3c4' : '#262630',
+              color: repeatMode !== 'off' ? '#5bc0de' : '#a1a1aa',
             }}
           >
-            🔁 Repeat: {snap?.repeat ?? 'Off'}
+            🔁 Repeat: {repeatLabel}
           </button>
         </div>
 
@@ -265,7 +263,7 @@ export const SimpDeckyDrawer: React.FC = () => {
             style={{
               background: 'transparent',
               border: 'none',
-              color: '#ffffff',
+              color: '#d4d4dc',
               fontSize: 15,
               cursor: 'pointer',
               padding: 2,
@@ -279,7 +277,7 @@ export const SimpDeckyDrawer: React.FC = () => {
             max={100}
             value={volumePct}
             onChange={(e) => defaultSimpClient.setVolume(Number(e.target.value) / 100)}
-            style={{ flex: 1, accentColor: '#3b82f6', cursor: 'pointer' }}
+            style={{ flex: 1, accentColor: '#2aa3c4', cursor: 'pointer' }}
           />
           <span style={{ fontSize: 12, fontWeight: 700, minWidth: 34, textAlign: 'right' }}>
             {volumePct}%
@@ -290,23 +288,25 @@ export const SimpDeckyDrawer: React.FC = () => {
       {/* Quick Switcher Drawer Tabs */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
         <button
-          onClick={() => setDrawerTab(drawerTab === 'albums' ? 'none' : 'albums')}
+          onClick={() => toggleDrawerTab('albums')}
           style={{
             ...btnStyle,
             minHeight: 38,
             fontSize: 12,
-            borderColor: drawerTab === 'albums' ? '#3b82f6' : '#262630',
+            borderColor: drawerTab === 'albums' ? '#2aa3c4' : '#262630',
+            color: drawerTab === 'albums' ? '#5bc0de' : '#d4d4dc',
           }}
         >
           💿 Albums ({albums.length})
         </button>
         <button
-          onClick={() => setDrawerTab(drawerTab === 'playlists' ? 'none' : 'playlists')}
+          onClick={() => toggleDrawerTab('playlists')}
           style={{
             ...btnStyle,
             minHeight: 38,
             fontSize: 12,
-            borderColor: drawerTab === 'playlists' ? '#3b82f6' : '#262630',
+            borderColor: drawerTab === 'playlists' ? '#2aa3c4' : '#262630',
+            color: drawerTab === 'playlists' ? '#5bc0de' : '#d4d4dc',
           }}
         >
           Queue / Playlists ({playlists.length})
@@ -329,8 +329,8 @@ export const SimpDeckyDrawer: React.FC = () => {
         >
           {albums.map((alb) => (
             <button
-              key={alb.album_id}
-              onClick={() => playAlbum(alb)}
+              key={alb.id}
+              onClick={() => defaultSimpClient.playAlbum(alb.id, false)}
               style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -339,7 +339,7 @@ export const SimpDeckyDrawer: React.FC = () => {
                 borderRadius: 8,
                 background: '#121216',
                 border: '1px solid #262630',
-                color: '#ffffff',
+                color: '#d4d4dc',
                 cursor: 'pointer',
                 textAlign: 'left',
               }}
@@ -374,8 +374,8 @@ export const SimpDeckyDrawer: React.FC = () => {
           ) : (
             playlists.map((pl) => (
               <button
-                key={pl.playlist_id}
-                onClick={() => playPlaylist(pl)}
+                key={pl.id}
+                onClick={() => defaultSimpClient.playPlaylist(pl.id, false)}
                 style={{
                   display: 'flex',
                   justifyContent: 'space-between',
@@ -384,7 +384,7 @@ export const SimpDeckyDrawer: React.FC = () => {
                   borderRadius: 8,
                   background: '#121216',
                   border: '1px solid #262630',
-                  color: '#ffffff',
+                  color: '#d4d4dc',
                   cursor: 'pointer',
                 }}
               >
@@ -425,3 +425,4 @@ export default function defineSimpDeckyPlugin() {
     },
   };
 }
+

@@ -1,8 +1,17 @@
 import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
 
+/**
+ * Decky Loader (`api_version: 1`) executes plugins inside Steam's `SharedJSContext`
+ * where React is already mounted globally as `window.SP_REACT`.
+ * Never bundle a duplicate copy of React 19 (which has a null dispatcher inside Steam's renderer);
+ * compile JSX directly to `SP_REACT.createElement` / `SP_REACT.Fragment`.
+ */
 export default defineConfig({
-  plugins: [react()],
+  esbuild: {
+    jsx: 'transform',
+    jsxFactory: 'SP_REACT.createElement',
+    jsxFragment: 'SP_REACT.Fragment',
+  },
   define: {
     'process.env.NODE_ENV': JSON.stringify('production'),
   },
@@ -20,4 +29,5 @@ export default defineConfig({
     sourcemap: false,
   },
 });
+
 
