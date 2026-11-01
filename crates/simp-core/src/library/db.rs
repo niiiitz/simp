@@ -439,6 +439,93 @@ impl LibraryDatabase {
         Ok(rows.filter_map(Result::ok).collect())
     }
 
+    pub fn create_playlist(&self, name: &str, description: &str) -> Result<PlaylistRecord> {
+        let id_input = format!(
+            "playlist::{}::{}",
+            name.trim().to_lowercase(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let id = blake3::hash(id_input.as_bytes()).to_hex()[..16].to_string();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO playlists (id, name, description, origin, track_count, updated_at)
+             VALUES (?1, ?2, ?3, 'simp_local', 0, strftime('%s', 'now'))",
+            params![id, name.trim(), description.trim()],
+        )?;
+        let updated_at: i64 = conn
+            .query_row(
+                "SELECT updated_at FROM playlists WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok(PlaylistRecord {
+            id,
+            name: name.trim().to_string(),
+            description: description.trim().to_string(),
+            origin: "simp_local".to_string(),
+            cover_art_url: None,
+            track_count: 0,
+            updated_at,
+        })
+    }
+
+    pub fn add_tracks_to_playlist(&self, playlist_id: &str, uris: &[String]) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut next_pos: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_items WHERE playlist_id = ?1",
+                params![playlist_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        for uri in uris {
+            let inserted = conn.execute(
+                "INSERT INTO playlist_items (playlist_id, position, track_uri, added_at)
+                 VALUES (?1, ?2, ?3, strftime('%s', 'now'))",
+                params![playlist_id, next_pos, uri],
+            );
+            if inserted.is_ok() {
+                next_pos += 1;
+            }
+        }
+
+        let new_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_items WHERE playlist_id = ?1",
+                params![playlist_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        let cover_art: Option<String> = conn
+            .query_row(
+                "SELECT t.art_url FROM playlist_items pi
+                 JOIN tracks t ON t.uri = pi.track_uri
+                 WHERE pi.playlist_id = ?1 AND t.art_url IS NOT NULL
+                 ORDER BY pi.position ASC LIMIT 1",
+                params![playlist_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        conn.execute(
+            "UPDATE playlists
+             SET track_count = ?2,
+                 cover_art_url = COALESCE(?3, cover_art_url),
+                 updated_at = strftime('%s', 'now')
+             WHERE id = ?1",
+            params![playlist_id, new_count, cover_art],
+        )?;
+
+        Ok(new_count as usize)
+    }
+
     pub fn get_library_counts(&self) -> Result<(usize, usize)> {
         let conn = self.conn.lock().unwrap();
         let albums: i64 = conn.query_row("SELECT COUNT(*) FROM albums", [], |r| r.get(0))?;

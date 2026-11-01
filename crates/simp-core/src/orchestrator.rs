@@ -227,18 +227,29 @@ impl AudioOrchestrator {
                 }
             }
             AudioCommand::Seek { position_ms } => {
-                let engine = self.state.lock().unwrap().active_engine;
+                let (engine, duration_ms) = {
+                    let st = self.state.lock().unwrap();
+                    let dur = st.current_track.as_ref().map(|t| t.duration_ms).unwrap_or(0);
+                    (st.active_engine, dur)
+                };
+                let clamped_pos = if duration_ms > 0 {
+                    position_ms.min(duration_ms.saturating_sub(250))
+                } else {
+                    position_ms
+                };
                 if engine == ActiveEngine::Local {
                     let _ = self.local_engine.seek(
-                        position_ms,
+                        clamped_pos,
                         self.transition_epoch,
                         self.internal_event_tx.clone(),
                     );
                 }
                 let is_playing = self.state.lock().unwrap().is_playing;
-                self.state.lock().unwrap().position_ms = position_ms;
-                update_mpris_playback(&mut self.mpris_controls, is_playing, position_ms);
-                let _ = self.broadcast_tx.send(PlaybackEvent::ProgressTick { position_ms });
+                self.state.lock().unwrap().position_ms = clamped_pos;
+                update_mpris_playback(&mut self.mpris_controls, is_playing, clamped_pos);
+                let _ = self
+                    .broadcast_tx
+                    .send(PlaybackEvent::ProgressTick { position_ms: clamped_pos });
             }
             AudioCommand::SeekRelative { delta_ms } => {
                 let current = self.get_live_position_ms() as i64;
@@ -277,10 +288,14 @@ impl AudioOrchestrator {
                 self.handle_command(AudioCommand::SetRepeat { mode: next_mode });
             }
             AudioCommand::AddLibraryPath { path } => {
-                {
+                let trimmed = path.trim().to_string();
+                if !trimmed.is_empty() {
                     let mut cfg = self.settings.lock().unwrap();
-                    let next_key = cfg.library.custom_paths.len().to_string();
-                    cfg.library.custom_paths.insert(next_key, path);
+                    let already_exists = cfg.library.custom_paths.values().any(|p| p == &trimmed);
+                    if !already_exists {
+                        let next_key = cfg.library.custom_paths.len().to_string();
+                        cfg.library.custom_paths.insert(next_key, trimmed);
+                    }
                 }
                 self.handle_command(AudioCommand::RescanStorage);
             }

@@ -137,6 +137,9 @@ export class SimpDaemonClient {
           this.state = { ...this.state, mounts: msg.data.mounts };
           this.notifyState();
           break;
+        case 'library_updated':
+          this.notifyState();
+          break;
         case 'power_state_changed':
           this.state = { ...this.state, power: msg.data.power };
           this.notifyState();
@@ -175,7 +178,13 @@ export class SimpDaemonClient {
   public setRepeat = (mode: RepeatMode) => this.sendCommand('set_repeat', { mode });
   public cycleRepeat = () => this.sendCommand('cycle_repeat');
   public loadUri = (uri: string) => this.sendCommand('load', { uri });
-  public playAlbum = (album_id: string, shuffle = false) => this.sendCommand('play_album', { album_id, shuffle });
+  public loadQueue = (uris: string[], start_index = 0) =>
+    this.sendCommand('load_queue', { uris, start_index });
+  public playAlbum = (album_id: string, shuffle = false) =>
+    this.sendCommand('play_album', { album_id, shuffle });
+  public playPlaylist = (playlist_id: string, shuffle = false) =>
+    this.sendCommand('play_playlist', { playlist_id, shuffle });
+  public addLibraryPath = (path: string) => this.sendCommand('add_library_path', { path });
   public rescanStorage = () => this.sendCommand('rescan_storage');
   public shutdownDaemon = () => this.sendCommand('shutdown_daemon');
 

@@ -114,7 +114,19 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
             if let Ok(envelope) = serde_json::from_str::<ClientEnvelope>(&text) {
                 match envelope {
                     ClientEnvelope::Command { command } => {
+                        let persist = matches!(
+                            command,
+                            AudioCommand::SetVolume { .. } | AudioCommand::AddLibraryPath { .. }
+                        );
                         let _ = state.cmd_tx.send(command);
+                        if persist {
+                            let settings_clone = state.settings.clone();
+                            tokio::task::spawn_blocking(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(25));
+                                let cfg = settings_clone.lock().unwrap().clone();
+                                let _ = crate::config::save_settings(&cfg);
+                            });
+                        }
                     }
                     ClientEnvelope::Query { req_id, query } => {
                         let resp = execute_query(req_id, query, &state);
@@ -236,6 +248,38 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                 error: Some(e.to_string()),
             },
         },
+        LibraryQuery::CreatePlaylist { name, description } => {
+            match state.db.create_playlist(&name, &description) {
+                Ok(playlist) => ServerEnvelope::QueryResponse {
+                    req_id,
+                    ok: true,
+                    data: serde_json::to_value(playlist).unwrap_or_default(),
+                    error: None,
+                },
+                Err(e) => ServerEnvelope::QueryResponse {
+                    req_id,
+                    ok: false,
+                    data: serde_json::Value::Null,
+                    error: Some(e.to_string()),
+                },
+            }
+        }
+        LibraryQuery::AddTracksToPlaylist { playlist_id, uris } => {
+            match state.db.add_tracks_to_playlist(&playlist_id, &uris) {
+                Ok(new_count) => ServerEnvelope::QueryResponse {
+                    req_id,
+                    ok: true,
+                    data: serde_json::json!({ "playlist_id": playlist_id, "track_count": new_count }),
+                    error: None,
+                },
+                Err(e) => ServerEnvelope::QueryResponse {
+                    req_id,
+                    ok: false,
+                    data: serde_json::Value::Null,
+                    error: Some(e.to_string()),
+                },
+            }
+        }
         LibraryQuery::GetMountRoots => match state.db.get_mounts() {
             Ok(mounts) => ServerEnvelope::QueryResponse {
                 req_id,
