@@ -51,6 +51,27 @@ function mapAppleItemToTrack(item: any): TrackMetadata | null {
   };
 }
 
+async function checkWidevineDrm(): Promise<boolean> {
+  if (typeof navigator === 'undefined' || !navigator.requestMediaKeySystemAccess) {
+    return false;
+  }
+  const configs: MediaKeySystemConfiguration[] = [
+    {
+      initDataTypes: ['cenc'],
+      audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
+    },
+  ];
+  for (const ks of ['com.widevine.alpha', 'com.apple.fps.1_0', 'com.apple.fps']) {
+    try {
+      await navigator.requestMediaKeySystemAccess(ks, configs);
+      return true;
+    } catch {
+      // Try next key system
+    }
+  }
+  return false;
+}
+
 export async function ensureMusicKitConfigured(
   developerToken: string,
   musicUserToken?: string | null
@@ -103,11 +124,19 @@ export async function ensureMusicKitConfigured(
     configuredToken = developerToken;
   }
   const instance = MK.getInstance();
-  // Hydrate pre-authorized Music-User-Token (e.g. transferred from PC/FIDO2 session)
-  // directly into MusicKit's StoreKit session so no login popup is required on the Deck!
-  if (musicUserToken && instance.musicUserToken !== musicUserToken) {
+  // Hydrate pre-authorized Music-User-Token (e.g. transferred from PC/FIDO2 or Firefox session)
+  // directly into MusicKit's StoreKit & Store session so `hasAuthorization()` is true without a popup!
+  const effectiveToken = musicUserToken || instance.musicUserToken;
+  if (effectiveToken) {
     try {
-      instance.musicUserToken = musicUserToken;
+      if (instance.storekit) {
+        // Force StoreKit transition so `authorizationStatusDidChange` fires and sets `Store._hasAuthorized = true`
+        instance.storekit._authorizationStatus = 0;
+      }
+      instance.musicUserToken = effectiveToken;
+      if (instance.storekit?.userTokenIsValid) {
+        await instance.authorize().catch(() => {});
+      }
     } catch {
       // Ignore if read-only in a future MusicKit build
     }
@@ -288,13 +317,34 @@ export const AppleMusicDriver: React.FC = () => {
       });
     };
 
-    const ensureInstance = async () => {
+    const isDedicatedWorker =
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('worker') === 'apple';
+
+    const ensureInstance = async (): Promise<any | null> => {
       if (mkRef.current) return mkRef.current;
       const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
       if (!cfg.configured || !cfg.developer_token || cancelled) return null;
+
+      // If a dedicated background Widevine worker (`?worker=apple`) is running on this host,
+      // foreground UI windows (including `steamwebhelper` in Gamescope) act strictly as UI remotes
+      // so `steamwebhelper` never falls back to 30-second previews or double-plays audio.
+      if (cfg.headless_worker_active && !isDedicatedWorker) {
+        return null;
+      }
+
+      const hasWidevine = await checkWidevineDrm();
+      if (!hasWidevine && !isDedicatedWorker) {
+        console.info(
+          '[SIMP AppleMusicDriver] Browser lacks Widevine CDM (steamwebhelper); delegating audio to headless Widevine worker.'
+        );
+        return null;
+      }
+
       const mk = await ensureMusicKitConfigured(cfg.developer_token, cfg.music_user_token);
       mkRef.current = mk;
       bindMusicKitEvents(mk);
+      defaultSimpClient.reportAppleWorkerEvent('worker_ready', 0, null, null);
       return mk;
     };
 

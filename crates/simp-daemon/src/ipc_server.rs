@@ -364,6 +364,11 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                     Err(e) => (None, Some(e.to_string())),
                 };
             let apple_authenticated = creds.music_user_token.is_some();
+            let headless_worker_active = if apple_authenticated {
+                simp_core::sinks::apple::AppleMusicSink::ensure_headless_widevine_worker()
+            } else {
+                simp_core::sinks::apple::AppleMusicSink::is_headless_worker_active()
+            };
 
             ServerEnvelope::QueryResponse {
                 req_id,
@@ -377,6 +382,7 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                     "developer_token": dev_token,
                     "music_user_token": creds.music_user_token,
                     "apple_authenticated": apple_authenticated,
+                    "headless_worker_active": headless_worker_active,
                     "status_error": status_error,
                 }),
                 error: None,

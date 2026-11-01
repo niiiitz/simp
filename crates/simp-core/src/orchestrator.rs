@@ -69,6 +69,9 @@ impl AudioOrchestrator {
                 .is_some()
         };
         apple_sink.is_authenticated = initial_apple_auth;
+        if initial_apple_auth {
+            AppleMusicSink::ensure_headless_widevine_worker();
+        }
 
         let mpris_controls = initialize_mpris(cmd_tx);
 
@@ -447,6 +450,9 @@ impl AudioOrchestrator {
                 }
                 self.apple_sink.is_authenticated = is_auth;
                 self.state.lock().unwrap().apple_authenticated = is_auth;
+                if is_auth {
+                    AppleMusicSink::ensure_headless_widevine_worker();
+                }
                 let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
                 let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
                     total_albums,
@@ -552,6 +558,22 @@ impl AudioOrchestrator {
                         let _ = self
                             .broadcast_tx
                             .send(PlaybackEvent::ProgressTick { position_ms });
+                    }
+                    "worker_ready" => {
+                        let (should_replay, cur_uri, cur_pos) = {
+                            let st = self.state.lock().unwrap();
+                            (
+                                st.active_engine == ActiveEngine::AppleMusic && st.is_playing,
+                                st.current_track.as_ref().map(|t| t.uri.clone()),
+                                st.position_ms,
+                            )
+                        };
+                        if should_replay {
+                            if let Some(uri) = cur_uri {
+                                self.apple_sink
+                                    .emit_load_and_play(&self.broadcast_tx, &uri, cur_pos);
+                            }
+                        }
                     }
                     _ => {}
                 }
