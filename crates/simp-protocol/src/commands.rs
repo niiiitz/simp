@@ -20,6 +20,7 @@ pub enum AudioCommand {
     SetRepeat { mode: RepeatMode },
     CycleRepeat,
     AddLibraryPath { path: String },
+    RemoveLibraryPath { path: String },
     RescanStorage,
     SuspendForSleep,
     ShutdownDaemon,

@@ -185,6 +185,7 @@ export class SimpDaemonClient {
   public playPlaylist = (playlist_id: string, shuffle = false) =>
     this.sendCommand('play_playlist', { playlist_id, shuffle });
   public addLibraryPath = (path: string) => this.sendCommand('add_library_path', { path });
+  public removeLibraryPath = (path: string) => this.sendCommand('remove_library_path', { path });
   public rescanStorage = () => this.sendCommand('rescan_storage');
   public shutdownDaemon = () => this.sendCommand('shutdown_daemon');
 

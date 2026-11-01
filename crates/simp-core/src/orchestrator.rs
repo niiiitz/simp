@@ -299,16 +299,65 @@ impl AudioOrchestrator {
                 self.handle_command(AudioCommand::SetRepeat { mode: next_mode });
             }
             AudioCommand::AddLibraryPath { path } => {
-                let trimmed = path.trim().to_string();
-                if !trimmed.is_empty() {
+                let normalized = crate::library::vdf::normalize_platform_path(&path)
+                    .to_string_lossy()
+                    .to_string();
+                if !normalized.is_empty() {
                     let mut cfg = self.settings.lock().unwrap();
-                    let already_exists = cfg.library.custom_paths.values().any(|p| p == &trimmed);
-                    if !already_exists {
-                        let next_key = cfg.library.custom_paths.len().to_string();
-                        cfg.library.custom_paths.insert(next_key, trimmed);
+                    let mut unique_paths: Vec<String> = Vec::new();
+                    for existing in cfg.library.custom_paths.values() {
+                        let norm_existing = crate::library::vdf::normalize_platform_path(existing)
+                            .to_string_lossy()
+                            .to_string();
+                        if !norm_existing.is_empty() && !unique_paths.contains(&norm_existing) {
+                            unique_paths.push(norm_existing);
+                        }
+                    }
+                    if !unique_paths.contains(&normalized) {
+                        unique_paths.push(normalized);
+                    }
+                    cfg.library.custom_paths.clear();
+                    for (idx, p) in unique_paths.into_iter().enumerate() {
+                        cfg.library.custom_paths.insert(idx.to_string(), p);
                     }
                 }
                 self.handle_command(AudioCommand::RescanStorage);
+            }
+            AudioCommand::RemoveLibraryPath { path } => {
+                let target_norm = crate::library::vdf::normalize_platform_path(&path)
+                    .to_string_lossy()
+                    .to_string();
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    let mut remaining: Vec<String> = Vec::new();
+                    for existing in cfg.library.custom_paths.values() {
+                        let norm_existing = crate::library::vdf::normalize_platform_path(existing)
+                            .to_string_lossy()
+                            .to_string();
+                        if existing != &path
+                            && norm_existing != target_norm
+                            && !remaining.contains(&norm_existing)
+                        {
+                            remaining.push(norm_existing);
+                        }
+                    }
+                    cfg.library.custom_paths.clear();
+                    for (idx, p) in remaining.into_iter().enumerate() {
+                        cfg.library.custom_paths.insert(idx.to_string(), p);
+                    }
+                }
+                let _ = self.db.remove_mount(&path);
+                let _ = self.db.remove_mount(&target_norm);
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+                if let Ok(mounts) = self.db.get_mounts() {
+                    let _ = self
+                        .broadcast_tx
+                        .send(PlaybackEvent::StorageMountsChanged { mounts });
+                }
             }
             AudioCommand::RescanStorage => {
                 let db = self.db.clone();

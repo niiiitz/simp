@@ -136,6 +136,24 @@ impl LibraryDatabase {
         Ok(())
     }
 
+    /// Removes a storage mount and its associated tracks, cleaning up any orphaned albums.
+    pub fn remove_mount(&self, mount_root: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM tracks WHERE mount_root = ?1",
+            params![mount_root],
+        )?;
+        conn.execute(
+            "DELETE FROM storage_mounts WHERE mount_root = ?1",
+            params![mount_root],
+        )?;
+        conn.execute(
+            "DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn get_mounts(&self) -> Result<Vec<MountStatus>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

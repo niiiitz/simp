@@ -152,7 +152,9 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
                     ClientEnvelope::Command { command } => {
                         let persist = matches!(
                             command,
-                            AudioCommand::SetVolume { .. } | AudioCommand::AddLibraryPath { .. }
+                            AudioCommand::SetVolume { .. }
+                                | AudioCommand::AddLibraryPath { .. }
+                                | AudioCommand::RemoveLibraryPath { .. }
                         );
                         let _ = state.cmd_tx.send(command);
                         if persist {

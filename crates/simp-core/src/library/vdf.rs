@@ -102,18 +102,42 @@ pub fn parse_library_roots_from_vdf(vdf_text: &str) -> Vec<PathBuf> {
     roots
 }
 
-/// Converts Windows VDF paths (`"C:\\Program Files (x86)\\Steam"` or `"D:\\SteamLibrary"`)
-/// into WSL2 mount paths (`"/mnt/c/Program Files (x86)/Steam"`) when running on Linux/WSL,
-/// while leaving native Linux paths (`"/home/deck/.local/share/Steam"`) untouched.
+/// Converts Windows VDF/Explorer paths (`"C:\\Users\\...\\Music"` or `"D:\\SteamLibrary"`),
+/// bash-escaped paths (`"/mnt/c/Users/.../Apple\\ Music/"`), and `~/...` paths into clean
+/// canonical platform paths on Linux/WSL2.
 pub fn normalize_platform_path(raw_path: &str) -> PathBuf {
-    let unescaped = raw_path.replace("\\\\", "\\");
-    let bytes = unescaped.as_bytes();
+    let trimmed = raw_path.trim().trim_matches('"').trim_matches('\'').trim();
 
-    // Detect Windows drive letter prefix like `C:\` or `D:/`
-    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+    // 1. Expand leading `~/` to the user's home directory
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest.replace("\\ ", " ").trim_end_matches('/'));
+        }
+    }
+
+    // 2. If it starts with `/` (POSIX / WSL `/mnt/c/...` path), unescape shell `\ ` spaces
+    if trimmed.starts_with('/') {
+        let unescaped_spaces = trimmed.replace("\\\\ ", " ").replace("\\ ", " ");
+        let clean = if unescaped_spaces.len() > 1 {
+            unescaped_spaces.trim_end_matches('/')
+        } else {
+            &unescaped_spaces
+        };
+        return PathBuf::from(clean);
+    }
+
+    // 3. Detect Windows drive letter prefix like `C:\` or `D:/`
+    let unescaped = trimmed.replace("\\\\", "\\");
+    let bytes = unescaped.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
         let drive_letter = (bytes[0] as char).to_ascii_lowercase();
         let rest = unescaped[3..].replace('\\', "/");
-        let wsl_path = PathBuf::from(format!("/mnt/{drive_letter}/{rest}"));
+        let rest_clean = rest.trim_end_matches('/');
+        let wsl_path = PathBuf::from(format!("/mnt/{drive_letter}/{rest_clean}"));
         if Path::new("/mnt").is_dir() {
             return wsl_path;
         }
@@ -169,6 +193,18 @@ mod tests {
         assert_eq!(
             normalize_platform_path(linux_path),
             PathBuf::from("/home/deck/.local/share/Steam")
+        );
+
+        let escaped_wsl_path = r"/mnt/c/Users/niiii/Music/Apple\ Music/Media/Music/";
+        assert_eq!(
+            normalize_platform_path(escaped_wsl_path),
+            PathBuf::from("/mnt/c/Users/niiii/Music/Apple Music/Media/Music")
+        );
+
+        let win_apple_path = r"C:\Users\niiii\Music\Apple Music\Media\Music";
+        assert_eq!(
+            normalize_platform_path(win_apple_path),
+            PathBuf::from("/mnt/c/Users/niiii/Music/Apple Music/Media/Music")
         );
     }
 

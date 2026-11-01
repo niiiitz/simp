@@ -295,6 +295,12 @@ export const App: React.FC = () => {
     window.setTimeout(() => refreshLibraryData(), 700);
   };
 
+  const handleRemoveFolder = (mountRoot: string, label: string) => {
+    defaultSimpClient.removeLibraryPath(mountRoot);
+    showToast(`Removed mount: ${label}`);
+    window.setTimeout(() => refreshLibraryData(), 350);
+  };
+
   const track = snap?.current_track;
   const selectedAlbumObj =
     browserTarget?.kind === 'album' ? albums.find((a) => a.id === browserTarget.id) : null;
@@ -310,7 +316,7 @@ export const App: React.FC = () => {
         color: '#d4d4dc',
         display: 'flex',
         flexDirection: 'column',
-        opacity: isDimmed ? 0.14 : activeOpacity,
+        opacity: isDimmed ? 0.3 : activeOpacity,
         transform: `translate3d(${orbitX}px, ${orbitY}px, 0)`,
         transition: 'opacity 350ms ease, transform 4000ms linear',
         position: 'relative',
@@ -780,20 +786,68 @@ export const App: React.FC = () => {
               <div
                 key={m.mount_root}
                 style={{
-                  padding: '10px 12px',
+                  padding: '8px 10px',
                   borderRadius: 10,
                   background: '#0a0a0e',
                   border: '1px solid #1e1e26',
                   display: 'flex',
                   justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 8,
                   fontSize: 12,
-                  opacity: m.is_online ? 1 : 0.5,
+                  opacity: m.is_online ? 1 : 0.65,
                 }}
               >
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {m.is_online ? '🟢' : '⚫'} {m.label}
-                </span>
-                <span style={{ fontFamily: 'monospace', color: '#2aa3c4' }}>{m.track_count}</span>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div
+                    style={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {m.is_online ? '🟢' : '⚫'} {m.label}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                      color: '#71717a',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={m.mount_root}
+                  >
+                    {m.mount_root}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                  <span style={{ fontFamily: 'monospace', color: '#2aa3c4', fontWeight: 700 }}>
+                    {m.track_count}
+                  </span>
+                  <button
+                    onClick={() => handleRemoveFolder(m.mount_root, m.label)}
+                    title={`Remove mount: ${m.mount_root}`}
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: 8,
+                      background: '#181216',
+                      border: '1px solid #3f2228',
+                      color: '#f87171',
+                      fontSize: 12,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
               </div>
             ))}
 
@@ -1215,6 +1269,7 @@ export const App: React.FC = () => {
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {[
                   { label: 'Steam OSTs (C:)', path: '/mnt/c/Program Files (x86)/Steam/steamapps/music' },
+                  { label: 'Apple Music (C:)', path: '/mnt/c/Users/niiii/Music/Apple Music/Media/Music' },
                   { label: 'Windows Public Music', path: '/mnt/c/Users/Public/Music' },
                   { label: 'SteamOS ~/Music', path: '/home/deck/Music' },
                 ].map((preset) => (
@@ -1235,6 +1290,65 @@ export const App: React.FC = () => {
                   </button>
                 ))}
               </div>
+
+              {/* Active Mounts List with 1-Tap Remove inside Modal */}
+              {snap?.mounts && snap.mounts.length > 0 && (
+                <div
+                  style={{
+                    maxHeight: 140,
+                    overflowY: 'auto',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 4,
+                    marginTop: 4,
+                  }}
+                >
+                  {snap.mounts.map((m) => (
+                    <div
+                      key={m.mount_root}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                        padding: '6px 10px',
+                        borderRadius: 8,
+                        background: '#08080c',
+                        border: '1px solid #1c1c26',
+                        fontSize: 11,
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontFamily: 'monospace',
+                          color: m.is_online ? '#c8c8d2' : '#71717a',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {m.is_online ? '🟢' : '⚫'} {m.mount_root} ({m.track_count} tracks)
+                      </span>
+                      <button
+                        onClick={() => handleRemoveFolder(m.mount_root, m.label)}
+                        style={{
+                          padding: '2px 8px',
+                          borderRadius: 6,
+                          background: '#1f1216',
+                          border: '1px solid #4c2228',
+                          color: '#f87171',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          flexShrink: 0,
+                        }}
+                      >
+                        Remove ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div
