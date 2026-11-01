@@ -562,12 +562,12 @@ fn spawn_headless_widevine_browser() -> Option<Child> {
         }
     }
 
-    // 3. Flatpak Chromium-family browsers (`--headless=new`)
-    for app_id in [
-        "com.google.Chrome",
-        "com.brave.Browser",
-        "com.microsoft.Edge",
-        "org.chromium.Chromium",
+    // 3. Flatpak Chromium-family browsers (`--headless=new` with isolated `--user-data-dir` + `WidevineCdm`)
+    for (app_id, rel_cfg) in [
+        ("com.google.Chrome", ".var/app/com.google.Chrome/config/google-chrome"),
+        ("com.brave.Browser", ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"),
+        ("com.microsoft.Edge", ".var/app/com.microsoft.Edge/config/microsoft-edge"),
+        ("org.chromium.Chromium", ".var/app/org.chromium.Chromium/config/chromium"),
     ] {
         if Command::new("flatpak")
             .args(["info", app_id])
@@ -577,6 +577,12 @@ fn spawn_headless_widevine_browser() -> Option<Child> {
             .map(|s| s.success())
             .unwrap_or(false)
         {
+            let cfg_root = home.join(rel_cfg);
+            let worker_dir = cfg_root.join("simp-widevine-worker");
+            let _ = std::fs::create_dir_all(&worker_dir);
+            if cfg_root.join("WidevineCdm").is_dir() && !worker_dir.join("WidevineCdm").is_dir() {
+                copy_dir_recursive(&cfg_root.join("WidevineCdm"), &worker_dir.join("WidevineCdm"));
+            }
             let mut cmd = Command::new("flatpak");
             cmd.args([
                 "run",
@@ -584,6 +590,7 @@ fn spawn_headless_widevine_browser() -> Option<Child> {
                 "--headless=new",
                 "--autoplay-policy=no-user-gesture-required",
                 "--enable-audio-service",
+                &format!("--user-data-dir={}", worker_dir.display()),
                 worker_url,
             ])
             .stdin(Stdio::null())

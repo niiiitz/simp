@@ -11,8 +11,8 @@ Environment="XDG_RUNTIME_DIR=/run/user/%U"
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus"
 Environment="MIMALLOC_PURGE_DELAY=100"
 Environment="MIMALLOC_RESERVE_ERRORS=0"
-Restart=on-failure
-RestartSec=3
+Restart=always
+RestartSec=1
 StandardOutput=journal
 StandardError=journal
 

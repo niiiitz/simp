@@ -12,9 +12,88 @@ import {
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
+let cachedSteamFocusable: any = null;
+
+/**
+ * Discovers Valve's native `Focusable` React component inside `window.webpackChunksteamui`
+ * using the exact prop-signature matcher from `@decky/ui` (`flow-children`, `onActivate`, `onCancel`,
+ * `focusClassName`, `focusWithinClassName`).
+ */
+function resolveSteamFocusable(): any {
+  if (cachedSteamFocusable) return cachedSteamFocusable;
+  if ((window as any).DFL?.Focusable) {
+    cachedSteamFocusable = (window as any).DFL.Focusable;
+    return cachedSteamFocusable;
+  }
+
+  try {
+    const chunk = (window as any).webpackChunksteamui;
+    if (!Array.isArray(chunk)) return null;
+
+    let webpackRequire: any;
+    chunk.push([
+      [Symbol('simp-decky-focusable')],
+      {},
+      (r: any) => {
+        webpackRequire = r;
+      },
+    ]);
+    if (!webpackRequire || !webpackRequire.m) return null;
+
+    const requiredProps = [
+      'flow-children',
+      'onActivate',
+      'onCancel',
+      'focusClassName',
+      'focusWithinClassName',
+    ];
+    const matchesFocusable = (fn: any): boolean => {
+      const str =
+        (typeof fn === 'function' && fn.toString?.()) ||
+        (fn?.render && typeof fn.render === 'function' && fn.render.toString?.()) ||
+        '';
+      if (!str) return false;
+      return requiredProps.every((p) => str.includes(p));
+    };
+
+    for (const id of Object.keys(webpackRequire.m)) {
+      let mod: any;
+      try {
+        mod = webpackRequire(id);
+      } catch {
+        continue;
+      }
+      if (!mod) continue;
+      for (const candidate of [mod.default, mod]) {
+        if (!candidate || candidate === window) continue;
+        if (matchesFocusable(candidate)) {
+          cachedSteamFocusable = candidate;
+          return cachedSteamFocusable;
+        }
+        if (typeof candidate === 'object') {
+          for (const key of Object.keys(candidate)) {
+            try {
+              const exp = candidate[key];
+              if (exp && matchesFocusable(exp)) {
+                cachedSteamFocusable = exp;
+                return cachedSteamFocusable;
+              }
+            } catch {
+              // Ignore getter errors
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[SIMP Decky] Failed to resolve Focusable from webpackChunksteamui:', err);
+  }
+  return null;
+}
+
 /**
  * Gamepad-navigable Focusable component.
- * Uses Decky / Steam's native Focusable from `window.DFL` if available,
+ * Uses Valve's native Focusable from `window.webpackChunksteamui` (`@decky/ui` method),
  * and falls back gracefully to a focusable HTML container with standard Steam `Focusable` class & handlers.
  */
 const Focusable: ReactTypes.FC<any> = ({
@@ -26,19 +105,21 @@ const Focusable: ReactTypes.FC<any> = ({
   flowChildren,
   ...rest
 }) => {
-  const DFLFocusable = (window as any).DFL?.Focusable;
+  const SteamFocusable = resolveSteamFocusable();
   const handleClick = (e: any) => {
     if (onActivate) onActivate(e);
     if (onClick) onClick(e);
   };
 
-  if (DFLFocusable) {
+  if (SteamFocusable) {
     return SP_REACT.createElement(
-      DFLFocusable,
+      SteamFocusable,
       {
         onActivate: handleClick,
         onClick: handleClick,
         className: `Focusable ${className}`.trim(),
+        focusClassName: 'gpfocus',
+        focusWithinClassName: 'gpfocuswithin',
         style,
         'flow-children': flowChildren,
         ...rest,
@@ -71,34 +152,35 @@ const Focusable: ReactTypes.FC<any> = ({
  * Pilot Phase 2: Lightweight Decky Loader QAM (`...` Menu) Drawer.
  * Connects directly to `simp --daemon` over `ws://127.0.0.1:18888/ws` with zero Python audio glue.
  */
-const SimpDeckyDrawer: ReactTypes.FC = () => {
+const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
   const { useState, useEffect } = SP_REACT;
   const [snap, setSnap] = useState<SimpStateSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
+  const [reloading, setReloading] = useState(false);
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
   const [drawerTab, setDrawerTab] = useState<'none' | 'albums' | 'playlists'>('none');
   const [preMuteVol, setPreMuteVol] = useState<number>(0.85);
 
+  const refreshCatalogs = () => {
+    defaultSimpClient
+      .query<AlbumRecord[]>('get_albums', { limit: 40, offset: 0 })
+      .then((res) => {
+        setConnected(true);
+        if (Array.isArray(res)) setAlbums(res);
+      })
+      .catch(() => {});
+    defaultSimpClient
+      .query<PlaylistRecord[]>('get_playlists')
+      .then((res) => {
+        setConnected(true);
+        if (Array.isArray(res)) setPlaylists(res);
+      })
+      .catch(() => {});
+  };
+
   useEffect(() => {
     defaultSimpClient.connect();
-
-    const refreshCatalogs = () => {
-      defaultSimpClient
-        .query<AlbumRecord[]>('get_albums', { limit: 40, offset: 0 })
-        .then((res) => {
-          setConnected(true);
-          if (Array.isArray(res)) setAlbums(res);
-        })
-        .catch(() => {});
-      defaultSimpClient
-        .query<PlaylistRecord[]>('get_playlists')
-        .then((res) => {
-          setConnected(true);
-          if (Array.isArray(res)) setPlaylists(res);
-        })
-        .catch(() => {});
-    };
 
     const unsubState = defaultSimpClient.subscribeState((s) => {
       setSnap({ ...s });
@@ -111,6 +193,22 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
       unsubState();
     };
   }, []);
+
+  const handleReloadDaemon = async () => {
+    setReloading(true);
+    try {
+      if (serverApi?.callPluginMethod) {
+        await serverApi.callPluginMethod('restart_daemon', {});
+      }
+    } catch {
+      // Fallback if Decky serverApi isn't exposed or already using v2
+    }
+    window.setTimeout(() => {
+      defaultSimpClient.connect();
+      refreshCatalogs();
+      setReloading(false);
+    }, 800);
+  };
 
   const toggleDrawerTab = (tab: 'albums' | 'playlists') => {
     const next = drawerTab === tab ? 'none' : tab;
@@ -525,18 +623,35 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
         </Focusable>
       )}
 
-      {/* Open Full SIMP Console Button */}
-      <Focusable
-        onActivate={() => window.open('http://127.0.0.1:18888', '_blank')}
-        onClick={() => window.open('http://127.0.0.1:18888', '_blank')}
-        style={{
-          ...btnStyle,
-          minHeight: 40,
-          fontSize: 12,
-          color: '#a1a1aa',
-        }}
-      >
-        ↗ Open Full SIMP Console (:18888)
+      {/* Open Full SIMP Console + Reload Row */}
+      <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 6 }}>
+        <Focusable
+          onActivate={() => window.open('http://127.0.0.1:18888', '_blank')}
+          onClick={() => window.open('http://127.0.0.1:18888', '_blank')}
+          style={{
+            ...btnStyle,
+            minHeight: 40,
+            fontSize: 12,
+            color: '#a1a1aa',
+          }}
+        >
+          ↗ Open Full SIMP Console (:18888)
+        </Focusable>
+        <Focusable
+          onActivate={handleReloadDaemon}
+          onClick={handleReloadDaemon}
+          style={{
+            ...btnStyle,
+            minHeight: 40,
+            padding: '0 12px',
+            fontSize: 12,
+            color: reloading ? '#5bc0de' : '#a1a1aa',
+            borderColor: reloading ? '#2aa3c4' : '#262630',
+          }}
+          title="Reload Daemon & Reconnect"
+        >
+          {reloading ? '⏳' : '🔄 Reload'}
+        </Focusable>
       </Focusable>
     </div>
   );
@@ -545,10 +660,10 @@ const SimpDeckyDrawer: ReactTypes.FC = () => {
 /**
  * Standard Decky Loader plugin entrypoint (`api_version: 1`).
  */
-export default function defineSimpDeckyPlugin() {
+export default function defineSimpDeckyPlugin(serverApi?: any) {
   return {
     title: <div style={{ fontWeight: 800 }}>SIMP Audio Player</div>,
-    content: <SimpDeckyDrawer />,
+    content: <SimpDeckyDrawer serverApi={serverApi} />,
     icon: <span>🎵</span>,
     onDismount() {
       // Daemon remains active in background; no teardown required

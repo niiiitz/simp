@@ -1,27 +1,239 @@
 import asyncio
+import hashlib
+import os
+import pwd
+import shutil
+import socket
 import subprocess
 
+SERVICE_UNIT_TEMPLATE = """[Unit]
+Description=SIMP (Simple Integrated Media Player) Background Audio & UI Daemon
+After=pipewire.service pipewire-pulse.service graphical-session.target
+Wants=pipewire.service
 
-class Plugin:
-    """
-    Minimal Decky Loader lifecycle shim for SIMP (org.simp.player).
-    All audio decoding, library queries, and real-time state sync bypass Python
-    entirely and flow over the local Rust daemon WebSocket (ws://127.0.0.1:18888/ws).
-    """
+[Service]
+Type=simple
+ExecStart=%h/.local/share/simp/bin/simp --daemon
+Environment="SIMP_UI_DIR=%h/.local/share/simp/ui"
+Environment="XDG_RUNTIME_DIR=/run/user/%U"
+Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus"
+Environment="MIMALLOC_PURGE_DELAY=100"
+Environment="MIMALLOC_RESERVE_ERRORS=0"
+Restart=always
+RestartSec=1
+StandardOutput=journal
+StandardError=journal
 
-    async def _main(self):
-        # Ensure the userland systemd daemon is active when Decky loads the plugin
-        try:
+[Install]
+WantedBy=default.target
+"""
+
+
+def _resolve_target_user():
+    user = os.environ.get("DECKY_USER") or "deck"
+    home = os.environ.get("DECKY_USER_HOME") or f"/home/{user}"
+    uid, gid = 1000, 1000
+    try:
+        pw = pwd.getpwnam(user)
+        uid, gid = pw.pw_uid, pw.pw_gid
+        home = pw.pw_dir or home
+    except Exception:
+        pass
+    return user, home, uid, gid
+
+
+def _chown_tree(path: str, uid: int, gid: int):
+    if os.geteuid() != 0 or not os.path.exists(path):
+        return
+    try:
+        os.chown(path, uid, gid)
+    except Exception:
+        pass
+    for root, dirs, files in os.walk(path):
+        for d in dirs:
+            try:
+                os.chown(os.path.join(root, d), uid, gid)
+            except Exception:
+                pass
+        for f in files:
+            try:
+                os.chown(os.path.join(root, f), uid, gid)
+            except Exception:
+                pass
+
+
+def _sha256_file(path: str) -> str:
+    if not os.path.isfile(path):
+        return ""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _is_daemon_listening() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", 18888), timeout=0.35):
+            return True
+    except Exception:
+        return False
+
+
+def _run_as_user(cmd: list[str], user: str, home: str, uid: int, gid: int):
+    env = os.environ.copy()
+    env["HOME"] = home
+    env["USER"] = user
+    env["LOGNAME"] = user
+    env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+    env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+
+    if os.geteuid() == 0:
+        return subprocess.run(
+            ["sudo", "-u", user, "-E", *cmd],
+            env=env,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return subprocess.run(
+        cmd,
+        env=env,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _provision_and_start_userland():
+    plugin_dir = os.environ.get("DECKY_PLUGIN_DIR") or os.path.dirname(
+        os.path.realpath(__file__)
+    )
+    user, home, uid, gid = _resolve_target_user()
+
+    # 1. Ensure user `deck` owns `~/homebrew/plugins/simp-decky` so userland updates work without sudo
+    _chown_tree(plugin_dir, uid, gid)
+
+    install_root = os.path.join(home, ".local", "share", "simp")
+    bin_dest_dir = os.path.join(install_root, "bin")
+    ui_dest_dir = os.path.join(install_root, "ui")
+    local_bin_dir = os.path.join(home, ".local", "bin")
+    systemd_user_dir = os.path.join(home, ".config", "systemd", "user")
+
+    for d in (bin_dest_dir, ui_dest_dir, local_bin_dir, systemd_user_dir):
+        os.makedirs(d, exist_ok=True)
+
+    bundled_bin = os.path.join(plugin_dir, "bin", "simp")
+    bundled_ui = os.path.join(plugin_dir, "ui")
+    dest_bin = os.path.join(bin_dest_dir, "simp")
+    binary_updated = False
+
+    # 2. If `simp-decky.zip` includes the bundled `bin/simp` + `ui/`, install/update them into userland
+    if os.path.isfile(bundled_bin):
+        if _sha256_file(bundled_bin) != _sha256_file(dest_bin):
+            binary_updated = True
+            _run_as_user(
+                ["systemctl", "--user", "stop", "simp.service"],
+                user,
+                home,
+                uid,
+                gid,
+            )
             subprocess.run(
-                ["systemctl", "--user", "start", "simp.service"],
+                ["pkill", "-f", "simp --daemon"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            tmp_dest = dest_bin + ".new"
+            shutil.copy2(bundled_bin, tmp_dest)
+            os.chmod(tmp_dest, 0o755)
+            os.replace(tmp_dest, dest_bin)
+
+        symlink_path = os.path.join(local_bin_dir, "simp")
+        try:
+            if os.path.lexists(symlink_path):
+                os.remove(symlink_path)
+            os.symlink(dest_bin, symlink_path)
         except Exception:
             pass
 
-    async def _unload(self):
-        # Audio daemon intentionally stays alive across QAM reloads
-        pass
+    if os.path.isfile(os.path.join(bundled_ui, "index.html")):
+        shutil.copytree(bundled_ui, ui_dest_dir, dirs_exist_ok=True)
+        binary_updated = True
 
+    # 3. Ensure `~/.config/systemd/user/simp.service` is present and up to date
+    unit_path = os.path.join(systemd_user_dir, "simp.service")
+    with open(unit_path, "w", encoding="utf-8") as f:
+        f.write(SERVICE_UNIT_TEMPLATE)
+
+    _chown_tree(install_root, uid, gid)
+    _chown_tree(os.path.join(home, ".config", "systemd"), uid, gid)
+
+    # 4. Start or restart `simp.service` under target user's systemd session
+    _run_as_user(["systemctl", "--user", "daemon-reload"], user, home, uid, gid)
+    _run_as_user(["systemctl", "--user", "enable", "simp.service"], user, home, uid, gid)
+    if binary_updated or not _is_daemon_listening():
+        _run_as_user(
+            ["systemctl", "--user", "restart", "simp.service"],
+            user,
+            home,
+            uid,
+            gid,
+        )
+    else:
+        _run_as_user(
+            ["systemctl", "--user", "start", "simp.service"],
+            user,
+            home,
+            uid,
+            gid,
+        )
+
+    # 5. Fallback direct spawn if user systemd bus wasn't reachable yet
+    if not _is_daemon_listening() and os.path.isfile(dest_bin):
+        env = os.environ.copy()
+        env["HOME"] = home
+        env["USER"] = user
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+        env["SIMP_UI_DIR"] = ui_dest_dir
+        if os.geteuid() == 0:
+            subprocess.Popen(
+                ["sudo", "-u", user, "-E", dest_bin, "--daemon"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        else:
+            subprocess.Popen(
+                [dest_bin, "--daemon"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
+
+class Plugin:
+    """
+    All-in-One Decky Loader lifecycle supervisor for SIMP (org.simp.player).
+    Automatically provisions/updates `~/.local/share/simp/` from the Decky plugin bundle
+    and supervises `simp.service` across Gaming Mode boots and plugin reloads.
+    """
+
+    async def _main(self):
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _provision_and_start_userland)
+
+    async def restart_daemon(self) -> bool:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _provision_and_start_userland)
+        return _is_daemon_listening()
+
+    async def _unload(self):
+        # Audio daemon intentionally stays alive in userland across QAM reloads
+        pass

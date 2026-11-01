@@ -25,6 +25,15 @@
         height: 100%;
         overflow: hidden;
       }
+      button:focus,
+      button:focus-visible,
+      input:focus,
+      select:focus,
+      [data-focusable="true"]:focus {
+        outline: 2px solid #2aa3c4 !important;
+        outline-offset: 2px !important;
+        box-shadow: 0 0 0 3px rgba(42, 163, 196, 0.35) !important;
+      }
     </style>
   </head>
   <body>

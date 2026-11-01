@@ -199,63 +199,182 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // 6. Keyboard shortcuts (ArrowUp/ArrowDown volume on Lock Screen, Space Play/Pause)
+  // 6. Spatial Focus Navigation Helper (Gamepad D-Pad / Left Stick / Keyboard Arrows)
+  const moveSpatialFocus = useCallback(
+    (dir: 'up' | 'down' | 'left' | 'right') => {
+      setIsDimmed(false);
+      const selector = sourceModalOpen
+        ? '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled]), [data-modal-root="true"] select:not([disabled])'
+        : 'button:not([disabled]), input:not([disabled]), select:not([disabled]), [data-focusable="true"]';
+      const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+      if (nodes.length === 0) return;
+
+      const active = document.activeElement as HTMLElement | null;
+      if (!active || !nodes.includes(active)) {
+        const preferred =
+          nodes.find((el) => el.dataset.defaultFocus === 'true') || nodes[0];
+        preferred.focus();
+        preferred.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        return;
+      }
+
+      const cur = active.getBoundingClientRect();
+      const cx = cur.left + cur.width / 2;
+      const cy = cur.top + cur.height / 2;
+
+      let best: HTMLElement | null = null;
+      let bestScore = Infinity;
+
+      for (const candidate of nodes) {
+        if (candidate === active) continue;
+        const r = candidate.getBoundingClientRect();
+        const tx = r.left + r.width / 2;
+        const ty = r.top + r.height / 2;
+        const dx = tx - cx;
+        const dy = ty - cy;
+
+        if (dir === 'right' && dx <= 6) continue;
+        if (dir === 'left' && dx >= -6) continue;
+        if (dir === 'down' && dy <= 6) continue;
+        if (dir === 'up' && dy >= -6) continue;
+
+        const primary = dir === 'left' || dir === 'right' ? Math.abs(dx) : Math.abs(dy);
+        const cross = dir === 'left' || dir === 'right' ? Math.abs(dy) : Math.abs(dx);
+        const score = primary + cross * 2.6;
+
+        if (score < bestScore) {
+          bestScore = score;
+          best = candidate;
+        }
+      }
+
+      if (best) {
+        best.focus();
+        best.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+    },
+    [sourceModalOpen]
+  );
+
+  // 7. Keyboard shortcuts (Arrow keys navigate or adjust volume/seek, Enter/Space activates)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+        if (e.key === 'Escape') {
+          (e.target as HTMLElement).blur();
+        }
+        return;
+      }
 
       if (e.key === 'ArrowUp') {
         e.preventDefault();
-        applyVolume(currentVolume + 0.05);
+        moveSpatialFocus('up');
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
-        applyVolume(currentVolume - 0.05);
+        moveSpatialFocus('down');
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
-        defaultSimpClient.seekRelative(-10_000);
+        moveSpatialFocus('left');
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
-        defaultSimpClient.seekRelative(10_000);
+        moveSpatialFocus('right');
+      } else if (e.key === 'Escape' || e.key === 'Backspace') {
+        if (sourceModalOpen) {
+          e.preventDefault();
+          setSourceModalOpen(false);
+        } else if (view === 'browser') {
+          e.preventDefault();
+          setView('lock');
+        }
       } else if (e.key === ' ') {
-        e.preventDefault();
-        defaultSimpClient.togglePlayPause();
+        if (document.activeElement === document.body || !document.activeElement) {
+          e.preventDefault();
+          defaultSimpClient.togglePlayPause();
+        }
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [applyVolume, currentVolume]);
+  }, [moveSpatialFocus, sourceModalOpen, view]);
 
-  // 7. HTML5 Gamepad API polling for Steam Deck / Steam Machine controllers
+  // 8. HTML5 Gamepad API polling across all connected controllers (D-Pad + Left/Right Sticks + ABXY/Bumpers/Triggers)
   useEffect(() => {
-    let prevButtons: boolean[] = [];
+    const prevButtonsByPad = new Map<number, boolean[]>();
+    const prevAxisDirByPad = new Map<number, string | null>();
 
     const poll = window.setInterval(() => {
-      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-      const pad = pads[0];
-      if (!pad) return;
+      const rawPads = navigator.getGamepads ? navigator.getGamepads() : [];
+      for (const pad of rawPads) {
+        if (!pad || !pad.connected) continue;
 
-      const pressed = (idx: number) => !!pad.buttons[idx]?.pressed && !prevButtons[idx];
+        const prevButtons = prevButtonsByPad.get(pad.index) || [];
+        const pressed = (idx: number) => !!pad.buttons[idx]?.pressed && !prevButtons[idx];
 
-      if (pressed(0)) defaultSimpClient.togglePlayPause(); // A
-      if (pressed(1)) setSourceModalOpen(false); // B
-      if (pressed(2)) defaultSimpClient.setShuffle(!snap?.shuffle); // X
-      if (pressed(3)) defaultSimpClient.cycleRepeat(); // Y
-      if (pressed(4)) setView('lock'); // L1
-      if (pressed(5)) setView('browser'); // R1
-      if (pressed(6)) defaultSimpClient.seekRelative(-10_000); // L2 (Rewind 10s)
-      if (pressed(7)) defaultSimpClient.seekRelative(10_000); // R2 (Fast-Forward 10s)
-      if (pressed(8)) setSourceModalOpen((v) => !v); // Select
-      if (pressed(12)) applyVolume(currentVolume + 0.05); // D-Up (+5% Volume)
-      if (pressed(13)) applyVolume(currentVolume - 0.05); // D-Down (-5% Volume)
-      if (pressed(14)) defaultSimpClient.previous(); // D-Left (Previous Track)
-      if (pressed(15)) defaultSimpClient.next(); // D-Right (Next Track)
+        if (pressed(0)) {
+          // A Button: Activate focused element, or toggle Play/Pause if nothing focused
+          setIsDimmed(false);
+          const active = document.activeElement as HTMLElement | null;
+          if (active && active !== document.body && typeof active.click === 'function') {
+            active.click();
+          } else {
+            defaultSimpClient.togglePlayPause();
+          }
+        }
+        if (pressed(1)) {
+          // B Button: Close modal or return to Player view
+          setIsDimmed(false);
+          if (sourceModalOpen) {
+            setSourceModalOpen(false);
+          } else if (view === 'browser') {
+            setView('lock');
+          }
+        }
+        if (pressed(2)) defaultSimpClient.setShuffle(!snap?.shuffle); // X
+        if (pressed(3)) defaultSimpClient.cycleRepeat(); // Y
+        if (pressed(4)) setView('lock'); // L1
+        if (pressed(5)) setView('browser'); // R1
+        if (pressed(6)) defaultSimpClient.seekRelative(-10_000); // L2 (Rewind 10s)
+        if (pressed(7)) defaultSimpClient.seekRelative(10_000); // R2 (Fast-Forward 10s)
+        if (pressed(8) || pressed(9)) setSourceModalOpen((v) => !v); // Select / Start
+        if (pressed(12)) moveSpatialFocus('up'); // D-Up
+        if (pressed(13)) moveSpatialFocus('down'); // D-Down
+        if (pressed(14)) moveSpatialFocus('left'); // D-Left
+        if (pressed(15)) moveSpatialFocus('right'); // D-Right
 
-      prevButtons = pad.buttons.map((b) => b.pressed);
+        // Left Stick 2D Spatial Navigation (with edge-trigger debounce)
+        const lx = pad.axes[0] ?? 0;
+        const ly = pad.axes[1] ?? 0;
+        let stickDir: 'up' | 'down' | 'left' | 'right' | null = null;
+        if (ly < -0.55) stickDir = 'up';
+        else if (ly > 0.55) stickDir = 'down';
+        else if (lx < -0.55) stickDir = 'left';
+        else if (lx > 0.55) stickDir = 'right';
+
+        const prevDir = prevAxisDirByPad.get(pad.index) || null;
+        if (stickDir && stickDir !== prevDir) {
+          moveSpatialFocus(stickDir);
+        }
+        prevAxisDirByPad.set(pad.index, stickDir);
+
+        // Right Stick Y-Axis Volume Adjustment
+        const ry = pad.axes[3] ?? 0;
+        if (Math.abs(ry) > 0.6) {
+          applyVolume(currentVolume + (ry < 0 ? 0.02 : -0.02));
+        }
+
+        prevButtonsByPad.set(
+          pad.index,
+          pad.buttons.map((b) => b.pressed)
+        );
+      }
     }, 50);
 
     return () => window.clearInterval(poll);
-  }, [snap?.shuffle, applyVolume, currentVolume]);
+  }, [snap?.shuffle, applyVolume, currentVolume, moveSpatialFocus, sourceModalOpen, view]);
 
   // 8. Playlist & Custom Folder Handlers
   const handleCreatePlaylist = async () => {
@@ -1243,6 +1362,7 @@ export const App: React.FC = () => {
           }}
         >
           <div
+            data-modal-root="true"
             style={{
               width: 560,
               background: '#0a0a0e',
@@ -1782,25 +1902,6 @@ export const App: React.FC = () => {
                   )}
                 </div>
               )}
-            </div>
-
-            <div
-              style={{
-                minHeight: 54,
-                padding: '10px 14px',
-                borderRadius: 12,
-                background: '#121218',
-                border: '1px solid #24242e',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-              }}
-            >
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 700 }}>🟢 Spotify Premium</div>
-                <div style={{ fontSize: 12, color: '#8e8e99' }}>PKCE OAuth + Spotify Connect</div>
-              </div>
-              <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#0d9488' }}>Phase 3</span>
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6 }}>

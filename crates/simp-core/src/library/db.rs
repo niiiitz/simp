@@ -553,7 +553,7 @@ impl LibraryDatabase {
     }
 
     /// Imports a batch of streaming tracks (and optional album / playlist container) from
-    /// Apple Music (`source = "apple_music"`) or Spotify (`source = "spotify"`) into SQLite.
+    /// Apple Music (`source = "apple_music"`) into SQLite.
     pub fn import_catalog_bundle(
         &self,
         source: &str,

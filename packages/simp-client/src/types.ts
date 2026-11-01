@@ -1,4 +1,4 @@
-export type ActiveEngine = 'local' | 'spotify' | 'apple_music' | 'none';
+export type ActiveEngine = 'local' | 'apple_music' | 'none';
 export type RepeatMode = 'off' | 'queue' | 'track';
 
 export interface TrackMetadata {
@@ -62,7 +62,6 @@ export interface SimpStateSnapshot {
   queue_index: number;
   mounts: MountStatus[];
   power: PowerState;
-  spotify_authenticated: boolean;
   apple_authenticated: boolean;
 }
 

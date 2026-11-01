@@ -37,7 +37,6 @@ export class SimpDaemonClient {
     queue_index: 0,
     mounts: [],
     power: { on_battery: false, battery_pct: null },
-    spotify_authenticated: false,
     apple_authenticated: false,
   };
 
@@ -81,7 +80,6 @@ export class SimpDaemonClient {
         queue_index: msg.queue_index ?? 0,
         mounts: msg.mounts ?? [],
         power: msg.power ?? { on_battery: false, battery_pct: null },
-        spotify_authenticated: !!msg.spotify_authenticated,
         apple_authenticated: !!msg.apple_authenticated,
       };
       this.notifyState();

@@ -87,7 +87,9 @@ mkdir -p \
   "${OUT_DIR}/ui" \
   "${OUT_DIR}/systemd" \
   "${OUT_DIR}/desktop" \
-  "${OUT_DIR}/simp-decky/dist"
+  "${OUT_DIR}/simp-decky/dist" \
+  "${OUT_DIR}/simp-decky/bin" \
+  "${OUT_DIR}/simp-decky/ui"
 
 cp "${REPO_ROOT}/target/release/simp" "${OUT_DIR}/bin/simp"
 cp -r "${REPO_ROOT}/ui/dist/"* "${OUT_DIR}/ui/"
@@ -98,6 +100,9 @@ cp "${REPO_ROOT}/decky-plugin/plugin.json" "${OUT_DIR}/simp-decky/"
 cp "${REPO_ROOT}/decky-plugin/package.json" "${OUT_DIR}/simp-decky/"
 cp "${REPO_ROOT}/decky-plugin/main.py" "${OUT_DIR}/simp-decky/"
 cp "${REPO_ROOT}/decky-plugin/dist/"* "${OUT_DIR}/simp-decky/dist/"
+cp "${OUT_DIR}/bin/simp" "${OUT_DIR}/simp-decky/bin/simp"
+cp -r "${OUT_DIR}/ui/"* "${OUT_DIR}/simp-decky/ui/"
+chmod +x "${OUT_DIR}/simp-decky/bin/simp"
 
 cp "${REPO_ROOT}/packaging/scripts/install-steamos.sh" "${OUT_DIR}/install-steamos.sh"
 cp "${REPO_ROOT}/packaging/scripts/uninstall-steamos.sh" "${OUT_DIR}/uninstall-steamos.sh"

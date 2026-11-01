@@ -8,18 +8,18 @@
   [![Status: v0.1.0-alpha Pilot](https://img.shields.io/badge/version-0.1.0--alpha%20(Pilot)-00e5ff?style=flat-square)](#)
   [![Platform: SteamOS / Linux](https://img.shields.io/badge/platform-SteamOS%20%7C%20Bazzite%20%7C%20WSL2-1a1a1a?style=flat-square)](#)
   [![Backend: Rust + Tokio](https://img.shields.io/badge/backend-Rust%20%2B%20Tokio-dea584?style=flat-square)](#)
-  [![UI: Tauri v2 + React](https://img.shields.io/badge/UI-Tauri%20v2%20%2B%20React-24c8db?style=flat-square)](#)
+  [![UI: Console Web + Decky QAM](https://img.shields.io/badge/UI-React%20%2B%20Decky%20QAM-24c8db?style=flat-square)](#)
 </div>
 
 ---
 
 ## Why SIMP?
 
-Running desktop media apps alongside demanding AAA games in SteamOS Game Mode burns hundreds of megabytes of RAM, drains battery, and breaks console immersion. **SIMP** separates playback from presentation:
+Running heavyweight desktop media apps alongside demanding AAA games in SteamOS Game Mode burns hundreds of megabytes of RAM, drains battery, and breaks console immersion. **SIMP** separates playback from presentation:
 
-* **Headless Rust Audio Daemon (`simp --daemon`):** Powered by `tokio` (2 worker threads) and `mimalloc` with **zero WebView overhead** when the UI is closed, plus 60-second PipeWire DSP idle-suspend (`0.00%` CPU when paused).
+* **Headless Rust Audio Daemon (`simp --daemon`):** Powered by `tokio` (2 worker threads) and `mimalloc` with **zero WebView overhead** when playing local/OST tracks while the UI is closed, plus 60-second PipeWire DSP idle-suspend (`0.00%` CPU when paused).
 * **Native SteamOS Quick Access Menu (QAM) & `MPRIS2`:** Hooks into Linux `MPRIS2` (`org.mpris.MediaPlayer2.org.simp.player`) via `souvlaki` and pairs with a zero-Python-backend `simp-decky` QAM drawer over local WebSocket (`ws://127.0.0.1:18888/ws`).
-* **OLED Console Mode UI (`simp`):** True-black (`#000000`) interface with 30-second battery auto-dim + wake-tap guard, 60fps `requestAnimationFrame` scrub bar, and hybrid **Touch (`>= 48x48px`) + Gamepad (`ABXY` / `L1/R1` / `L2/R2`)** navigation.
+* **OLED Console Mode UI (`simp`):** True-black (`#000000`) interface with 30-second battery auto-dim + wake-tap guard, 60fps `requestAnimationFrame` scrub bar, and hybrid **Touch (`>= 48x48px`) + Gamepad (`D-Pad` / `Sticks` / `ABXY` / `L1/R1` / `L2/R2`)** spatial navigation.
 
 ---
 
@@ -30,13 +30,14 @@ Running desktop media apps alongside demanding AAA games in SteamOS Game Mode bu
 * [x] **Valve Hybrid Storage:** `.vdf` settings (`~/.config/simp/settings.vdf`) + SQLite `WAL` index (`~/.local/share/simp/library.db`) with non-destructive USB/MicroSD hotplug tracking.
 * [x] **Local Audio & Steam Soundtracks:** `rodio` + `symphonia` playback & seeking (`FLAC`, `MP3`, `WAV`, `M4A`, `OGG`, `OPUS`), `libraryfolders.vdf` discovery (SteamOS + WSL2 Windows mounts), `.mp3`/`.wav` twin deduplication, and `album_art.png` / ID3 cover extraction.
 * [x] **Handheld Safeguards:** Anti-runaway-skip circuit breaker (pauses after 3 consecutive unreachable tracks), 60s PipeWire idle-suspend, interactive master volume persistence, custom folder picker, and SQLite playlist builder.
+* [x] **Full Controller Spatial Navigation:** Native Valve `Focusable` discovery (`webpackChunksteamui`) inside `simp-decky` QAM plus 2D D-Pad / Analog Stick spatial focus navigation across the Full Console UI.
 
-### 🚧 Pilot Phase 3 — Spotify Premium Engine *(Next Up)*
-* [ ] **Port `8888` PKCE OAuth Trap:** Single browser sign-in authenticating both `rspotify` library/playlist sync (`moka` cache) and native `librespot` encrypted audio streaming + Spotify Connect.
-* [ ] **Seamless Mixed-Queue Transitions:** Interleave local tracks, Steam OSTs, and Spotify tracks with normalized volume.
+### 🧪 Pilot Phase 3 — Apple Music Engine *(In Active Testing)*
+* [x] **Native Rust `ES256` Developer Token Signer:** Signs Apple `MusicKit` Developer JWTs (`alg: ES256`, IEEE P1363 64-byte signature) and embeds public publisher tokens at release build time.
+* [x] **SQLite Catalog & Playlist Sync:** Imports Apple Music user playlists (`🍎`) and library songs into `library.db`.
+* [ ] **SteamOS / Gamescope Widevine DRM Architecture Refinement:** Evaluating clean, non-fragile DRM playback packaging on SteamOS (`gamescope`) where `steamwebhelper` lacks Widevine CDM.
 
-### ⏳ Pilot Phase 4 — Apple Music Virtual Sink *(Planned)*
-* [ ] **Lazy-Loaded `<AppleMusicDriver />`:** On-demand `MusicKit JS v3` virtual sink (`AppleMusicSink`) for FairPlay DRM streams without bloating pure-Rust local/Spotify playback.
+> **Scope Note:** Spotify integration has been permanently dropped from the SIMP roadmap due to restrictive third-party developer API terms and seat quota limits.
 
 ### 🔮 Post-Pilot (`v0.2+`)
 * [ ] **External USB Optical CD-ROM (`cdda://`):** Plug-and-play `/dev/sr0` Audio CD playback with MusicBrainz DiscID + Cover Art Archive lookup.
@@ -64,7 +65,7 @@ simp/
 │   ├── simp-protocol/    # Shared serde command, event & metadata contracts
 │   ├── simp-core/        # Audio Orchestrator, sinks, VDF/SQLite indexer & MPRIS2
 │   └── simp-daemon/      # Headless systemd service + WebSocket / Artwork HTTP server
-├── src-tauri/            # Unified `simp` binary (`--daemon` headless vs `--ui` Tauri v2)
+├── src-tauri/            # Unified `simp` binary (`--daemon` headless vs `--ui` launcher)
 ├── packages/simp-client/ # Shared TypeScript WebSocket SDK (`@simp/client`)
 ├── ui/                   # OLED Console Mode React + Vite frontend
 └── decky-plugin/         # `simp-decky` SteamOS Quick Access Menu (QAM) drawer

@@ -84,7 +84,6 @@ pub enum LibraryQuery {
     GetMountRoots,
     GetSettings,
     GetAppleMusicAuthConfig,
-    StartSpotifyAuth,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

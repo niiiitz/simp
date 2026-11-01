@@ -68,7 +68,6 @@ pub enum ServerEnvelope {
         queue_index: usize,
         mounts: Vec<MountStatus>,
         power: PowerState,
-        spotify_authenticated: bool,
         apple_authenticated: bool,
     },
     QueryResponse {

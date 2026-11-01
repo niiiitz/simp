@@ -5,7 +5,6 @@ use crate::library::vdf::{load_session_state, save_session_state};
 use crate::mpris::{initialize_mpris, update_mpris_metadata, update_mpris_playback};
 use crate::sinks::apple::AppleMusicSink;
 use crate::sinks::local::LocalAudioEngine;
-use crate::sinks::spotify::SpotifyEngine;
 use simp_protocol::{
     ActiveEngine, AudioCommand, PlaybackEvent, RepeatMode, ServerEnvelope, SessionState,
     SimpSettings, TrackMetadata,
@@ -27,7 +26,6 @@ pub struct OrchestratorSnapshot {
     pub current_track: Option<TrackMetadata>,
     pub queue: Vec<TrackMetadata>,
     pub queue_index: usize,
-    pub spotify_authenticated: bool,
     pub apple_authenticated: bool,
 }
 
@@ -36,7 +34,6 @@ pub struct AudioOrchestrator {
     pub settings: Arc<Mutex<SimpSettings>>,
     pub state: Arc<Mutex<OrchestratorSnapshot>>,
     local_engine: LocalAudioEngine,
-    spotify_engine: SpotifyEngine,
     apple_sink: AppleMusicSink,
     mpris_controls: Option<MediaControls>,
     transition_epoch: u64,
@@ -56,9 +53,6 @@ impl AudioOrchestrator {
         let initial_vol = settings.lock().unwrap().audio.master_volume;
         let mut local_engine = LocalAudioEngine::new();
         local_engine.set_volume(initial_vol);
-
-        let mut spotify_engine = SpotifyEngine::new();
-        spotify_engine.set_volume(initial_vol);
 
         let mut apple_sink = AppleMusicSink::new();
         apple_sink.set_volume(initial_vol);
@@ -85,7 +79,6 @@ impl AudioOrchestrator {
             current_track: None,
             queue: Vec::new(),
             queue_index: 0,
-            spotify_authenticated: false,
             apple_authenticated: initial_apple_auth,
         }));
 
@@ -94,7 +87,6 @@ impl AudioOrchestrator {
             settings,
             state,
             local_engine,
-            spotify_engine,
             apple_sink,
             mpris_controls,
             transition_epoch: 0,
@@ -198,10 +190,6 @@ impl AudioOrchestrator {
                         let pos = self.local_engine.get_position_ms();
                         self.set_playing_state(true, pos);
                     }
-                    ActiveEngine::Spotify => {
-                        let pos = self.state.lock().unwrap().position_ms;
-                        self.set_playing_state(true, pos);
-                    }
                     ActiveEngine::AppleMusic => {
                         self.apple_sink.emit_play(&self.broadcast_tx);
                         let pos = self.state.lock().unwrap().position_ms;
@@ -286,7 +274,6 @@ impl AudioOrchestrator {
                 let clamped = volume.clamp(0.0, 1.0);
                 // Simultaneous bidirectional volume normalization across all sinks
                 self.local_engine.set_volume(clamped);
-                self.spotify_engine.set_volume(clamped);
                 self.apple_sink.set_volume(clamped);
                 self.apple_sink.emit_volume(&self.broadcast_tx, clamped);
                 self.state.lock().unwrap().volume = clamped;
@@ -613,7 +600,6 @@ impl AudioOrchestrator {
         let engine = self.state.lock().unwrap().active_engine;
         match engine {
             ActiveEngine::Local => self.local_engine.pause(),
-            ActiveEngine::Spotify => self.spotify_engine.pause(),
             ActiveEngine::AppleMusic => self.apple_sink.emit_pause(&self.broadcast_tx),
             ActiveEngine::None => {}
         }
@@ -636,9 +622,7 @@ impl AudioOrchestrator {
             st.queue[index].clone()
         };
 
-        let target_engine = if track.uri.starts_with("spotify:") {
-            ActiveEngine::Spotify
-        } else if track.uri.starts_with("applemusic:") {
+        let target_engine = if track.uri.starts_with("applemusic:") {
             ActiveEngine::AppleMusic
         } else {
             ActiveEngine::Local
@@ -649,7 +633,6 @@ impl AudioOrchestrator {
         if prev_engine != target_engine {
             match prev_engine {
                 ActiveEngine::Local => self.local_engine.release_pipewire_stream(),
-                ActiveEngine::Spotify => self.spotify_engine.pause(),
                 ActiveEngine::AppleMusic => self.apple_sink.emit_pause(&self.broadcast_tx),
                 ActiveEngine::None => {}
             }
@@ -678,9 +661,6 @@ impl AudioOrchestrator {
                         return;
                     }
                 }
-            }
-            ActiveEngine::Spotify => {
-                self.consecutive_failures = 0;
             }
             ActiveEngine::AppleMusic => {
                 self.apple_sink
@@ -803,9 +783,7 @@ impl AudioOrchestrator {
             disc_number: Some(1),
             art_url: None,
             duration_ms: 0,
-            source: if uri.starts_with("spotify:") {
-                "spotify".to_string()
-            } else if uri.starts_with("applemusic:") {
+            source: if uri.starts_with("applemusic:") {
                 "apple_music".to_string()
             } else {
                 "local".to_string()
@@ -842,9 +820,7 @@ impl AudioOrchestrator {
             return;
         };
 
-        let engine = if track.uri.starts_with("spotify:") {
-            ActiveEngine::Spotify
-        } else if track.uri.starts_with("applemusic:") {
+        let engine = if track.uri.starts_with("applemusic:") {
             ActiveEngine::AppleMusic
         } else {
             ActiveEngine::Local
@@ -940,7 +916,6 @@ pub fn build_state_snapshot(
         queue_index: st.queue_index,
         mounts,
         power,
-        spotify_authenticated: st.spotify_authenticated,
         apple_authenticated: st.apple_authenticated,
     }
 }

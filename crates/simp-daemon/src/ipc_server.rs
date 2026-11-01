@@ -388,12 +388,6 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                 error: None,
             }
         }
-        _ => ServerEnvelope::QueryResponse {
-            req_id,
-            ok: true,
-            data: serde_json::json!({"status": "queued"}),
-            error: None,
-        },
     }
 }
 
