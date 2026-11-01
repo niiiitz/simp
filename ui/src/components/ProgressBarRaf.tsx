@@ -134,10 +134,10 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
           style={{
             width: '100%',
             height: 22,
-            background: '#111118',
+            background: '#0d0d12',
             borderRadius: 999,
             overflow: 'hidden',
-            border: '2px solid #262634',
+            border: '1px solid #1e1e28',
             position: 'relative',
           }}
         >
@@ -146,27 +146,27 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
             style={{
               width: '100%',
               height: '100%',
-              background: 'linear-gradient(90deg, #00b8d4 0%, #00e5ff 100%)',
+              background: 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
               transformOrigin: 'left center',
               transform: 'scaleX(0)',
             }}
           />
         </div>
 
-        {/* High-Contrast Playhead Thumb */}
+        {/* OLED-Safe Low-Luminance Playhead Thumb */}
         <div
           ref={thumbRef}
           style={{
             position: 'absolute',
             left: '0%',
             top: '50%',
-            width: 28,
-            height: 28,
+            width: 26,
+            height: 26,
             borderRadius: 999,
-            background: '#ffffff',
-            border: '4px solid #00e5ff',
+            background: '#c8c8d2',
+            border: '3px solid #2aa3c4',
             transform: 'translate(-50%, -50%)',
-            boxShadow: '0 2px 10px rgba(0, 229, 255, 0.55)',
+            boxShadow: '0 1px 6px rgba(0, 0, 0, 0.7)',
             pointerEvents: 'none',
           }}
         />
@@ -180,11 +180,11 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
           alignItems: 'center',
           fontSize: 13,
           fontFamily: 'monospace',
-          color: '#a1a1aa',
+          color: '#8a8a96',
           marginTop: 2,
         }}
       >
-        <span ref={timeTextRef} style={{ fontWeight: 700, color: '#f4f4f6', minWidth: 48 }}>
+        <span ref={timeTextRef} style={{ fontWeight: 700, color: '#c8c8d2', minWidth: 48 }}>
           00:00
         </span>
         <span style={{ fontWeight: 700, minWidth: 48, textAlign: 'right' }}>
