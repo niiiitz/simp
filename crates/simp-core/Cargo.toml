@@ -19,6 +19,7 @@ walkdir.workspace = true
 lofty.workspace = true
 blake3.workspace = true
 rodio.workspace = true
+symphonia.workspace = true
 souvlaki.workspace = true
 moka.workspace = true
 

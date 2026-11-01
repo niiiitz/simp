@@ -1,12 +1,27 @@
 use crate::time_tracker::LocalTimeTracker;
-use anyhow::{Context, Result};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use anyhow::{anyhow, Context, Result};
+use rodio::{
+    source::{SeekError as RodioSeekError},
+    OutputStream, OutputStreamHandle, Sink, Source,
+};
 use simp_protocol::PlaybackEvent;
 use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use symphonia::{
+    core::{
+        audio::{AudioBufferRef, SampleBuffer, SignalSpec},
+        codecs::{Decoder as SymphDecoder, DecoderOptions, CODEC_TYPE_NULL},
+        errors::Error as SymphError,
+        formats::{FormatOptions, FormatReader, SeekMode, SeekTo},
+        io::{MediaSource, MediaSourceStream},
+        meta::MetadataOptions,
+        probe::Hint,
+        units::{self, Time},
+    },
+    default::{get_codecs, get_probe},
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -85,9 +100,10 @@ impl LocalAudioEngine {
         let sink = self.sink.as_ref().unwrap();
         sink.stop();
 
-        // Build seekable Symphonia-backed decoder (`BufReader<File>` implements `Read + Seek`)
-        let source = Decoder::new(BufReader::new(file))
-            .context("Failed to decode audio file via rodio/Symphonia")?;
+        // Build seekable Symphonia decoder directly over `std::fs::File` (so `byte_len()` returns
+        // `Some(file_len)` for `.m4a` ISOMP4 files with trailing `moov` atoms and never panics)
+        let source = SymphoniaFileSource::from_file(file, path)
+            .with_context(|| format!("Failed to decode audio file: {}", path.display()))?;
 
         sink.append(source);
         sink.set_volume(self.volume);
@@ -179,8 +195,9 @@ impl LocalAudioEngine {
             self.abort_monitor();
             self.ensure_stream()?;
             let file_path_str = uri.strip_prefix("file://").unwrap_or(&uri);
-            let file = File::open(file_path_str)?;
-            let source = Decoder::new(BufReader::new(file))?;
+            let path = Path::new(file_path_str);
+            let file = File::open(path)?;
+            let source = SymphoniaFileSource::from_file(file, path)?;
             let skipped = source.skip_duration(target);
 
             let sink = self.sink.as_ref().unwrap();
@@ -285,6 +302,210 @@ fn ensure_wslg_alsa_pulse_bridge() {
             let config = "pcm.!default {\n    type pulse\n}\nctl.!default {\n    type pulse\n}\n";
             let _ = std::fs::write(&asoundrc, config);
         }
+    }
+}
+
+const MAX_DECODE_RETRIES: usize = 5;
+
+/// Panic-free Symphonia audio source backed directly by `std::fs::File` (which implements
+/// `symphonia::core::io::MediaSource` with `byte_len() -> Some(file_len)`).
+///
+/// Unlike `rodio::Decoder::new(BufReader<File>)`—whose internal `ReadSeekSource` returns
+/// `byte_len() -> None` and triggers a panic (`unreachable!("Seek errors should not occur during initialization")`)
+/// whenever an `.m4a` (`isomp4`) file has its `moov` atom after `mdat`—`SymphoniaFileSource`
+/// provides the exact file length to Symphonia's ISO/MP4 demuxer and filters packets by `track_id`.
+pub struct SymphoniaFileSource {
+    decoder: Box<dyn SymphDecoder>,
+    current_frame_offset: usize,
+    format: Box<dyn FormatReader>,
+    track_id: u32,
+    total_duration: Option<Time>,
+    buffer: SampleBuffer<i16>,
+    spec: SignalSpec,
+}
+
+impl SymphoniaFileSource {
+    pub fn from_file(file: File, path: &Path) -> Result<Self> {
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
+
+        // `std::fs::File` implements `MediaSource` with `is_seekable() == true` and `byte_len() == Some(len)`!
+        let mss = MediaSourceStream::new(Box::new(file) as Box<dyn MediaSource>, Default::default());
+        let format_opts = FormatOptions {
+            enable_gapless: true,
+            ..Default::default()
+        };
+        let metadata_opts = MetadataOptions::default();
+
+        let mut probed = get_probe()
+            .format(&hint, mss, &format_opts, &metadata_opts)
+            .map_err(|e| anyhow!("Symphonia probe failed: {e}"))?;
+
+        let track = probed
+            .format
+            .default_track()
+            .filter(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .or_else(|| {
+                probed
+                    .format
+                    .tracks()
+                    .iter()
+                    .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            })
+            .ok_or_else(|| anyhow!("No supported audio track in container"))?;
+
+        let track_id = track.id;
+        let total_duration = track
+            .codec_params
+            .time_base
+            .zip(track.codec_params.n_frames)
+            .map(|(base, frames)| base.calc_time(frames));
+
+        let mut decoder = get_codecs()
+            .make(&track.codec_params, &DecoderOptions::default())
+            .map_err(|e| anyhow!("Unsupported audio codec: {e}"))?;
+
+        let mut decode_errors = 0usize;
+        let decoded = loop {
+            let packet = match probed.format.next_packet() {
+                Ok(p) => p,
+                Err(SymphError::IoError(_)) => break decoder.last_decoded(),
+                Err(e) => return Err(anyhow!("Failed reading initial audio packet: {e}")),
+            };
+
+            if packet.track_id() != track_id {
+                continue;
+            }
+
+            match decoder.decode(&packet) {
+                Ok(decoded) => break decoded,
+                Err(SymphError::DecodeError(_)) if decode_errors < MAX_DECODE_RETRIES => {
+                    decode_errors += 1;
+                    continue;
+                }
+                Err(e) => return Err(anyhow!("Audio decode error on initial frame: {e}")),
+            }
+        };
+
+        let spec = decoded.spec().to_owned();
+        let buffer = Self::to_sample_buffer(decoded, &spec);
+
+        Ok(Self {
+            decoder,
+            current_frame_offset: 0,
+            format: probed.format,
+            track_id,
+            total_duration,
+            buffer,
+            spec,
+        })
+    }
+
+    #[inline]
+    fn to_sample_buffer(decoded: AudioBufferRef<'_>, spec: &SignalSpec) -> SampleBuffer<i16> {
+        let duration = units::Duration::from(decoded.capacity() as u64);
+        let mut buffer = SampleBuffer::<i16>::new(duration, *spec);
+        buffer.copy_interleaved_ref(decoded);
+        buffer
+    }
+}
+
+impl Iterator for SymphoniaFileSource {
+    type Item = i16;
+
+    #[inline]
+    fn next(&mut self) -> Option<i16> {
+        while self.current_frame_offset >= self.buffer.len() {
+            let mut decode_errors = 0usize;
+            let decoded = loop {
+                let packet = self.format.next_packet().ok()?;
+                if packet.track_id() != self.track_id {
+                    continue;
+                }
+                match self.decoder.decode(&packet) {
+                    Ok(d) => break d,
+                    Err(_) if decode_errors < MAX_DECODE_RETRIES => {
+                        decode_errors += 1;
+                        continue;
+                    }
+                    Err(_) => return None,
+                }
+            };
+            decoded.spec().clone_into(&mut self.spec);
+            self.buffer = Self::to_sample_buffer(decoded, &self.spec);
+            self.current_frame_offset = 0;
+        }
+
+        let sample = *self.buffer.samples().get(self.current_frame_offset)?;
+        self.current_frame_offset += 1;
+        Some(sample)
+    }
+}
+
+impl Source for SymphoniaFileSource {
+    #[inline]
+    fn current_frame_len(&self) -> Option<usize> {
+        Some(self.buffer.samples().len())
+    }
+
+    #[inline]
+    fn channels(&self) -> u16 {
+        self.spec.channels.count() as u16
+    }
+
+    #[inline]
+    fn sample_rate(&self) -> u32 {
+        self.spec.rate
+    }
+
+    #[inline]
+    fn total_duration(&self) -> Option<Duration> {
+        self.total_duration
+            .map(|Time { seconds, frac }| Duration::from_secs_f64(seconds as f64 + frac))
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> std::result::Result<(), RodioSeekError> {
+        let channels = self.channels().max(1) as usize;
+        let to_skip = self.current_frame_offset % channels;
+
+        let target_time: Time = pos.as_secs_f64().into();
+        let seek_res = self
+            .format
+            .seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time: target_time,
+                    track_id: Some(self.track_id),
+                },
+            )
+            .map_err(|e| RodioSeekError::Other(Box::new(e)))?;
+
+        let mut samples_to_pass = seek_res.required_ts.saturating_sub(seek_res.actual_ts);
+        let packet = loop {
+            let candidate = self
+                .format
+                .next_packet()
+                .map_err(|e| RodioSeekError::Other(Box::new(e)))?;
+            if candidate.track_id() != self.track_id {
+                continue;
+            }
+            if candidate.dur() > samples_to_pass {
+                break candidate;
+            } else {
+                samples_to_pass -= candidate.dur();
+            }
+        };
+
+        let decoded = self
+            .decoder
+            .decode(&packet)
+            .map_err(|e| RodioSeekError::Other(Box::new(e)))?;
+        decoded.spec().clone_into(&mut self.spec);
+        self.buffer = Self::to_sample_buffer(decoded, &self.spec);
+        self.current_frame_offset = (samples_to_pass as usize * channels) + to_skip;
+        Ok(())
     }
 }
 
