@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@simp/client": ["./packages/simp-client/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/simp-client/src",
+    "ui/src",
+    "decky-plugin/src"
+  ]
+}
+

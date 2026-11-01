@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SIMP",
+  "version": "0.1.0-alpha",
+  "identifier": "org.simp.player",
+  "build": {
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "SIMP",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true,
+        "backgroundColor": "#000000"
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage"],
+    "icon": []
+  }
+}
+

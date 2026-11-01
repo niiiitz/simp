@@ -1,0 +1,24 @@
+[package]
+name = "simp-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+simp-protocol = { path = "../simp-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+keyvalues-parser.workspace = true
+keyvalues-serde.workspace = true
+rusqlite.workspace = true
+walkdir.workspace = true
+lofty.workspace = true
+blake3.workspace = true
+rodio.workspace = true
+souvlaki.workspace = true
+moka.workspace = true
+
