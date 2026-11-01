@@ -16,6 +16,16 @@ type AppleSinkListener = (cmd: AppleSinkCommandPayload) => void;
  * Shared auto-reconnecting WebSocket client connecting to `simp --daemon` (`ws://127.0.0.1:18888/ws`).
  * Decouples low-frequency state updates from high-frequency 500ms `progress_tick` anchors.
  */
+function resolveDefaultWsUrl(): string {
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    const host = window.location.hostname;
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const port = window.location.port === '1420' ? '18888' : window.location.port || '18888';
+    return `${proto}//${host}:${port}/ws`;
+  }
+  return 'ws://127.0.0.1:18888/ws';
+}
+
 export class SimpDaemonClient {
   private ws: WebSocket | null = null;
   private url: string;
@@ -40,7 +50,7 @@ export class SimpDaemonClient {
     apple_authenticated: false,
   };
 
-  constructor(url = 'ws://127.0.0.1:18888/ws') {
+  constructor(url = resolveDefaultWsUrl()) {
     this.url = url;
   }
 

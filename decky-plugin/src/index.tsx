@@ -2,9 +2,11 @@ import type * as ReactTypes from 'react';
 import {
   defaultSimpClient,
   AlbumRecord,
+  AppleMusicAuthConfig,
   PlaylistRecord,
   SimpStateSnapshot,
 } from '@simp/client';
+import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
 
 /**
  * SteamOS Gaming Mode (`SharedJSContext`) exposes its active React instance on `window.SP_REACT`.
@@ -148,6 +150,47 @@ const Focusable: ReactTypes.FC<any> = ({
   );
 };
 
+const DeckyQrSvg: ReactTypes.FC<{ value: string; size?: number }> = ({
+  value,
+  size = 92,
+}) => {
+  const matrix = encodeQrMatrix(value);
+  const n = matrix.length;
+  const quiet = 2;
+  const viewBoxSize = n + quiet * 2;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${viewBoxSize} ${viewBoxSize}`}
+      shapeRendering="crispEdges"
+      style={{
+        borderRadius: 10,
+        background: '#ffffff',
+        padding: 4,
+        boxSizing: 'border-box',
+        flexShrink: 0,
+      }}
+    >
+      <rect width={viewBoxSize} height={viewBoxSize} fill="#ffffff" />
+      {matrix.map((row, r) =>
+        row.map((cell, c) =>
+          cell ? (
+            <rect
+              key={`${r}-${c}`}
+              x={c + quiet}
+              y={r + quiet}
+              width={1}
+              height={1}
+              fill="#07070c"
+            />
+          ) : null
+        )
+      )}
+    </svg>
+  );
+};
+
 /**
  * Pilot Phase 2: Lightweight Decky Loader QAM (`...` Menu) Drawer.
  * Connects directly to `simp --daemon` over `ws://127.0.0.1:18888/ws` with zero Python audio glue.
@@ -159,7 +202,8 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
   const [reloading, setReloading] = useState(false);
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
-  const [drawerTab, setDrawerTab] = useState<'none' | 'albums' | 'playlists'>('none');
+  const [authCfg, setAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
+  const [drawerTab, setDrawerTab] = useState<'none' | 'albums' | 'playlists' | 'pair'>('none');
   const [preMuteVol, setPreMuteVol] = useState<number>(0.85);
 
   const refreshCatalogs = () => {
@@ -175,6 +219,13 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       .then((res) => {
         setConnected(true);
         if (Array.isArray(res)) setPlaylists(res);
+      })
+      .catch(() => {});
+    defaultSimpClient
+      .getAppleMusicAuthConfig()
+      .then((cfg) => {
+        setConnected(true);
+        setAuthCfg(cfg);
       })
       .catch(() => {});
   };
@@ -210,7 +261,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
     }, 800);
   };
 
-  const toggleDrawerTab = (tab: 'albums' | 'playlists') => {
+  const toggleDrawerTab = (tab: 'albums' | 'playlists' | 'pair') => {
     const next = drawerTab === tab ? 'none' : tab;
     setDrawerTab(next);
     if (next === 'albums') {
@@ -222,6 +273,11 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       defaultSimpClient
         .query<PlaylistRecord[]>('get_playlists')
         .then((res) => Array.isArray(res) && setPlaylists(res))
+        .catch(() => {});
+    } else if (next === 'pair') {
+      defaultSimpClient
+        .getAppleMusicAuthConfig()
+        .then((cfg) => setAuthCfg(cfg))
         .catch(() => {});
     }
   };
@@ -507,7 +563,10 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       </div>
 
       {/* Quick Switcher Drawer Tabs */}
-      <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+      <Focusable
+        flowChildren="horizontal"
+        style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 6 }}
+      >
         <Focusable
           onActivate={() => toggleDrawerTab('albums')}
           onClick={() => toggleDrawerTab('albums')}
@@ -532,9 +591,71 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
             color: drawerTab === 'playlists' ? '#5bc0de' : '#d4d4dc',
           }}
         >
-          Queue / Playlists ({playlists.length})
+          Playlists ({playlists.length})
+        </Focusable>
+        <Focusable
+          onActivate={() => toggleDrawerTab('pair')}
+          onClick={() => toggleDrawerTab('pair')}
+          style={{
+            ...btnStyle,
+            minHeight: 38,
+            padding: '0 10px',
+            fontSize: 12,
+            borderColor:
+              drawerTab === 'pair'
+                ? '#f43f5e'
+                : snap?.apple_authenticated
+                ? '#10b981'
+                : '#262630',
+            color:
+              drawerTab === 'pair'
+                ? '#fda4af'
+                : snap?.apple_authenticated
+                ? '#6ee7b7'
+                : '#d4d4dc',
+          }}
+          title="Apple Music QR Companion Pairing"
+        >
+          {snap?.apple_authenticated ? '🍎 Paired' : '📱 Pair QR'}
         </Focusable>
       </Focusable>
+
+      {drawerTab === 'pair' && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: 10,
+            borderRadius: 10,
+            background: '#000000',
+            border: '1px solid #f43f5e',
+          }}
+        >
+          <DeckyQrSvg
+            value={authCfg?.pair_url || 'http://steamdeck.local:18888/pair'}
+            size={92}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#fda4af' }}>
+              {snap?.apple_authenticated ? '🟢 Apple Music Connected' : '📱 Scan with iPhone / PC'}
+            </div>
+            <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.35 }}>
+              Sign in with Face ID, Passkey, or YubiKey on your phone/PC to sync Apple Music directly to your Deck.
+            </div>
+            <div
+              style={{
+                fontSize: 10,
+                fontFamily: 'monospace',
+                color: '#67e8f9',
+                wordBreak: 'break-all',
+              }}
+            >
+              {authCfg?.pair_url || 'http://steamdeck.local:18888/pair'}
+            </div>
+          </div>
+        </div>
+      )}
 
       {drawerTab === 'albums' && (
         <Focusable

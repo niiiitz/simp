@@ -60,6 +60,36 @@ pub fn resolve_ui_dir() -> Option<PathBuf> {
         .find(|dir| dir.join("index.html").is_file())
 }
 
+pub fn detect_lan_ips() -> Vec<String> {
+    let mut ips = Vec::new();
+
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if sock.connect("8.8.8.8:80").is_ok() {
+            if let Ok(local_addr) = sock.local_addr() {
+                let ip = local_addr.ip().to_string();
+                if !ip.starts_with("127.") && ip != "0.0.0.0" {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+
+    if let Ok(out) = std::process::Command::new("hostname").arg("-I").output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for token in text.split_whitespace() {
+            if token.contains('.')
+                && !token.starts_with("127.")
+                && !token.starts_with("169.254.")
+                && !ips.contains(&token.to_string())
+            {
+                ips.push(token.to_string());
+            }
+        }
+    }
+
+    ips
+}
+
 pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
     let art_cache_dir = dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -74,7 +104,14 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
 
     if let Some(ui_dir) = resolve_ui_dir() {
         tracing::info!("Serving SIMP Console UI from {}", ui_dir.display());
-        app = app.fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true));
+        let index_file = ui_dir.join("index.html");
+        app = app
+            .route_service("/pair", tower_http::services::ServeFile::new(&index_file))
+            .fallback_service(
+                ServeDir::new(ui_dir)
+                    .append_index_html_on_directories(true)
+                    .not_found_service(tower_http::services::ServeFile::new(index_file)),
+            );
     } else {
         tracing::warn!(
             "No production UI bundle (index.html) found; run `npm run build:ui` or set SIMP_UI_DIR"
@@ -83,8 +120,15 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
 
     let app = app.layer(CorsLayer::permissive()).with_state(ipc_state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 18888));
-    tracing::info!("SIMP Daemon IPC, Art & UI Server listening on http://{addr}");
+    let addr = SocketAddr::from(([0, 0, 0, 0], 18888));
+    let lan_ips = detect_lan_ips();
+    if let Some(primary_ip) = lan_ips.first() {
+        tracing::info!(
+            "SIMP Daemon listening on http://127.0.0.1:18888 and LAN Companion http://{primary_ip}:18888/pair"
+        );
+    } else {
+        tracing::info!("SIMP Daemon IPC, Art & UI Server listening on http://{addr}");
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -370,6 +414,13 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                 simp_core::sinks::apple::AppleMusicSink::is_headless_worker_active()
             };
 
+            let lan_ips = detect_lan_ips();
+            let lan_ip = lan_ips.first().cloned();
+            let pair_url = lan_ip
+                .as_ref()
+                .map(|ip| format!("http://{ip}:18888/pair"))
+                .unwrap_or_else(|| "http://steamdeck.local:18888/pair".to_string());
+
             ServerEnvelope::QueryResponse {
                 req_id,
                 ok: true,
@@ -383,6 +434,9 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                     "music_user_token": creds.music_user_token,
                     "apple_authenticated": apple_authenticated,
                     "headless_worker_active": headless_worker_active,
+                    "lan_ip": lan_ip,
+                    "lan_ips": lan_ips,
+                    "pair_url": pair_url,
                     "status_error": status_error,
                 }),
                 error: None,

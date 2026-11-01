@@ -75,6 +75,9 @@ export interface AppleMusicAuthConfig {
   music_user_token: string | null;
   apple_authenticated: boolean;
   headless_worker_active?: boolean;
+  lan_ip?: string | null;
+  lan_ips?: string[];
+  pair_url?: string | null;
   status_error: string | null;
 }
 

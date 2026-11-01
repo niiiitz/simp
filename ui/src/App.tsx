@@ -8,13 +8,27 @@ import {
   TrackMetadata,
 } from '@simp/client';
 import { ProgressBarRaf } from './components/ProgressBarRaf';
+import { CompanionPairView } from './components/CompanionPairView';
+import { QrCodeSvg } from './components/QrCodeSvg';
 import {
   AppleMusicDriver,
   authorizeAppleMusic,
   syncAppleMusicCatalog,
 } from './drivers/AppleMusicDriver';
 
+const isCompanionPairRoute =
+  typeof window !== 'undefined' &&
+  (window.location.pathname.startsWith('/pair') ||
+    new URLSearchParams(window.location.search).get('pair') === '1');
+
 export const App: React.FC = () => {
+  if (isCompanionPairRoute) {
+    return <CompanionPairView />;
+  }
+  return <ConsoleMainApp />;
+};
+
+const ConsoleMainApp: React.FC = () => {
   const [snap, setSnap] = useState<SimpStateSnapshot | null>(null);
   const [view, setView] = useState<'lock' | 'browser'>('lock');
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
@@ -1696,6 +1710,44 @@ export const App: React.FC = () => {
                   )}
                 </div>
               </div>
+
+              {/* Console-Style LAN QR Companion Pairing Banner */}
+              {appleAuthCfg?.configured && !snap?.apple_authenticated && (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 14,
+                    padding: '10px 12px',
+                    borderRadius: 10,
+                    background: '#0a0a10',
+                    border: '1px solid #282838',
+                  }}
+                >
+                  <QrCodeSvg
+                    value={appleAuthCfg.pair_url || 'http://steamdeck.local:18888/pair'}
+                    size={96}
+                  />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: '#fda4af' }}>
+                      📱 Scan to Pair with iPhone / Android / PC
+                    </div>
+                    <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.4 }}>
+                      Sign in on your phone or PC where Face ID, Passkeys, and YubiKey / FIDO2 work natively. Your Apple Music library & token sync straight to your Steam Deck.
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                        color: '#67e8f9',
+                        marginTop: 2,
+                      }}
+                    >
+                      {appleAuthCfg.pair_url || 'http://steamdeck.local:18888/pair'}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {appleConfigOpen && (
                 <div
