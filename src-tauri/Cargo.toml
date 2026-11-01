@@ -1,0 +1,25 @@
+[package]
+name = "simp"
+version.workspace = true
+edition.workspace = true
+default-run = "simp"
+
+[lib]
+name = "simp_ui_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "simp"
+path = "src/main.rs"
+
+[dependencies]
+simp-protocol = { path = "../crates/simp-protocol" }
+simp-core = { path = "../crates/simp-core" }
+simp-daemon = { path = "../crates/simp-daemon" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+mimalloc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
