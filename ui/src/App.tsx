@@ -1092,11 +1092,16 @@ export const App: React.FC = () => {
                 <div
                   key={`${t.uri}-${i}`}
                   onClick={() => {
-                    defaultSimpClient.loadQueue(
-                      browserTracks.map((tr) => tr.uri),
-                      i
-                    );
-                    setView('lock');
+                    if (track?.uri === t.uri) {
+                      // Already active: return to player view preserving position & playback state
+                      setView('lock');
+                    } else {
+                      defaultSimpClient.loadQueue(
+                        browserTracks.map((tr) => tr.uri),
+                        i
+                      );
+                      setView('lock');
+                    }
                   }}
                   style={{
                     minHeight: 50,
