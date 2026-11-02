@@ -14,7 +14,7 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.12';
+const SIMP_VERSION = 'v0.1.0-alpha.13';
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 
 let cachedSteamFocusable: any = null;
@@ -947,7 +947,11 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />
             ) : (
-              <span style={{ fontSize: 22 }}>🎵</span>
+              <img
+                src="http://127.0.0.1:18888/simp-icon-dark.png"
+                alt="SIMP"
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              />
             )}
           </div>
           <div style={{ minWidth: 0, flex: 1 }}>

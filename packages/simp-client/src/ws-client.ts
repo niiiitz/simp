@@ -2,6 +2,7 @@ import type {
   AlbumRecord,
   AppleMusicAuthConfig,
   AppleSinkCommandPayload,
+  OpticalDiscStatus,
   PlaylistRecord,
   RepeatMode,
   SimpStateSnapshot,
@@ -228,6 +229,13 @@ export class SimpDaemonClient {
   public restartDaemon = () => this.sendCommand('restart_daemon');
   public resetDatabaseCache = () => this.sendCommand('reset_database_cache');
   public factoryReset = () => this.sendCommand('factory_reset');
+  public ejectOpticalDisc = (device_path?: string) =>
+    this.sendCommand('eject_optical_disc', device_path ? { device_path } : {});
+  public scanOpticalDisc = (force_refresh = false, device_path?: string): Promise<OpticalDiscStatus> =>
+    this.query<OpticalDiscStatus>('scan_optical_disc', {
+      force_refresh,
+      ...(device_path ? { device_path } : {}),
+    });
   public shutdownDaemon = () => this.sendCommand('shutdown_daemon');
 
   // Apple Music Virtual Sink & Developer Token helpers

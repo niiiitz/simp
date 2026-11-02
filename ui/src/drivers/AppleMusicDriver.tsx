@@ -562,6 +562,91 @@ export async function fetchAppleRadioAndForYou(): Promise<{
 }
 
 /**
+ * Fetches Apple Music "New" / Top Charts & Hot New Releases (`albums`, `playlists`, `songs`) for the storefront.
+ */
+export async function fetchAppleNewFeed(): Promise<{
+  albums: AppleCloudAlbumSummary[];
+  playlists: AppleCloudPlaylistSummary[];
+  songs: TrackMetadata[];
+}> {
+  const { headers, storefront } = await getAppleAuthHeaders();
+  const albums: AppleCloudAlbumSummary[] = [];
+  const playlists: AppleCloudPlaylistSummary[] = [];
+  const songs: TrackMetadata[] = [];
+  const seenAlbumIds = new Set<string>();
+  const seenPlaylistIds = new Set<string>();
+  const seenSongUris = new Set<string>();
+
+  const pushAlbum = (alb: any) => {
+    if (!alb?.id || seenAlbumIds.has(String(alb.id))) return;
+    seenAlbumIds.add(String(alb.id));
+    const attrs = alb.attributes || {};
+    albums.push({
+      id: String(alb.id),
+      title: attrs.name || 'New Album',
+      artist: attrs.artistName || 'Apple Music',
+      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
+      track_count: Number(attrs.trackCount || 0),
+      release_year: attrs.releaseDate ? Number(String(attrs.releaseDate).slice(0, 4)) || null : null,
+      kind: 'catalog',
+    });
+  };
+
+  const pushPlaylist = (pl: any) => {
+    if (!pl?.id || seenPlaylistIds.has(String(pl.id))) return;
+    seenPlaylistIds.add(String(pl.id));
+    const attrs = pl.attributes || {};
+    playlists.push({
+      id: String(pl.id),
+      name: attrs.name || 'Featured Playlist',
+      description: attrs.curatorName || attrs.editorialNotes?.short || 'Apple Music New & Featured',
+      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
+      kind: 'catalog',
+    });
+  };
+
+  await Promise.allSettled([
+    fetch(
+      `https://api.music.apple.com/v1/catalog/${storefront}/charts?types=albums,playlists,songs&limit=15`,
+      { headers }
+    )
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        const res = json?.results || {};
+        for (const chart of res.albums || []) {
+          for (const alb of chart.data || []) pushAlbum(alb);
+        }
+        for (const chart of res.playlists || []) {
+          for (const pl of chart.data || []) pushPlaylist(pl);
+        }
+        for (const chart of res.songs || []) {
+          for (const item of chart.data || []) {
+            const tr = mapAppleItemToTrack(item);
+            if (tr && !seenSongUris.has(tr.uri)) {
+              seenSongUris.add(tr.uri);
+              songs.push(tr);
+            }
+          }
+        }
+      }),
+    fetch(
+      `https://api.music.apple.com/v1/catalog/${storefront}/search?term=${encodeURIComponent(
+        'New Music Daily'
+      )}&types=playlists,albums&limit=10`,
+      { headers }
+    )
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        const res = json?.results || {};
+        for (const pl of res.playlists?.data || []) pushPlaylist(pl);
+        for (const alb of res.albums?.data || []) pushAlbum(alb);
+      }),
+  ]);
+
+  return { albums, playlists, songs };
+}
+
+/**
  * Live Apple Music Catalog Search (Songs, Full Albums, Playlists, and Radio Stations).
  */
 export async function searchAppleMusicCatalog(

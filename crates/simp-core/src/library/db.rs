@@ -773,6 +773,55 @@ impl LibraryDatabase {
         conn.execute("DELETE FROM tracks", [])?;
         conn.execute("DELETE FROM albums", [])?;
         conn.execute("DELETE FROM storage_mounts", [])?;
+        conn.execute("DELETE FROM cd_cache", [])?;
+        Ok(())
+    }
+
+    pub fn get_cd_cache(
+        &self,
+        disc_id: &str,
+    ) -> Result<Option<(String, String, Vec<TrackMetadata>, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT album_title, artist_name, tracks_json, art_cache_path
+             FROM cd_cache
+             WHERE disc_id = ?1",
+        )?;
+        let res = stmt
+            .query_row(params![disc_id], |row| {
+                let album_title: String = row.get(0)?;
+                let artist_name: String = row.get(1)?;
+                let tracks_str: String = row.get(2)?;
+                let art_path: Option<String> = row.get(3)?;
+                let tracks: Vec<TrackMetadata> =
+                    serde_json::from_str(&tracks_str).unwrap_or_default();
+                Ok((album_title, artist_name, tracks, art_path))
+            })
+            .optional()?;
+        Ok(res)
+    }
+
+    pub fn upsert_cd_cache(
+        &self,
+        disc_id: &str,
+        album_title: &str,
+        artist_name: &str,
+        tracks: &[TrackMetadata],
+        art_url: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let tracks_json = serde_json::to_string(tracks).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT INTO cd_cache (disc_id, album_title, artist_name, tracks_json, art_cache_path, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s', 'now'))
+             ON CONFLICT(disc_id) DO UPDATE SET
+               album_title = excluded.album_title,
+               artist_name = excluded.artist_name,
+               tracks_json = excluded.tracks_json,
+               art_cache_path = COALESCE(excluded.art_cache_path, cd_cache.art_cache_path),
+               fetched_at = strftime('%s', 'now')",
+            params![disc_id, album_title, artist_name, tracks_json, art_url],
+        )?;
         Ok(())
     }
 }

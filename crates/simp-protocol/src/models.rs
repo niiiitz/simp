@@ -72,6 +72,22 @@ pub struct PowerState {
     pub battery_pct: Option<u8>,
 }
 
+/// Ephemeral Optical Audio CD (`cdda://`) status & resolved MusicBrainz metadata
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct OpticalDiscStatus {
+    pub drive_present: bool,
+    pub device_path: String,
+    pub disc_present: bool,
+    pub is_audio_cd: bool,
+    pub disc_id: Option<String>,
+    pub album_title: String,
+    pub artist_name: String,
+    pub release_year: Option<i32>,
+    pub art_url: Option<String>,
+    pub tracks: Vec<TrackMetadata>,
+    pub status_message: String,
+}
+
 /// Valve Data Format (`~/.config/simp/settings.vdf`) schema
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SimpSettings {

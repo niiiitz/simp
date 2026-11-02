@@ -92,20 +92,26 @@ impl LocalAudioEngine {
         self.abort_monitor();
         self.ensure_stream()?;
 
-        let file_path_str = uri.strip_prefix("file://").unwrap_or(uri);
-        let path = Path::new(file_path_str);
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open audio file: {}", path.display()))?;
-
         let sink = self.sink.as_ref().unwrap();
         sink.stop();
 
-        // Build seekable Symphonia decoder directly over `std::fs::File` (so `byte_len()` returns
-        // `Some(file_len)` for `.m4a` ISOMP4 files with trailing `moov` atoms and never panics)
-        let source = SymphoniaFileSource::from_file(file, path)
-            .with_context(|| format!("Failed to decode audio file: {}", path.display()))?;
+        if uri.starts_with("cdda://") {
+            let source = crate::sinks::cdda::CddaTrackSource::open_uri(uri)
+                .with_context(|| format!("Failed to open Audio CD track: {uri}"))?;
+            sink.append(source);
+        } else {
+            let file_path_str = uri.strip_prefix("file://").unwrap_or(uri);
+            let path = Path::new(file_path_str);
+            let file = File::open(path)
+                .with_context(|| format!("Failed to open audio file: {}", path.display()))?;
 
-        sink.append(source);
+            // Build seekable Symphonia decoder directly over `std::fs::File` (so `byte_len()` returns
+            // `Some(file_len)` for `.m4a` ISOMP4 files with trailing `moov` atoms and never panics)
+            let source = SymphoniaFileSource::from_file(file, path)
+                .with_context(|| format!("Failed to decode audio file: {}", path.display()))?;
+
+            sink.append(source);
+        }
         sink.set_volume(self.volume);
 
         {
@@ -194,16 +200,22 @@ impl LocalAudioEngine {
         if let Some(uri) = self.current_uri.clone() {
             self.abort_monitor();
             self.ensure_stream()?;
-            let file_path_str = uri.strip_prefix("file://").unwrap_or(&uri);
-            let path = Path::new(file_path_str);
-            let file = File::open(path)?;
-            let source = SymphoniaFileSource::from_file(file, path)?;
-            let skipped = source.skip_duration(target);
-
             let sink = self.sink.as_ref().unwrap();
             let was_playing = self.tracker.lock().unwrap().is_playing();
             sink.stop();
-            sink.append(skipped);
+
+            if uri.starts_with("cdda://") {
+                let mut source = crate::sinks::cdda::CddaTrackSource::open_uri(&uri)?;
+                let _ = source.try_seek(target);
+                sink.append(source);
+            } else {
+                let file_path_str = uri.strip_prefix("file://").unwrap_or(&uri);
+                let path = Path::new(file_path_str);
+                let file = File::open(path)?;
+                let source = SymphoniaFileSource::from_file(file, path)?;
+                let skipped = source.skip_duration(target);
+                sink.append(skipped);
+            }
             if was_playing {
                 sink.play();
             } else {

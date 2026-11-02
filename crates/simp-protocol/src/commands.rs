@@ -53,6 +53,10 @@ pub enum AudioCommand {
     RestartDaemon,
     ResetDatabaseCache,
     FactoryReset,
+    EjectOpticalDisc {
+        #[serde(default)]
+        device_path: Option<String>,
+    },
     ShutdownDaemon,
 }
 
@@ -106,6 +110,12 @@ pub enum LibraryQuery {
     GetMountRoots,
     GetSettings,
     GetAppleMusicAuthConfig,
+    ScanOpticalDisc {
+        #[serde(default)]
+        device_path: Option<String>,
+        #[serde(default)]
+        force_refresh: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

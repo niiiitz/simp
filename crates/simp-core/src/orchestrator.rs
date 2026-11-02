@@ -670,6 +670,21 @@ impl AudioOrchestrator {
                 });
                 self.handle_command(AudioCommand::RescanStorage);
             }
+            AudioCommand::EjectOpticalDisc { device_path } => {
+                let is_playing_cd = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .current_track
+                    .as_ref()
+                    .map(|t| t.uri.starts_with("cdda://") || t.source == "cdda")
+                    .unwrap_or(false);
+                if is_playing_cd {
+                    self.pause_active_engine();
+                    self.local_engine.release_pipewire_stream();
+                }
+                let _ = crate::sinks::cdda::eject_optical_disc(device_path.as_deref());
+            }
             AudioCommand::ShutdownDaemon => {
                 self.pause_active_engine();
                 self.local_engine.release_pipewire_stream();
@@ -742,10 +757,12 @@ impl AudioOrchestrator {
         // 3. Dispatch to target engine with Anti-Runaway-Skip Circuit Breaker
         match target_engine {
             ActiveEngine::Local => {
-                let file_path = track.uri.strip_prefix("file://").unwrap_or(&track.uri);
-                if !Path::new(file_path).exists() {
-                    self.handle_track_load_failure("Offline/unplugged storage mount");
-                    return;
+                if !track.uri.starts_with("cdda://") {
+                    let file_path = track.uri.strip_prefix("file://").unwrap_or(&track.uri);
+                    if !Path::new(file_path).exists() {
+                        self.handle_track_load_failure("Offline/unplugged storage mount");
+                        return;
+                    }
                 }
                 match self.local_engine.load_and_play(
                     &track.uri,
@@ -810,9 +827,9 @@ impl AudioOrchestrator {
     }
 
     fn advance_queue(&mut self, manual_skip: bool) {
-        let (queue_len, current_idx, repeat_mode) = {
+        let (queue_len, current_idx, repeat_mode, shuffle) = {
             let st = self.state.lock().unwrap();
-            (st.queue.len(), st.queue_index, st.repeat_mode)
+            (st.queue.len(), st.queue_index, st.repeat_mode, st.shuffle)
         };
         if queue_len == 0 {
             return;
@@ -820,6 +837,17 @@ impl AudioOrchestrator {
 
         if !manual_skip && repeat_mode == RepeatMode::Track {
             self.transition_to_index(current_idx);
+            return;
+        }
+
+        if shuffle && queue_len > 1 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as usize)
+                .unwrap_or(1);
+            let step = (nanos % (queue_len - 1)) + 1;
+            let next_idx = (current_idx + step) % queue_len;
+            self.transition_to_index(next_idx);
             return;
         }
 
@@ -886,6 +914,8 @@ impl AudioOrchestrator {
             duration_ms: 0,
             source: if uri.starts_with("applemusic:") {
                 "apple_music".to_string()
+            } else if uri.starts_with("cdda://") {
+                "cdda".to_string()
             } else {
                 "local".to_string()
             },

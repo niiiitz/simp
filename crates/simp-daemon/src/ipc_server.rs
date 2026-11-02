@@ -215,9 +215,20 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
                         }
                     }
                     ClientEnvelope::Query { req_id, query } => {
-                        let resp = execute_query(req_id, query, &state);
-                        if let Ok(json) = serde_json::to_string(&resp) {
-                            let _ = direct_tx.send(json);
+                        let state_clone = state.clone();
+                        let direct_tx_clone = direct_tx.clone();
+                        if matches!(query, LibraryQuery::ScanOpticalDisc { .. }) {
+                            tokio::task::spawn_blocking(move || {
+                                let resp = execute_query(req_id, query, &state_clone);
+                                if let Ok(json) = serde_json::to_string(&resp) {
+                                    let _ = direct_tx_clone.send(json);
+                                }
+                            });
+                        } else {
+                            let resp = execute_query(req_id, query, &state);
+                            if let Ok(json) = serde_json::to_string(&resp) {
+                                let _ = direct_tx.send(json);
+                            }
                         }
                     }
                     ClientEnvelope::AppleWorkerEvent {
@@ -491,6 +502,22 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                     "pair_url": pair_url,
                     "status_error": status_error,
                 }),
+                error: None,
+            }
+        }
+        LibraryQuery::ScanOpticalDisc {
+            device_path,
+            force_refresh,
+        } => {
+            let status = simp_core::sinks::cdda::scan_optical_disc(
+                &state.db,
+                device_path.as_deref(),
+                force_refresh,
+            );
+            ServerEnvelope::QueryResponse {
+                req_id,
+                ok: true,
+                data: serde_json::to_value(status).unwrap_or_default(),
                 error: None,
             }
         }

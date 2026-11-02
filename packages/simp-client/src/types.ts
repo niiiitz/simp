@@ -88,4 +88,19 @@ export interface AppleSinkCommandPayload {
   volume?: number | null;
 }
 
+export interface OpticalDiscStatus {
+  drive_present: boolean;
+  device_path: string;
+  disc_present: boolean;
+  is_audio_cd: boolean;
+  disc_id?: string | null;
+  album_title: string;
+  artist_name: string;
+  release_year?: number | null;
+  art_url?: string | null;
+  tracks: TrackMetadata[];
+  status_message: string;
+}
+
+
 
