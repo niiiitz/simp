@@ -225,6 +225,9 @@ export class SimpDaemonClient {
   public addLibraryPath = (path: string) => this.sendCommand('add_library_path', { path });
   public removeLibraryPath = (path: string) => this.sendCommand('remove_library_path', { path });
   public rescanStorage = () => this.sendCommand('rescan_storage');
+  public restartDaemon = () => this.sendCommand('restart_daemon');
+  public resetDatabaseCache = () => this.sendCommand('reset_database_cache');
+  public factoryReset = () => this.sendCommand('factory_reset');
   public shutdownDaemon = () => this.sendCommand('shutdown_daemon');
 
   // Apple Music Virtual Sink & Developer Token helpers

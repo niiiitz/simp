@@ -84,6 +84,16 @@ impl AppleMusicSink {
         false
     }
 
+    pub fn kill_headless_widevine_worker() {
+        if let Ok(mut guard) = worker_slot().lock() {
+            if let Some(ref mut child) = *guard {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            *guard = None;
+        }
+    }
+
     /// Ensures a headless Widevine CDM browser worker (`http://127.0.0.1:18888/?worker=apple`)
     /// is running in the background on Linux / SteamOS (Gamescope + Desktop Mode) so full-length
     /// DRM-protected Apple Music tracks stream via PipeWire even when `steamwebhelper` lacks Widevine.

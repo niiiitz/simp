@@ -50,6 +50,9 @@ pub enum AudioCommand {
         duration_ms: Option<u32>,
     },
     SuspendForSleep,
+    RestartDaemon,
+    ResetDatabaseCache,
+    FactoryReset,
     ShutdownDaemon,
 }
 

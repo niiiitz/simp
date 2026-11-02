@@ -14,7 +14,7 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.11';
+const SIMP_VERSION = 'v0.1.0-alpha.12';
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 
 let cachedSteamFocusable: any = null;
@@ -713,7 +713,15 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
           return initial;
         }
 
-        const cur = nodes[prev].getBoundingClientRect();
+        const curNode = nodes[prev];
+        if (curNode?.dataset?.simpVolumeRow === 'true' && (dir === 'left' || dir === 'right')) {
+          const curVol = defaultSimpClient.getState()?.volume ?? 0.85;
+          const delta = dir === 'right' ? 0.05 : -0.05;
+          defaultSimpClient.setVolume(Math.max(0, Math.min(1, curVol + delta)));
+          return prev;
+        }
+
+        const cur = curNode.getBoundingClientRect();
         const cx = cur.left + cur.width / 2;
         const cy = cur.top + cur.height / 2;
 
@@ -807,17 +815,18 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
   const handleReloadDaemon = async () => {
     setReloading(true);
     try {
+      defaultSimpClient.restartDaemon();
       if (serverApi?.callPluginMethod) {
         await serverApi.callPluginMethod('restart_daemon', {});
       }
     } catch {
-      // Fallback if Decky serverApi isn't exposed or already using v2
+      // Fallback if Decky serverApi isn't exposed
     }
     window.setTimeout(() => {
       defaultSimpClient.connect();
       refreshCatalogs();
       setReloading(false);
-    }, 800);
+    }, 950);
   };
 
   const toggleDrawerTab = (tab: 'albums' | 'playlists' | 'pair') => {
@@ -1060,73 +1069,53 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
           </Focusable>
         </Focusable>
 
-        {/* Volume Slider Row with Gamepad-Accessible Step Buttons */}
+        {/* Clean Volume Slider Row (D-Pad Left/Right steps volume; A toggles mute) */}
         <Focusable
-          flowChildren="horizontal"
+          data-simp-volume-row="true"
+          onActivate={toggleMute}
+          onMoveLeft={() => {
+            defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05));
+            return true;
+          }}
+          onMoveRight={() => {
+            defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05));
+            return true;
+          }}
           style={{
             display: 'flex',
             alignItems: 'center',
-            gap: 8,
-            padding: '6px 8px',
+            gap: 10,
+            padding: '8px 10px',
             borderRadius: 8,
             background: '#121216',
             border: '1px solid #262630',
           }}
         >
-          <Focusable
-            onActivate={toggleMute}
-            onClick={toggleMute}
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleMute();
+            }}
             style={{
-              background: 'transparent',
-              border: 'none',
               color: '#d4d4dc',
               fontSize: 15,
               cursor: 'pointer',
-              padding: '4px 6px',
-              borderRadius: 6,
+              lineHeight: 1,
             }}
+            title="Mute / Unmute"
           >
             {volumePct === 0 ? '🔇' : volumePct < 45 ? '🔉' : '🔊'}
-          </Focusable>
-
-          <Focusable
-            onActivate={() => defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05))}
-            onClick={() => defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05))}
-            style={{
-              ...btnStyle,
-              minHeight: 32,
-              padding: '0 8px',
-              fontSize: 12,
-              background: '#181822',
-            }}
-            title="Volume -5%"
-          >
-            −5%
-          </Focusable>
+          </span>
 
           <input
             type="range"
             min={0}
             max={100}
             value={volumePct}
+            onClick={(e) => e.stopPropagation()}
             onChange={(e) => defaultSimpClient.setVolume(Number(e.target.value) / 100)}
             style={{ flex: 1, accentColor: '#2aa3c4', cursor: 'pointer' }}
           />
-
-          <Focusable
-            onActivate={() => defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05))}
-            onClick={() => defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05))}
-            style={{
-              ...btnStyle,
-              minHeight: 32,
-              padding: '0 8px',
-              fontSize: 12,
-              background: '#181822',
-            }}
-            title="Volume +5%"
-          >
-            +5%
-          </Focusable>
 
           <span style={{ fontSize: 12, fontWeight: 700, minWidth: 34, textAlign: 'right' }}>
             {volumePct}%
@@ -1341,9 +1330,9 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
             color: reloading ? '#5bc0de' : '#a1a1aa',
             borderColor: reloading ? '#2aa3c4' : '#262630',
           }}
-          title="Reload Daemon & Reconnect"
+          title="Restart SIMP Background Daemon & Widevine Worker"
         >
-          {reloading ? '⏳' : '🔄 Reload'}
+          {reloading ? '⏳' : '🔄 Restart BG'}
         </Focusable>
       </Focusable>
       </div>

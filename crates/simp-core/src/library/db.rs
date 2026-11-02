@@ -765,5 +765,15 @@ impl LibraryDatabase {
         )?;
         Ok(())
     }
+
+    pub fn clear_all_library_cache(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM playlist_items", [])?;
+        conn.execute("DELETE FROM playlists", [])?;
+        conn.execute("DELETE FROM tracks", [])?;
+        conn.execute("DELETE FROM albums", [])?;
+        conn.execute("DELETE FROM storage_mounts", [])?;
+        Ok(())
+    }
 }
 

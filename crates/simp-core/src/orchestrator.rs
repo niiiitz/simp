@@ -602,9 +602,78 @@ impl AudioOrchestrator {
                 self.pause_active_engine();
                 self.local_engine.release_pipewire_stream();
             }
+            AudioCommand::RestartDaemon => {
+                tracing::info!("Restarting SIMP daemon & headless Widevine worker...");
+                self.pause_active_engine();
+                self.local_engine.release_pipewire_stream();
+                AppleMusicSink::kill_headless_widevine_worker();
+                if let Ok(exe) = std::env::current_exe() {
+                    let args: Vec<String> = std::env::args().skip(1).collect();
+                    let _ = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg("sleep 0.35 && exec \"$0\" \"$@\"")
+                        .arg(exe)
+                        .args(args)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+                std::process::exit(0);
+            }
+            AudioCommand::ResetDatabaseCache => {
+                tracing::info!("Clearing offline SQLite library cache & rescanning local mounts...");
+                self.pause_active_engine();
+                {
+                    let mut st = self.state.lock().unwrap();
+                    st.queue.clear();
+                    st.queue_index = 0;
+                    st.current_track = None;
+                    st.active_engine = ActiveEngine::None;
+                }
+                let _ = self.db.clear_all_library_cache();
+                self.emit_queue_updated();
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+                self.handle_command(AudioCommand::RescanStorage);
+            }
+            AudioCommand::FactoryReset => {
+                tracing::info!("Performing Factory Reset (de-auth, clear DB, reset settings)...");
+                self.pause_active_engine();
+                self.local_engine.release_pipewire_stream();
+                AppleMusicSink::kill_headless_widevine_worker();
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    *cfg = SimpSettings::default();
+                }
+                self.apple_sink.is_authenticated = false;
+                {
+                    let mut st = self.state.lock().unwrap();
+                    st.apple_authenticated = false;
+                    st.queue.clear();
+                    st.queue_index = 0;
+                    st.current_track = None;
+                    st.active_engine = ActiveEngine::None;
+                    st.position_ms = 0;
+                    st.is_playing = false;
+                }
+                let _ = self.db.clear_all_library_cache();
+                self.persist_session_to_vdf();
+                self.emit_queue_updated();
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+                self.handle_command(AudioCommand::RescanStorage);
+            }
             AudioCommand::ShutdownDaemon => {
                 self.pause_active_engine();
                 self.local_engine.release_pipewire_stream();
+                AppleMusicSink::kill_headless_widevine_worker();
                 std::process::exit(0);
             }
         }

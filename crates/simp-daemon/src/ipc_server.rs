@@ -202,6 +202,7 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
                                 | AudioCommand::ConfigureAppleMusic { .. }
                                 | AudioCommand::SetAppleMusicUserToken { .. }
                                 | AudioCommand::DisconnectAppleMusic
+                                | AudioCommand::FactoryReset
                         );
                         let _ = state.cmd_tx.send(command);
                         if persist {

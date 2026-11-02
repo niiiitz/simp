@@ -24,7 +24,6 @@ import {
   pinAppleAlbumToSimp,
   pinApplePlaylistToSimp,
   searchAppleMusicCatalog,
-  syncAppleMusicCatalog,
 } from './drivers/AppleMusicDriver';
 
 const isCompanionPairRoute =
@@ -43,6 +42,9 @@ const ConsoleMainApp: React.FC = () => {
   const [snap, setSnap] = useState<SimpStateSnapshot | null>(null);
   const [view, setView] = useState<'lock' | 'browser'>('lock');
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
+  const [powerModalOpen, setPowerModalOpen] = useState(false);
+  const [isSleeping, setIsSleeping] = useState(false);
+  const [confirmHardReset, setConfirmHardReset] = useState(false);
 
   // Library & Playlist Browser state
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
@@ -84,13 +86,8 @@ const ConsoleMainApp: React.FC = () => {
   const [customFolderPath, setCustomFolderPath] = useState('');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-  // Apple Music Developer Key & Auth Modal state
+  // Apple Music Auth Modal state
   const [appleAuthCfg, setAppleAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
-  const [appleConfigOpen, setAppleConfigOpen] = useState(false);
-  const [appleTeamId, setAppleTeamId] = useState('');
-  const [appleKeyId, setAppleKeyId] = useState('');
-  const [appleKeyPath, setAppleKeyPath] = useState('');
-  const [appleManualUserToken, setAppleManualUserToken] = useState('');
   const [appleBusy, setAppleBusy] = useState(false);
 
   // Volume mute memory, OLED auto-dim, active luminance cap & sub-pixel orbit state
@@ -118,6 +115,14 @@ const ConsoleMainApp: React.FC = () => {
     window.setTimeout(() => {
       setToastMsg((prev) => (prev === msg ? null : prev));
     }, 2600);
+  }, []);
+
+  const dismissConsole = useCallback(() => {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ type: 'SIMP_EXIT_CONSOLE' }, '*');
+    } else {
+      window.close();
+    }
   }, []);
 
   // 1. Connect to `simp --daemon` (`ws://127.0.0.1:18888/ws`)
@@ -171,21 +176,21 @@ const ConsoleMainApp: React.FC = () => {
   }, [browserSourceFilter, browserTarget?.kind, browserTarget?.id, browserSearch]);
 
   useEffect(() => {
-    if (view === 'browser' || sourceModalOpen) {
+    if (view === 'browser' || sourceModalOpen || powerModalOpen) {
       refreshLibraryData();
     }
-    if (sourceModalOpen) {
+    if (sourceModalOpen || powerModalOpen) {
       defaultSimpClient
         .getAppleMusicAuthConfig()
         .then((cfg) => {
           setAppleAuthCfg(cfg);
-          setAppleTeamId((prev) => prev || cfg.team_id || '');
-          setAppleKeyId((prev) => prev || cfg.key_id || '');
-          setAppleKeyPath((prev) => prev || cfg.private_key_path || '');
         })
         .catch(() => {});
     }
-  }, [view, sourceModalOpen, snap?.mounts, refreshLibraryData]);
+    if (!powerModalOpen) {
+      setConfirmHardReset(false);
+    }
+  }, [view, sourceModalOpen, powerModalOpen, snap?.mounts, refreshLibraryData]);
 
   // 3. Load tracks for whichever Album, Playlist, Storage Mount, or Apple Cloud item is selected in the Browser
   useEffect(() => {
@@ -436,8 +441,10 @@ const ConsoleMainApp: React.FC = () => {
   const moveSpatialFocus = useCallback(
     (dir: 'up' | 'down' | 'left' | 'right') => {
       setIsDimmed(false);
-      const selector = sourceModalOpen
-        ? '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled]), [data-modal-root="true"] select:not([disabled])'
+      setIsSleeping(false);
+      const isModalOpen = sourceModalOpen || powerModalOpen;
+      const selector = isModalOpen
+        ? '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled]), [data-modal-root="true"] select:not([disabled]), [data-modal-root="true"] a'
         : 'button:not([disabled]), input:not([disabled]), select:not([disabled]), [data-focusable="true"]';
       const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter((el) => {
         const rect = el.getBoundingClientRect();
@@ -489,7 +496,7 @@ const ConsoleMainApp: React.FC = () => {
         applyFocusMarker(best);
       }
     },
-    [sourceModalOpen, applyFocusMarker]
+    [sourceModalOpen, powerModalOpen, applyFocusMarker]
   );
 
   // 7. Keyboard shortcuts + Native Decky Fullscreen Route `postMessage` Gamepad Bridge
@@ -500,10 +507,14 @@ const ConsoleMainApp: React.FC = () => {
       if (lastActionTs[action] && now - lastActionTs[action] < 70) return;
       lastActionTs[action] = now;
       setIsDimmed(false);
+      if (isSleeping) {
+        setIsSleeping(false);
+        return;
+      }
 
-      // In the `🎵 Player` (`lock`) view (when the Source modal is closed), D-Pad maps directly
+      // In the `🎵 Player` (`lock`) view (when modals are closed), D-Pad maps directly
       // to the on-screen transport badges (`◄` Previous, `►` Next, `▲/▼` Volume, `A` Play/Pause)!
-      const isDirectTransportView = view === 'lock' && !sourceModalOpen;
+      const isDirectTransportView = view === 'lock' && !sourceModalOpen && !powerModalOpen;
 
       switch (action) {
         case 'left':
@@ -550,7 +561,11 @@ const ConsoleMainApp: React.FC = () => {
           break;
         }
         case 'back':
-          if (sourceModalOpen) {
+          if (confirmHardReset) {
+            setConfirmHardReset(false);
+          } else if (powerModalOpen) {
+            setPowerModalOpen(false);
+          } else if (sourceModalOpen) {
             setSourceModalOpen(false);
           } else if (activeCloudAlbum || activeCloudPlaylist) {
             setActiveCloudAlbum(null);
@@ -580,6 +595,7 @@ const ConsoleMainApp: React.FC = () => {
           defaultSimpClient.seekRelative(10_000);
           break;
         case 'sources':
+          setPowerModalOpen(false);
           setSourceModalOpen((v) => !v);
           break;
         case 'vol_up':
@@ -671,6 +687,9 @@ const ConsoleMainApp: React.FC = () => {
   }, [
     moveSpatialFocus,
     sourceModalOpen,
+    powerModalOpen,
+    confirmHardReset,
+    isSleeping,
     activeCloudAlbum,
     activeCloudPlaylist,
     view,
@@ -691,8 +710,19 @@ const ConsoleMainApp: React.FC = () => {
 
         const prevButtons = prevButtonsByPad.get(pad.index) || [];
         const pressed = (idx: number) => !!pad.buttons[idx]?.pressed && !prevButtons[idx];
+        const anyButtonPressed = pad.buttons.some((b, i) => b.pressed && !prevButtons[i]);
 
-        const isDirectTransportView = view === 'lock' && !sourceModalOpen;
+        if (isSleeping && anyButtonPressed) {
+          setIsSleeping(false);
+          setIsDimmed(false);
+          prevButtonsByPad.set(
+            pad.index,
+            pad.buttons.map((b) => b.pressed)
+          );
+          continue;
+        }
+
+        const isDirectTransportView = view === 'lock' && !sourceModalOpen && !powerModalOpen;
 
         if (pressed(0)) {
           // A Button: In Player view, toggle Play/Pause; in Browser/Modal view, activate focused element
@@ -713,7 +743,11 @@ const ConsoleMainApp: React.FC = () => {
         if (pressed(1)) {
           // B Button: Close modal or return to Player view
           setIsDimmed(false);
-          if (sourceModalOpen) {
+          if (confirmHardReset) {
+            setConfirmHardReset(false);
+          } else if (powerModalOpen) {
+            setPowerModalOpen(false);
+          } else if (sourceModalOpen) {
             setSourceModalOpen(false);
           } else if (view === 'browser') {
             setView('lock');
@@ -725,7 +759,14 @@ const ConsoleMainApp: React.FC = () => {
         if (pressed(5)) setView('browser'); // R1
         if (pressed(6)) defaultSimpClient.seekRelative(-10_000); // L2 (Rewind 10s)
         if (pressed(7)) defaultSimpClient.seekRelative(10_000); // R2 (Fast-Forward 10s)
-        if (pressed(8) || pressed(9)) setSourceModalOpen((v) => !v); // Select / Start
+        if (pressed(8)) {
+          setPowerModalOpen(false);
+          setSourceModalOpen((v) => !v); // Select -> Sources
+        }
+        if (pressed(9)) {
+          setSourceModalOpen(false);
+          setPowerModalOpen((v) => !v); // Start -> Power Menu
+        }
         if (pressed(12)) {
           if (isDirectTransportView) applyVolume(currentVolume + 0.05);
           else moveSpatialFocus('up'); // D-Up
@@ -779,7 +820,17 @@ const ConsoleMainApp: React.FC = () => {
     }, 50);
 
     return () => window.clearInterval(poll);
-  }, [snap?.shuffle, applyVolume, currentVolume, moveSpatialFocus, sourceModalOpen, view]);
+  }, [
+    snap?.shuffle,
+    applyVolume,
+    currentVolume,
+    moveSpatialFocus,
+    sourceModalOpen,
+    powerModalOpen,
+    confirmHardReset,
+    isSleeping,
+    view,
+  ]);
 
   // 8. Playlist & Custom Folder Handlers
   const handleCreatePlaylist = async () => {
@@ -1009,7 +1060,7 @@ const ConsoleMainApp: React.FC = () => {
       `}</style>
 
       {/* Wake-Tap Guard: intercepts the first tap when dimmed so no button is misfired */}
-      {isDimmed && (
+      {isDimmed && !isSleeping && (
         <div
           onPointerDown={(e) => {
             e.stopPropagation();
@@ -1022,6 +1073,55 @@ const ConsoleMainApp: React.FC = () => {
             cursor: 'pointer',
           }}
         />
+      )}
+
+      {/* True-Black OLED Sleep Screen (Wake on Tap or Any Controller Button) */}
+      {isSleeping && (
+        <div
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            setIsSleeping(false);
+            setIsDimmed(false);
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            setIsSleeping(false);
+            setIsDimmed(false);
+          }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: '#000000',
+            zIndex: 120,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            userSelect: 'none',
+          }}
+        >
+          <div
+            style={{
+              transform: `translate3d(${orbitX * 3}px, ${orbitY * 3}px, 0)`,
+              transition: 'transform 4000ms linear',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 6,
+              opacity: 0.22,
+              color: '#71717a',
+              fontFamily: 'monospace',
+              fontSize: 12,
+              textAlign: 'center',
+            }}
+          >
+            <span>
+              🌙 SIMP OLED Sleep • {snap?.is_playing && track ? `▶ ${track.title}` : 'Standby'}
+            </span>
+            <span style={{ fontSize: 11 }}>Tap anywhere or press any button to wake</span>
+          </div>
+        </div>
       )}
 
       {/* Toast Notification Pill */}
@@ -1242,8 +1342,11 @@ const ConsoleMainApp: React.FC = () => {
           </button>
 
           <button
-            onClick={() => setSourceModalOpen(true)}
-            title="Power & Daemon Controls"
+            onClick={() => {
+              setSourceModalOpen(false);
+              setPowerModalOpen(true);
+            }}
+            title="Power, Sleep & System Menu"
             style={{
               width: 44,
               height: 44,
@@ -1489,6 +1592,8 @@ const ConsoleMainApp: React.FC = () => {
               borderRight: '1px solid #16161c',
               padding: 16,
               overflowY: 'auto',
+              WebkitOverflowScrolling: 'touch',
+              touchAction: 'pan-y',
               display: 'flex',
               flexDirection: 'column',
               gap: 10,
@@ -2862,6 +2967,8 @@ const ConsoleMainApp: React.FC = () => {
             style={{
               padding: 20,
               overflowY: 'auto',
+              WebkitOverflowScrolling: 'touch',
+              touchAction: 'pan-y',
               display: 'flex',
               flexDirection: 'column',
               justifyContent: 'space-between',
@@ -3351,6 +3458,7 @@ const ConsoleMainApp: React.FC = () => {
       {/* Source Selection, Custom Folder Picker & Authentication Pop-Up Modal */}
       {sourceModalOpen && (
         <div
+          onClick={() => setSourceModalOpen(false)}
           style={{
             position: 'fixed',
             inset: 0,
@@ -3358,17 +3466,26 @@ const ConsoleMainApp: React.FC = () => {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
+            padding: '16px',
+            boxSizing: 'border-box',
             zIndex: 50,
           }}
         >
           <div
             data-modal-root="true"
+            onClick={(e) => e.stopPropagation()}
             style={{
-              width: 560,
+              width: '100%',
+              maxWidth: 580,
+              maxHeight: '86vh',
+              overflowY: 'auto',
+              WebkitOverflowScrolling: 'touch',
+              touchAction: 'pan-y',
               background: '#0a0a0e',
               border: '2px solid #262632',
               borderRadius: 20,
               padding: 22,
+              boxSizing: 'border-box',
               display: 'flex',
               flexDirection: 'column',
               gap: 14,
@@ -3477,8 +3594,10 @@ const ConsoleMainApp: React.FC = () => {
               {snap?.mounts && snap.mounts.length > 0 && (
                 <div
                   style={{
-                    maxHeight: 140,
+                    maxHeight: 160,
                     overflowY: 'auto',
+                    WebkitOverflowScrolling: 'touch',
+                    touchAction: 'pan-y',
                     display: 'flex',
                     flexDirection: 'column',
                     gap: 4,
@@ -3561,7 +3680,7 @@ const ConsoleMainApp: React.FC = () => {
               <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>Browse</span>
             </div>
 
-            {/* Apple Music (MusicKit v3 + ES256 Developer JWT) */}
+            {/* Apple Music (MusicKit v3 + Companion QR Pairing) */}
             <div
               style={{
                 padding: '12px 14px',
@@ -3579,6 +3698,7 @@ const ConsoleMainApp: React.FC = () => {
                   justifyContent: 'space-between',
                   alignItems: 'center',
                   gap: 10,
+                  flexWrap: 'wrap',
                 }}
               >
                 <div>
@@ -3589,29 +3709,12 @@ const ConsoleMainApp: React.FC = () => {
                     {snap?.apple_authenticated
                       ? '🟢 Connected — Browse Cloud Playlists, Radio & Full Albums'
                       : appleAuthCfg?.configured
-                      ? 'Sign in with your Apple ID to stream & browse Cloud Library'
-                      : 'Publisher setup: add Apple Developer Key (.p8) to enable'}
+                      ? 'Sign in with your Apple ID or scan the Companion QR code'
+                      : 'Apple Music Developer Token not loaded'}
                   </div>
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <button
-                    onClick={() => setAppleConfigOpen((prev) => !prev)}
-                    style={{
-                      minHeight: 34,
-                      padding: '0 10px',
-                      borderRadius: 8,
-                      background: '#181822',
-                      border: '1px solid #2e2e3c',
-                      color: '#c8c8d2',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {appleConfigOpen ? 'Hide Key' : '⚙️ Key Setup'}
-                  </button>
-
                   {appleAuthCfg?.configured && !snap?.apple_authenticated && (
                     <button
                       disabled={appleBusy}
@@ -3629,7 +3732,7 @@ const ConsoleMainApp: React.FC = () => {
                         }
                       }}
                       style={{
-                        minHeight: 34,
+                        minHeight: 36,
                         padding: '0 12px',
                         borderRadius: 8,
                         background: '#31101b',
@@ -3654,7 +3757,7 @@ const ConsoleMainApp: React.FC = () => {
                           setSourceModalOpen(false);
                         }}
                         style={{
-                          minHeight: 34,
+                          minHeight: 36,
                           padding: '0 10px',
                           borderRadius: 8,
                           background: '#0f222a',
@@ -3673,7 +3776,7 @@ const ConsoleMainApp: React.FC = () => {
                           showToast('Disconnected Apple Music');
                         }}
                         style={{
-                          minHeight: 34,
+                          minHeight: 36,
                           padding: '0 10px',
                           borderRadius: 8,
                           background: '#1f1216',
@@ -3713,7 +3816,7 @@ const ConsoleMainApp: React.FC = () => {
                       📱 Scan to Pair with iPhone / Android / PC
                     </div>
                     <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.4 }}>
-                      Sign in on your phone or PC where Face ID, Passkeys, and YubiKey / FIDO2 work natively. Your Apple Music library & token sync straight to your Steam Deck.
+                      Sign in on your phone or PC where Face ID, Passkeys, and YubiKey / FIDO2 work natively. Having FIDO2 or security key issues? Visit the <code>/pair</code> URL below for troubleshooting & token tools.
                     </div>
                     <div
                       style={{
@@ -3729,214 +3832,18 @@ const ConsoleMainApp: React.FC = () => {
                 </div>
               )}
 
-              {appleConfigOpen && (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 8,
-                    paddingTop: 8,
-                    borderTop: '1px solid #22222e',
-                  }}
-                >
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                    <input
-                      type="text"
-                      placeholder="APPLE_TEAM_ID (10 chars)"
-                      value={appleTeamId}
-                      onChange={(e) => setAppleTeamId(e.target.value)}
-                      style={{
-                        minHeight: 36,
-                        padding: '0 10px',
-                        borderRadius: 8,
-                        background: '#07070a',
-                        border: '1px solid #2e2e3c',
-                        color: '#d4d4dc',
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                      }}
-                    />
-                    <input
-                      type="text"
-                      placeholder="APPLE_KEY_ID (10 chars)"
-                      value={appleKeyId}
-                      onChange={(e) => setAppleKeyId(e.target.value)}
-                      style={{
-                        minHeight: 36,
-                        padding: '0 10px',
-                        borderRadius: 8,
-                        background: '#07070a',
-                        border: '1px solid #2e2e3c',
-                        color: '#d4d4dc',
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                      }}
-                    />
-                  </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input
-                      type="text"
-                      placeholder="/path/to/AuthKey_XXXXXXXXXX.p8"
-                      value={appleKeyPath}
-                      onChange={(e) => setAppleKeyPath(e.target.value)}
-                      style={{
-                        flex: 1,
-                        minHeight: 36,
-                        padding: '0 10px',
-                        borderRadius: 8,
-                        background: '#07070a',
-                        border: '1px solid #2e2e3c',
-                        color: '#d4d4dc',
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                      }}
-                    />
-                    <button
-                      onClick={() => {
-                        defaultSimpClient.configureAppleMusic({
-                          team_id: appleTeamId,
-                          key_id: appleKeyId,
-                          private_key_path: appleKeyPath,
-                        });
-                        window.setTimeout(() => {
-                          defaultSimpClient
-                            .getAppleMusicAuthConfig()
-                            .then((cfg) => {
-                              setAppleAuthCfg(cfg);
-                              if (cfg.configured) {
-                                showToast('ES256 Developer Token signed & ready!');
-                                setAppleConfigOpen(false);
-                              } else if (cfg.status_error) {
-                                showToast(cfg.status_error);
-                              }
-                            })
-                            .catch(() => {});
-                        }, 150);
-                      }}
-                      style={{
-                        minHeight: 36,
-                        padding: '0 14px',
-                        borderRadius: 8,
-                        background: '#0f222a',
-                        border: '1px solid #2aa3c4',
-                        color: '#bfeaf5',
-                        fontSize: 11,
-                        fontWeight: 800,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      Save & Sign ES256
-                    </button>
-                  </div>
-
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 6,
-                      paddingTop: 6,
-                      borderTop: '1px dashed #22222e',
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                      }}
-                    >
-                      <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 700 }}>
-                        🔑 Companion Music-User-Token (Bypass FIDO / YubiKey Popup on Handheld)
-                      </span>
-                      {appleAuthCfg?.music_user_token && (
-                        <button
-                          onClick={() => {
-                            navigator.clipboard
-                              .writeText(appleAuthCfg.music_user_token || '')
-                              .then(() => showToast('Copied Music-User-Token to clipboard!'))
-                              .catch(() => showToast('Clipboard copy failed'));
-                          }}
-                          style={{
-                            minHeight: 24,
-                            padding: '0 8px',
-                            borderRadius: 6,
-                            background: '#171722',
-                            border: '1px solid #2e2e3c',
-                            color: '#67e8f9',
-                            fontSize: 10,
-                            fontWeight: 700,
-                            cursor: 'pointer',
-                          }}
-                        >
-                          📋 Copy Active Token
-                        </button>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <input
-                        type="text"
-                        placeholder="Paste Music-User-Token from PC (0.ArOY...)"
-                        value={appleManualUserToken}
-                        onChange={(e) => setAppleManualUserToken(e.target.value)}
-                        style={{
-                          flex: 1,
-                          minHeight: 36,
-                          padding: '0 10px',
-                          borderRadius: 8,
-                          background: '#07070a',
-                          border: '1px solid #2e2e3c',
-                          color: '#d4d4dc',
-                          fontSize: 11,
-                          fontFamily: 'monospace',
-                        }}
-                      />
-                      <button
-                        onClick={async () => {
-                          const token = appleManualUserToken.trim();
-                          if (!token) {
-                            showToast('Paste a valid Music-User-Token first');
-                            return;
-                          }
-                          setAppleBusy(true);
-                          defaultSimpClient.setAppleMusicUserToken(token);
-                          window.setTimeout(async () => {
-                            try {
-                              const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
-                              setAppleAuthCfg(cfg);
-                              setAppleConfigOpen(false);
-                              await syncAppleMusicCatalog(showToast);
-                            } finally {
-                              setAppleBusy(false);
-                            }
-                          }, 250);
-                        }}
-                        style={{
-                          minHeight: 36,
-                          padding: '0 12px',
-                          borderRadius: 8,
-                          background: '#2a131c',
-                          border: '1px solid #fa243c',
-                          color: '#fda4af',
-                          fontSize: 11,
-                          fontWeight: 800,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        Apply Token & Sync
-                      </button>
-                    </div>
-                  </div>
-
-                  {appleAuthCfg?.status_error && !appleAuthCfg.configured && (
-                    <div style={{ fontSize: 11, color: '#f87171', fontFamily: 'monospace' }}>
-                      ⚠️ {appleAuthCfg.status_error}
-                    </div>
-                  )}
+              {snap?.apple_authenticated && (
+                <div style={{ fontSize: 11, color: '#71717a' }}>
+                  Need to re-pair or use FIDO2 / token troubleshooting? Open{' '}
+                  <span style={{ fontFamily: 'monospace', color: '#67e8f9' }}>
+                    {appleAuthCfg?.pair_url || 'http://127.0.0.1:18888/pair'}
+                  </span>{' '}
+                  or use the <strong>⏻ Power Menu</strong>.
                 </div>
               )}
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
               <button
                 onClick={() => {
                   defaultSimpClient.rescanStorage();
@@ -3958,21 +3865,382 @@ const ConsoleMainApp: React.FC = () => {
                 🔄 Rescan Storage Drives
               </button>
               <button
-                onClick={() => defaultSimpClient.shutdownDaemon()}
+                onClick={() => {
+                  setSourceModalOpen(false);
+                  setPowerModalOpen(true);
+                }}
                 style={{
                   minHeight: 44,
                   padding: '0 16px',
                   borderRadius: 12,
-                  background: '#2a1215',
-                  border: '1px solid #7f1d1d',
-                  color: '#fca5a5',
+                  background: '#12121a',
+                  border: '1px solid #2e2e3a',
+                  color: '#9ca3af',
                   fontSize: 12,
                   fontWeight: 700,
                   cursor: 'pointer',
                 }}
               >
-                ⏻ Stop Background Daemon
+                ⏻ Power & System Menu →
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Dedicated Power, Sleep, Reset, Pairing & System Maintenance Modal */}
+      {powerModalOpen && (
+        <div
+          onClick={() => setPowerModalOpen(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.88)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px',
+            boxSizing: 'border-box',
+            zIndex: 55,
+          }}
+        >
+          <div
+            data-modal-root="true"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: '100%',
+              maxWidth: 560,
+              maxHeight: '86vh',
+              overflowY: 'auto',
+              WebkitOverflowScrolling: 'touch',
+              touchAction: 'pan-y',
+              background: '#0a0a0e',
+              border: '2px solid #262632',
+              borderRadius: 20,
+              padding: 22,
+              boxSizing: 'border-box',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <strong style={{ fontSize: 15 }}>⏻ Power, Sleep & System Menu</strong>
+              <button
+                onClick={() => setPowerModalOpen(false)}
+                style={{
+                  minHeight: 42,
+                  padding: '0 14px',
+                  borderRadius: 10,
+                  background: '#16161f',
+                  border: '1px solid #2e2e3a',
+                  color: '#d4d4dc',
+                  fontFamily: 'monospace',
+                  cursor: 'pointer',
+                }}
+              >
+                ✕ B
+              </button>
+            </div>
+
+            {/* 1. Sleep Screen & Pause/Dismiss Quick Actions */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <button
+                data-default-focus="true"
+                onClick={() => {
+                  setPowerModalOpen(false);
+                  setIsSleeping(true);
+                }}
+                style={{
+                  minHeight: 62,
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  background: '#0d1b22',
+                  border: '1px solid #2aa3c4',
+                  color: '#bfeaf5',
+                  textAlign: 'left',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ fontSize: 13, fontWeight: 800 }}>🌙 Sleep Screen</span>
+                <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                  True-black OLED screen • Wakes on any tap or button
+                </span>
+              </button>
+
+              <button
+                onClick={() => {
+                  defaultSimpClient.pause();
+                  setPowerModalOpen(false);
+                  dismissConsole();
+                }}
+                style={{
+                  minHeight: 62,
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  background: '#12121b',
+                  border: '1px solid #2c2c3c',
+                  color: '#e4e4ec',
+                  textAlign: 'left',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ fontSize: 13, fontWeight: 800 }}>⏸️ Pause & Dismiss Console</span>
+                <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                  Pauses audio and returns to Steam Gaming Mode
+                </span>
+              </button>
+            </div>
+
+            {/* 2. Reset Services & Shutdown Background Daemon */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <button
+                onClick={() => {
+                  defaultSimpClient.pause();
+                  defaultSimpClient.restartDaemon();
+                  showToast('Restarting SIMP background services...');
+                  setPowerModalOpen(false);
+                  window.setTimeout(() => dismissConsole(), 300);
+                }}
+                style={{
+                  minHeight: 62,
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  background: '#161420',
+                  border: '1px solid #3b3354',
+                  color: '#ddd6fe',
+                  textAlign: 'left',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ fontSize: 13, fontWeight: 800 }}>🔄 Reset Services & Dismiss</span>
+                <span style={{ fontSize: 11, color: '#a1a1aa' }}>
+                  Pause, restart BG daemon & Widevine worker, and close screen
+                </span>
+              </button>
+
+              <button
+                onClick={() => {
+                  defaultSimpClient.shutdownDaemon();
+                  setPowerModalOpen(false);
+                  window.setTimeout(() => dismissConsole(), 250);
+                }}
+                style={{
+                  minHeight: 62,
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  background: '#241115',
+                  border: '1px solid #7f1d1d',
+                  color: '#fca5a5',
+                  textAlign: 'left',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ fontSize: 13, fontWeight: 800 }}>⏻ Shutdown SIMP</span>
+                <span style={{ fontSize: 11, color: '#fca5a5', opacity: 0.8 }}>
+                  Kill background daemon & workers and dismiss console
+                </span>
+              </button>
+            </div>
+
+            {/* 3. Pairing & Troubleshooting Assistance (/pair) */}
+            <div
+              style={{
+                padding: '12px 14px',
+                borderRadius: 12,
+                background: '#0d0d14',
+                border: '1px solid #262636',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 14,
+              }}
+            >
+              <QrCodeSvg
+                value={appleAuthCfg?.pair_url || 'http://steamdeck.local:18888/pair'}
+                size={84}
+              />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5, flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
+                  📱 Pairing & Troubleshooting Assistance (/pair)
+                </div>
+                <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.4 }}>
+                  Scan with your phone or visit on a PC to pair Apple Music or access the{' '}
+                  <strong>FIDO2 / YubiKey & Token Debug</strong> tools.
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    flexWrap: 'wrap',
+                    marginTop: 2,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color: '#fda4af',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                  >
+                    {appleAuthCfg?.pair_url || 'http://127.0.0.1:18888/pair'}
+                  </span>
+                  <a
+                    href="/pair"
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      padding: '5px 10px',
+                      borderRadius: 8,
+                      background: '#171724',
+                      border: '1px solid #2aa3c4',
+                      color: '#bfeaf5',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      textDecoration: 'none',
+                    }}
+                  >
+                    Open /pair ↗
+                  </a>
+                </div>
+              </div>
+            </div>
+
+            {/* 4. Database Cache Reset & Hard Reset All Settings */}
+            <div
+              style={{
+                padding: '12px 14px',
+                borderRadius: 12,
+                background: '#0f0f15',
+                border: '1px solid #22222e',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 10,
+              }}
+            >
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#9ca3af' }}>
+                🛠️ Storage Cache & Factory Reset
+              </div>
+
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => {
+                    defaultSimpClient.resetDatabaseCache();
+                    showToast('Cleared offline DB cache & rescanning folders...');
+                    setPowerModalOpen(false);
+                    window.setTimeout(() => refreshLibraryData(), 600);
+                  }}
+                  style={{
+                    flex: 1,
+                    minHeight: 46,
+                    padding: '8px 12px',
+                    borderRadius: 10,
+                    background: '#161622',
+                    border: '1px solid #2e2e3e',
+                    color: '#d4d4dc',
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  🧹 Reset Offline DB Cache (Keep Auth)
+                </button>
+
+                {!confirmHardReset ? (
+                  <button
+                    onClick={() => setConfirmHardReset(true)}
+                    style={{
+                      flex: 1,
+                      minHeight: 46,
+                      padding: '8px 12px',
+                      borderRadius: 10,
+                      background: '#221115',
+                      border: '1px solid #5c222d',
+                      color: '#f87171',
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ⚠️ Hard Reset All Settings...
+                  </button>
+                ) : (
+                  <div
+                    style={{
+                      width: '100%',
+                      padding: 12,
+                      borderRadius: 10,
+                      background: '#2a0e13',
+                      border: '1px solid #ef4444',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                    }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 800, color: '#fecaca' }}>
+                      ⚠️ Confirm Hard Reset?
+                    </div>
+                    <div style={{ fontSize: 11, color: '#fca5a5', lineHeight: 1.4 }}>
+                      This will sign out of Apple Music, clear all playlists, pinned albums, cached tracks, and reset all SIMP settings to factory defaults.
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        onClick={() => {
+                          defaultSimpClient.factoryReset();
+                          setConfirmHardReset(false);
+                          setPowerModalOpen(false);
+                          showToast('Factory reset complete — all settings & auth cleared');
+                          window.setTimeout(() => refreshLibraryData(), 600);
+                        }}
+                        style={{
+                          flex: 1,
+                          minHeight: 40,
+                          borderRadius: 8,
+                          background: '#dc2626',
+                          border: '1px solid #f87171',
+                          color: '#ffffff',
+                          fontSize: 12,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Yes, Wipe & Hard Reset
+                      </button>
+                      <button
+                        onClick={() => setConfirmHardReset(false)}
+                        style={{
+                          minHeight: 40,
+                          padding: '0 14px',
+                          borderRadius: 8,
+                          background: '#181822',
+                          border: '1px solid #2e2e3c',
+                          color: '#d4d4dc',
+                          fontSize: 12,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
