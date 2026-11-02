@@ -78,6 +78,10 @@ PY
     echo "   • Baked 150-day ES256 Apple Developer Token into binary (no .p8 key required on target devices)"
   fi
 fi
+if [[ -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
+  echo "   ❌ ERROR: SIMP_EMBEDDED_APPLE_DEV_TOKEN was not generated (check APPLE_PRIVATE_KEY_PATH accessibility; run outside sandbox if key is on /mnt/c)." >&2
+  exit 1
+fi
 "${CARGO_BIN}" build --release -p simp --offline
 
 echo "4/4 Assembling dist/simp-steamos-userland/..."

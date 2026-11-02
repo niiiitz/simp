@@ -14,8 +14,12 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
+const SIMP_VERSION = 'v0.1.0-alpha.10';
+const SIMP_CONSOLE_ROUTE = '/simp-console';
+
 let cachedSteamFocusable: any = null;
 let cachedSteamButtonItem: any = null;
+let cachedSteamNavigation: any = null;
 
 function getSteamWebpackModules(): any[] {
   const modules: any[] = [];
@@ -81,8 +85,10 @@ function resolveSteamFocusable(): any {
     if (!str) return false;
     return (
       str.includes('flow-children') &&
-      str.includes('onActivate') &&
-      (str.includes('focusClassName') || str.includes('navRef'))
+      (str.includes('onActivate') ||
+        str.includes('focusClassName') ||
+        str.includes('navRef') ||
+        str.includes('focusWithinClassName'))
     );
   };
 
@@ -130,8 +136,7 @@ function resolveSteamDialogButton(): any {
       '';
     return (
       str.includes('DialogButton') &&
-      str.includes('onClick') &&
-      (str.includes('noFocusRing') || str.includes('focusable'))
+      (str.includes('noFocusRing') || str.includes('onOKButton') || str.includes('focusable'))
     );
   };
 
@@ -154,30 +159,348 @@ function resolveSteamDialogButton(): any {
 }
 
 /**
- * Opens the Full SIMP Console (`http://127.0.0.1:18888`) using Steam's native
- * `Navigation.NavigateToExternalWeb` (with `SteamClient.System.OpenInSystemBrowser` and `window.open` fallbacks).
+ * Discovers Valve's `Navigation` router object (`Navigate`, `NavigateBack`, `CloseSideMenus`)
+ * so SIMP can open the native `/simp-console` route inside Gaming Mode without triggering
+ * the External Web Browser's `"Use touch"` controller block!
  */
-function openFullSimpConsole(url = 'http://127.0.0.1:18888') {
-  try {
-    const globalDfl = (window as any).DFL || (window as any).deckyFrontendLib;
-    if (globalDfl?.Navigation?.NavigateToExternalWeb) {
-      globalDfl.Navigation.NavigateToExternalWeb(url);
-      return;
-    }
-    const steamClient = (window as any).SteamClient;
-    if (steamClient?.System?.OpenInSystemBrowser) {
-      steamClient.System.OpenInSystemBrowser(url);
-      return;
-    }
-  } catch {
-    // Fall through
+function resolveSteamNavigation(): any {
+  if (cachedSteamNavigation) return cachedSteamNavigation;
+  const globalDfl = (window as any).DFL || (window as any).deckyFrontendLib;
+  if (globalDfl?.Navigation) {
+    cachedSteamNavigation = globalDfl.Navigation;
+    return cachedSteamNavigation;
   }
-  window.open(url, '_blank');
+
+  for (const mod of getSteamWebpackModules()) {
+    for (const candidate of [mod?.default, mod]) {
+      if (!candidate || typeof candidate !== 'object' || candidate === window) continue;
+      if (
+        typeof candidate.Navigate === 'function' &&
+        (typeof candidate.NavigateBack === 'function' ||
+          typeof candidate.CloseSideMenus === 'function')
+      ) {
+        cachedSteamNavigation = candidate;
+        return cachedSteamNavigation;
+      }
+      for (const key of Object.keys(candidate)) {
+        try {
+          const exp = candidate[key];
+          if (
+            exp &&
+            typeof exp === 'object' &&
+            typeof exp.Navigate === 'function' &&
+            (typeof exp.NavigateBack === 'function' || typeof exp.CloseSideMenus === 'function')
+          ) {
+            cachedSteamNavigation = exp;
+            return cachedSteamNavigation;
+          }
+        } catch {
+          // Ignore
+        }
+      }
+    }
+  }
+  return null;
+}
+
+export type SteamPadAction =
+  | 'up'
+  | 'down'
+  | 'left'
+  | 'right'
+  | 'activate'
+  | 'back'
+  | 'shuffle'
+  | 'repeat'
+  | 'l1'
+  | 'r1'
+  | 'l2'
+  | 'r2'
+  | 'sources';
+
+let isSimpRouteRegistered = false;
+let lastFocusableClickTs = 0;
+
+function resolveDeckyRouterHook(serverApi?: any): any {
+  return (
+    serverApi?.routerHook ||
+    (window as any).DeckyPluginLoader?.routerHook ||
+    (window as any).DFL?.routerHook ||
+    (window as any).deckyFrontendLib?.routerHook ||
+    null
+  );
 }
 
 /**
+ * Maps Valve's `EGamepadButton` (`@decky/ui` / `decky-frontend-lib` / `vgp_onbuttondown` /
+ * `SteamClient.Input.RegisterForControllerInputMessages`) to canonical SIMP actions:
+ *   1 = OK (A), 2 = CANCEL (B), 3 = SECONDARY (X), 4 = OPTIONS (Y),
+ *   5 = BUMPER_LEFT (L1), 6 = BUMPER_RIGHT (R1), 7 = TRIGGER_LEFT (L2), 8 = TRIGGER_RIGHT (R2),
+ *   9 = DIR_UP, 10 = DIR_DOWN, 11 = DIR_LEFT, 12 = DIR_RIGHT, 13 = SELECT, 14 = START
+ */
+const E_GAMEPAD_BUTTON_MAP: Record<number, SteamPadAction> = {
+  1: 'activate',
+  2: 'back',
+  3: 'shuffle',
+  4: 'repeat',
+  5: 'l1',
+  6: 'r1',
+  7: 'l2',
+  8: 'r2',
+  9: 'up',
+  10: 'down',
+  11: 'left',
+  12: 'right',
+  13: 'sources',
+  14: 'sources',
+};
+
+/**
+ * Multi-source deduplicated SteamOS controller listener for both the QAM drawer and `/simp-console`:
+ *   1. SteamUI DOM `vgp_onbuttondown` & `vgp_ondirection` events on the active window/document (capture phase)
+ *   2. `SteamClient.Input.RegisterForControllerInputMessages` (both array and positional callback shapes)
+ *   3. Standard `keydown` (`ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Enter`)
+ */
+function registerSteamControllerButtons(
+  onAction: (action: SteamPadAction, rawEvent?: Event) => void,
+  getTargetDoc?: () => Document | null
+): () => void {
+  const disposers: Array<() => void> = [];
+  const lastEmitByAction: Record<string, number> = {};
+
+  const emit = (action: SteamPadAction | undefined, rawEvent?: Event) => {
+    if (!action) return;
+    const now = performance.now();
+    if (lastEmitByAction[action] && now - lastEmitByAction[action] < 65) return;
+    lastEmitByAction[action] = now;
+    onAction(action, rawEvent);
+  };
+
+  // 1. SteamClient.Input.RegisterForControllerInputMessages
+  try {
+    const input = (window as any).SteamClient?.Input;
+    if (input?.RegisterForControllerInputMessages) {
+      const reg = input.RegisterForControllerInputMessages(
+        (arg0: any, arg1?: any, arg2?: any) => {
+          if (Array.isArray(arg0)) {
+            for (const msg of arg0) {
+              const isDown = Boolean(msg?.bState ?? msg?.bPressed ?? msg?.isDown);
+              const btn = Number(msg?.eButton ?? msg?.nButton ?? msg?.button);
+              if (isDown && btn) {
+                emit(E_GAMEPAD_BUTTON_MAP[btn]);
+              }
+            }
+          } else if (arg2 === true) {
+            emit(E_GAMEPAD_BUTTON_MAP[Number(arg1)]);
+          }
+        }
+      );
+      if (reg && typeof reg.unregister === 'function') {
+        disposers.push(() => reg.unregister());
+      }
+    }
+  } catch (err) {
+    console.warn('[SIMP Decky] RegisterForControllerInputMessages failed:', err);
+  }
+
+  // 2. Attach `vgp_onbuttondown`, `vgp_ondirection`, and `keydown` to both `window` and `ownerDocument`
+  const attachedTargets = new Set<EventTarget>();
+  const onVgp = (e: any) => {
+    const btn = Number(e?.detail?.button);
+    if (btn && E_GAMEPAD_BUTTON_MAP[btn]) {
+      emit(E_GAMEPAD_BUTTON_MAP[btn], e);
+    }
+  };
+  const onKeyDown = (e: any) => {
+    const map: Record<string, SteamPadAction> = {
+      ArrowUp: 'up',
+      ArrowDown: 'down',
+      ArrowLeft: 'left',
+      ArrowRight: 'right',
+      Enter: 'activate',
+    };
+    if (map[e.key]) {
+      emit(map[e.key], e);
+    }
+  };
+
+  const attachToTarget = (target: EventTarget | null | undefined) => {
+    if (!target || attachedTargets.has(target)) return;
+    attachedTargets.add(target);
+    target.addEventListener('vgp_onbuttondown', onVgp as EventListener, true);
+    target.addEventListener('vgp_ondirection', onVgp as EventListener, true);
+    target.addEventListener('keydown', onKeyDown as EventListener, true);
+    disposers.push(() => {
+      target.removeEventListener('vgp_onbuttondown', onVgp as EventListener, true);
+      target.removeEventListener('vgp_ondirection', onVgp as EventListener, true);
+      target.removeEventListener('keydown', onKeyDown as EventListener, true);
+    });
+  };
+
+  attachToTarget(window);
+  attachToTarget(document);
+
+  // Poll briefly to attach to `ownerDocument` & its `defaultView` once the QAM / Route ref mounts
+  const syncDocTarget = () => {
+    const doc = getTargetDoc?.();
+    if (doc) {
+      attachToTarget(doc);
+      attachToTarget(doc.defaultView);
+    }
+  };
+  syncDocTarget();
+  const docTimer = window.setInterval(syncDocTarget, 250);
+  disposers.push(() => window.clearInterval(docTimer));
+
+  return () => {
+    for (const fn of disposers) {
+      try {
+        fn();
+      } catch {
+        // Ignore
+      }
+    }
+  };
+}
+
+/**
+ * Navigates to the native `/simp-console` Decky route inside SteamUI (avoiding the `"Use touch"`
+ * External Web Browser popup), closing the QAM drawer automatically.
+ * Falls back to the inline fullscreen console overlay inside SteamUI if `routerHook` isn't available.
+ */
+function openFullSimpConsole(onFallbackInline?: () => void) {
+  try {
+    const nav = resolveSteamNavigation();
+    if (isSimpRouteRegistered && nav?.Navigate) {
+      if (nav?.CloseSideMenus) {
+        nav.CloseSideMenus();
+      }
+      nav.Navigate(SIMP_CONSOLE_ROUTE);
+      return;
+    }
+    const routerHook = resolveDeckyRouterHook();
+    if (isSimpRouteRegistered && routerHook?.navigate) {
+      if (nav?.CloseSideMenus) {
+        nav.CloseSideMenus();
+      }
+      routerHook.navigate(SIMP_CONSOLE_ROUTE);
+      return;
+    }
+  } catch {
+    // Fall through to inline fullscreen SteamUI overlay
+  }
+  if (onFallbackInline) {
+    onFallbackInline();
+  }
+}
+
+/**
+ * Fullscreen Native SteamUI Route (`/simp-console`) registered via Decky's `routerHook.addRoute`.
+ * Renders SIMP Console (`http://127.0.0.1:18888`) inside a native SteamUI `Focusable` screen
+ * and bridges all Steam Deck controller buttons (`D-Pad`, `A`, `B`, `X`, `Y`, `L1`, `R1`, `L2`, `R2`, `Start`)
+ * directly into the Console UI via `postMessage` — zero `"Use touch"` banner and 100% controller support!
+ */
+const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit }) => {
+  const { useEffect, useRef } = SP_REACT;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  const sendAction = (action: SteamPadAction) => {
+    const win = iframeRef.current?.contentWindow;
+    if (win) {
+      win.postMessage({ type: 'SIMP_GAMEPAD_ACTION', action }, '*');
+    }
+  };
+
+  const exitConsole = () => {
+    if (onExit) {
+      onExit();
+      return;
+    }
+    const nav = resolveSteamNavigation();
+    if (nav?.NavigateBack) {
+      nav.NavigateBack();
+    } else {
+      window.history.back();
+    }
+  };
+
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.data?.type === 'SIMP_EXIT_CONSOLE') {
+        exitConsole();
+      }
+    };
+    window.addEventListener('message', onMessage);
+
+    const unsubController = registerSteamControllerButtons(
+      (action, rawEvent) => {
+        rawEvent?.stopPropagation?.();
+        rawEvent?.preventDefault?.();
+        sendAction(action);
+      },
+      () => containerRef.current?.ownerDocument || null
+    );
+
+    return () => {
+      window.removeEventListener('message', onMessage);
+      unsubController();
+    };
+  }, []);
+
+  return (
+    <Focusable
+      style={{
+        position: 'fixed',
+        inset: 0,
+        width: '100vw',
+        height: '100vh',
+        background: '#000000',
+        zIndex: 999999,
+        display: 'flex',
+        flexDirection: 'column',
+      }}
+      onActivate={() => sendAction('activate')}
+      onOKButton={() => sendAction('activate')}
+      onCancel={() => sendAction('back')}
+      onCancelButton={() => sendAction('back')}
+      onSecondaryButton={() => sendAction('shuffle')}
+      onOptionsButton={() => sendAction('repeat')}
+      onMenuButton={() => sendAction('sources')}
+      onGamepadDirection={(evt: any) => {
+        const dir = Number(evt?.detail?.button);
+        if (dir && E_GAMEPAD_BUTTON_MAP[dir]) {
+          sendAction(E_GAMEPAD_BUTTON_MAP[dir]);
+        }
+        return true;
+      }}
+    >
+      <div
+        ref={containerRef}
+        style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}
+      >
+        <iframe
+          ref={iframeRef}
+          src="http://127.0.0.1:18888"
+          title="SIMP Console"
+          allow="autoplay; encrypted-media; clipboard-write"
+          style={{
+            width: '100%',
+            height: '100%',
+            border: 'none',
+            background: '#000000',
+          }}
+        />
+      </div>
+    </Focusable>
+  );
+};
+
+/**
  * Gamepad-navigable Focusable container & button component.
- * Uses Valve's native `Focusable` / `DialogButton` from `window.DFL` or `window.webpackChunksteamui`.
+ * Uses Valve's native `Focusable` from `window.DFL` or `window.webpackChunksteamui` and marks
+ * interactive nodes with `.SimpInteractiveBtn` + `data-simp-focusable="true"` so both native
+ * `CNavTree` and our spatial controller bridge can navigate them seamlessly.
  */
 const Focusable: ReactTypes.FC<any> = ({
   onActivate,
@@ -189,32 +512,16 @@ const Focusable: ReactTypes.FC<any> = ({
   ...rest
 }) => {
   const SteamFocusable = resolveSteamFocusable();
-  const SteamDialogButton = resolveSteamDialogButton();
   const isInteractive = Boolean(onActivate || onClick);
-  const handleClick = (e: any) => {
-    if (onActivate) onActivate(e);
-    if (onClick) onClick(e);
-  };
+  const combinedClassName = `Focusable ${isInteractive ? 'SimpInteractiveBtn' : ''} ${className}`.trim();
 
-  // For leaf interactive buttons (no flowChildren), prefer DialogButton or Focusable with explicit focusable=true
-  if (!flowChildren && SteamDialogButton && isInteractive) {
-    return SP_REACT.createElement(
-      SteamDialogButton,
-      {
-        onClick: handleClick,
-        onOKButton: handleClick,
-        onActivate: handleClick,
-        focusable: true,
-        className: `Focusable ${className}`.trim(),
-        style: {
-          minWidth: 0,
-          ...style,
-        },
-        ...rest,
-      },
-      children
-    );
-  }
+  const handleClick = (e: any) => {
+    const now = performance.now();
+    if (now - lastFocusableClickTs < 140) return;
+    lastFocusableClickTs = now;
+    if (onActivate) onActivate(e);
+    else if (onClick) onClick(e);
+  };
 
   if (SteamFocusable) {
     return SP_REACT.createElement(
@@ -224,7 +531,8 @@ const Focusable: ReactTypes.FC<any> = ({
         onOKButton: isInteractive ? handleClick : undefined,
         onClick: isInteractive ? handleClick : undefined,
         focusable: isInteractive,
-        className: `Focusable ${className}`.trim(),
+        'data-simp-focusable': isInteractive ? 'true' : undefined,
+        className: combinedClassName,
         focusClassName: 'gpfocus',
         focusWithinClassName: 'gpfocuswithin',
         style,
@@ -238,16 +546,19 @@ const Focusable: ReactTypes.FC<any> = ({
   return SP_REACT.createElement(
     'div',
     {
-      role: 'button',
-      tabIndex: 0,
-      className: `Focusable ${className}`.trim(),
-      onClick: handleClick,
-      onKeyDown: (e: any) => {
-        if (e.key === 'Enter' || e.key === ' ' || e.keyCode === 13 || e.keyCode === 32) {
-          e.preventDefault();
-          handleClick(e);
-        }
-      },
+      role: isInteractive ? 'button' : undefined,
+      tabIndex: isInteractive ? 0 : undefined,
+      'data-simp-focusable': isInteractive ? 'true' : undefined,
+      className: combinedClassName,
+      onClick: isInteractive ? handleClick : undefined,
+      onKeyDown: isInteractive
+        ? (e: any) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.keyCode === 13 || e.keyCode === 32) {
+              e.preventDefault();
+              handleClick(e);
+            }
+          }
+        : undefined,
       style,
       ...rest,
     },
@@ -301,7 +612,8 @@ const DeckyQrSvg: ReactTypes.FC<{ value: string; size?: number }> = ({
  * Connects directly to `simp --daemon` over `ws://127.0.0.1:18888/ws` with zero Python audio glue.
  */
 const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
-  const { useState, useEffect } = SP_REACT;
+  const { useState, useEffect, useRef } = SP_REACT;
+  const drawerRootRef = useRef<HTMLDivElement | null>(null);
   const [snap, setSnap] = useState<SimpStateSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const [reloading, setReloading] = useState(false);
@@ -310,6 +622,8 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
   const [authCfg, setAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
   const [drawerTab, setDrawerTab] = useState<'none' | 'albums' | 'playlists' | 'pair'>('none');
   const [preMuteVol, setPreMuteVol] = useState<number>(0.85);
+  const [focusedIdx, setFocusedIdx] = useState<number>(-1);
+  const [inlineConsoleOpen, setInlineConsoleOpen] = useState<boolean>(false);
 
   const refreshCatalogs = () => {
     defaultSimpClient
@@ -343,9 +657,129 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       setConnected(true);
     });
 
+    const getInteractiveNodes = (): HTMLElement[] => {
+      const root = drawerRootRef.current;
+      if (!root) return [];
+      return Array.from(
+        root.querySelectorAll<HTMLElement>(
+          '.SimpInteractiveBtn, [data-simp-focusable="true"], .Focusable[role="button"], .Focusable[tabindex="0"], button.Focusable'
+        )
+      ).filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+    };
+
+    const moveDrawerFocus = (dir: 'up' | 'down' | 'left' | 'right', rawEvent?: Event) => {
+      const nodes = getInteractiveNodes();
+      if (nodes.length === 0) return;
+
+      setFocusedIdx((prev) => {
+        if (prev < 0 || prev >= nodes.length) {
+          if (dir === 'up') {
+            return -1;
+          }
+          rawEvent?.stopPropagation?.();
+          rawEvent?.preventDefault?.();
+          // Default to Play/Pause button (index 2 in top row) or first button
+          const initial = Math.min(2, nodes.length - 1);
+          nodes.forEach((n, idx) => n.classList.toggle('gpfocus', idx === initial));
+          nodes[initial]?.focus?.();
+          nodes[initial]?.scrollIntoView({ block: 'nearest' });
+          return initial;
+        }
+
+        const cur = nodes[prev].getBoundingClientRect();
+        const cx = cur.left + cur.width / 2;
+        const cy = cur.top + cur.height / 2;
+
+        let bestIdx = prev;
+        let bestScore = Infinity;
+
+        nodes.forEach((candidate, idx) => {
+          if (idx === prev) return;
+          const r = candidate.getBoundingClientRect();
+          const tx = r.left + r.width / 2;
+          const ty = r.top + r.height / 2;
+          const dx = tx - cx;
+          const dy = ty - cy;
+
+          if (dir === 'right' && dx <= 4) return;
+          if (dir === 'left' && dx >= -4) return;
+          if (dir === 'down' && dy <= 4) return;
+          if (dir === 'up' && dy >= -4) return;
+
+          const primary = dir === 'left' || dir === 'right' ? Math.abs(dx) : Math.abs(dy);
+          const cross = dir === 'left' || dir === 'right' ? Math.abs(dy) : Math.abs(dx);
+          const score = primary + cross * 2.5;
+          if (score < bestScore) {
+            bestScore = score;
+            bestIdx = idx;
+          }
+        });
+
+        // If user presses Up at the very top row of the SIMP drawer, release focus back to `< SIMP` header
+        if (dir === 'up' && bestIdx === prev) {
+          nodes.forEach((n) => n.classList.remove('gpfocus'));
+          return -1;
+        }
+
+        rawEvent?.stopPropagation?.();
+        rawEvent?.preventDefault?.();
+        nodes.forEach((n, idx) => n.classList.toggle('gpfocus', idx === bestIdx));
+        nodes[bestIdx]?.focus?.();
+        nodes[bestIdx]?.scrollIntoView({ block: 'nearest' });
+        return bestIdx;
+      });
+    };
+
+    const activateDrawerFocus = (rawEvent?: Event) => {
+      const nodes = getInteractiveNodes();
+      setFocusedIdx((cur) => {
+        if (cur >= 0 && cur < nodes.length) {
+          rawEvent?.stopPropagation?.();
+          rawEvent?.preventDefault?.();
+          nodes[cur].click();
+        }
+        return cur;
+      });
+    };
+
+    const unsubController = registerSteamControllerButtons(
+      (action, rawEvent) => {
+        // Only handle QAM controller events when our drawer is mounted and visible
+        if (!drawerRootRef.current || drawerRootRef.current.offsetParent === null) return;
+        switch (action) {
+          case 'up':
+          case 'down':
+          case 'left':
+          case 'right':
+            moveDrawerFocus(action, rawEvent);
+            break;
+          case 'activate':
+            activateDrawerFocus(rawEvent);
+            break;
+          case 'shuffle':
+            defaultSimpClient.setShuffle(!defaultSimpClient.getState()?.shuffle);
+            break;
+          case 'repeat':
+            defaultSimpClient.cycleRepeat();
+            break;
+          case 'l2':
+            defaultSimpClient.seekRelative(-10_000);
+            break;
+          case 'r2':
+            defaultSimpClient.seekRelative(10_000);
+            break;
+        }
+      },
+      () => drawerRootRef.current?.ownerDocument || null
+    );
+
     const timer = window.setTimeout(refreshCatalogs, 350);
     return () => {
       window.clearTimeout(timer);
+      unsubController();
       unsubState();
     };
   }, []);
@@ -430,13 +864,24 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
         fontFamily: 'system-ui, -apple-system, sans-serif',
       }}
     >
-      <style>{`
-        .Focusable:focus, .Focusable:focus-visible, .Focusable.gpfocus {
-          outline: 2px solid #2aa3c4 !important;
-          outline-offset: 1px !important;
-          background: #18333e !important;
-        }
-      `}</style>
+      {inlineConsoleOpen && (
+        <SimpNativeConsoleRoute onExit={() => setInlineConsoleOpen(false)} />
+      )}
+      <div
+        ref={drawerRootRef}
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 10,
+        }}
+      >
+        <style>{`
+          .Focusable:focus, .Focusable:focus-visible, .Focusable.gpfocus {
+            outline: 2px solid #2aa3c4 !important;
+            outline-offset: 1px !important;
+            background: #18333e !important;
+          }
+        `}</style>
 
       {/* Now Playing Card */}
       <Focusable
@@ -854,8 +1299,8 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       {/* Open Full SIMP Console + Reload Row */}
       <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 6 }}>
         <Focusable
-          onActivate={() => openFullSimpConsole('http://127.0.0.1:18888')}
-          onClick={() => openFullSimpConsole('http://127.0.0.1:18888')}
+          onActivate={() => openFullSimpConsole(() => setInlineConsoleOpen(true))}
+          onClick={() => openFullSimpConsole(() => setInlineConsoleOpen(true))}
           style={{
             ...btnStyle,
             minHeight: 40,
@@ -863,7 +1308,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
             color: '#a1a1aa',
           }}
         >
-          ↗ Open Full SIMP Console (:18888)
+          ↗ Open Full SIMP Console ({SIMP_VERSION})
         </Focusable>
         <Focusable
           onActivate={handleReloadDaemon}
@@ -881,6 +1326,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
           {reloading ? '⏳' : '🔄 Reload'}
         </Focusable>
       </Focusable>
+      </div>
     </Focusable>
   );
 };
@@ -889,12 +1335,32 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
  * Standard Decky Loader plugin entrypoint (`api_version: 1`).
  */
 export default function defineSimpDeckyPlugin(serverApi?: any) {
+  const routerHook = resolveDeckyRouterHook(serverApi);
+  try {
+    if (routerHook?.addRoute) {
+      routerHook.addRoute(SIMP_CONSOLE_ROUTE, SimpNativeConsoleRoute, {
+        exact: true,
+      });
+      isSimpRouteRegistered = true;
+    }
+  } catch (err) {
+    console.warn('[SIMP Decky] Failed to register /simp-console route:', err);
+  }
+
   return {
     title: <div style={{ fontWeight: 800 }}>SIMP Audio Player</div>,
     content: <SimpDeckyDrawer serverApi={serverApi} />,
     icon: <span>🎵</span>,
     onDismount() {
-      // Daemon remains active in background; no teardown required
+      try {
+        const rh = resolveDeckyRouterHook(serverApi);
+        if (rh?.removeRoute) {
+          rh.removeRoute(SIMP_CONSOLE_ROUTE);
+        }
+        isSimpRouteRegistered = false;
+      } catch {
+        // Ignore teardown errors
+      }
     },
   };
 }

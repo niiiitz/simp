@@ -270,6 +270,8 @@ export class SimpDaemonClient {
     return () => this.stateListeners.delete(fn);
   }
 
+  public getState = (): SimpStateSnapshot => this.state;
+
   public subscribeProgress(fn: ProgressListener): () => void {
     this.progressListeners.add(fn);
     fn(this.state.position_ms, performance.now(), this.state.is_playing);

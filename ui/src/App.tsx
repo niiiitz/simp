@@ -475,7 +475,7 @@ const ConsoleMainApp: React.FC = () => {
     [sourceModalOpen]
   );
 
-  // 7. Keyboard shortcuts (Arrow keys navigate or adjust volume/seek, Enter/Space activates)
+  // 7. Keyboard shortcuts + Native Decky Fullscreen Route `postMessage` Gamepad Bridge
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -513,9 +513,125 @@ const ConsoleMainApp: React.FC = () => {
         }
       }
     };
+
+    const lastActionTs: Record<string, number> = {};
+    const handleGamepadAction = (action: string) => {
+      const now = performance.now();
+      if (lastActionTs[action] && now - lastActionTs[action] < 70) return;
+      lastActionTs[action] = now;
+      setIsDimmed(false);
+
+      switch (action) {
+        case 'up':
+        case 'down':
+        case 'left':
+        case 'right':
+          moveSpatialFocus(action);
+          break;
+        case 'activate': {
+          const active = document.activeElement as HTMLElement | null;
+          if (active && active !== document.body && typeof active.click === 'function') {
+            active.click();
+          } else {
+            defaultSimpClient.togglePlayPause();
+          }
+          break;
+        }
+        case 'back':
+          if (sourceModalOpen) {
+            setSourceModalOpen(false);
+          } else if (cloudAlbumDetail) {
+            setCloudAlbumDetail(null);
+          } else if (view === 'browser' && browserTarget.kind !== 'overview') {
+            setBrowserTarget({ kind: 'overview' });
+          } else if (view === 'browser') {
+            setView('lock');
+          } else if (window.parent && window.parent !== window) {
+            window.parent.postMessage({ type: 'SIMP_EXIT_CONSOLE' }, '*');
+          }
+          break;
+        case 'shuffle':
+          defaultSimpClient.setShuffle(!snap?.shuffle);
+          break;
+        case 'repeat':
+          defaultSimpClient.cycleRepeat();
+          break;
+        case 'l1':
+          setView('lock');
+          break;
+        case 'r1':
+          setView('browser');
+          break;
+        case 'l2':
+          defaultSimpClient.seekRelative(-10_000);
+          break;
+        case 'r2':
+          defaultSimpClient.seekRelative(10_000);
+          break;
+        case 'sources':
+          setSourceModalOpen((v) => !v);
+          break;
+        case 'vol_up':
+          applyVolume(currentVolume + 0.05);
+          break;
+        case 'vol_down':
+          applyVolume(currentVolume - 0.05);
+          break;
+      }
+    };
+
+    const onMessage = (e: MessageEvent) => {
+      const data = e.data;
+      if (!data || data.type !== 'SIMP_GAMEPAD_ACTION') return;
+      handleGamepadAction(data.action);
+    };
+
+    // Also listen for SteamUI's native `vgp_onbuttondown` / `vgp_ondirection` events directly
+    const onVgpEvent = (e: any) => {
+      const btn = Number(e?.detail?.button);
+      if (!btn) return;
+      const map: Record<number, string> = {
+        1: 'activate',
+        2: 'back',
+        3: 'shuffle',
+        4: 'repeat',
+        5: 'l1',
+        6: 'r1',
+        7: 'l2',
+        8: 'r2',
+        9: 'up',
+        10: 'down',
+        11: 'left',
+        12: 'right',
+        13: 'sources',
+        14: 'sources',
+      };
+      const action = map[btn];
+      if (action) {
+        handleGamepadAction(action);
+      }
+    };
+
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [moveSpatialFocus, sourceModalOpen, view]);
+    window.addEventListener('message', onMessage);
+    window.addEventListener('vgp_onbuttondown', onVgpEvent as EventListener, true);
+    window.addEventListener('vgp_ondirection', onVgpEvent as EventListener, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('message', onMessage);
+      window.removeEventListener('vgp_onbuttondown', onVgpEvent as EventListener, true);
+      window.removeEventListener('vgp_ondirection', onVgpEvent as EventListener, true);
+    };
+  }, [
+    moveSpatialFocus,
+    sourceModalOpen,
+    cloudAlbumDetail,
+    browserTarget.kind,
+    view,
+    snap?.shuffle,
+    applyVolume,
+    currentVolume,
+  ]);
 
   // 8. HTML5 Gamepad API polling across all connected controllers (D-Pad + Left/Right Sticks + ABXY/Bumpers/Triggers)
   useEffect(() => {
