@@ -14,7 +14,7 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.10';
+const SIMP_VERSION = 'v0.1.0-alpha.11';
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 
 let cachedSteamFocusable: any = null;
@@ -404,8 +404,14 @@ const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit
   const { useEffect, useRef } = SP_REACT;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const lastSentByActionRef = useRef<Record<string, number>>({});
 
   const sendAction = (action: SteamPadAction) => {
+    const now = performance.now();
+    const prev = lastSentByActionRef.current[action] || 0;
+    if (now - prev < 65) return;
+    lastSentByActionRef.current[action] = now;
+
     const win = iframeRef.current?.contentWindow;
     if (win) {
       win.postMessage({ type: 'SIMP_GAMEPAD_ACTION', action }, '*');
@@ -434,9 +440,7 @@ const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit
     window.addEventListener('message', onMessage);
 
     const unsubController = registerSteamControllerButtons(
-      (action, rawEvent) => {
-        rawEvent?.stopPropagation?.();
-        rawEvent?.preventDefault?.();
+      (action) => {
         sendAction(action);
       },
       () => containerRef.current?.ownerDocument || null
@@ -467,6 +471,28 @@ const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit
       onSecondaryButton={() => sendAction('shuffle')}
       onOptionsButton={() => sendAction('repeat')}
       onMenuButton={() => sendAction('sources')}
+      onMoveUp={() => {
+        sendAction('up');
+        return true;
+      }}
+      onMoveDown={() => {
+        sendAction('down');
+        return true;
+      }}
+      onMoveLeft={() => {
+        sendAction('left');
+        return true;
+      }}
+      onMoveRight={() => {
+        sendAction('right');
+        return true;
+      }}
+      onButtonDown={(evt: any) => {
+        const btn = Number(evt?.detail?.button);
+        if (btn && E_GAMEPAD_BUTTON_MAP[btn]) {
+          sendAction(E_GAMEPAD_BUTTON_MAP[btn]);
+        }
+      }}
       onGamepadDirection={(evt: any) => {
         const dir = Number(evt?.detail?.button);
         if (dir && E_GAMEPAD_BUTTON_MAP[dir]) {
@@ -670,7 +696,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       });
     };
 
-    const moveDrawerFocus = (dir: 'up' | 'down' | 'left' | 'right', rawEvent?: Event) => {
+    const moveDrawerFocus = (dir: 'up' | 'down' | 'left' | 'right') => {
       const nodes = getInteractiveNodes();
       if (nodes.length === 0) return;
 
@@ -679,8 +705,6 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
           if (dir === 'up') {
             return -1;
           }
-          rawEvent?.stopPropagation?.();
-          rawEvent?.preventDefault?.();
           // Default to Play/Pause button (index 2 in top row) or first button
           const initial = Math.min(2, nodes.length - 1);
           nodes.forEach((n, idx) => n.classList.toggle('gpfocus', idx === initial));
@@ -724,8 +748,6 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
           return -1;
         }
 
-        rawEvent?.stopPropagation?.();
-        rawEvent?.preventDefault?.();
         nodes.forEach((n, idx) => n.classList.toggle('gpfocus', idx === bestIdx));
         nodes[bestIdx]?.focus?.();
         nodes[bestIdx]?.scrollIntoView({ block: 'nearest' });
@@ -733,12 +755,10 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       });
     };
 
-    const activateDrawerFocus = (rawEvent?: Event) => {
+    const activateDrawerFocus = () => {
       const nodes = getInteractiveNodes();
       setFocusedIdx((cur) => {
         if (cur >= 0 && cur < nodes.length) {
-          rawEvent?.stopPropagation?.();
-          rawEvent?.preventDefault?.();
           nodes[cur].click();
         }
         return cur;
@@ -746,7 +766,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
     };
 
     const unsubController = registerSteamControllerButtons(
-      (action, rawEvent) => {
+      (action) => {
         // Only handle QAM controller events when our drawer is mounted and visible
         if (!drawerRootRef.current || drawerRootRef.current.offsetParent === null) return;
         switch (action) {
@@ -754,10 +774,10 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
           case 'down':
           case 'left':
           case 'right':
-            moveDrawerFocus(action, rawEvent);
+            moveDrawerFocus(action);
             break;
           case 'activate':
-            activateDrawerFocus(rawEvent);
+            activateDrawerFocus();
             break;
           case 'shuffle':
             defaultSimpClient.setShuffle(!defaultSimpClient.getState()?.shuffle);

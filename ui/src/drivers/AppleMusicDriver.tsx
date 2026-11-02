@@ -162,13 +162,13 @@ export async function ensureMusicKitConfigured(
   }
   const instance = MK.getInstance();
   const effectiveToken = musicUserToken || instance.musicUserToken;
-  if (effectiveToken) {
+  if (effectiveToken && instance.musicUserToken !== effectiveToken) {
     try {
-      if (instance.storekit) {
+      if (instance.storekit && !instance.isAuthorized) {
         instance.storekit._authorizationStatus = 0;
       }
       instance.musicUserToken = effectiveToken;
-      if (instance.storekit?.userTokenIsValid) {
+      if (instance.storekit?.userTokenIsValid && !instance.isAuthorized) {
         await instance.authorize().catch(() => {});
       }
     } catch {
@@ -186,8 +186,11 @@ async function getAppleAuthHeaders(): Promise<{
   if (!cfg.developer_token) {
     throw new Error(cfg.status_error || 'Missing Apple Developer Token');
   }
-  const mk = await ensureMusicKitConfigured(cfg.developer_token, cfg.music_user_token);
-  const userToken = cfg.music_user_token || mk?.musicUserToken;
+  const userToken =
+    cfg.music_user_token ||
+    (typeof window !== 'undefined' && window.MusicKit
+      ? window.MusicKit.getInstance?.()?.musicUserToken
+      : null);
   if (!userToken) {
     throw new Error('Please authorize with your Apple ID first');
   }
@@ -660,6 +663,9 @@ export async function syncAppleMusicCatalog(
 export const AppleMusicDriver: React.FC = () => {
   const mkRef = useRef<any>(null);
   const listenersBoundRef = useRef(false);
+  const loadSeqRef = useRef(0);
+  const isLoadingRef = useRef(false);
+  const lastEndedSeqRef = useRef(-1);
 
   useEffect(() => {
     let cancelled = false;
@@ -692,22 +698,38 @@ export const AppleMusicDriver: React.FC = () => {
         const durMs = Math.round(Number(mk.currentPlaybackDuration || 0) * 1000);
 
         if (st === States.playing) {
+          isLoadingRef.current = false;
           reportCurrentItemIfAny('playing');
-        } else if (st === States.paused || st === States.stopped) {
+          return;
+        }
+
+        // Ignore transient stopped/paused/ended events fired while `mk.setQueue` tears down the previous track
+        if (isLoadingRef.current) {
+          return;
+        }
+
+        if (st === States.paused) {
           defaultSimpClient.reportAppleWorkerEvent('paused', posMs, null, durMs);
         } else if (st === States.completed || st === States.ended) {
-          defaultSimpClient.reportAppleWorkerEvent('ended', posMs, null, durMs);
+          // Deduplicate `completed` (10) followed by `ended` (6) for the same track load
+          if (lastEndedSeqRef.current !== loadSeqRef.current) {
+            lastEndedSeqRef.current = loadSeqRef.current;
+            defaultSimpClient.reportAppleWorkerEvent('ended', posMs, null, durMs);
+          }
         }
       });
 
       mk.addEventListener(Events.playbackTimeDidChange, () => {
+        if (isLoadingRef.current) return;
         const posMs = Math.round(Number(mk.currentPlaybackTime || 0) * 1000);
         const durMs = Math.round(Number(mk.currentPlaybackDuration || 0) * 1000);
         defaultSimpClient.reportAppleWorkerEvent('time_update', posMs, null, durMs);
       });
 
       mk.addEventListener(Events.nowPlayingItemDidChange, () => {
-        reportCurrentItemIfAny('playing');
+        if (mk.nowPlayingItem) {
+          reportCurrentItemIfAny('playing');
+        }
       });
     };
 
@@ -715,7 +737,7 @@ export const AppleMusicDriver: React.FC = () => {
       typeof window !== 'undefined' &&
       new URLSearchParams(window.location.search).get('worker') === 'apple';
 
-    const ensureInstance = async (): Promise<any | null> => {
+    const ensureInstance = async (fromCommand = false): Promise<any | null> => {
       if (mkRef.current) return mkRef.current;
       const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
       if (!cfg.configured || !cfg.developer_token || cancelled) return null;
@@ -735,7 +757,9 @@ export const AppleMusicDriver: React.FC = () => {
       const mk = await ensureMusicKitConfigured(cfg.developer_token, cfg.music_user_token);
       mkRef.current = mk;
       bindMusicKitEvents(mk);
-      defaultSimpClient.reportAppleWorkerEvent('worker_ready', 0, null, null);
+      if (!fromCommand) {
+        defaultSimpClient.reportAppleWorkerEvent('worker_ready', 0, null, null);
+      }
       return mk;
     };
 
@@ -743,30 +767,50 @@ export const AppleMusicDriver: React.FC = () => {
       .getAppleMusicAuthConfig()
       .then(async (cfg) => {
         if (cfg.configured && cfg.apple_authenticated && cfg.developer_token) {
-          await ensureInstance().catch(() => {});
+          await ensureInstance(false).catch(() => {});
         }
       })
       .catch(() => {});
 
     const unsubSink = defaultSimpClient.subscribeAppleSink(async (cmd) => {
       try {
-        const mk = await ensureInstance();
+        const mk = await ensureInstance(true);
         if (!mk) return;
 
         if (cmd.volume != null) {
           mk.volume = Math.max(0, Math.min(1, cmd.volume));
         }
 
+        const States = window.MusicKit?.PlaybackStates;
+
         switch (cmd.action) {
           case 'load_and_play': {
             if (!cmd.uri) return;
+            const mySeq = ++loadSeqRef.current;
+            isLoadingRef.current = true;
+
+            // Cleanly stop any previous track's Widevine EME MediaKeySession / MediaSource before loading next song
+            try {
+              if (mk.playbackState && mk.playbackState !== (States?.none ?? 0)) {
+                await mk.stop();
+              }
+            } catch {
+              // Ignore stop errors on idle player
+            }
+
+            if (mySeq !== loadSeqRef.current) return;
+
             if (cmd.uri.startsWith('applemusic:station:')) {
               const stationId = cmd.uri.replace(/^applemusic:station:/, '');
               await mk.setQueue({
                 station: stationId,
                 startPlaying: true,
               });
-              await mk.play();
+              if (mySeq !== loadSeqRef.current) return;
+              if (mk.playbackState !== States?.playing) {
+                await mk.play().catch(() => {});
+              }
+              isLoadingRef.current = false;
               const item = mk.nowPlayingItem;
               if (item) {
                 const mapped = mapAppleItemToTrack(item);
@@ -776,17 +820,45 @@ export const AppleMusicDriver: React.FC = () => {
               }
               break;
             }
+
             const rawId = cmd.uri
               .replace(/^applemusic:(song|track):/, '')
               .replace(/^applemusic:/, '');
-            await mk.setQueue({
-              song: rawId,
-              startPlaying: true,
-            });
-            if (cmd.position_ms && cmd.position_ms > 0) {
-              await mk.seekToTime(cmd.position_ms / 1000);
+
+            try {
+              await mk.setQueue({
+                song: rawId,
+                startPlaying: true,
+              });
+              if (mySeq !== loadSeqRef.current) return;
+              if (cmd.position_ms && cmd.position_ms > 0) {
+                await mk.seekToTime(cmd.position_ms / 1000).catch(() => {});
+              }
+              if (mk.playbackState !== States?.playing) {
+                await mk.play();
+              }
+            } catch (firstErr) {
+              console.warn('[SIMP AppleMusicDriver] First setQueue/play attempt failed, retrying cleanly:', firstErr);
+              if (mySeq !== loadSeqRef.current) return;
+              await mk.stop().catch(() => {});
+              await mk.setQueue({ song: rawId, startPlaying: false });
+              if (mySeq !== loadSeqRef.current) return;
+              await mk.play();
             }
-            await mk.play();
+
+            // Ensure underlying HTML5 <audio id="apple-music-player"> is unmuted and playing
+            const audioEl = document.getElementById('apple-music-player') as HTMLAudioElement | null;
+            if (audioEl) {
+              audioEl.muted = false;
+              if (cmd.volume != null) {
+                audioEl.volume = Math.max(0, Math.min(1, cmd.volume));
+              }
+              if (audioEl.paused) {
+                await audioEl.play().catch(() => {});
+              }
+            }
+
+            isLoadingRef.current = false;
             const item = mk.nowPlayingItem;
             if (item) {
               const mapped = mapAppleItemToTrack(item);
@@ -801,9 +873,14 @@ export const AppleMusicDriver: React.FC = () => {
             }
             break;
           }
-          case 'play':
+          case 'play': {
             await mk.play();
+            const audioEl = document.getElementById('apple-music-player') as HTMLAudioElement | null;
+            if (audioEl && audioEl.paused) {
+              await audioEl.play().catch(() => {});
+            }
             break;
+          }
           case 'pause':
             await mk.pause();
             break;
@@ -812,13 +889,18 @@ export const AppleMusicDriver: React.FC = () => {
               await mk.seekToTime(cmd.position_ms / 1000);
             }
             break;
-          case 'set_volume':
+          case 'set_volume': {
             if (cmd.volume != null) {
-              mk.volume = Math.max(0, Math.min(1, cmd.volume));
+              const v = Math.max(0, Math.min(1, cmd.volume));
+              mk.volume = v;
+              const audioEl = document.getElementById('apple-music-player') as HTMLAudioElement | null;
+              if (audioEl) audioEl.volume = v;
             }
             break;
+          }
         }
       } catch (err) {
+        isLoadingRef.current = false;
         console.warn('AppleMusicDriver command failed:', err);
       }
     });

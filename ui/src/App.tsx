@@ -416,6 +416,23 @@ const ConsoleMainApp: React.FC = () => {
   }, []);
 
   // 6. Spatial Focus Navigation Helper (Gamepad D-Pad / Left Stick / Keyboard Arrows)
+  const applyFocusMarker = useCallback((el: HTMLElement | null) => {
+    document
+      .querySelectorAll<HTMLElement>('[data-simp-active-focus="true"], .simp-gpfocus')
+      .forEach((node) => {
+        if (node !== el) {
+          node.removeAttribute('data-simp-active-focus');
+          node.classList.remove('simp-gpfocus');
+        }
+      });
+    if (el) {
+      el.setAttribute('data-simp-active-focus', 'true');
+      el.classList.add('simp-gpfocus');
+      el.focus();
+      el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }, []);
+
   const moveSpatialFocus = useCallback(
     (dir: 'up' | 'down' | 'left' | 'right') => {
       setIsDimmed(false);
@@ -428,12 +445,13 @@ const ConsoleMainApp: React.FC = () => {
       });
       if (nodes.length === 0) return;
 
-      const active = document.activeElement as HTMLElement | null;
+      const active =
+        (document.querySelector<HTMLElement>('[data-simp-active-focus="true"]') as HTMLElement | null) ||
+        (document.activeElement as HTMLElement | null);
       if (!active || !nodes.includes(active)) {
         const preferred =
           nodes.find((el) => el.dataset.defaultFocus === 'true') || nodes[0];
-        preferred.focus();
-        preferred.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        applyFocusMarker(preferred);
         return;
       }
 
@@ -468,52 +486,14 @@ const ConsoleMainApp: React.FC = () => {
       }
 
       if (best) {
-        best.focus();
-        best.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        applyFocusMarker(best);
       }
     },
-    [sourceModalOpen]
+    [sourceModalOpen, applyFocusMarker]
   );
 
   // 7. Keyboard shortcuts + Native Decky Fullscreen Route `postMessage` Gamepad Bridge
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
-        if (e.key === 'Escape') {
-          (e.target as HTMLElement).blur();
-        }
-        return;
-      }
-
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        moveSpatialFocus('up');
-      } else if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        moveSpatialFocus('down');
-      } else if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        moveSpatialFocus('left');
-      } else if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        moveSpatialFocus('right');
-      } else if (e.key === 'Escape' || e.key === 'Backspace') {
-        if (sourceModalOpen) {
-          e.preventDefault();
-          setSourceModalOpen(false);
-        } else if (view === 'browser') {
-          e.preventDefault();
-          setView('lock');
-        }
-      } else if (e.key === ' ') {
-        if (document.activeElement === document.body || !document.activeElement) {
-          e.preventDefault();
-          defaultSimpClient.togglePlayPause();
-        }
-      }
-    };
-
     const lastActionTs: Record<string, number> = {};
     const handleGamepadAction = (action: string) => {
       const now = performance.now();
@@ -521,15 +501,47 @@ const ConsoleMainApp: React.FC = () => {
       lastActionTs[action] = now;
       setIsDimmed(false);
 
+      // In the `🎵 Player` (`lock`) view (when the Source modal is closed), D-Pad maps directly
+      // to the on-screen transport badges (`◄` Previous, `►` Next, `▲/▼` Volume, `A` Play/Pause)!
+      const isDirectTransportView = view === 'lock' && !sourceModalOpen;
+
       switch (action) {
-        case 'up':
-        case 'down':
         case 'left':
+          if (isDirectTransportView) {
+            defaultSimpClient.previous();
+          } else {
+            moveSpatialFocus('left');
+          }
+          break;
         case 'right':
-          moveSpatialFocus(action);
+          if (isDirectTransportView) {
+            defaultSimpClient.next();
+          } else {
+            moveSpatialFocus('right');
+          }
+          break;
+        case 'up':
+          if (isDirectTransportView) {
+            applyVolume(currentVolume + 0.05);
+          } else {
+            moveSpatialFocus('up');
+          }
+          break;
+        case 'down':
+          if (isDirectTransportView) {
+            applyVolume(currentVolume - 0.05);
+          } else {
+            moveSpatialFocus('down');
+          }
           break;
         case 'activate': {
-          const active = document.activeElement as HTMLElement | null;
+          if (isDirectTransportView) {
+            defaultSimpClient.togglePlayPause();
+            break;
+          }
+          const active =
+            (document.querySelector<HTMLElement>('[data-simp-active-focus="true"]') as HTMLElement | null) ||
+            (document.activeElement as HTMLElement | null);
           if (active && active !== document.body && typeof active.click === 'function') {
             active.click();
           } else {
@@ -576,6 +588,41 @@ const ConsoleMainApp: React.FC = () => {
         case 'vol_down':
           applyVolume(currentVolume - 0.05);
           break;
+      }
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+        if (e.key === 'Escape') {
+          (e.target as HTMLElement).blur();
+        }
+        return;
+      }
+
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        handleGamepadAction('up');
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        handleGamepadAction('down');
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        handleGamepadAction('left');
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleGamepadAction('right');
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        handleGamepadAction('activate');
+      } else if (e.key === 'Escape' || e.key === 'Backspace') {
+        e.preventDefault();
+        handleGamepadAction('back');
+      } else if (e.key === ' ') {
+        if (document.activeElement === document.body || !document.activeElement) {
+          e.preventDefault();
+          defaultSimpClient.togglePlayPause();
+        }
       }
     };
 
@@ -645,14 +692,22 @@ const ConsoleMainApp: React.FC = () => {
         const prevButtons = prevButtonsByPad.get(pad.index) || [];
         const pressed = (idx: number) => !!pad.buttons[idx]?.pressed && !prevButtons[idx];
 
+        const isDirectTransportView = view === 'lock' && !sourceModalOpen;
+
         if (pressed(0)) {
-          // A Button: Activate focused element, or toggle Play/Pause if nothing focused
+          // A Button: In Player view, toggle Play/Pause; in Browser/Modal view, activate focused element
           setIsDimmed(false);
-          const active = document.activeElement as HTMLElement | null;
-          if (active && active !== document.body && typeof active.click === 'function') {
-            active.click();
-          } else {
+          if (isDirectTransportView) {
             defaultSimpClient.togglePlayPause();
+          } else {
+            const active =
+              (document.querySelector<HTMLElement>('[data-simp-active-focus="true"]') as HTMLElement | null) ||
+              (document.activeElement as HTMLElement | null);
+            if (active && active !== document.body && typeof active.click === 'function') {
+              active.click();
+            } else {
+              defaultSimpClient.togglePlayPause();
+            }
           }
         }
         if (pressed(1)) {
@@ -671,10 +726,22 @@ const ConsoleMainApp: React.FC = () => {
         if (pressed(6)) defaultSimpClient.seekRelative(-10_000); // L2 (Rewind 10s)
         if (pressed(7)) defaultSimpClient.seekRelative(10_000); // R2 (Fast-Forward 10s)
         if (pressed(8) || pressed(9)) setSourceModalOpen((v) => !v); // Select / Start
-        if (pressed(12)) moveSpatialFocus('up'); // D-Up
-        if (pressed(13)) moveSpatialFocus('down'); // D-Down
-        if (pressed(14)) moveSpatialFocus('left'); // D-Left
-        if (pressed(15)) moveSpatialFocus('right'); // D-Right
+        if (pressed(12)) {
+          if (isDirectTransportView) applyVolume(currentVolume + 0.05);
+          else moveSpatialFocus('up'); // D-Up
+        }
+        if (pressed(13)) {
+          if (isDirectTransportView) applyVolume(currentVolume - 0.05);
+          else moveSpatialFocus('down'); // D-Down
+        }
+        if (pressed(14)) {
+          if (isDirectTransportView) defaultSimpClient.previous();
+          else moveSpatialFocus('left'); // D-Left
+        }
+        if (pressed(15)) {
+          if (isDirectTransportView) defaultSimpClient.next();
+          else moveSpatialFocus('right'); // D-Right
+        }
 
         // Left Stick 2D Spatial Navigation (with edge-trigger debounce)
         const lx = pad.axes[0] ?? 0;
@@ -687,7 +754,14 @@ const ConsoleMainApp: React.FC = () => {
 
         const prevDir = prevAxisDirByPad.get(pad.index) || null;
         if (stickDir && stickDir !== prevDir) {
-          moveSpatialFocus(stickDir);
+          if (isDirectTransportView) {
+            if (stickDir === 'left') defaultSimpClient.previous();
+            else if (stickDir === 'right') defaultSimpClient.next();
+            else if (stickDir === 'up') applyVolume(currentVolume + 0.05);
+            else if (stickDir === 'down') applyVolume(currentVolume - 0.05);
+          } else {
+            moveSpatialFocus(stickDir);
+          }
         }
         prevAxisDirByPad.set(pad.index, stickDir);
 
@@ -926,7 +1000,8 @@ const ConsoleMainApp: React.FC = () => {
         button:focus, button:focus-visible,
         input:focus, input:focus-visible,
         select:focus, select:focus-visible,
-        [data-focusable="true"]:focus, [data-focusable="true"]:focus-visible {
+        [data-focusable="true"]:focus, [data-focusable="true"]:focus-visible,
+        .simp-gpfocus, [data-simp-active-focus="true"] {
           outline: 2px solid #2aa3c4 !important;
           outline-offset: 2px !important;
           box-shadow: 0 0 0 3px rgba(42, 163, 196, 0.28) !important;
