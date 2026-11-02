@@ -1,4 +1,4 @@
-use crate::models::{RepeatMode, TrackMetadata};
+use crate::models::{AlbumRecord, PlaylistRecord, RepeatMode, TrackMetadata};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -10,7 +10,12 @@ pub enum AudioCommand {
     Next,
     Previous,
     Load { uri: String },
-    LoadQueue { uris: Vec<String>, start_index: usize },
+    LoadQueue {
+        uris: Vec<String>,
+        start_index: usize,
+        #[serde(default)]
+        tracks: Vec<TrackMetadata>,
+    },
     PlayAlbum { album_id: String, shuffle: bool },
     PlayPlaylist { playlist_id: String, shuffle: bool },
     Seek { position_ms: u32 },
@@ -22,7 +27,36 @@ pub enum AudioCommand {
     AddLibraryPath { path: String },
     RemoveLibraryPath { path: String },
     RescanStorage,
+    ConfigureAppleMusic {
+        team_id: String,
+        key_id: String,
+        private_key_path: String,
+        developer_token: Option<String>,
+    },
+    SetAppleMusicUserToken {
+        music_user_token: String,
+    },
+    DisconnectAppleMusic,
+    ImportCatalogTracks {
+        source: String,
+        album: Option<AlbumRecord>,
+        playlist: Option<PlaylistRecord>,
+        tracks: Vec<TrackMetadata>,
+    },
+    AppleWorkerReport {
+        state: String,
+        track: Option<TrackMetadata>,
+        position_ms: u32,
+        duration_ms: Option<u32>,
+    },
     SuspendForSleep,
+    RestartDaemon,
+    ResetDatabaseCache,
+    FactoryReset,
+    EjectOpticalDisc {
+        #[serde(default)]
+        device_path: Option<String>,
+    },
     ShutdownDaemon,
 }
 
@@ -32,6 +66,8 @@ pub enum LibraryQuery {
     GetStateSnapshot,
     GetAlbums {
         source: Option<String>,
+        #[serde(default)]
+        mount_root: Option<String>,
         search: Option<String>,
         limit: usize,
         offset: usize,
@@ -41,6 +77,8 @@ pub enum LibraryQuery {
     },
     GetTracks {
         source: Option<String>,
+        #[serde(default)]
+        mount_root: Option<String>,
         search: Option<String>,
         limit: usize,
         offset: usize,
@@ -59,9 +97,25 @@ pub enum LibraryQuery {
         playlist_id: String,
         uris: Vec<String>,
     },
+    RemoveTrackFromPlaylist {
+        playlist_id: String,
+        track_uri: String,
+    },
+    DeletePlaylist {
+        playlist_id: String,
+    },
+    DeleteAlbum {
+        album_id: String,
+    },
     GetMountRoots,
     GetSettings,
-    StartSpotifyAuth,
+    GetAppleMusicAuthConfig,
+    ScanOpticalDisc {
+        #[serde(default)]
+        device_path: Option<String>,
+        #[serde(default)]
+        force_refresh: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,6 +134,8 @@ pub enum ClientEnvelope {
         state: String,
         track: Option<TrackMetadata>,
         position_ms: u32,
+        #[serde(default)]
+        duration_ms: Option<u32>,
     },
 }
 

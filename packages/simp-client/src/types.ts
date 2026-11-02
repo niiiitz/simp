@@ -1,4 +1,4 @@
-export type ActiveEngine = 'local' | 'spotify' | 'apple_music' | 'none';
+export type ActiveEngine = 'local' | 'apple_music' | 'none';
 export type RepeatMode = 'off' | 'queue' | 'track';
 
 export interface TrackMetadata {
@@ -62,7 +62,45 @@ export interface SimpStateSnapshot {
   queue_index: number;
   mounts: MountStatus[];
   power: PowerState;
-  spotify_authenticated: boolean;
   apple_authenticated: boolean;
 }
+
+export interface AppleMusicAuthConfig {
+  configured: boolean;
+  team_id: string;
+  key_id: string;
+  private_key_path: string;
+  has_private_key: boolean;
+  developer_token: string | null;
+  music_user_token: string | null;
+  apple_authenticated: boolean;
+  headless_worker_active?: boolean;
+  lan_ip?: string | null;
+  lan_ips?: string[];
+  pair_url?: string | null;
+  status_error: string | null;
+}
+
+export interface AppleSinkCommandPayload {
+  action: 'load_and_play' | 'play' | 'pause' | 'seek' | 'set_volume';
+  uri?: string | null;
+  position_ms?: number | null;
+  volume?: number | null;
+}
+
+export interface OpticalDiscStatus {
+  drive_present: boolean;
+  device_path: string;
+  disc_present: boolean;
+  is_audio_cd: boolean;
+  disc_id?: string | null;
+  album_title: string;
+  artist_name: string;
+  release_year?: number | null;
+  art_url?: string | null;
+  tracks: TrackMetadata[];
+  status_message: string;
+}
+
+
 

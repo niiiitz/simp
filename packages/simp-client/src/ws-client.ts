@@ -1,12 +1,41 @@
-import type { RepeatMode, SimpStateSnapshot } from './types';
+import type {
+  AlbumRecord,
+  AppleMusicAuthConfig,
+  AppleSinkCommandPayload,
+  OpticalDiscStatus,
+  PlaylistRecord,
+  RepeatMode,
+  SimpStateSnapshot,
+  TrackMetadata,
+} from './types';
 
 type StateListener = (state: SimpStateSnapshot) => void;
 type ProgressListener = (positionMs: number, syncPerfTime: number, isPlaying: boolean) => void;
+type AppleSinkListener = (cmd: AppleSinkCommandPayload) => void;
 
 /**
  * Shared auto-reconnecting WebSocket client connecting to `simp --daemon` (`ws://127.0.0.1:18888/ws`).
  * Decouples low-frequency state updates from high-frequency 500ms `progress_tick` anchors.
  */
+function resolveDefaultWsUrl(): string {
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    const host = window.location.hostname;
+    // In SteamOS Gaming Mode (`SharedJSContext`), `window.location` is `https://steamloopback.host`.
+    // Always connect directly to the local daemon on `ws://127.0.0.1:18888/ws` unless accessed over
+    // plain HTTP from a LAN companion device (e.g. `http://192.168.x.x:18888/pair`).
+    if (
+      window.location.protocol === 'http:' &&
+      host !== 'steamloopback.host' &&
+      host !== '127.0.0.1' &&
+      host !== 'localhost'
+    ) {
+      const port = window.location.port === '1420' ? '18888' : window.location.port || '18888';
+      return `ws://${host}:${port}/ws`;
+    }
+  }
+  return 'ws://127.0.0.1:18888/ws';
+}
+
 export class SimpDaemonClient {
   private ws: WebSocket | null = null;
   private url: string;
@@ -14,6 +43,7 @@ export class SimpDaemonClient {
   private pendingQueries = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void }>();
   private stateListeners = new Set<StateListener>();
   private progressListeners = new Set<ProgressListener>();
+  private appleSinkListeners = new Set<AppleSinkListener>();
   private state: SimpStateSnapshot = {
     active_engine: 'none',
     is_playing: false,
@@ -27,11 +57,10 @@ export class SimpDaemonClient {
     queue_index: 0,
     mounts: [],
     power: { on_battery: false, battery_pct: null },
-    spotify_authenticated: false,
     apple_authenticated: false,
   };
 
-  constructor(url = 'ws://127.0.0.1:18888/ws') {
+  constructor(url = resolveDefaultWsUrl()) {
     this.url = url;
   }
 
@@ -71,7 +100,6 @@ export class SimpDaemonClient {
         queue_index: msg.queue_index ?? 0,
         mounts: msg.mounts ?? [],
         power: msg.power ?? { on_battery: false, battery_pct: null },
-        spotify_authenticated: !!msg.spotify_authenticated,
         apple_authenticated: !!msg.apple_authenticated,
       };
       this.notifyState();
@@ -146,6 +174,11 @@ export class SimpDaemonClient {
           this.state = { ...this.state, power: msg.data.power };
           this.notifyState();
           break;
+        case 'apple_sink_command':
+          for (const fn of this.appleSinkListeners) {
+            fn(msg.data as AppleSinkCommandPayload);
+          }
+          break;
       }
     }
   }
@@ -180,8 +213,12 @@ export class SimpDaemonClient {
   public setRepeat = (mode: RepeatMode) => this.sendCommand('set_repeat', { mode });
   public cycleRepeat = () => this.sendCommand('cycle_repeat');
   public loadUri = (uri: string) => this.sendCommand('load', { uri });
-  public loadQueue = (uris: string[], start_index = 0) =>
-    this.sendCommand('load_queue', { uris, start_index });
+  public loadQueue = (uris: string[], start_index = 0, tracks?: TrackMetadata[]) =>
+    this.sendCommand('load_queue', {
+      uris,
+      start_index,
+      ...(tracks && tracks.length > 0 ? { tracks } : {}),
+    });
   public playAlbum = (album_id: string, shuffle = false) =>
     this.sendCommand('play_album', { album_id, shuffle });
   public playPlaylist = (playlist_id: string, shuffle = false) =>
@@ -189,13 +226,71 @@ export class SimpDaemonClient {
   public addLibraryPath = (path: string) => this.sendCommand('add_library_path', { path });
   public removeLibraryPath = (path: string) => this.sendCommand('remove_library_path', { path });
   public rescanStorage = () => this.sendCommand('rescan_storage');
+  public restartDaemon = () => this.sendCommand('restart_daemon');
+  public resetDatabaseCache = () => this.sendCommand('reset_database_cache');
+  public factoryReset = () => this.sendCommand('factory_reset');
+  public ejectOpticalDisc = (device_path?: string) =>
+    this.sendCommand('eject_optical_disc', device_path ? { device_path } : {});
+  public scanOpticalDisc = (force_refresh = false, device_path?: string): Promise<OpticalDiscStatus> =>
+    this.query<OpticalDiscStatus>('scan_optical_disc', {
+      force_refresh,
+      ...(device_path ? { device_path } : {}),
+    });
   public shutdownDaemon = () => this.sendCommand('shutdown_daemon');
+
+  // Apple Music Virtual Sink & Developer Token helpers
+  public configureAppleMusic = (params: {
+    team_id: string;
+    key_id: string;
+    private_key_path: string;
+    developer_token?: string | null;
+  }) => this.sendCommand('configure_apple_music', params);
+
+  public setAppleMusicUserToken = (music_user_token: string) =>
+    this.sendCommand('set_apple_music_user_token', { music_user_token });
+
+  public disconnectAppleMusic = () => this.sendCommand('disconnect_apple_music');
+
+  public importCatalogTracks = (params: {
+    source: string;
+    album?: AlbumRecord | null;
+    playlist?: PlaylistRecord | null;
+    tracks: TrackMetadata[];
+  }) => this.sendCommand('import_catalog_tracks', params);
+
+  public getAppleMusicAuthConfig = (): Promise<AppleMusicAuthConfig> =>
+    this.query<AppleMusicAuthConfig>('get_apple_music_auth_config');
+
+  public reportAppleWorkerEvent = (
+    state: 'playing' | 'paused' | 'ended' | 'time_update' | 'authorized' | 'worker_ready',
+    position_ms: number,
+    track?: TrackMetadata | null,
+    duration_ms?: number | null
+  ): void => {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(
+      JSON.stringify({
+        kind: 'apple_worker_event',
+        state,
+        position_ms: Math.max(0, Math.round(position_ms)),
+        ...(track ? { track } : { track: null }),
+        ...(duration_ms != null ? { duration_ms: Math.round(duration_ms) } : {}),
+      })
+    );
+  };
+
+  public subscribeAppleSink(fn: AppleSinkListener): () => void {
+    this.appleSinkListeners.add(fn);
+    return () => this.appleSinkListeners.delete(fn);
+  }
 
   public subscribeState(fn: StateListener): () => void {
     this.stateListeners.add(fn);
     fn(this.state);
     return () => this.stateListeners.delete(fn);
   }
+
+  public getState = (): SimpStateSnapshot => this.state;
 
   public subscribeProgress(fn: ProgressListener): () => void {
     this.progressListeners.add(fn);

@@ -1,48 +1,859 @@
-import React, { useEffect, useState } from 'react';
+import type * as ReactTypes from 'react';
 import {
   defaultSimpClient,
-  AlbumSummary,
-  PlaylistSummary,
-  RepeatMode,
+  AlbumRecord,
+  AppleMusicAuthConfig,
+  PlaylistRecord,
   SimpStateSnapshot,
 } from '@simp/client';
+import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
+
+/**
+ * SteamOS Gaming Mode (`SharedJSContext`) exposes its active React instance on `window.SP_REACT`.
+ * Using `window.SP_REACT` directly avoids bundling a second copy of React with a null hook dispatcher.
+ */
+const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
+
+const SIMP_VERSION = 'v0.1.0-alpha.13';
+const SIMP_CONSOLE_ROUTE = '/simp-console';
+
+let cachedSteamFocusable: any = null;
+let cachedSteamButtonItem: any = null;
+let cachedSteamNavigation: any = null;
+
+function getSteamWebpackModules(): any[] {
+  const modules: any[] = [];
+  try {
+    const chunk = (window as any).webpackChunksteamui;
+    if (!Array.isArray(chunk)) return modules;
+
+    let webpackRequire: any;
+    chunk.push([
+      [Symbol('simp-decky-webpack')],
+      {},
+      (r: any) => {
+        webpackRequire = r;
+      },
+    ]);
+    if (!webpackRequire) return modules;
+
+    // 1. Check already-loaded module cache (`webpackRequire.c`) first
+    if (webpackRequire.c) {
+      for (const key of Object.keys(webpackRequire.c)) {
+        const exp = webpackRequire.c[key]?.exports;
+        if (exp) modules.push(exp);
+      }
+    }
+
+    // 2. Also scan module factories (`webpackRequire.m`) if not yet instantiated
+    if (webpackRequire.m) {
+      for (const id of Object.keys(webpackRequire.m)) {
+        try {
+          const exp = webpackRequire(id);
+          if (exp) modules.push(exp);
+        } catch {
+          // Ignore factory init errors
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[SIMP Decky] Failed to inspect webpackChunksteamui:', err);
+  }
+  return modules;
+}
+
+/**
+ * Discovers Valve's native `Focusable` React component inside `window.DFL`, `window.deckyFrontendLib`,
+ * or `window.webpackChunksteamui` (supporting both standard functions and `React.forwardRef` objects
+ * where `typeof candidate === 'object'` and `candidate.render` holds the implementation).
+ */
+function resolveSteamFocusable(): any {
+  if (cachedSteamFocusable) return cachedSteamFocusable;
+  const globalDfl = (window as any).DFL || (window as any).deckyFrontendLib;
+  if (globalDfl?.Focusable) {
+    cachedSteamFocusable = globalDfl.Focusable;
+    return cachedSteamFocusable;
+  }
+
+  const matchesFocusable = (fn: any): boolean => {
+    if (!fn) return false;
+    const str =
+      (typeof fn === 'function' && fn.toString?.()) ||
+      (fn?.render && typeof fn.render === 'function' && fn.render.toString?.()) ||
+      (fn?.type && typeof fn.type === 'function' && fn.type.toString?.()) ||
+      '';
+    if (!str) return false;
+    return (
+      str.includes('flow-children') &&
+      (str.includes('onActivate') ||
+        str.includes('focusClassName') ||
+        str.includes('navRef') ||
+        str.includes('focusWithinClassName'))
+    );
+  };
+
+  for (const mod of getSteamWebpackModules()) {
+    for (const candidate of [mod?.default, mod]) {
+      if (!candidate || candidate === window) continue;
+      if (matchesFocusable(candidate)) {
+        cachedSteamFocusable = candidate;
+        return cachedSteamFocusable;
+      }
+      if (typeof candidate === 'object') {
+        for (const key of Object.keys(candidate)) {
+          try {
+            const exp = candidate[key];
+            if (exp && matchesFocusable(exp)) {
+              cachedSteamFocusable = exp;
+              return cachedSteamFocusable;
+            }
+          } catch {
+            // Ignore getter errors
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Discovers Valve's native `DialogButton` component for 100% native SteamOS QAM button focus.
+ */
+function resolveSteamDialogButton(): any {
+  if (cachedSteamButtonItem) return cachedSteamButtonItem;
+  const globalDfl = (window as any).DFL || (window as any).deckyFrontendLib;
+  if (globalDfl?.DialogButton) {
+    cachedSteamButtonItem = globalDfl.DialogButton;
+    return cachedSteamButtonItem;
+  }
+
+  const matchesDialogButton = (fn: any): boolean => {
+    if (!fn) return false;
+    const str =
+      (typeof fn === 'function' && fn.toString?.()) ||
+      (fn?.render && typeof fn.render === 'function' && fn.render.toString?.()) ||
+      '';
+    return (
+      str.includes('DialogButton') &&
+      (str.includes('noFocusRing') || str.includes('onOKButton') || str.includes('focusable'))
+    );
+  };
+
+  for (const mod of getSteamWebpackModules()) {
+    if (typeof mod === 'object' && mod) {
+      for (const key of Object.keys(mod)) {
+        try {
+          const exp = mod[key];
+          if (exp && matchesDialogButton(exp)) {
+            cachedSteamButtonItem = exp;
+            return cachedSteamButtonItem;
+          }
+        } catch {
+          // Ignore
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Discovers Valve's `Navigation` router object (`Navigate`, `NavigateBack`, `CloseSideMenus`)
+ * so SIMP can open the native `/simp-console` route inside Gaming Mode without triggering
+ * the External Web Browser's `"Use touch"` controller block!
+ */
+function resolveSteamNavigation(): any {
+  if (cachedSteamNavigation) return cachedSteamNavigation;
+  const globalDfl = (window as any).DFL || (window as any).deckyFrontendLib;
+  if (globalDfl?.Navigation) {
+    cachedSteamNavigation = globalDfl.Navigation;
+    return cachedSteamNavigation;
+  }
+
+  for (const mod of getSteamWebpackModules()) {
+    for (const candidate of [mod?.default, mod]) {
+      if (!candidate || typeof candidate !== 'object' || candidate === window) continue;
+      if (
+        typeof candidate.Navigate === 'function' &&
+        (typeof candidate.NavigateBack === 'function' ||
+          typeof candidate.CloseSideMenus === 'function')
+      ) {
+        cachedSteamNavigation = candidate;
+        return cachedSteamNavigation;
+      }
+      for (const key of Object.keys(candidate)) {
+        try {
+          const exp = candidate[key];
+          if (
+            exp &&
+            typeof exp === 'object' &&
+            typeof exp.Navigate === 'function' &&
+            (typeof exp.NavigateBack === 'function' || typeof exp.CloseSideMenus === 'function')
+          ) {
+            cachedSteamNavigation = exp;
+            return cachedSteamNavigation;
+          }
+        } catch {
+          // Ignore
+        }
+      }
+    }
+  }
+  return null;
+}
+
+export type SteamPadAction =
+  | 'up'
+  | 'down'
+  | 'left'
+  | 'right'
+  | 'activate'
+  | 'back'
+  | 'shuffle'
+  | 'repeat'
+  | 'l1'
+  | 'r1'
+  | 'l2'
+  | 'r2'
+  | 'sources';
+
+let isSimpRouteRegistered = false;
+let lastFocusableClickTs = 0;
+
+function resolveDeckyRouterHook(serverApi?: any): any {
+  return (
+    serverApi?.routerHook ||
+    (window as any).DeckyPluginLoader?.routerHook ||
+    (window as any).DFL?.routerHook ||
+    (window as any).deckyFrontendLib?.routerHook ||
+    null
+  );
+}
+
+/**
+ * Maps Valve's `EGamepadButton` (`@decky/ui` / `decky-frontend-lib` / `vgp_onbuttondown` /
+ * `SteamClient.Input.RegisterForControllerInputMessages`) to canonical SIMP actions:
+ *   1 = OK (A), 2 = CANCEL (B), 3 = SECONDARY (X), 4 = OPTIONS (Y),
+ *   5 = BUMPER_LEFT (L1), 6 = BUMPER_RIGHT (R1), 7 = TRIGGER_LEFT (L2), 8 = TRIGGER_RIGHT (R2),
+ *   9 = DIR_UP, 10 = DIR_DOWN, 11 = DIR_LEFT, 12 = DIR_RIGHT, 13 = SELECT, 14 = START
+ */
+const E_GAMEPAD_BUTTON_MAP: Record<number, SteamPadAction> = {
+  1: 'activate',
+  2: 'back',
+  3: 'shuffle',
+  4: 'repeat',
+  5: 'l1',
+  6: 'r1',
+  7: 'l2',
+  8: 'r2',
+  9: 'up',
+  10: 'down',
+  11: 'left',
+  12: 'right',
+  13: 'sources',
+  14: 'sources',
+};
+
+/**
+ * Multi-source deduplicated SteamOS controller listener for both the QAM drawer and `/simp-console`:
+ *   1. SteamUI DOM `vgp_onbuttondown` & `vgp_ondirection` events on the active window/document (capture phase)
+ *   2. `SteamClient.Input.RegisterForControllerInputMessages` (both array and positional callback shapes)
+ *   3. Standard `keydown` (`ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Enter`)
+ */
+function registerSteamControllerButtons(
+  onAction: (action: SteamPadAction, rawEvent?: Event) => void,
+  getTargetDoc?: () => Document | null
+): () => void {
+  const disposers: Array<() => void> = [];
+  const lastEmitByAction: Record<string, number> = {};
+
+  const emit = (action: SteamPadAction | undefined, rawEvent?: Event) => {
+    if (!action) return;
+    const now = performance.now();
+    if (lastEmitByAction[action] && now - lastEmitByAction[action] < 65) return;
+    lastEmitByAction[action] = now;
+    onAction(action, rawEvent);
+  };
+
+  // 1. SteamClient.Input.RegisterForControllerInputMessages
+  try {
+    const input = (window as any).SteamClient?.Input;
+    if (input?.RegisterForControllerInputMessages) {
+      const reg = input.RegisterForControllerInputMessages(
+        (arg0: any, arg1?: any, arg2?: any) => {
+          if (Array.isArray(arg0)) {
+            for (const msg of arg0) {
+              const isDown = Boolean(msg?.bState ?? msg?.bPressed ?? msg?.isDown);
+              const btn = Number(msg?.eButton ?? msg?.nButton ?? msg?.button);
+              if (isDown && btn) {
+                emit(E_GAMEPAD_BUTTON_MAP[btn]);
+              }
+            }
+          } else if (arg2 === true) {
+            emit(E_GAMEPAD_BUTTON_MAP[Number(arg1)]);
+          }
+        }
+      );
+      if (reg && typeof reg.unregister === 'function') {
+        disposers.push(() => reg.unregister());
+      }
+    }
+  } catch (err) {
+    console.warn('[SIMP Decky] RegisterForControllerInputMessages failed:', err);
+  }
+
+  // 2. Attach `vgp_onbuttondown`, `vgp_ondirection`, and `keydown` to both `window` and `ownerDocument`
+  const attachedTargets = new Set<EventTarget>();
+  const onVgp = (e: any) => {
+    const btn = Number(e?.detail?.button);
+    if (btn && E_GAMEPAD_BUTTON_MAP[btn]) {
+      emit(E_GAMEPAD_BUTTON_MAP[btn], e);
+    }
+  };
+  const onKeyDown = (e: any) => {
+    const map: Record<string, SteamPadAction> = {
+      ArrowUp: 'up',
+      ArrowDown: 'down',
+      ArrowLeft: 'left',
+      ArrowRight: 'right',
+      Enter: 'activate',
+    };
+    if (map[e.key]) {
+      emit(map[e.key], e);
+    }
+  };
+
+  const attachToTarget = (target: EventTarget | null | undefined) => {
+    if (!target || attachedTargets.has(target)) return;
+    attachedTargets.add(target);
+    target.addEventListener('vgp_onbuttondown', onVgp as EventListener, true);
+    target.addEventListener('vgp_ondirection', onVgp as EventListener, true);
+    target.addEventListener('keydown', onKeyDown as EventListener, true);
+    disposers.push(() => {
+      target.removeEventListener('vgp_onbuttondown', onVgp as EventListener, true);
+      target.removeEventListener('vgp_ondirection', onVgp as EventListener, true);
+      target.removeEventListener('keydown', onKeyDown as EventListener, true);
+    });
+  };
+
+  attachToTarget(window);
+  attachToTarget(document);
+
+  // Poll briefly to attach to `ownerDocument` & its `defaultView` once the QAM / Route ref mounts
+  const syncDocTarget = () => {
+    const doc = getTargetDoc?.();
+    if (doc) {
+      attachToTarget(doc);
+      attachToTarget(doc.defaultView);
+    }
+  };
+  syncDocTarget();
+  const docTimer = window.setInterval(syncDocTarget, 250);
+  disposers.push(() => window.clearInterval(docTimer));
+
+  return () => {
+    for (const fn of disposers) {
+      try {
+        fn();
+      } catch {
+        // Ignore
+      }
+    }
+  };
+}
+
+/**
+ * Navigates to the native `/simp-console` Decky route inside SteamUI (avoiding the `"Use touch"`
+ * External Web Browser popup), closing the QAM drawer automatically.
+ * Falls back to the inline fullscreen console overlay inside SteamUI if `routerHook` isn't available.
+ */
+function openFullSimpConsole(onFallbackInline?: () => void) {
+  try {
+    const nav = resolveSteamNavigation();
+    if (isSimpRouteRegistered && nav?.Navigate) {
+      if (nav?.CloseSideMenus) {
+        nav.CloseSideMenus();
+      }
+      nav.Navigate(SIMP_CONSOLE_ROUTE);
+      return;
+    }
+    const routerHook = resolveDeckyRouterHook();
+    if (isSimpRouteRegistered && routerHook?.navigate) {
+      if (nav?.CloseSideMenus) {
+        nav.CloseSideMenus();
+      }
+      routerHook.navigate(SIMP_CONSOLE_ROUTE);
+      return;
+    }
+  } catch {
+    // Fall through to inline fullscreen SteamUI overlay
+  }
+  if (onFallbackInline) {
+    onFallbackInline();
+  }
+}
+
+/**
+ * Fullscreen Native SteamUI Route (`/simp-console`) registered via Decky's `routerHook.addRoute`.
+ * Renders SIMP Console (`http://127.0.0.1:18888`) inside a native SteamUI `Focusable` screen
+ * and bridges all Steam Deck controller buttons (`D-Pad`, `A`, `B`, `X`, `Y`, `L1`, `R1`, `L2`, `R2`, `Start`)
+ * directly into the Console UI via `postMessage` — zero `"Use touch"` banner and 100% controller support!
+ */
+const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit }) => {
+  const { useEffect, useRef } = SP_REACT;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const lastSentByActionRef = useRef<Record<string, number>>({});
+
+  const sendAction = (action: SteamPadAction) => {
+    const now = performance.now();
+    const prev = lastSentByActionRef.current[action] || 0;
+    if (now - prev < 65) return;
+    lastSentByActionRef.current[action] = now;
+
+    const win = iframeRef.current?.contentWindow;
+    if (win) {
+      win.postMessage({ type: 'SIMP_GAMEPAD_ACTION', action }, '*');
+    }
+  };
+
+  const exitConsole = () => {
+    if (onExit) {
+      onExit();
+      return;
+    }
+    const nav = resolveSteamNavigation();
+    if (nav?.NavigateBack) {
+      nav.NavigateBack();
+    } else {
+      window.history.back();
+    }
+  };
+
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.data?.type === 'SIMP_EXIT_CONSOLE') {
+        exitConsole();
+      }
+    };
+    window.addEventListener('message', onMessage);
+
+    const unsubController = registerSteamControllerButtons(
+      (action) => {
+        sendAction(action);
+      },
+      () => containerRef.current?.ownerDocument || null
+    );
+
+    return () => {
+      window.removeEventListener('message', onMessage);
+      unsubController();
+    };
+  }, []);
+
+  return (
+    <Focusable
+      style={{
+        position: 'fixed',
+        inset: 0,
+        width: '100vw',
+        height: '100vh',
+        background: '#000000',
+        zIndex: 999999,
+        display: 'flex',
+        flexDirection: 'column',
+      }}
+      onActivate={() => sendAction('activate')}
+      onOKButton={() => sendAction('activate')}
+      onCancel={() => sendAction('back')}
+      onCancelButton={() => sendAction('back')}
+      onSecondaryButton={() => sendAction('shuffle')}
+      onOptionsButton={() => sendAction('repeat')}
+      onMenuButton={() => sendAction('sources')}
+      onMoveUp={() => {
+        sendAction('up');
+        return true;
+      }}
+      onMoveDown={() => {
+        sendAction('down');
+        return true;
+      }}
+      onMoveLeft={() => {
+        sendAction('left');
+        return true;
+      }}
+      onMoveRight={() => {
+        sendAction('right');
+        return true;
+      }}
+      onButtonDown={(evt: any) => {
+        const btn = Number(evt?.detail?.button);
+        if (btn && E_GAMEPAD_BUTTON_MAP[btn]) {
+          sendAction(E_GAMEPAD_BUTTON_MAP[btn]);
+        }
+      }}
+      onGamepadDirection={(evt: any) => {
+        const dir = Number(evt?.detail?.button);
+        if (dir && E_GAMEPAD_BUTTON_MAP[dir]) {
+          sendAction(E_GAMEPAD_BUTTON_MAP[dir]);
+        }
+        return true;
+      }}
+    >
+      <div
+        ref={containerRef}
+        style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}
+      >
+        <iframe
+          ref={iframeRef}
+          src="http://127.0.0.1:18888"
+          title="SIMP Console"
+          allow="autoplay; encrypted-media; clipboard-write"
+          style={{
+            width: '100%',
+            height: '100%',
+            border: 'none',
+            background: '#000000',
+          }}
+        />
+      </div>
+    </Focusable>
+  );
+};
+
+/**
+ * Gamepad-navigable Focusable container & button component.
+ * Uses Valve's native `Focusable` from `window.DFL` or `window.webpackChunksteamui` and marks
+ * interactive nodes with `.SimpInteractiveBtn` + `data-simp-focusable="true"` so both native
+ * `CNavTree` and our spatial controller bridge can navigate them seamlessly.
+ */
+const Focusable: ReactTypes.FC<any> = ({
+  onActivate,
+  onClick,
+  className = '',
+  children,
+  style,
+  flowChildren,
+  ...rest
+}) => {
+  const SteamFocusable = resolveSteamFocusable();
+  const isInteractive = Boolean(onActivate || onClick);
+  const combinedClassName = `Focusable ${isInteractive ? 'SimpInteractiveBtn' : ''} ${className}`.trim();
+
+  const handleClick = (e: any) => {
+    const now = performance.now();
+    if (now - lastFocusableClickTs < 140) return;
+    lastFocusableClickTs = now;
+    if (onActivate) onActivate(e);
+    else if (onClick) onClick(e);
+  };
+
+  if (SteamFocusable) {
+    return SP_REACT.createElement(
+      SteamFocusable,
+      {
+        onActivate: isInteractive ? handleClick : undefined,
+        onOKButton: isInteractive ? handleClick : undefined,
+        onClick: isInteractive ? handleClick : undefined,
+        focusable: isInteractive,
+        'data-simp-focusable': isInteractive ? 'true' : undefined,
+        className: combinedClassName,
+        focusClassName: 'gpfocus',
+        focusWithinClassName: 'gpfocuswithin',
+        style,
+        'flow-children': flowChildren,
+        ...rest,
+      },
+      children
+    );
+  }
+
+  return SP_REACT.createElement(
+    'div',
+    {
+      role: isInteractive ? 'button' : undefined,
+      tabIndex: isInteractive ? 0 : undefined,
+      'data-simp-focusable': isInteractive ? 'true' : undefined,
+      className: combinedClassName,
+      onClick: isInteractive ? handleClick : undefined,
+      onKeyDown: isInteractive
+        ? (e: any) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.keyCode === 13 || e.keyCode === 32) {
+              e.preventDefault();
+              handleClick(e);
+            }
+          }
+        : undefined,
+      style,
+      ...rest,
+    },
+    children
+  );
+};
+
+const DeckyQrSvg: ReactTypes.FC<{ value: string; size?: number }> = ({
+  value,
+  size = 92,
+}) => {
+  const matrix = encodeQrMatrix(value);
+  const n = matrix.length;
+  const quiet = 2;
+  const viewBoxSize = n + quiet * 2;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${viewBoxSize} ${viewBoxSize}`}
+      shapeRendering="crispEdges"
+      style={{
+        borderRadius: 10,
+        background: '#ffffff',
+        padding: 4,
+        boxSizing: 'border-box',
+        flexShrink: 0,
+      }}
+    >
+      <rect width={viewBoxSize} height={viewBoxSize} fill="#ffffff" />
+      {matrix.map((row, r) =>
+        row.map((cell, c) =>
+          cell ? (
+            <rect
+              key={`${r}-${c}`}
+              x={c + quiet}
+              y={r + quiet}
+              width={1}
+              height={1}
+              fill="#07070c"
+            />
+          ) : null
+        )
+      )}
+    </svg>
+  );
+};
 
 /**
  * Pilot Phase 2: Lightweight Decky Loader QAM (`...` Menu) Drawer.
  * Connects directly to `simp --daemon` over `ws://127.0.0.1:18888/ws` with zero Python audio glue.
  */
-export const SimpDeckyDrawer: React.FC = () => {
+const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
+  const { useState, useEffect, useRef } = SP_REACT;
+  const drawerRootRef = useRef<HTMLDivElement | null>(null);
   const [snap, setSnap] = useState<SimpStateSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
-  const [albums, setAlbums] = useState<AlbumSummary[]>([]);
-  const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
-  const [drawerTab, setDrawerTab] = useState<'none' | 'albums' | 'playlists'>('none');
+  const [reloading, setReloading] = useState(false);
+  const [albums, setAlbums] = useState<AlbumRecord[]>([]);
+  const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
+  const [authCfg, setAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
+  const [drawerTab, setDrawerTab] = useState<'none' | 'albums' | 'playlists' | 'pair'>('none');
   const [preMuteVol, setPreMuteVol] = useState<number>(0.85);
+  const [focusedIdx, setFocusedIdx] = useState<number>(-1);
+  const [inlineConsoleOpen, setInlineConsoleOpen] = useState<boolean>(false);
+
+  const refreshCatalogs = () => {
+    defaultSimpClient
+      .query<AlbumRecord[]>('get_albums', { limit: 200, offset: 0 })
+      .then((res) => {
+        setConnected(true);
+        if (Array.isArray(res)) setAlbums(res);
+      })
+      .catch(() => {});
+    defaultSimpClient
+      .query<PlaylistRecord[]>('get_playlists')
+      .then((res) => {
+        setConnected(true);
+        if (Array.isArray(res)) setPlaylists(res);
+      })
+      .catch(() => {});
+    defaultSimpClient
+      .getAppleMusicAuthConfig()
+      .then((cfg) => {
+        setConnected(true);
+        setAuthCfg(cfg);
+      })
+      .catch(() => {});
+  };
 
   useEffect(() => {
     defaultSimpClient.connect();
-    const unsubConn = defaultSimpClient.subscribeConnection((isConn) => {
-      setConnected(isConn);
-      if (isConn) {
-        defaultSimpClient.getAlbums(undefined, undefined, 40, 0).then(setAlbums).catch(() => {});
-        defaultSimpClient.getPlaylists().then(setPlaylists).catch(() => {});
-      }
+
+    const unsubState = defaultSimpClient.subscribeState((s) => {
+      setSnap({ ...s });
+      setConnected(true);
     });
-    const unsubState = defaultSimpClient.subscribeState((s) => setSnap({ ...s }));
+
+    const getInteractiveNodes = (): HTMLElement[] => {
+      const root = drawerRootRef.current;
+      if (!root) return [];
+      return Array.from(
+        root.querySelectorAll<HTMLElement>(
+          '.SimpInteractiveBtn, [data-simp-focusable="true"], .Focusable[role="button"], .Focusable[tabindex="0"], button.Focusable'
+        )
+      ).filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+    };
+
+    const moveDrawerFocus = (dir: 'up' | 'down' | 'left' | 'right') => {
+      const nodes = getInteractiveNodes();
+      if (nodes.length === 0) return;
+
+      setFocusedIdx((prev) => {
+        if (prev < 0 || prev >= nodes.length) {
+          if (dir === 'up') {
+            return -1;
+          }
+          // Default to Play/Pause button (index 2 in top row) or first button
+          const initial = Math.min(2, nodes.length - 1);
+          nodes.forEach((n, idx) => n.classList.toggle('gpfocus', idx === initial));
+          nodes[initial]?.focus?.();
+          nodes[initial]?.scrollIntoView({ block: 'nearest' });
+          return initial;
+        }
+
+        const curNode = nodes[prev];
+        if (curNode?.dataset?.simpVolumeRow === 'true' && (dir === 'left' || dir === 'right')) {
+          const curVol = defaultSimpClient.getState()?.volume ?? 0.85;
+          const delta = dir === 'right' ? 0.05 : -0.05;
+          defaultSimpClient.setVolume(Math.max(0, Math.min(1, curVol + delta)));
+          return prev;
+        }
+
+        const cur = curNode.getBoundingClientRect();
+        const cx = cur.left + cur.width / 2;
+        const cy = cur.top + cur.height / 2;
+
+        let bestIdx = prev;
+        let bestScore = Infinity;
+
+        nodes.forEach((candidate, idx) => {
+          if (idx === prev) return;
+          const r = candidate.getBoundingClientRect();
+          const tx = r.left + r.width / 2;
+          const ty = r.top + r.height / 2;
+          const dx = tx - cx;
+          const dy = ty - cy;
+
+          if (dir === 'right' && dx <= 4) return;
+          if (dir === 'left' && dx >= -4) return;
+          if (dir === 'down' && dy <= 4) return;
+          if (dir === 'up' && dy >= -4) return;
+
+          const primary = dir === 'left' || dir === 'right' ? Math.abs(dx) : Math.abs(dy);
+          const cross = dir === 'left' || dir === 'right' ? Math.abs(dy) : Math.abs(dx);
+          const score = primary + cross * 2.5;
+          if (score < bestScore) {
+            bestScore = score;
+            bestIdx = idx;
+          }
+        });
+
+        // If user presses Up at the very top row of the SIMP drawer, release focus back to `< SIMP` header
+        if (dir === 'up' && bestIdx === prev) {
+          nodes.forEach((n) => n.classList.remove('gpfocus'));
+          return -1;
+        }
+
+        nodes.forEach((n, idx) => n.classList.toggle('gpfocus', idx === bestIdx));
+        nodes[bestIdx]?.focus?.();
+        nodes[bestIdx]?.scrollIntoView({ block: 'nearest' });
+        return bestIdx;
+      });
+    };
+
+    const activateDrawerFocus = () => {
+      const nodes = getInteractiveNodes();
+      setFocusedIdx((cur) => {
+        if (cur >= 0 && cur < nodes.length) {
+          nodes[cur].click();
+        }
+        return cur;
+      });
+    };
+
+    const unsubController = registerSteamControllerButtons(
+      (action) => {
+        // Only handle QAM controller events when our drawer is mounted and visible
+        if (!drawerRootRef.current || drawerRootRef.current.offsetParent === null) return;
+        switch (action) {
+          case 'up':
+          case 'down':
+          case 'left':
+          case 'right':
+            moveDrawerFocus(action);
+            break;
+          case 'activate':
+            activateDrawerFocus();
+            break;
+          case 'shuffle':
+            defaultSimpClient.setShuffle(!defaultSimpClient.getState()?.shuffle);
+            break;
+          case 'repeat':
+            defaultSimpClient.cycleRepeat();
+            break;
+          case 'l2':
+            defaultSimpClient.seekRelative(-10_000);
+            break;
+          case 'r2':
+            defaultSimpClient.seekRelative(10_000);
+            break;
+        }
+      },
+      () => drawerRootRef.current?.ownerDocument || null
+    );
+
+    const timer = window.setTimeout(refreshCatalogs, 350);
     return () => {
-      unsubConn();
+      window.clearTimeout(timer);
+      unsubController();
       unsubState();
     };
   }, []);
 
+  const handleReloadDaemon = async () => {
+    setReloading(true);
+    try {
+      defaultSimpClient.restartDaemon();
+      if (serverApi?.callPluginMethod) {
+        await serverApi.callPluginMethod('restart_daemon', {});
+      }
+    } catch {
+      // Fallback if Decky serverApi isn't exposed
+    }
+    window.setTimeout(() => {
+      defaultSimpClient.connect();
+      refreshCatalogs();
+      setReloading(false);
+    }, 950);
+  };
+
+  const toggleDrawerTab = (tab: 'albums' | 'playlists' | 'pair') => {
+    const next = drawerTab === tab ? 'none' : tab;
+    setDrawerTab(next);
+    if (next === 'albums') {
+      defaultSimpClient
+        .query<AlbumRecord[]>('get_albums', { limit: 200, offset: 0 })
+        .then((res) => Array.isArray(res) && setAlbums(res))
+        .catch(() => {});
+    } else if (next === 'playlists') {
+      defaultSimpClient
+        .query<PlaylistRecord[]>('get_playlists')
+        .then((res) => Array.isArray(res) && setPlaylists(res))
+        .catch(() => {});
+    } else if (next === 'pair') {
+      defaultSimpClient
+        .getAppleMusicAuthConfig()
+        .then((cfg) => setAuthCfg(cfg))
+        .catch(() => {});
+    }
+  };
+
   const track = snap?.current_track;
   const volumePct = Math.round((snap?.volume ?? 0.85) * 100);
-
-  const cycleRepeat = () => {
-    const nextMode: RepeatMode =
-      snap?.repeat === 'Off' ? 'All' : snap?.repeat === 'All' ? 'One' : 'Off';
-    defaultSimpClient.setRepeat(nextMode);
-  };
+  const repeatMode = snap?.repeat_mode ?? 'off';
+  const repeatLabel = repeatMode === 'queue' ? 'All' : repeatMode === 'track' ? 'One' : 'Off';
 
   const toggleMute = () => {
     const cur = snap?.volume ?? 0.85;
@@ -54,70 +865,56 @@ export const SimpDeckyDrawer: React.FC = () => {
     }
   };
 
-  const seekRelative = (deltaMs: number) => {
-    const pos = defaultSimpClient.getInterpolatedPositionMs();
-    const dur = track?.duration_ms ?? 0;
-    const target = Math.max(0, dur > 0 ? Math.min(dur, pos + deltaMs) : pos + deltaMs);
-    defaultSimpClient.seek(Math.round(target));
-  };
-
-  const playAlbum = async (album: AlbumSummary) => {
-    try {
-      const tracks = await defaultSimpClient.getAlbumTracks(album.album_id);
-      if (tracks.length > 0) {
-        defaultSimpClient.loadQueue(
-          tracks.map((t) => t.uri),
-          0,
-          true
-        );
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  const playPlaylist = async (pl: PlaylistSummary) => {
-    try {
-      const tracks = await defaultSimpClient.getPlaylistItems(pl.playlist_id, 500, 0);
-      if (tracks.length > 0) {
-        defaultSimpClient.loadQueue(
-          tracks.map((t) => t.uri),
-          0,
-          true
-        );
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  const btnStyle: React.CSSProperties = {
+  const btnStyle: ReactTypes.CSSProperties = {
     minHeight: 44,
     borderRadius: 10,
     border: '1px solid #262630',
     background: '#121216',
-    color: '#ffffff',
+    color: '#d4d4dc',
     fontWeight: 700,
     fontSize: 14,
     cursor: 'pointer',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    boxSizing: 'border-box',
+    userSelect: 'none',
   };
 
   return (
-    <div
+    <Focusable
+      flowChildren="vertical"
       style={{
         padding: 10,
-        color: '#ffffff',
+        color: '#d4d4dc',
         display: 'flex',
         flexDirection: 'column',
         gap: 10,
         fontFamily: 'system-ui, -apple-system, sans-serif',
       }}
     >
-      {/* Now Playing Card */}
+      {inlineConsoleOpen && (
+        <SimpNativeConsoleRoute onExit={() => setInlineConsoleOpen(false)} />
+      )}
       <div
+        ref={drawerRootRef}
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 10,
+        }}
+      >
+        <style>{`
+          .Focusable:focus, .Focusable:focus-visible, .Focusable.gpfocus {
+            outline: 2px solid #2aa3c4 !important;
+            outline-offset: 1px !important;
+            background: #18333e !important;
+          }
+        `}</style>
+
+      {/* Now Playing Card */}
+      <Focusable
+        flowChildren="vertical"
         style={{
           padding: 12,
           borderRadius: 12,
@@ -143,14 +940,18 @@ export const SimpDeckyDrawer: React.FC = () => {
               justifyContent: 'center',
             }}
           >
-            {track?.artwork_url ? (
+            {track?.art_url ? (
               <img
-                src={`http://127.0.0.1:18888${track.artwork_url}`}
+                src={track.art_url}
                 alt="Art"
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />
             ) : (
-              <span style={{ fontSize: 22 }}>🎵</span>
+              <img
+                src="http://127.0.0.1:18888/simp-icon-dark.png"
+                alt="SIMP"
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              />
             )}
           </div>
           <div style={{ minWidth: 0, flex: 1 }}>
@@ -176,145 +977,254 @@ export const SimpDeckyDrawer: React.FC = () => {
             >
               {track?.artists?.join(', ') || (connected ? 'Daemon Online (:18888)' : 'Connecting...')}
             </div>
-            {track?.album_title && (
+            {track?.album && (
               <div
                 style={{
                   fontSize: 11,
-                  color: '#3b82f6',
+                  color: '#2aa3c4',
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                 }}
               >
-                {track.album_title}
+                {track.album}
               </div>
             )}
           </div>
         </div>
 
         {/* 5-Button Symmetrical Transport Row */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
-          <button onClick={() => seekRelative(-10_000)} style={btnStyle} title="Rewind 10s">
+        <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6 }}>
+          <Focusable
+            onActivate={() => defaultSimpClient.seekRelative(-10_000)}
+            onClick={() => defaultSimpClient.seekRelative(-10_000)}
+            style={btnStyle}
+            title="Rewind 10s"
+          >
             ⏪
-          </button>
-          <button onClick={() => defaultSimpClient.previous()} style={btnStyle} title="Previous">
+          </Focusable>
+          <Focusable
+            onActivate={() => defaultSimpClient.previous()}
+            onClick={() => defaultSimpClient.previous()}
+            style={btnStyle}
+            title="Previous"
+          >
             ⏮
-          </button>
-          <button
+          </Focusable>
+          <Focusable
+            onActivate={() => defaultSimpClient.togglePlayPause()}
             onClick={() => defaultSimpClient.togglePlayPause()}
             style={{
               ...btnStyle,
-              background: '#3b82f6',
-              borderColor: '#60a5fa',
+              background: '#0f222a',
+              borderColor: '#2aa3c4',
+              color: '#5bc0de',
               fontSize: 16,
             }}
             title="Play / Pause"
           >
             {snap?.is_playing ? '⏸' : '▶'}
-          </button>
-          <button onClick={() => defaultSimpClient.next()} style={btnStyle} title="Next">
+          </Focusable>
+          <Focusable
+            onActivate={() => defaultSimpClient.next()}
+            onClick={() => defaultSimpClient.next()}
+            style={btnStyle}
+            title="Next"
+          >
             ⏭
-          </button>
-          <button onClick={() => seekRelative(10_000)} style={btnStyle} title="Fast-Forward 10s">
+          </Focusable>
+          <Focusable
+            onActivate={() => defaultSimpClient.seekRelative(10_000)}
+            onClick={() => defaultSimpClient.seekRelative(10_000)}
+            style={btnStyle}
+            title="Fast-Forward 10s"
+          >
             ⏩
-          </button>
-        </div>
+          </Focusable>
+        </Focusable>
 
         {/* Shuffle & Repeat Row */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-          <button
+        <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+          <Focusable
+            onActivate={() => defaultSimpClient.setShuffle(!snap?.shuffle)}
             onClick={() => defaultSimpClient.setShuffle(!snap?.shuffle)}
             style={{
               ...btnStyle,
               minHeight: 38,
               fontSize: 12,
-              borderColor: snap?.shuffle ? '#3b82f6' : '#262630',
-              color: snap?.shuffle ? '#60a5fa' : '#a1a1aa',
+              borderColor: snap?.shuffle ? '#2aa3c4' : '#262630',
+              color: snap?.shuffle ? '#5bc0de' : '#a1a1aa',
             }}
           >
             🔀 {snap?.shuffle ? 'Shuffle: ON' : 'Shuffle: OFF'}
-          </button>
-          <button
-            onClick={cycleRepeat}
+          </Focusable>
+          <Focusable
+            onActivate={() => defaultSimpClient.cycleRepeat()}
+            onClick={() => defaultSimpClient.cycleRepeat()}
             style={{
               ...btnStyle,
               minHeight: 38,
               fontSize: 12,
-              borderColor: snap?.repeat && snap.repeat !== 'Off' ? '#3b82f6' : '#262630',
-              color: snap?.repeat && snap.repeat !== 'Off' ? '#60a5fa' : '#a1a1aa',
+              borderColor: repeatMode !== 'off' ? '#2aa3c4' : '#262630',
+              color: repeatMode !== 'off' ? '#5bc0de' : '#a1a1aa',
             }}
           >
-            🔁 Repeat: {snap?.repeat ?? 'Off'}
-          </button>
-        </div>
+            🔁 Repeat: {repeatLabel}
+          </Focusable>
+        </Focusable>
 
-        {/* Volume Slider Row */}
-        <div
+        {/* Clean Volume Slider Row (D-Pad Left/Right steps volume; A toggles mute) */}
+        <Focusable
+          data-simp-volume-row="true"
+          onActivate={toggleMute}
+          onMoveLeft={() => {
+            defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05));
+            return true;
+          }}
+          onMoveRight={() => {
+            defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05));
+            return true;
+          }}
           style={{
             display: 'flex',
             alignItems: 'center',
-            gap: 8,
-            padding: '6px 8px',
+            gap: 10,
+            padding: '8px 10px',
             borderRadius: 8,
             background: '#121216',
             border: '1px solid #262630',
           }}
         >
-          <button
-            onClick={toggleMute}
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleMute();
+            }}
             style={{
-              background: 'transparent',
-              border: 'none',
-              color: '#ffffff',
+              color: '#d4d4dc',
               fontSize: 15,
               cursor: 'pointer',
-              padding: 2,
+              lineHeight: 1,
             }}
+            title="Mute / Unmute"
           >
             {volumePct === 0 ? '🔇' : volumePct < 45 ? '🔉' : '🔊'}
-          </button>
+          </span>
+
           <input
             type="range"
             min={0}
             max={100}
             value={volumePct}
+            onClick={(e) => e.stopPropagation()}
             onChange={(e) => defaultSimpClient.setVolume(Number(e.target.value) / 100)}
-            style={{ flex: 1, accentColor: '#3b82f6', cursor: 'pointer' }}
+            style={{ flex: 1, accentColor: '#2aa3c4', cursor: 'pointer' }}
           />
+
           <span style={{ fontSize: 12, fontWeight: 700, minWidth: 34, textAlign: 'right' }}>
             {volumePct}%
           </span>
-        </div>
-      </div>
+        </Focusable>
+      </Focusable>
 
       {/* Quick Switcher Drawer Tabs */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-        <button
-          onClick={() => setDrawerTab(drawerTab === 'albums' ? 'none' : 'albums')}
+      <Focusable
+        flowChildren="horizontal"
+        style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 6 }}
+      >
+        <Focusable
+          onActivate={() => toggleDrawerTab('albums')}
+          onClick={() => toggleDrawerTab('albums')}
           style={{
             ...btnStyle,
             minHeight: 38,
             fontSize: 12,
-            borderColor: drawerTab === 'albums' ? '#3b82f6' : '#262630',
+            borderColor: drawerTab === 'albums' ? '#2aa3c4' : '#262630',
+            color: drawerTab === 'albums' ? '#5bc0de' : '#d4d4dc',
           }}
         >
           💿 Albums ({albums.length})
-        </button>
-        <button
-          onClick={() => setDrawerTab(drawerTab === 'playlists' ? 'none' : 'playlists')}
+        </Focusable>
+        <Focusable
+          onActivate={() => toggleDrawerTab('playlists')}
+          onClick={() => toggleDrawerTab('playlists')}
           style={{
             ...btnStyle,
             minHeight: 38,
             fontSize: 12,
-            borderColor: drawerTab === 'playlists' ? '#3b82f6' : '#262630',
+            borderColor: drawerTab === 'playlists' ? '#2aa3c4' : '#262630',
+            color: drawerTab === 'playlists' ? '#5bc0de' : '#d4d4dc',
           }}
         >
-          Queue / Playlists ({playlists.length})
-        </button>
-      </div>
+          Playlists ({playlists.length})
+        </Focusable>
+        <Focusable
+          onActivate={() => toggleDrawerTab('pair')}
+          onClick={() => toggleDrawerTab('pair')}
+          style={{
+            ...btnStyle,
+            minHeight: 38,
+            padding: '0 10px',
+            fontSize: 12,
+            borderColor:
+              drawerTab === 'pair'
+                ? '#f43f5e'
+                : snap?.apple_authenticated
+                ? '#10b981'
+                : '#262630',
+            color:
+              drawerTab === 'pair'
+                ? '#fda4af'
+                : snap?.apple_authenticated
+                ? '#6ee7b7'
+                : '#d4d4dc',
+          }}
+          title="Apple Music QR Companion Pairing"
+        >
+          {snap?.apple_authenticated ? '🍎 Paired' : '📱 Pair QR'}
+        </Focusable>
+      </Focusable>
+
+      {drawerTab === 'pair' && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: 10,
+            borderRadius: 10,
+            background: '#000000',
+            border: '1px solid #f43f5e',
+          }}
+        >
+          <DeckyQrSvg
+            value={authCfg?.pair_url || 'http://steamdeck.local:18888/pair'}
+            size={92}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#fda4af' }}>
+              {snap?.apple_authenticated ? '🟢 Apple Music Connected' : '📱 Scan with iPhone / PC'}
+            </div>
+            <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.35 }}>
+              Sign in with Face ID, Passkey, or YubiKey on your phone/PC to sync Apple Music directly to your Deck.
+            </div>
+            <div
+              style={{
+                fontSize: 10,
+                fontFamily: 'monospace',
+                color: '#67e8f9',
+                wordBreak: 'break-all',
+              }}
+            >
+              {authCfg?.pair_url || 'http://steamdeck.local:18888/pair'}
+            </div>
+          </div>
+        </div>
+      )}
 
       {drawerTab === 'albums' && (
-        <div
+        <Focusable
+          flowChildren="vertical"
           style={{
             maxHeight: 190,
             overflowY: 'auto',
@@ -328,9 +1238,10 @@ export const SimpDeckyDrawer: React.FC = () => {
           }}
         >
           {albums.map((alb) => (
-            <button
-              key={alb.album_id}
-              onClick={() => playAlbum(alb)}
+            <Focusable
+              key={alb.id}
+              onActivate={() => defaultSimpClient.playAlbum(alb.id, false)}
+              onClick={() => defaultSimpClient.playAlbum(alb.id, false)}
               style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -339,7 +1250,7 @@ export const SimpDeckyDrawer: React.FC = () => {
                 borderRadius: 8,
                 background: '#121216',
                 border: '1px solid #262630',
-                color: '#ffffff',
+                color: '#d4d4dc',
                 cursor: 'pointer',
                 textAlign: 'left',
               }}
@@ -348,13 +1259,14 @@ export const SimpDeckyDrawer: React.FC = () => {
               <span style={{ fontSize: 11, color: '#a1a1aa' }}>
                 {alb.album_artist} • {alb.track_count} tracks
               </span>
-            </button>
+            </Focusable>
           ))}
-        </div>
+        </Focusable>
       )}
 
       {drawerTab === 'playlists' && (
-        <div
+        <Focusable
+          flowChildren="vertical"
           style={{
             maxHeight: 190,
             overflowY: 'auto',
@@ -373,9 +1285,10 @@ export const SimpDeckyDrawer: React.FC = () => {
             </div>
           ) : (
             playlists.map((pl) => (
-              <button
-                key={pl.playlist_id}
-                onClick={() => playPlaylist(pl)}
+              <Focusable
+                key={pl.id}
+                onActivate={() => defaultSimpClient.playPlaylist(pl.id, false)}
+                onClick={() => defaultSimpClient.playPlaylist(pl.id, false)}
                 style={{
                   display: 'flex',
                   justifyContent: 'space-between',
@@ -384,44 +1297,84 @@ export const SimpDeckyDrawer: React.FC = () => {
                   borderRadius: 8,
                   background: '#121216',
                   border: '1px solid #262630',
-                  color: '#ffffff',
+                  color: '#d4d4dc',
                   cursor: 'pointer',
                 }}
               >
                 <span style={{ fontSize: 12, fontWeight: 700 }}>{pl.name}</span>
                 <span style={{ fontSize: 11, color: '#a1a1aa' }}>{pl.track_count} tracks</span>
-              </button>
+              </Focusable>
             ))
           )}
-        </div>
+        </Focusable>
       )}
 
-      {/* Open Full SIMP Console Button */}
-      <button
-        onClick={() => window.open('http://127.0.0.1:18888', '_blank')}
-        style={{
-          ...btnStyle,
-          minHeight: 40,
-          fontSize: 12,
-          color: '#a1a1aa',
-        }}
-      >
-        ↗ Open Full SIMP Console (:18888)
-      </button>
-    </div>
+      {/* Open Full SIMP Console + Reload Row */}
+      <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 6 }}>
+        <Focusable
+          onActivate={() => openFullSimpConsole(() => setInlineConsoleOpen(true))}
+          onClick={() => openFullSimpConsole(() => setInlineConsoleOpen(true))}
+          style={{
+            ...btnStyle,
+            minHeight: 40,
+            fontSize: 12,
+            color: '#a1a1aa',
+          }}
+        >
+          ↗ Open Full SIMP Console ({SIMP_VERSION})
+        </Focusable>
+        <Focusable
+          onActivate={handleReloadDaemon}
+          onClick={handleReloadDaemon}
+          style={{
+            ...btnStyle,
+            minHeight: 40,
+            padding: '0 12px',
+            fontSize: 12,
+            color: reloading ? '#5bc0de' : '#a1a1aa',
+            borderColor: reloading ? '#2aa3c4' : '#262630',
+          }}
+          title="Restart SIMP Background Daemon & Widevine Worker"
+        >
+          {reloading ? '⏳' : '🔄 Restart BG'}
+        </Focusable>
+      </Focusable>
+      </div>
+    </Focusable>
   );
 };
 
 /**
  * Standard Decky Loader plugin entrypoint (`api_version: 1`).
  */
-export default function defineSimpDeckyPlugin() {
+export default function defineSimpDeckyPlugin(serverApi?: any) {
+  const routerHook = resolveDeckyRouterHook(serverApi);
+  try {
+    if (routerHook?.addRoute) {
+      routerHook.addRoute(SIMP_CONSOLE_ROUTE, SimpNativeConsoleRoute, {
+        exact: true,
+      });
+      isSimpRouteRegistered = true;
+    }
+  } catch (err) {
+    console.warn('[SIMP Decky] Failed to register /simp-console route:', err);
+  }
+
   return {
     title: <div style={{ fontWeight: 800 }}>SIMP Audio Player</div>,
-    content: <SimpDeckyDrawer />,
+    content: <SimpDeckyDrawer serverApi={serverApi} />,
     icon: <span>🎵</span>,
     onDismount() {
-      // Daemon remains active in background; no teardown required
+      try {
+        const rh = resolveDeckyRouterHook(serverApi);
+        if (rh?.removeRoute) {
+          rh.removeRoute(SIMP_CONSOLE_ROUTE);
+        }
+        isSimpRouteRegistered = false;
+      } catch {
+        // Ignore teardown errors
+      }
     },
   };
 }
+

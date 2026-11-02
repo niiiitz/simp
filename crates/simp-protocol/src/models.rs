@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "snake_case")]
 pub enum ActiveEngine {
     Local,
-    Spotify,
     AppleMusic,
     #[default]
     None,
@@ -31,7 +30,7 @@ pub struct TrackMetadata {
     pub disc_number: Option<u32>,
     pub art_url: Option<String>,
     pub duration_ms: u32,
-    pub source: String, // "local" | "steam_ost" | "spotify" | "apple_music" | "cdda"
+    pub source: String, // "local" | "steam_ost" | "apple_music" | "cdda"
     pub mount_root: Option<String>,
 }
 
@@ -51,7 +50,7 @@ pub struct PlaylistRecord {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub origin: String, // "simp_mixed" | "spotify_remote" | "apple_remote"
+    pub origin: String, // "simp_mixed" | "apple_remote"
     pub cover_art_url: Option<String>,
     pub track_count: usize,
     pub updated_at: i64,
@@ -71,6 +70,22 @@ pub struct MountStatus {
 pub struct PowerState {
     pub on_battery: bool,
     pub battery_pct: Option<u8>,
+}
+
+/// Ephemeral Optical Audio CD (`cdda://`) status & resolved MusicBrainz metadata
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct OpticalDiscStatus {
+    pub drive_present: bool,
+    pub device_path: String,
+    pub disc_present: bool,
+    pub is_audio_cd: bool,
+    pub disc_id: Option<String>,
+    pub album_title: String,
+    pub artist_name: String,
+    pub release_year: Option<i32>,
+    pub art_url: Option<String>,
+    pub tracks: Vec<TrackMetadata>,
+    pub status_message: String,
 }
 
 /// Valve Data Format (`~/.config/simp/settings.vdf`) schema
@@ -109,10 +124,18 @@ pub struct LibrarySettings {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceSettings {
-    pub spotify_client_id: String,
-    pub spotify_connect_enabled: bool,
-    pub spotify_device_name: String,
+    #[serde(default)]
     pub apple_music_enabled: bool,
+    #[serde(default)]
+    pub apple_team_id: String,
+    #[serde(default)]
+    pub apple_key_id: String,
+    #[serde(default)]
+    pub apple_private_key_path: String,
+    #[serde(default)]
+    pub apple_developer_token: String,
+    #[serde(default)]
+    pub apple_music_user_token: String,
 }
 
 impl Default for SimpSettings {
@@ -143,10 +166,12 @@ impl Default for SimpSettings {
                 custom_paths,
             },
             services: ServiceSettings {
-                spotify_client_id: String::new(),
-                spotify_connect_enabled: true,
-                spotify_device_name: "SIMP (SteamOS)".to_string(),
                 apple_music_enabled: false,
+                apple_team_id: String::new(),
+                apple_key_id: String::new(),
+                apple_private_key_path: String::new(),
+                apple_developer_token: String::new(),
+                apple_music_user_token: String::new(),
             },
         }
     }

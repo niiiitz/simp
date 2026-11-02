@@ -107,6 +107,21 @@ impl LibraryDatabase {
                  PRAGMA user_version = 2;",
             );
         }
+        if user_version < 4 {
+            // Switch to Opt-In ("Pin to SIMP") Apple Music model:
+            // Clear previously auto-dumped `apple_remote` playlists and unpinned partial Apple Music albums,
+            // while preserving any `apple_music` tracks that the user added to their own `simp_local` hybrid playlists!
+            let _ = conn.execute_batch(
+                "DELETE FROM playlists WHERE origin = 'apple_remote';
+                 UPDATE tracks SET album_id = NULL WHERE source = 'apple_music';
+                 DELETE FROM tracks
+                 WHERE source = 'apple_music'
+                   AND uri NOT IN (SELECT DISTINCT track_uri FROM playlist_items);
+                 DELETE FROM albums
+                 WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL);
+                 PRAGMA user_version = 4;",
+            );
+        }
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -234,6 +249,7 @@ impl LibraryDatabase {
                 album_title, track_number, disc_number, duration_ms, art_url, file_mtime, file_size
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(uri) DO UPDATE SET
+                album_id = COALESCE(excluded.album_id, tracks.album_id),
                 title = excluded.title,
                 artists_json = excluded.artists_json,
                 album_title = excluded.album_title,
@@ -298,6 +314,17 @@ impl LibraryDatabase {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<AlbumRecord>> {
+        self.get_albums_filtered(source, None, search, limit, offset)
+    }
+
+    pub fn get_albums_filtered(
+        &self,
+        source: Option<&str>,
+        mount_root: Option<&str>,
+        search: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<AlbumRecord>> {
         let conn = self.conn.lock().unwrap();
         let search_pattern = search.map(|s| format!("%{}%", s)).unwrap_or_else(|| "%".to_string());
         let mut stmt = conn.prepare(
@@ -307,14 +334,15 @@ impl LibraryDatabase {
              JOIN tracks t ON t.album_id = a.id
              LEFT JOIN storage_mounts m ON t.mount_root = m.mount_root
              WHERE (t.mount_root IS NULL OR m.is_online = 1)
-               AND (?1 IS NULL OR t.source = ?1)
-               AND (a.title LIKE ?2 OR a.album_artist LIKE ?2)
+               AND (?1 IS NULL OR (?1 = 'local' AND t.source != 'apple_music') OR t.source = ?1)
+               AND (?2 IS NULL OR t.mount_root = ?2)
+               AND (a.title LIKE ?3 OR a.album_artist LIKE ?3)
              GROUP BY a.id
              ORDER BY a.title COLLATE NOCASE ASC
-             LIMIT ?3 OFFSET ?4",
+             LIMIT ?4 OFFSET ?5",
         )?;
         let rows = stmt.query_map(
-            params![source, search_pattern, limit as i64, offset as i64],
+            params![source, mount_root, search_pattern, limit as i64, offset as i64],
             |row| {
                 Ok(AlbumRecord {
                     id: row.get(0)?,
@@ -366,6 +394,17 @@ impl LibraryDatabase {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<TrackMetadata>> {
+        self.get_tracks_filtered(source, None, search, limit, offset)
+    }
+
+    pub fn get_tracks_filtered(
+        &self,
+        source: Option<&str>,
+        mount_root: Option<&str>,
+        search: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<TrackMetadata>> {
         let conn = self.conn.lock().unwrap();
         let search_pattern = search.map(|s| format!("%{}%", s)).unwrap_or_else(|| "%".to_string());
         let mut stmt = conn.prepare(
@@ -374,13 +413,14 @@ impl LibraryDatabase {
              FROM tracks t
              LEFT JOIN storage_mounts m ON t.mount_root = m.mount_root
              WHERE (t.mount_root IS NULL OR m.is_online = 1)
-               AND (?1 IS NULL OR t.source = ?1)
-               AND (t.title LIKE ?2 OR t.album_title LIKE ?2 OR t.artists_json LIKE ?2)
+               AND (?1 IS NULL OR (?1 = 'local' AND t.source != 'apple_music') OR t.source = ?1)
+               AND (?2 IS NULL OR t.mount_root = ?2)
+               AND (t.title LIKE ?3 OR t.album_title LIKE ?3 OR t.artists_json LIKE ?3)
              ORDER BY t.album_title COLLATE NOCASE ASC, COALESCE(t.disc_number, 1) ASC, COALESCE(t.track_number, 999) ASC
-             LIMIT ?3 OFFSET ?4",
+             LIMIT ?4 OFFSET ?5",
         )?;
         let rows = stmt.query_map(
-            params![source, search_pattern, limit as i64, offset as i64],
+            params![source, mount_root, search_pattern, limit as i64, offset as i64],
             |row| {
                 let artists_str: String = row.get(2)?;
                 let artists: Vec<String> = serde_json::from_str(&artists_str).unwrap_or_default();
@@ -406,7 +446,9 @@ impl LibraryDatabase {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, description, origin, cover_art_url, track_count, updated_at
-             FROM playlists ORDER BY updated_at DESC",
+             FROM playlists
+             ORDER BY CASE WHEN origin = 'simp_local' THEN 0 ELSE 1 END ASC,
+                      name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(PlaylistRecord {
@@ -545,11 +587,242 @@ impl LibraryDatabase {
         Ok(new_count as usize)
     }
 
+    pub fn remove_track_from_playlist(&self, playlist_id: &str, track_uri: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM playlist_items WHERE playlist_id = ?1 AND track_uri = ?2",
+            params![playlist_id, track_uri],
+        )?;
+        let new_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_items WHERE playlist_id = ?1",
+                params![playlist_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        conn.execute(
+            "UPDATE playlists SET track_count = ?2, updated_at = strftime('%s', 'now') WHERE id = ?1",
+            params![playlist_id, new_count],
+        )?;
+        Ok(new_count as usize)
+    }
+
+    pub fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM playlist_items WHERE playlist_id = ?1",
+            params![playlist_id],
+        )?;
+        conn.execute("DELETE FROM playlists WHERE id = ?1", params![playlist_id])?;
+        Ok(())
+    }
+
+    pub fn delete_album(&self, album_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tracks SET album_id = NULL WHERE album_id = ?1",
+            params![album_id],
+        )?;
+        conn.execute("DELETE FROM albums WHERE id = ?1", params![album_id])?;
+        conn.execute(
+            "DELETE FROM tracks
+             WHERE source = 'apple_music'
+               AND album_id IS NULL
+               AND uri NOT IN (SELECT DISTINCT track_uri FROM playlist_items)",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn get_library_counts(&self) -> Result<(usize, usize)> {
         let conn = self.conn.lock().unwrap();
         let albums: i64 = conn.query_row("SELECT COUNT(*) FROM albums", [], |r| r.get(0))?;
         let tracks: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
         Ok((albums as usize, tracks as usize))
+    }
+
+    /// Imports a batch of streaming tracks (and optional album / playlist container) from
+    /// Apple Music (`source = "apple_music"`) into SQLite.
+    pub fn import_catalog_bundle(
+        &self,
+        source: &str,
+        album: Option<&AlbumRecord>,
+        playlist: Option<&PlaylistRecord>,
+        tracks: &[TrackMetadata],
+    ) -> Result<()> {
+        if let Some(alb) = album {
+            self.upsert_album(
+                &alb.id,
+                &alb.title,
+                &alb.album_artist,
+                alb.release_year,
+                alb.steam_app_id,
+                alb.art_url.as_deref(),
+            )?;
+        }
+
+        let mut normalized_uris = Vec::with_capacity(tracks.len());
+        for raw_track in tracks {
+            let mut t = raw_track.clone();
+            if t.source.is_empty() {
+                t.source = source.to_string();
+            }
+            let artist_primary = t
+                .artists
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Unknown Artist".to_string());
+            let album_title = if t.album.trim().is_empty() {
+                "Apple Music Library".to_string()
+            } else {
+                t.album.clone()
+            };
+
+            if let Some(alb) = album {
+                t.album_id = Some(alb.id.clone());
+                self.upsert_album(
+                    &alb.id,
+                    &alb.title,
+                    &alb.album_artist,
+                    alb.release_year,
+                    alb.steam_app_id,
+                    alb.art_url.as_deref().or(t.art_url.as_deref()),
+                )?;
+            } else if playlist.is_none() && t.source != "apple_music" {
+                let alb_id = t.album_id.clone().unwrap_or_else(|| {
+                    let hash_key = format!(
+                        "album::{}::{}::{}",
+                        t.source,
+                        album_title.trim().to_lowercase(),
+                        artist_primary.trim().to_lowercase()
+                    );
+                    blake3::hash(hash_key.as_bytes()).to_hex()[..16].to_string()
+                });
+                t.album_id = Some(alb_id.clone());
+                self.upsert_album(
+                    &alb_id,
+                    &album_title,
+                    &artist_primary,
+                    None,
+                    None,
+                    t.art_url.as_deref(),
+                )?;
+            } else {
+                // Individual Apple Music tracks or playlist tracks do not auto-create albums
+                // unless an explicit `AlbumRecord` is being pinned.
+                t.album_id = None;
+            }
+            self.upsert_track(&t, None, None)?;
+            normalized_uris.push(t.uri.clone());
+        }
+
+        if let Some(pl) = playlist {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO playlists (id, name, description, origin, cover_art_url, track_count, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s', 'now'))
+                 ON CONFLICT(id) DO UPDATE SET
+                   name = excluded.name,
+                   description = excluded.description,
+                   cover_art_url = COALESCE(excluded.cover_art_url, playlists.cover_art_url),
+                   track_count = excluded.track_count,
+                   updated_at = strftime('%s', 'now')",
+                params![
+                    pl.id,
+                    pl.name,
+                    pl.description,
+                    pl.origin,
+                    pl.cover_art_url,
+                    normalized_uris.len() as i64
+                ],
+            )?;
+            conn.execute(
+                "DELETE FROM playlist_items WHERE playlist_id = ?1",
+                params![pl.id],
+            )?;
+            for (pos, uri) in normalized_uris.iter().enumerate() {
+                let _ = conn.execute(
+                    "INSERT INTO playlist_items (playlist_id, position, track_uri, added_at)
+                     VALUES (?1, ?2, ?3, strftime('%s', 'now'))",
+                    params![pl.id, pos as i64, uri],
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_streaming_source(&self, source: &str, playlist_origin: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM playlists WHERE origin = ?1",
+            params![playlist_origin],
+        )?;
+        conn.execute("DELETE FROM tracks WHERE source = ?1", params![source])?;
+        conn.execute(
+            "DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_all_library_cache(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM playlist_items", [])?;
+        conn.execute("DELETE FROM playlists", [])?;
+        conn.execute("DELETE FROM tracks", [])?;
+        conn.execute("DELETE FROM albums", [])?;
+        conn.execute("DELETE FROM storage_mounts", [])?;
+        conn.execute("DELETE FROM cd_cache", [])?;
+        Ok(())
+    }
+
+    pub fn get_cd_cache(
+        &self,
+        disc_id: &str,
+    ) -> Result<Option<(String, String, Vec<TrackMetadata>, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT album_title, artist_name, tracks_json, art_cache_path
+             FROM cd_cache
+             WHERE disc_id = ?1",
+        )?;
+        let res = stmt
+            .query_row(params![disc_id], |row| {
+                let album_title: String = row.get(0)?;
+                let artist_name: String = row.get(1)?;
+                let tracks_str: String = row.get(2)?;
+                let art_path: Option<String> = row.get(3)?;
+                let tracks: Vec<TrackMetadata> =
+                    serde_json::from_str(&tracks_str).unwrap_or_default();
+                Ok((album_title, artist_name, tracks, art_path))
+            })
+            .optional()?;
+        Ok(res)
+    }
+
+    pub fn upsert_cd_cache(
+        &self,
+        disc_id: &str,
+        album_title: &str,
+        artist_name: &str,
+        tracks: &[TrackMetadata],
+        art_url: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let tracks_json = serde_json::to_string(tracks).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT INTO cd_cache (disc_id, album_title, artist_name, tracks_json, art_cache_path, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s', 'now'))
+             ON CONFLICT(disc_id) DO UPDATE SET
+               album_title = excluded.album_title,
+               artist_name = excluded.artist_name,
+               tracks_json = excluded.tracks_json,
+               art_cache_path = COALESCE(excluded.art_cache_path, cd_cache.art_cache_path),
+               fetched_at = strftime('%s', 'now')",
+            params![disc_id, album_title, artist_name, tracks_json, art_url],
+        )?;
+        Ok(())
     }
 }
 

@@ -60,6 +60,36 @@ pub fn resolve_ui_dir() -> Option<PathBuf> {
         .find(|dir| dir.join("index.html").is_file())
 }
 
+pub fn detect_lan_ips() -> Vec<String> {
+    let mut ips = Vec::new();
+
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if sock.connect("8.8.8.8:80").is_ok() {
+            if let Ok(local_addr) = sock.local_addr() {
+                let ip = local_addr.ip().to_string();
+                if !ip.starts_with("127.") && ip != "0.0.0.0" {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+
+    if let Ok(out) = std::process::Command::new("hostname").arg("-I").output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for token in text.split_whitespace() {
+            if token.contains('.')
+                && !token.starts_with("127.")
+                && !token.starts_with("169.254.")
+                && !ips.contains(&token.to_string())
+            {
+                ips.push(token.to_string());
+            }
+        }
+    }
+
+    ips
+}
+
 pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
     let art_cache_dir = dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -74,7 +104,14 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
 
     if let Some(ui_dir) = resolve_ui_dir() {
         tracing::info!("Serving SIMP Console UI from {}", ui_dir.display());
-        app = app.fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true));
+        let index_file = ui_dir.join("index.html");
+        app = app
+            .route_service("/pair", tower_http::services::ServeFile::new(&index_file))
+            .fallback_service(
+                ServeDir::new(ui_dir)
+                    .append_index_html_on_directories(true)
+                    .not_found_service(tower_http::services::ServeFile::new(index_file)),
+            );
     } else {
         tracing::warn!(
             "No production UI bundle (index.html) found; run `npm run build:ui` or set SIMP_UI_DIR"
@@ -83,8 +120,15 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
 
     let app = app.layer(CorsLayer::permissive()).with_state(ipc_state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 18888));
-    tracing::info!("SIMP Daemon IPC, Art & UI Server listening on http://{addr}");
+    let addr = SocketAddr::from(([0, 0, 0, 0], 18888));
+    let lan_ips = detect_lan_ips();
+    if let Some(primary_ip) = lan_ips.first() {
+        tracing::info!(
+            "SIMP Daemon listening on http://127.0.0.1:18888 and LAN Companion http://{primary_ip}:18888/pair"
+        );
+    } else {
+        tracing::info!("SIMP Daemon IPC, Art & UI Server listening on http://{addr}");
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -155,6 +199,10 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
                             AudioCommand::SetVolume { .. }
                                 | AudioCommand::AddLibraryPath { .. }
                                 | AudioCommand::RemoveLibraryPath { .. }
+                                | AudioCommand::ConfigureAppleMusic { .. }
+                                | AudioCommand::SetAppleMusicUserToken { .. }
+                                | AudioCommand::DisconnectAppleMusic
+                                | AudioCommand::FactoryReset
                         );
                         let _ = state.cmd_tx.send(command);
                         if persist {
@@ -167,13 +215,34 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
                         }
                     }
                     ClientEnvelope::Query { req_id, query } => {
-                        let resp = execute_query(req_id, query, &state);
-                        if let Ok(json) = serde_json::to_string(&resp) {
-                            let _ = direct_tx.send(json);
+                        let state_clone = state.clone();
+                        let direct_tx_clone = direct_tx.clone();
+                        if matches!(query, LibraryQuery::ScanOpticalDisc { .. }) {
+                            tokio::task::spawn_blocking(move || {
+                                let resp = execute_query(req_id, query, &state_clone);
+                                if let Ok(json) = serde_json::to_string(&resp) {
+                                    let _ = direct_tx_clone.send(json);
+                                }
+                            });
+                        } else {
+                            let resp = execute_query(req_id, query, &state);
+                            if let Ok(json) = serde_json::to_string(&resp) {
+                                let _ = direct_tx.send(json);
+                            }
                         }
                     }
-                    ClientEnvelope::AppleWorkerEvent { .. } => {
-                        // Phase 4 Apple Music relay
+                    ClientEnvelope::AppleWorkerEvent {
+                        state: worker_state,
+                        track,
+                        position_ms,
+                        duration_ms,
+                    } => {
+                        let _ = state.cmd_tx.send(AudioCommand::AppleWorkerReport {
+                            state: worker_state,
+                            track,
+                            position_ms,
+                            duration_ms,
+                        });
                     }
                 }
             }
@@ -191,13 +260,15 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
         }
         LibraryQuery::GetAlbums {
             source,
+            mount_root,
             search,
             limit,
             offset,
-        } => match state.db.get_albums(
+        } => match state.db.get_albums_filtered(
             source.as_deref(),
+            mount_root.as_deref(),
             search.as_deref(),
-            limit.max(1).min(500),
+            limit.max(1).min(2000),
             offset,
         ) {
             Ok(albums) => ServerEnvelope::QueryResponse {
@@ -229,13 +300,15 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
         },
         LibraryQuery::GetTracks {
             source,
+            mount_root,
             search,
             limit,
             offset,
-        } => match state.db.get_tracks(
+        } => match state.db.get_tracks_filtered(
             source.as_deref(),
+            mount_root.as_deref(),
             search.as_deref(),
-            limit.max(1).min(500),
+            limit.max(1).min(5000),
             offset,
         ) {
             Ok(tracks) => ServerEnvelope::QueryResponse {
@@ -318,6 +391,53 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                 },
             }
         }
+        LibraryQuery::RemoveTrackFromPlaylist {
+            playlist_id,
+            track_uri,
+        } => match state.db.remove_track_from_playlist(&playlist_id, &track_uri) {
+            Ok(new_count) => ServerEnvelope::QueryResponse {
+                req_id,
+                ok: true,
+                data: serde_json::json!({ "playlist_id": playlist_id, "track_count": new_count }),
+                error: None,
+            },
+            Err(e) => ServerEnvelope::QueryResponse {
+                req_id,
+                ok: false,
+                data: serde_json::Value::Null,
+                error: Some(e.to_string()),
+            },
+        },
+        LibraryQuery::DeletePlaylist { playlist_id } => {
+            match state.db.delete_playlist(&playlist_id) {
+                Ok(()) => ServerEnvelope::QueryResponse {
+                    req_id,
+                    ok: true,
+                    data: serde_json::json!({ "deleted": playlist_id }),
+                    error: None,
+                },
+                Err(e) => ServerEnvelope::QueryResponse {
+                    req_id,
+                    ok: false,
+                    data: serde_json::Value::Null,
+                    error: Some(e.to_string()),
+                },
+            }
+        }
+        LibraryQuery::DeleteAlbum { album_id } => match state.db.delete_album(&album_id) {
+            Ok(()) => ServerEnvelope::QueryResponse {
+                req_id,
+                ok: true,
+                data: serde_json::json!({ "deleted": album_id }),
+                error: None,
+            },
+            Err(e) => ServerEnvelope::QueryResponse {
+                req_id,
+                ok: false,
+                data: serde_json::Value::Null,
+                error: Some(e.to_string()),
+            },
+        },
         LibraryQuery::GetMountRoots => match state.db.get_mounts() {
             Ok(mounts) => ServerEnvelope::QueryResponse {
                 req_id,
@@ -341,12 +461,66 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                 error: None,
             }
         }
-        _ => ServerEnvelope::QueryResponse {
-            req_id,
-            ok: true,
-            data: serde_json::json!({"status": "queued"}),
-            error: None,
-        },
+        LibraryQuery::GetAppleMusicAuthConfig => {
+            let cfg = state.settings.lock().unwrap().clone();
+            let creds = simp_core::sinks::apple::AppleMusicSink::resolve_credentials(&cfg);
+            let has_private_key = creds.private_key_pem.is_some();
+            let (dev_token, status_error) =
+                match simp_core::sinks::apple::AppleMusicSink::get_or_sign_developer_token(&cfg) {
+                    Ok(tok) => (Some(tok), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
+            let apple_authenticated = creds.music_user_token.is_some();
+            let headless_worker_active = if apple_authenticated {
+                simp_core::sinks::apple::AppleMusicSink::ensure_headless_widevine_worker()
+            } else {
+                simp_core::sinks::apple::AppleMusicSink::is_headless_worker_active()
+            };
+
+            let lan_ips = detect_lan_ips();
+            let lan_ip = lan_ips.first().cloned();
+            let pair_url = lan_ip
+                .as_ref()
+                .map(|ip| format!("http://{ip}:18888/pair"))
+                .unwrap_or_else(|| "http://steamdeck.local:18888/pair".to_string());
+
+            ServerEnvelope::QueryResponse {
+                req_id,
+                ok: true,
+                data: serde_json::json!({
+                    "configured": dev_token.is_some(),
+                    "team_id": creds.team_id,
+                    "key_id": creds.key_id,
+                    "private_key_path": creds.private_key_path,
+                    "has_private_key": has_private_key,
+                    "developer_token": dev_token,
+                    "music_user_token": creds.music_user_token,
+                    "apple_authenticated": apple_authenticated,
+                    "headless_worker_active": headless_worker_active,
+                    "lan_ip": lan_ip,
+                    "lan_ips": lan_ips,
+                    "pair_url": pair_url,
+                    "status_error": status_error,
+                }),
+                error: None,
+            }
+        }
+        LibraryQuery::ScanOpticalDisc {
+            device_path,
+            force_refresh,
+        } => {
+            let status = simp_core::sinks::cdda::scan_optical_disc(
+                &state.db,
+                device_path.as_deref(),
+                force_refresh,
+            );
+            ServerEnvelope::QueryResponse {
+                req_id,
+                ok: true,
+                data: serde_json::to_value(status).unwrap_or_default(),
+                error: None,
+            }
+        }
     }
 }
 

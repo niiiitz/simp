@@ -5,7 +5,6 @@ use crate::library::vdf::{load_session_state, save_session_state};
 use crate::mpris::{initialize_mpris, update_mpris_metadata, update_mpris_playback};
 use crate::sinks::apple::AppleMusicSink;
 use crate::sinks::local::LocalAudioEngine;
-use crate::sinks::spotify::SpotifyEngine;
 use simp_protocol::{
     ActiveEngine, AudioCommand, PlaybackEvent, RepeatMode, ServerEnvelope, SessionState,
     SimpSettings, TrackMetadata,
@@ -27,7 +26,6 @@ pub struct OrchestratorSnapshot {
     pub current_track: Option<TrackMetadata>,
     pub queue: Vec<TrackMetadata>,
     pub queue_index: usize,
-    pub spotify_authenticated: bool,
     pub apple_authenticated: bool,
 }
 
@@ -36,7 +34,6 @@ pub struct AudioOrchestrator {
     pub settings: Arc<Mutex<SimpSettings>>,
     pub state: Arc<Mutex<OrchestratorSnapshot>>,
     local_engine: LocalAudioEngine,
-    spotify_engine: SpotifyEngine,
     apple_sink: AppleMusicSink,
     mpris_controls: Option<MediaControls>,
     transition_epoch: u64,
@@ -57,11 +54,18 @@ impl AudioOrchestrator {
         let mut local_engine = LocalAudioEngine::new();
         local_engine.set_volume(initial_vol);
 
-        let mut spotify_engine = SpotifyEngine::new();
-        spotify_engine.set_volume(initial_vol);
-
         let mut apple_sink = AppleMusicSink::new();
         apple_sink.set_volume(initial_vol);
+        let initial_apple_auth = {
+            let cfg = settings.lock().unwrap();
+            AppleMusicSink::resolve_credentials(&cfg)
+                .music_user_token
+                .is_some()
+        };
+        apple_sink.is_authenticated = initial_apple_auth;
+        if initial_apple_auth {
+            AppleMusicSink::ensure_headless_widevine_worker();
+        }
 
         let mpris_controls = initialize_mpris(cmd_tx);
 
@@ -75,8 +79,7 @@ impl AudioOrchestrator {
             current_track: None,
             queue: Vec::new(),
             queue_index: 0,
-            spotify_authenticated: false,
-            apple_authenticated: false,
+            apple_authenticated: initial_apple_auth,
         }));
 
         let mut orchestrator = Self {
@@ -84,7 +87,6 @@ impl AudioOrchestrator {
             settings,
             state,
             local_engine,
-            spotify_engine,
             apple_sink,
             mpris_controls,
             transition_epoch: 0,
@@ -133,10 +135,35 @@ impl AudioOrchestrator {
                 }
                 self.transition_to_index(0);
             }
-            AudioCommand::LoadQueue { uris, start_index } => {
+            AudioCommand::LoadQueue {
+                uris,
+                start_index,
+                tracks,
+            } => {
+                // If full `TrackMetadata` objects were supplied (e.g., pure streaming of an unpinned
+                // Apple Music catalog album, cloud playlist, or search result), upsert their metadata
+                // into the `tracks` table (without creating an AlbumRecord or PlaylistRecord) and
+                // use them directly in the queue so artwork, title, and artist display immediately.
+                let mut provided_map = std::collections::HashMap::new();
+                for t in tracks {
+                    let mut clean = t.clone();
+                    if clean.source == "apple_music" {
+                        // Do not attach unpinned streaming tracks to an album_id unless already pinned
+                        if self.db.get_track_by_uri(&clean.uri).ok().flatten().is_none() {
+                            clean.album_id = None;
+                            let _ = self.db.upsert_track(&clean, None, None);
+                        }
+                    }
+                    provided_map.insert(t.uri.clone(), t);
+                }
+
                 let queue: Vec<TrackMetadata> = uris
                     .iter()
-                    .map(|u| self.resolve_track_from_uri(u))
+                    .map(|u| {
+                        provided_map
+                            .remove(u)
+                            .unwrap_or_else(|| self.resolve_track_from_uri(u))
+                    })
                     .collect();
                 if queue.is_empty() {
                     return;
@@ -188,7 +215,8 @@ impl AudioOrchestrator {
                         let pos = self.local_engine.get_position_ms();
                         self.set_playing_state(true, pos);
                     }
-                    ActiveEngine::Spotify | ActiveEngine::AppleMusic => {
+                    ActiveEngine::AppleMusic => {
+                        self.apple_sink.emit_play(&self.broadcast_tx);
                         let pos = self.state.lock().unwrap().position_ms;
                         self.set_playing_state(true, pos);
                     }
@@ -251,6 +279,8 @@ impl AudioOrchestrator {
                         self.transition_epoch,
                         self.internal_event_tx.clone(),
                     );
+                } else if engine == ActiveEngine::AppleMusic {
+                    self.apple_sink.emit_seek(&self.broadcast_tx, clamped_pos);
                 }
                 let is_playing = self.state.lock().unwrap().is_playing;
                 self.state.lock().unwrap().position_ms = clamped_pos;
@@ -269,8 +299,8 @@ impl AudioOrchestrator {
                 let clamped = volume.clamp(0.0, 1.0);
                 // Simultaneous bidirectional volume normalization across all sinks
                 self.local_engine.set_volume(clamped);
-                self.spotify_engine.set_volume(clamped);
                 self.apple_sink.set_volume(clamped);
+                self.apple_sink.emit_volume(&self.broadcast_tx, clamped);
                 self.state.lock().unwrap().volume = clamped;
                 self.settings.lock().unwrap().audio.master_volume = clamped;
                 let _ = self
@@ -393,14 +423,272 @@ impl AudioOrchestrator {
                     }
                 });
             }
+            AudioCommand::ConfigureAppleMusic {
+                team_id,
+                key_id,
+                private_key_path,
+                developer_token,
+            } => {
+                let norm_path = if private_key_path.trim().is_empty() {
+                    String::new()
+                } else {
+                    crate::library::vdf::normalize_platform_path(&private_key_path)
+                        .to_string_lossy()
+                        .to_string()
+                };
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    cfg.services.apple_team_id = team_id.trim().to_string();
+                    cfg.services.apple_key_id = key_id.trim().to_string();
+                    cfg.services.apple_private_key_path = norm_path;
+                    if let Some(tok) = developer_token {
+                        cfg.services.apple_developer_token = tok.trim().to_string();
+                    }
+                    cfg.services.apple_music_enabled = true;
+                }
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
+            AudioCommand::SetAppleMusicUserToken { music_user_token } => {
+                let trimmed = music_user_token.trim().to_string();
+                let is_auth = !trimmed.is_empty();
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    cfg.services.apple_music_user_token = trimmed;
+                    cfg.services.apple_music_enabled = is_auth;
+                }
+                self.apple_sink.is_authenticated = is_auth;
+                self.state.lock().unwrap().apple_authenticated = is_auth;
+                if is_auth {
+                    AppleMusicSink::ensure_headless_widevine_worker();
+                }
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
+            AudioCommand::DisconnectAppleMusic => {
+                if self.state.lock().unwrap().active_engine == ActiveEngine::AppleMusic {
+                    self.pause_active_engine();
+                }
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    cfg.services.apple_music_user_token.clear();
+                    cfg.services.apple_music_enabled = false;
+                }
+                self.apple_sink.is_authenticated = false;
+                self.state.lock().unwrap().apple_authenticated = false;
+                let _ = self
+                    .db
+                    .remove_streaming_source("apple_music", "apple_remote");
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
+            AudioCommand::ImportCatalogTracks {
+                source,
+                album,
+                playlist,
+                tracks,
+            } => {
+                if let Err(e) = self.db.import_catalog_bundle(
+                    &source,
+                    album.as_ref(),
+                    playlist.as_ref(),
+                    &tracks,
+                ) {
+                    tracing::warn!("Failed to import catalog tracks for {source}: {e}");
+                }
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
+            AudioCommand::AppleWorkerReport {
+                state,
+                track,
+                position_ms,
+                duration_ms,
+            } => {
+                let is_apple_active =
+                    self.state.lock().unwrap().active_engine == ActiveEngine::AppleMusic;
+                if !is_apple_active && state != "authorized" {
+                    return;
+                }
+
+                if let Some(meta) = track {
+                    {
+                        let mut st = self.state.lock().unwrap();
+                        st.current_track = Some(meta.clone());
+                        let q_idx = st.queue_index;
+                        if q_idx < st.queue.len() {
+                            st.queue[q_idx] = meta.clone();
+                        }
+                    }
+                    let mut clean = meta.clone();
+                    clean.album_id = None;
+                    let _ = self.db.upsert_track(&clean, None, None);
+                    update_mpris_metadata(&mut self.mpris_controls, &meta);
+                    let _ = self.broadcast_tx.send(PlaybackEvent::TrackChanged {
+                        metadata: meta,
+                        position_ms,
+                    });
+                } else if let Some(dur) = duration_ms {
+                    if dur > 0 {
+                        let mut updated_meta = None;
+                        {
+                            let mut st = self.state.lock().unwrap();
+                            if let Some(ref mut cur) = st.current_track {
+                                if cur.duration_ms == 0 {
+                                    cur.duration_ms = dur;
+                                    updated_meta = Some(cur.clone());
+                                }
+                            }
+                        }
+                        if let Some(meta) = updated_meta {
+                            update_mpris_metadata(&mut self.mpris_controls, &meta);
+                            let _ = self.broadcast_tx.send(PlaybackEvent::TrackChanged {
+                                metadata: meta,
+                                position_ms,
+                            });
+                        }
+                    }
+                }
+
+                match state.as_str() {
+                    "playing" => {
+                        self.set_playing_state(true, position_ms);
+                    }
+                    "paused" => {
+                        self.set_playing_state(false, position_ms);
+                    }
+                    "ended" | "completed" => {
+                        self.advance_queue(false);
+                    }
+                    "time_update" => {
+                        self.state.lock().unwrap().position_ms = position_ms;
+                        let _ = self
+                            .broadcast_tx
+                            .send(PlaybackEvent::ProgressTick { position_ms });
+                    }
+                    "worker_ready" => {
+                        let (should_replay, cur_uri, cur_pos) = {
+                            let st = self.state.lock().unwrap();
+                            (
+                                st.active_engine == ActiveEngine::AppleMusic && st.is_playing,
+                                st.current_track.as_ref().map(|t| t.uri.clone()),
+                                st.position_ms,
+                            )
+                        };
+                        if should_replay {
+                            if let Some(uri) = cur_uri {
+                                self.apple_sink
+                                    .emit_load_and_play(&self.broadcast_tx, &uri, cur_pos);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             AudioCommand::SuspendForSleep => {
                 tracing::info!("System entering sleep — safe-pausing audio & releasing PipeWire");
                 self.pause_active_engine();
                 self.local_engine.release_pipewire_stream();
             }
+            AudioCommand::RestartDaemon => {
+                tracing::info!("Restarting SIMP daemon & headless Widevine worker...");
+                self.pause_active_engine();
+                self.local_engine.release_pipewire_stream();
+                AppleMusicSink::kill_headless_widevine_worker();
+                if let Ok(exe) = std::env::current_exe() {
+                    let args: Vec<String> = std::env::args().skip(1).collect();
+                    let _ = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg("sleep 0.35 && exec \"$0\" \"$@\"")
+                        .arg(exe)
+                        .args(args)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+                std::process::exit(0);
+            }
+            AudioCommand::ResetDatabaseCache => {
+                tracing::info!("Clearing offline SQLite library cache & rescanning local mounts...");
+                self.pause_active_engine();
+                {
+                    let mut st = self.state.lock().unwrap();
+                    st.queue.clear();
+                    st.queue_index = 0;
+                    st.current_track = None;
+                    st.active_engine = ActiveEngine::None;
+                }
+                let _ = self.db.clear_all_library_cache();
+                self.emit_queue_updated();
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+                self.handle_command(AudioCommand::RescanStorage);
+            }
+            AudioCommand::FactoryReset => {
+                tracing::info!("Performing Factory Reset (de-auth, clear DB, reset settings)...");
+                self.pause_active_engine();
+                self.local_engine.release_pipewire_stream();
+                AppleMusicSink::kill_headless_widevine_worker();
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    *cfg = SimpSettings::default();
+                }
+                self.apple_sink.is_authenticated = false;
+                {
+                    let mut st = self.state.lock().unwrap();
+                    st.apple_authenticated = false;
+                    st.queue.clear();
+                    st.queue_index = 0;
+                    st.current_track = None;
+                    st.active_engine = ActiveEngine::None;
+                    st.position_ms = 0;
+                    st.is_playing = false;
+                }
+                let _ = self.db.clear_all_library_cache();
+                self.persist_session_to_vdf();
+                self.emit_queue_updated();
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+                self.handle_command(AudioCommand::RescanStorage);
+            }
+            AudioCommand::EjectOpticalDisc { device_path } => {
+                let is_playing_cd = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .current_track
+                    .as_ref()
+                    .map(|t| t.uri.starts_with("cdda://") || t.source == "cdda")
+                    .unwrap_or(false);
+                if is_playing_cd {
+                    self.pause_active_engine();
+                    self.local_engine.release_pipewire_stream();
+                }
+                let _ = crate::sinks::cdda::eject_optical_disc(device_path.as_deref());
+            }
             AudioCommand::ShutdownDaemon => {
                 self.pause_active_engine();
                 self.local_engine.release_pipewire_stream();
+                AppleMusicSink::kill_headless_widevine_worker();
                 std::process::exit(0);
             }
         }
@@ -428,8 +716,7 @@ impl AudioOrchestrator {
         let engine = self.state.lock().unwrap().active_engine;
         match engine {
             ActiveEngine::Local => self.local_engine.pause(),
-            ActiveEngine::Spotify => self.spotify_engine.pause(),
-            ActiveEngine::AppleMusic => self.apple_sink.pause(),
+            ActiveEngine::AppleMusic => self.apple_sink.emit_pause(&self.broadcast_tx),
             ActiveEngine::None => {}
         }
         let pos = self.get_live_position_ms();
@@ -451,9 +738,7 @@ impl AudioOrchestrator {
             st.queue[index].clone()
         };
 
-        let target_engine = if track.uri.starts_with("spotify:") {
-            ActiveEngine::Spotify
-        } else if track.uri.starts_with("applemusic:") {
+        let target_engine = if track.uri.starts_with("applemusic:") {
             ActiveEngine::AppleMusic
         } else {
             ActiveEngine::Local
@@ -464,8 +749,7 @@ impl AudioOrchestrator {
         if prev_engine != target_engine {
             match prev_engine {
                 ActiveEngine::Local => self.local_engine.release_pipewire_stream(),
-                ActiveEngine::Spotify => self.spotify_engine.pause(),
-                ActiveEngine::AppleMusic => self.apple_sink.pause(),
+                ActiveEngine::AppleMusic => self.apple_sink.emit_pause(&self.broadcast_tx),
                 ActiveEngine::None => {}
             }
         }
@@ -473,10 +757,12 @@ impl AudioOrchestrator {
         // 3. Dispatch to target engine with Anti-Runaway-Skip Circuit Breaker
         match target_engine {
             ActiveEngine::Local => {
-                let file_path = track.uri.strip_prefix("file://").unwrap_or(&track.uri);
-                if !Path::new(file_path).exists() {
-                    self.handle_track_load_failure("Offline/unplugged storage mount");
-                    return;
+                if !track.uri.starts_with("cdda://") {
+                    let file_path = track.uri.strip_prefix("file://").unwrap_or(&track.uri);
+                    if !Path::new(file_path).exists() {
+                        self.handle_track_load_failure("Offline/unplugged storage mount");
+                        return;
+                    }
                 }
                 match self.local_engine.load_and_play(
                     &track.uri,
@@ -494,8 +780,9 @@ impl AudioOrchestrator {
                     }
                 }
             }
-            ActiveEngine::Spotify | ActiveEngine::AppleMusic => {
-                // Phase 3/4 streaming activation
+            ActiveEngine::AppleMusic => {
+                self.apple_sink
+                    .emit_load_and_play(&self.broadcast_tx, &track.uri, 0);
                 self.consecutive_failures = 0;
             }
             ActiveEngine::None => {}
@@ -540,9 +827,9 @@ impl AudioOrchestrator {
     }
 
     fn advance_queue(&mut self, manual_skip: bool) {
-        let (queue_len, current_idx, repeat_mode) = {
+        let (queue_len, current_idx, repeat_mode, shuffle) = {
             let st = self.state.lock().unwrap();
-            (st.queue.len(), st.queue_index, st.repeat_mode)
+            (st.queue.len(), st.queue_index, st.repeat_mode, st.shuffle)
         };
         if queue_len == 0 {
             return;
@@ -550,6 +837,17 @@ impl AudioOrchestrator {
 
         if !manual_skip && repeat_mode == RepeatMode::Track {
             self.transition_to_index(current_idx);
+            return;
+        }
+
+        if shuffle && queue_len > 1 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as usize)
+                .unwrap_or(1);
+            let step = (nanos % (queue_len - 1)) + 1;
+            let next_idx = (current_idx + step) % queue_len;
+            self.transition_to_index(next_idx);
             return;
         }
 
@@ -614,10 +912,10 @@ impl AudioOrchestrator {
             disc_number: Some(1),
             art_url: None,
             duration_ms: 0,
-            source: if uri.starts_with("spotify:") {
-                "spotify".to_string()
-            } else if uri.starts_with("applemusic:") {
+            source: if uri.starts_with("applemusic:") {
                 "apple_music".to_string()
+            } else if uri.starts_with("cdda://") {
+                "cdda".to_string()
             } else {
                 "local".to_string()
             },
@@ -653,9 +951,7 @@ impl AudioOrchestrator {
             return;
         };
 
-        let engine = if track.uri.starts_with("spotify:") {
-            ActiveEngine::Spotify
-        } else if track.uri.starts_with("applemusic:") {
+        let engine = if track.uri.starts_with("applemusic:") {
             ActiveEngine::AppleMusic
         } else {
             ActiveEngine::Local
@@ -751,7 +1047,6 @@ pub fn build_state_snapshot(
         queue_index: st.queue_index,
         mounts,
         power,
-        spotify_authenticated: st.spotify_authenticated,
         apple_authenticated: st.apple_authenticated,
     }
 }
