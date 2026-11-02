@@ -346,7 +346,7 @@ const ConsoleMainApp: React.FC = () => {
       const stationTrack: TrackMetadata = {
         uri: stationUri,
         title: `📻 ${st.name}`,
-        artists: [st.tagline || 'Apple Music Radio'],
+        artists: [st.subtitle || 'Apple Music Radio'],
         album: 'Apple Music Radio',
         album_id: null,
         track_number: 1,
@@ -540,10 +540,9 @@ const ConsoleMainApp: React.FC = () => {
         case 'back':
           if (sourceModalOpen) {
             setSourceModalOpen(false);
-          } else if (cloudAlbumDetail) {
-            setCloudAlbumDetail(null);
-          } else if (view === 'browser' && browserTarget.kind !== 'overview') {
-            setBrowserTarget({ kind: 'overview' });
+          } else if (activeCloudAlbum || activeCloudPlaylist) {
+            setActiveCloudAlbum(null);
+            setActiveCloudPlaylist(null);
           } else if (view === 'browser') {
             setView('lock');
           } else if (window.parent && window.parent !== window) {
@@ -625,8 +624,8 @@ const ConsoleMainApp: React.FC = () => {
   }, [
     moveSpatialFocus,
     sourceModalOpen,
-    cloudAlbumDetail,
-    browserTarget.kind,
+    activeCloudAlbum,
+    activeCloudPlaylist,
     view,
     snap?.shuffle,
     applyVolume,
@@ -854,7 +853,7 @@ const ConsoleMainApp: React.FC = () => {
     }
   };
 
-  const handlePinCloudAlbum = async (album: AppleCatalogAlbumSummary, tracks: TrackMetadata[]) => {
+  const handlePinCloudAlbum = async (album: AppleCloudAlbumSummary, tracks: TrackMetadata[]) => {
     setCloudLoading(true);
     try {
       await pinAppleAlbumToSimp(album, tracks, showToast);
@@ -1666,7 +1665,7 @@ const ConsoleMainApp: React.FC = () => {
                               whiteSpace: 'nowrap',
                             }}
                           >
-                            {st.tagline || 'Apple Music Live / Personal Station'}
+                            {st.subtitle || 'Apple Music Live / Personal Station'}
                           </div>
                         </div>
                         <span
@@ -3778,7 +3777,7 @@ const ConsoleMainApp: React.FC = () => {
                         <button
                           onClick={() => {
                             navigator.clipboard
-                              .writeText(appleAuthCfg.music_user_token)
+                              .writeText(appleAuthCfg.music_user_token || '')
                               .then(() => showToast('Copied Music-User-Token to clipboard!'))
                               .catch(() => showToast('Clipboard copy failed'));
                           }}

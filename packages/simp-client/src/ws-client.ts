@@ -242,7 +242,7 @@ export class SimpDaemonClient {
     this.query<AppleMusicAuthConfig>('get_apple_music_auth_config');
 
   public reportAppleWorkerEvent = (
-    state: 'playing' | 'paused' | 'ended' | 'time_update' | 'authorized',
+    state: 'playing' | 'paused' | 'ended' | 'time_update' | 'authorized' | 'worker_ready',
     position_ms: number,
     track?: TrackMetadata | null,
     duration_ms?: number | null
