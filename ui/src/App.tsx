@@ -101,8 +101,7 @@ const ConsoleMainApp: React.FC = () => {
   const [appleAuthCfg, setAppleAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
   const [appleBusy, setAppleBusy] = useState(false);
 
-  // Volume mute memory, OLED auto-dim, active luminance percentage, popovers & sub-pixel orbit state
-  const [preMuteVolume, setPreMuteVolume] = useState<number>(0.8);
+  // OLED auto-dim, active luminance percentage, popovers & sub-pixel orbit state
   const [isDimmed, setIsDimmed] = useState(false);
   const [brightnessPct, setBrightnessPct] = useState<number>(86);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
@@ -488,26 +487,15 @@ const ConsoleMainApp: React.FC = () => {
     [showToast]
   );
 
-  // 4. Volume helpers (interactive slider, mute toggle, wheel, keyboard & gamepad D-Pad Up/Down)
+  // 4. Volume helpers (interactive slider, wheel, keyboard & gamepad D-Pad Up/Down; Pause is unified with Silence)
   const currentVolume = snap?.volume ?? 0.8;
   const volPct = Math.round(currentVolume * 100);
+  const isPlaying = Boolean(snap?.is_playing);
 
   const applyVolume = useCallback((nextVol: number) => {
-    const clamped = Math.max(0, Math.min(1, Math.round(nextVol * 100) / 100));
-    if (clamped > 0) {
-      setPreMuteVolume(clamped);
-    }
+    const clamped = Math.max(0.05, Math.min(1, Math.round(nextVol * 100) / 100));
     defaultSimpClient.setVolume(clamped);
   }, []);
-
-  const toggleMute = useCallback(() => {
-    if (currentVolume > 0.01) {
-      setPreMuteVolume(currentVolume);
-      defaultSimpClient.setVolume(0);
-    } else {
-      defaultSimpClient.setVolume(preMuteVolume > 0.05 ? preMuteVolume : 0.8);
-    }
-  }, [currentVolume, preMuteVolume]);
 
   // 5. Continuous OLED Sub-Pixel Shifter (rotates ±2px every 20s) + Universal 30s Idle Auto-Dim
   useEffect(() => {
@@ -1677,7 +1665,7 @@ const ConsoleMainApp: React.FC = () => {
             </span>
           )}
 
-          {/* Split Mute Toggle + Volume % Vertical Slider Popover */}
+          {/* Unified Play/Pause (Silence) Toggle + Volume % Vertical Slider Popover */}
           <div
             onWheel={(e) => {
               e.preventDefault();
@@ -1688,7 +1676,11 @@ const ConsoleMainApp: React.FC = () => {
               height: 44,
               borderRadius: 12,
               background: '#0a0a0e',
-              border: volPct === 0 ? '1px solid #ef4444' : volumePopoverOpen ? '1px solid #2aa3c4' : '1px solid #22222c',
+              border: volumePopoverOpen
+                ? '1px solid #2aa3c4'
+                : isPlaying
+                  ? '1px solid #1e3a46'
+                  : '1px solid #22222c',
               display: 'flex',
               alignItems: 'stretch',
               position: 'relative',
@@ -1696,16 +1688,16 @@ const ConsoleMainApp: React.FC = () => {
             }}
           >
             <button
-              onClick={toggleMute}
-              title={volPct === 0 ? 'Muted — Click to Unmute' : 'Click to Mute'}
+              onClick={() => defaultSimpClient.togglePlayPause()}
+              title={isPlaying ? 'Audio Active — Click to Pause (Silence)' : 'Paused (Silenced) — Click to Resume'}
               style={{
                 padding: '0 10px',
                 border: 'none',
                 borderRight: '1px solid #1e1e28',
                 borderTopLeftRadius: 11,
                 borderBottomLeftRadius: 11,
-                background: volPct === 0 ? '#2f1116' : 'transparent',
-                color: volPct === 0 ? '#fca5a5' : '#2aa3c4',
+                background: isPlaying ? 'rgba(42, 163, 196, 0.1)' : '#12121a',
+                color: isPlaying ? '#2aa3c4' : '#9ca3af',
                 fontSize: 14,
                 fontWeight: 800,
                 cursor: 'pointer',
@@ -1714,9 +1706,9 @@ const ConsoleMainApp: React.FC = () => {
                 gap: 5,
               }}
             >
-              <span>{volPct === 0 ? '🔇' : volPct < 45 ? '🔉' : '🔊'}</span>
-              {volPct === 0 && (
-                <span style={{ fontSize: 10, letterSpacing: 0.5, color: '#fca5a5' }}>MUTE</span>
+              <span>{!isPlaying ? '🔇' : volPct < 45 ? '🔉' : '🔊'}</span>
+              {!isPlaying && (
+                <span style={{ fontSize: 10, letterSpacing: 0.4, color: '#9ca3af' }}>PAUSED</span>
               )}
             </button>
 
@@ -1732,7 +1724,7 @@ const ConsoleMainApp: React.FC = () => {
                 borderTopRightRadius: 11,
                 borderBottomRightRadius: 11,
                 background: volumePopoverOpen ? '#0f222a' : 'transparent',
-                color: volPct === 0 ? '#f87171' : '#c8c8d2',
+                color: isPlaying ? '#c8c8d2' : '#8e8e99',
                 fontSize: 12,
                 fontFamily: 'monospace',
                 fontWeight: 700,
@@ -1753,7 +1745,7 @@ const ConsoleMainApp: React.FC = () => {
                   position: 'absolute',
                   top: 52,
                   right: 0,
-                  width: 68,
+                  width: 74,
                   padding: '14px 10px',
                   borderRadius: 16,
                   background: '#0c0c12',
@@ -1766,7 +1758,9 @@ const ConsoleMainApp: React.FC = () => {
                   zIndex: 60,
                 }}
               >
-                <span style={{ fontSize: 11, fontWeight: 800, color: '#67e8f9' }}>{volPct}%</span>
+                <span style={{ fontSize: 11, fontWeight: 800, color: isPlaying ? '#67e8f9' : '#9ca3af' }}>
+                  {volPct}%
+                </span>
                 <div
                   style={{
                     height: 128,
@@ -1777,7 +1771,7 @@ const ConsoleMainApp: React.FC = () => {
                 >
                   <input
                     type="range"
-                    min={0}
+                    min={5}
                     max={100}
                     step={1}
                     value={volPct}
@@ -1791,20 +1785,20 @@ const ConsoleMainApp: React.FC = () => {
                   />
                 </div>
                 <button
-                  onClick={toggleMute}
+                  onClick={() => defaultSimpClient.togglePlayPause()}
                   style={{
                     width: '100%',
                     padding: '4px 0',
                     borderRadius: 8,
-                    background: volPct === 0 ? '#3b1219' : '#161622',
-                    border: volPct === 0 ? '1px solid #ef4444' : '1px solid #2a2a38',
-                    color: volPct === 0 ? '#fca5a5' : '#9ca3af',
+                    background: isPlaying ? '#0f222a' : '#161622',
+                    border: isPlaying ? '1px solid #2aa3c4' : '1px solid #2a2a38',
+                    color: isPlaying ? '#7dd3fc' : '#d4d4dc',
                     fontSize: 10,
                     fontWeight: 800,
                     cursor: 'pointer',
                   }}
                 >
-                  {volPct === 0 ? 'Unmute' : 'Mute'}
+                  {isPlaying ? '⏸ Pause' : '▶ Play'}
                 </button>
               </div>
             )}
@@ -2109,13 +2103,14 @@ const ConsoleMainApp: React.FC = () => {
               <button
                 data-default-focus="true"
                 onClick={() => defaultSimpClient.togglePlayPause()}
+                title={isPlaying ? 'Pause (Silence Audio)' : 'Resume Playback'}
                 style={{
                   width: 96,
                   height: 92,
                   borderRadius: 24,
-                  background: '#0f222a',
-                  color: '#bfeaf5',
-                  border: '2px solid #2aa3c4',
+                  background: isPlaying ? '#0f222a' : '#12121a',
+                  color: isPlaying ? '#bfeaf5' : '#d4d4dc',
+                  border: isPlaying ? '2px solid #2aa3c4' : '2px solid #3f3f4e',
                   display: 'flex',
                   flexDirection: 'column',
                   alignItems: 'center',
@@ -2125,18 +2120,18 @@ const ConsoleMainApp: React.FC = () => {
                   fontWeight: 900,
                 }}
               >
-                <span style={{ fontSize: 30 }}>{snap?.is_playing ? '⏸' : '▶'}</span>
+                <span style={{ fontSize: 30 }}>{isPlaying ? '⏸' : '▶'}</span>
                 <span
                   style={{
                     padding: '2px 10px',
                     borderRadius: 99,
-                    background: '#16313c',
-                    color: '#7dd3fc',
-                    fontSize: 12,
+                    background: isPlaying ? '#16313c' : '#1f1f2b',
+                    color: isPlaying ? '#7dd3fc' : '#a1a1aa',
+                    fontSize: 11,
                     fontFamily: 'monospace',
                   }}
                 >
-                  A
+                  {isPlaying ? 'A • 🔊' : 'A • 🔇'}
                 </span>
               </button>
               <TransportIconButton
