@@ -14,7 +14,7 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.15';
+const SIMP_VERSION = 'v0.1.0-alpha.17';
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 
 let cachedSteamFocusable: any = null;
@@ -262,18 +262,23 @@ const E_GAMEPAD_BUTTON_MAP: Record<number, SteamPadAction> = {
  *   3. Standard `keydown` (`ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Enter`)
  */
 function registerSteamControllerButtons(
-  onAction: (action: SteamPadAction, rawEvent?: Event) => void,
+  onAction: (action: SteamPadAction, rawEvent?: Event) => boolean | void,
   getTargetDoc?: () => Document | null
 ): () => void {
   const disposers: Array<() => void> = [];
   const lastEmitByAction: Record<string, number> = {};
+  const lastConsumedByAction: Record<string, boolean> = {};
 
-  const emit = (action: SteamPadAction | undefined, rawEvent?: Event) => {
-    if (!action) return;
+  const emit = (action: SteamPadAction | undefined, rawEvent?: Event): boolean => {
+    if (!action) return false;
     const now = performance.now();
-    if (lastEmitByAction[action] && now - lastEmitByAction[action] < 65) return;
+    if (lastEmitByAction[action] && now - lastEmitByAction[action] < 65) {
+      return Boolean(lastConsumedByAction[action]);
+    }
     lastEmitByAction[action] = now;
-    onAction(action, rawEvent);
+    const consumed = Boolean(onAction(action, rawEvent));
+    lastConsumedByAction[action] = consumed;
+    return consumed;
   };
 
   // 1. SteamClient.Input.RegisterForControllerInputMessages
@@ -307,11 +312,13 @@ function registerSteamControllerButtons(
   const attachedTargets = new Set<EventTarget>();
   const onVgp = (e: any) => {
     const btn = Number(e?.detail?.button);
-    if (btn && E_GAMEPAD_BUTTON_MAP[btn]) {
-      // Stop SteamUI's CNavTree from trying to move focus outside the fullscreen route (prevents the SteamUI "bonk" sound)
-      if (typeof e.stopPropagation === 'function') e.stopPropagation();
-      if (typeof e.preventDefault === 'function') e.preventDefault();
-      emit(E_GAMEPAD_BUTTON_MAP[btn], e);
+    const action = btn ? E_GAMEPAD_BUTTON_MAP[btn] : undefined;
+    if (action) {
+      const consumed = emit(action, e);
+      if (consumed) {
+        if (typeof e.stopPropagation === 'function') e.stopPropagation();
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+      }
     }
   };
   const onKeyDown = (e: any) => {
@@ -322,10 +329,13 @@ function registerSteamControllerButtons(
       ArrowRight: 'right',
       Enter: 'activate',
     };
-    if (map[e.key]) {
-      if (typeof e.stopPropagation === 'function') e.stopPropagation();
-      if (typeof e.preventDefault === 'function') e.preventDefault();
-      emit(map[e.key], e);
+    const action = map[e.key];
+    if (action) {
+      const consumed = emit(action, e);
+      if (consumed) {
+        if (typeof e.stopPropagation === 'function') e.stopPropagation();
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+      }
     }
   };
 
@@ -458,6 +468,7 @@ const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit
     const unsubController = registerSteamControllerButtons(
       (action) => {
         sendAction(action);
+        return true;
       },
       () => containerRef.current?.ownerDocument || null
     );
@@ -470,6 +481,7 @@ const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit
 
   return (
     <Focusable
+      useNativeSteamFocusable={true}
       style={{
         position: 'fixed',
         inset: 0,
@@ -551,9 +563,10 @@ const Focusable: ReactTypes.FC<any> = ({
   children,
   style,
   flowChildren,
+  useNativeSteamFocusable = false,
   ...rest
 }) => {
-  const SteamFocusable = resolveSteamFocusable();
+  const SteamFocusable = useNativeSteamFocusable ? resolveSteamFocusable() : null;
   const isInteractive = Boolean(onActivate || onClick);
   const combinedClassName = `Focusable ${isInteractive ? 'SimpInteractiveBtn' : ''} ${className}`.trim();
 
@@ -663,9 +676,23 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
   const [authCfg, setAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
   const [drawerTab, setDrawerTab] = useState<'none' | 'albums' | 'playlists' | 'pair'>('none');
-  const [preMuteVol, setPreMuteVol] = useState<number>(0.85);
+  const [volumeEditMode, setVolumeEditMode] = useState<boolean>(false);
+  const volumeEditRef = useRef<boolean>(false);
+  const volumeRailRef = useRef<HTMLDivElement | null>(null);
+  const isDraggingVolRef = useRef<boolean>(false);
   const [focusedIdx, setFocusedIdx] = useState<number>(-1);
+  const focusedIdxRef = useRef<number>(-1);
   const [inlineConsoleOpen, setInlineConsoleOpen] = useState<boolean>(false);
+
+  const setVolEdit = (val: boolean) => {
+    volumeEditRef.current = val;
+    setVolumeEditMode(val);
+  };
+
+  const setDrawerFocusIdx = (idx: number) => {
+    focusedIdxRef.current = idx;
+    setFocusedIdx(idx);
+  };
 
   const refreshCatalogs = () => {
     defaultSimpClient
@@ -703,127 +730,173 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       const root = drawerRootRef.current;
       if (!root) return [];
       return Array.from(
-        root.querySelectorAll<HTMLElement>(
-          '.SimpInteractiveBtn, [data-simp-focusable="true"], .Focusable[role="button"], .Focusable[tabindex="0"], button.Focusable'
-        )
+        root.querySelectorAll<HTMLElement>('.SimpInteractiveBtn, [data-simp-focusable="true"]')
       ).filter((el) => {
         const r = el.getBoundingClientRect();
         return r.width > 0 && r.height > 0;
       });
     };
 
-    const moveDrawerFocus = (dir: 'up' | 'down' | 'left' | 'right') => {
-      const nodes = getInteractiveNodes();
-      if (nodes.length === 0) return;
-
-      setFocusedIdx((prev) => {
-        if (prev < 0 || prev >= nodes.length) {
-          if (dir === 'up') {
-            return -1;
-          }
-          // Default to Play/Pause button (index 2 in top row) or first button
-          const initial = Math.min(2, nodes.length - 1);
-          nodes.forEach((n, idx) => n.classList.toggle('gpfocus', idx === initial));
-          nodes[initial]?.focus?.();
-          nodes[initial]?.scrollIntoView({ block: 'nearest' });
-          return initial;
-        }
-
-        const curNode = nodes[prev];
-        if (curNode?.dataset?.simpVolumeRow === 'true' && (dir === 'left' || dir === 'right')) {
-          const curVol = defaultSimpClient.getState()?.volume ?? 0.85;
-          const delta = dir === 'right' ? 0.05 : -0.05;
-          defaultSimpClient.setVolume(Math.max(0, Math.min(1, curVol + delta)));
-          return prev;
-        }
-
-        const cur = curNode.getBoundingClientRect();
-        const cx = cur.left + cur.width / 2;
-        const cy = cur.top + cur.height / 2;
-
-        let bestIdx = prev;
-        let bestScore = Infinity;
-
-        nodes.forEach((candidate, idx) => {
-          if (idx === prev) return;
-          const r = candidate.getBoundingClientRect();
-          const tx = r.left + r.width / 2;
-          const ty = r.top + r.height / 2;
-          const dx = tx - cx;
-          const dy = ty - cy;
-
-          if (dir === 'right' && dx <= 4) return;
-          if (dir === 'left' && dx >= -4) return;
-          if (dir === 'down' && dy <= 4) return;
-          if (dir === 'up' && dy >= -4) return;
-
-          const primary = dir === 'left' || dir === 'right' ? Math.abs(dx) : Math.abs(dy);
-          const cross = dir === 'left' || dir === 'right' ? Math.abs(dy) : Math.abs(dx);
-          const score = primary + cross * 2.5;
-          if (score < bestScore) {
-            bestScore = score;
-            bestIdx = idx;
-          }
-        });
-
-        // If user presses Up at the very top row of the SIMP drawer, release focus back to `< SIMP` header
-        if (dir === 'up' && bestIdx === prev) {
-          nodes.forEach((n) => n.classList.remove('gpfocus'));
-          return -1;
-        }
-
-        nodes.forEach((n, idx) => n.classList.toggle('gpfocus', idx === bestIdx));
-        nodes[bestIdx]?.focus?.();
-        nodes[bestIdx]?.scrollIntoView({ block: 'nearest' });
-        return bestIdx;
-      });
+    const isFocusInRightQamStrip = (): boolean => {
+      const root = drawerRootRef.current;
+      if (!root) return false;
+      const drawerRect = root.getBoundingClientRect();
+      const doc = root.ownerDocument;
+      const gpEl = doc?.querySelector?.('.gpfocus') as HTMLElement | null;
+      if (!gpEl || root.contains(gpEl)) return false;
+      const gpRect = gpEl.getBoundingClientRect();
+      return gpRect.width > 0 && gpRect.left > drawerRect.right + 4;
     };
 
-    const activateDrawerFocus = () => {
+    const moveDrawerFocus = (dir: 'up' | 'down' | 'left' | 'right'): boolean => {
       const nodes = getInteractiveNodes();
-      setFocusedIdx((cur) => {
-        if (cur >= 0 && cur < nodes.length) {
-          nodes[cur].click();
+      if (nodes.length === 0) return false;
+
+      const prev = focusedIdxRef.current;
+      if (prev < 0 || prev >= nodes.length) {
+        // When focus is outside the SIMP drawer (e.g. on Decky's `< SIMP Audio Player` header),
+        // only enter the SIMP drawer when the user presses D-Pad Down from the header column.
+        if (dir !== 'down' || isFocusInRightQamStrip()) {
+          return false;
         }
-        return cur;
+        const initial = Math.min(2, nodes.length - 1);
+        nodes.forEach((n, idx) => n.classList.toggle('gpfocus', idx === initial));
+        nodes[initial]?.scrollIntoView({ block: 'nearest' });
+        setDrawerFocusIdx(initial);
+        return true;
+      }
+
+      const curNode = nodes[prev];
+      const cur = curNode.getBoundingClientRect();
+      const cx = cur.left + cur.width / 2;
+      const cy = cur.top + cur.height / 2;
+
+      let bestIdx = prev;
+      let bestScore = Infinity;
+
+      nodes.forEach((candidate, idx) => {
+        if (idx === prev) return;
+        const r = candidate.getBoundingClientRect();
+        const tx = r.left + r.width / 2;
+        const ty = r.top + r.height / 2;
+        const dx = tx - cx;
+        const dy = ty - cy;
+
+        if (dir === 'right' && (dx <= 4 || Math.abs(dy) > 22)) return;
+        if (dir === 'left' && (dx >= -4 || Math.abs(dy) > 22)) return;
+        if (dir === 'down' && dy <= 4) return;
+        if (dir === 'up' && dy >= -4) return;
+
+        const primary = dir === 'left' || dir === 'right' ? Math.abs(dx) : Math.abs(dy);
+        const cross = dir === 'left' || dir === 'right' ? Math.abs(dy) : Math.abs(dx);
+        const score = primary + cross * 2.5;
+        if (score < bestScore) {
+          bestScore = score;
+          bestIdx = idx;
+        }
       });
+
+      // If user presses Up at the very top row of the SIMP drawer, release focus back to `< SIMP` header
+      if (dir === 'up' && bestIdx === prev) {
+        nodes.forEach((n) => n.classList.remove('gpfocus'));
+        setVolEdit(false);
+        setDrawerFocusIdx(-1);
+        return true;
+      }
+
+      // If user presses Left at the left edge of a row (when not in Volume Scrub Mode), release focus to QAM
+      if (dir === 'left' && bestIdx === prev) {
+        nodes.forEach((n) => n.classList.remove('gpfocus'));
+        setVolEdit(false);
+        setDrawerFocusIdx(-1);
+        return false;
+      }
+
+      nodes.forEach((n, idx) => n.classList.toggle('gpfocus', idx === bestIdx));
+      nodes[bestIdx]?.scrollIntoView({ block: 'nearest' });
+      setDrawerFocusIdx(bestIdx);
+      return true;
     };
 
-    // When Valve's native `SteamFocusable` is resolved (SteamOS Game Mode), SteamUI's native
-    // `CNavTree` already manages `.gpfocus`, directional movement, and `A` activation across the QAM drawer.
-    // Running a second custom focus loop on top of `SteamFocusable` causes dual blue highlights and volume bleed!
-    const hasNativeSteamFocusable = Boolean(resolveSteamFocusable());
-    const unsubController = hasNativeSteamFocusable
-      ? () => {}
-      : registerSteamControllerButtons(
-          (action) => {
-            if (!drawerRootRef.current || drawerRootRef.current.offsetParent === null) return;
-            switch (action) {
-              case 'up':
-              case 'down':
-              case 'left':
-              case 'right':
-                moveDrawerFocus(action);
-                break;
-              case 'activate':
-                activateDrawerFocus();
-                break;
-              case 'shuffle':
-                defaultSimpClient.setShuffle(!defaultSimpClient.getState()?.shuffle);
-                break;
-              case 'repeat':
-                defaultSimpClient.cycleRepeat();
-                break;
-              case 'l2':
-                defaultSimpClient.seekRelative(-10_000);
-                break;
-              case 'r2':
-                defaultSimpClient.seekRelative(10_000);
-                break;
+    const activateDrawerFocus = (): boolean => {
+      const nodes = getInteractiveNodes();
+      const cur = focusedIdxRef.current;
+      if (cur >= 0 && cur < nodes.length) {
+        nodes[cur].click();
+        return true;
+      }
+      return false;
+    };
+
+    const unsubController = registerSteamControllerButtons(
+      (action) => {
+        if (!drawerRootRef.current || drawerRootRef.current.offsetParent === null) return false;
+
+        // When Volume Scrub Mode (`volumeEditRef.current`) is active on the volume bar:
+        // D-Pad Left/Right steps volume by ±5%, B exits Scrub Mode, and Up/Down exits Scrub Mode & moves focus.
+        if (volumeEditRef.current) {
+          if (action === 'left' || action === 'right') {
+            const curVol = defaultSimpClient.getState()?.volume ?? 0.85;
+            const delta = action === 'right' ? 0.05 : -0.05;
+            const nextVol = Math.max(0.05, Math.min(1, Math.round((curVol + delta) * 100) / 100));
+            defaultSimpClient.setVolume(nextVol);
+            return true;
+          }
+          if (action === 'back') {
+            setVolEdit(false);
+            return true;
+          }
+          if (action === 'up' || action === 'down') {
+            setVolEdit(false);
+          }
+        }
+
+        switch (action) {
+          case 'up':
+          case 'down':
+          case 'left':
+          case 'right':
+            return moveDrawerFocus(action);
+          case 'activate':
+            return activateDrawerFocus();
+          case 'back':
+            if (focusedIdxRef.current >= 0) {
+              const nodes = getInteractiveNodes();
+              nodes.forEach((n) => n.classList.remove('gpfocus'));
+              setVolEdit(false);
+              setDrawerFocusIdx(-1);
             }
-          },
-          () => drawerRootRef.current?.ownerDocument || null
-        );
+            return false;
+          case 'shuffle':
+            if (focusedIdxRef.current >= 0) {
+              defaultSimpClient.setShuffle(!defaultSimpClient.getState()?.shuffle);
+              return true;
+            }
+            return false;
+          case 'repeat':
+            if (focusedIdxRef.current >= 0) {
+              defaultSimpClient.cycleRepeat();
+              return true;
+            }
+            return false;
+          case 'l2':
+            if (focusedIdxRef.current >= 0) {
+              defaultSimpClient.seekRelative(-10_000);
+              return true;
+            }
+            return false;
+          case 'r2':
+            if (focusedIdxRef.current >= 0) {
+              defaultSimpClient.seekRelative(10_000);
+              return true;
+            }
+            return false;
+          default:
+            return false;
+        }
+      },
+      () => drawerRootRef.current?.ownerDocument || null
+    );
 
     const timer = window.setTimeout(refreshCatalogs, 350);
     return () => {
@@ -872,18 +945,18 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
   };
 
   const track = snap?.current_track;
+  const isPlaying = Boolean(snap?.is_playing);
   const volumePct = Math.round((snap?.volume ?? 0.85) * 100);
   const repeatMode = snap?.repeat_mode ?? 'off';
   const repeatLabel = repeatMode === 'queue' ? 'All' : repeatMode === 'track' ? 'One' : 'Off';
 
-  const toggleMute = () => {
-    const cur = snap?.volume ?? 0.85;
-    if (cur > 0.005) {
-      setPreMuteVol(cur);
-      defaultSimpClient.setVolume(0);
-    } else {
-      defaultSimpClient.setVolume(preMuteVol > 0.05 ? preMuteVol : 0.85);
-    }
+  const setVolumeFromPointer = (clientX: number) => {
+    const el = volumeRailRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = Math.max(0.05, Math.min(1, (clientX - rect.left) / rect.width));
+    defaultSimpClient.setVolume(Math.round(ratio * 100) / 100);
   };
 
   const btnStyle: ReactTypes.CSSProperties = {
@@ -919,6 +992,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       )}
       <div
         ref={drawerRootRef}
+        data-simp-drawer-root="true"
         style={{
           display: 'flex',
           flexDirection: 'column',
@@ -926,10 +1000,20 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
         }}
       >
         <style>{`
-          .Focusable:focus, .Focusable:focus-visible, .Focusable.gpfocus {
+          [data-simp-drawer-root="true"] .SimpInteractiveBtn.gpfocus {
             outline: 2px solid #2aa3c4 !important;
             outline-offset: 1px !important;
             background: #18333e !important;
+          }
+          ${
+            focusedIdx >= 0
+              ? `
+          .gpfocus:not([data-simp-focusable="true"]) {
+            outline: none !important;
+            box-shadow: none !important;
+          }
+          `
+              : ''
           }
         `}</style>
 
@@ -1037,14 +1121,14 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
             onClick={() => defaultSimpClient.togglePlayPause()}
             style={{
               ...btnStyle,
-              background: '#0f222a',
-              borderColor: '#2aa3c4',
-              color: '#5bc0de',
+              background: isPlaying ? '#0f222a' : '#18141c',
+              borderColor: isPlaying ? '#2aa3c4' : '#52525b',
+              color: isPlaying ? '#5bc0de' : '#d4d4dc',
               fontSize: 16,
             }}
-            title="Play / Pause"
+            title={isPlaying ? 'Pause / Silence Audio' : 'Play / Resume Audio'}
           >
-            {snap?.is_playing ? '⏸' : '▶'}
+            {isPlaying ? '⏸' : '▶'}
           </Focusable>
           <Focusable
             onActivate={() => defaultSimpClient.next()}
@@ -1094,68 +1178,133 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
           </Focusable>
         </Focusable>
 
-        {/* Clean Volume Row: [-5%] | [Mute / Slider] | [+5%] (Zero custom focus trap) */}
+        {/* Unified Single-Row Volume Bar (Coupled to Play/Pause state + Press A to enter Left/Right Scrub Mode) */}
         <Focusable
-          flowChildren="horizontal"
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '40px 1fr 40px',
-            gap: 6,
-            alignItems: 'center',
+          data-simp-volume-row="true"
+          onActivate={() => setVolEdit(!volumeEditRef.current)}
+          onClick={() => {
+            if (!isDraggingVolRef.current) {
+              setVolEdit(!volumeEditRef.current);
+            }
           }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            minHeight: 40,
+            padding: '0 10px',
+            borderRadius: 10,
+            background: volumeEditMode ? '#1d160b' : '#121216',
+            border: volumeEditMode
+              ? '1px solid #f59e0b'
+              : isPlaying
+              ? '1px solid #262630'
+              : '1px solid #1c1c24',
+            boxSizing: 'border-box',
+            width: '100%',
+            minWidth: 0,
+            overflow: 'hidden',
+            cursor: 'pointer',
+            userSelect: 'none',
+            touchAction: 'none',
+          }}
+          title={
+            volumeEditMode
+              ? 'Volume Scrub Mode: Use D-Pad Left/Right to adjust, or press A/B when done'
+              : 'Press A to adjust volume with D-Pad Left/Right (or drag bar with touch)'
+          }
         >
-          <Focusable
-            onActivate={() => defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05))}
-            onClick={() => defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05))}
-            style={{ ...btnStyle, minHeight: 38, fontSize: 13 }}
-            title="Volume -5%"
-          >
-            🔉-
-          </Focusable>
-
-          <Focusable
-            onActivate={toggleMute}
-            onClick={toggleMute}
+          <span
             style={{
+              fontSize: 13,
+              lineHeight: 1,
+              flexShrink: 0,
+              color: volumeEditMode ? '#fcd34d' : isPlaying ? '#2aa3c4' : '#71717a',
+            }}
+          >
+            {!isPlaying ? '🔇' : volumePct < 45 ? '🔉' : '🔊'}
+          </span>
+
+          {/* Custom Zero-Overflow Touch & Controller Scrub Rail */}
+          <div
+            ref={volumeRailRef}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              isDraggingVolRef.current = true;
+              e.currentTarget.setPointerCapture(e.pointerId);
+              setVolumeFromPointer(e.clientX);
+            }}
+            onPointerMove={(e) => {
+              if (!isDraggingVolRef.current) return;
+              e.stopPropagation();
+              setVolumeFromPointer(e.clientX);
+            }}
+            onPointerUp={(e) => {
+              if (!isDraggingVolRef.current) return;
+              e.stopPropagation();
+              if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                e.currentTarget.releasePointerCapture(e.pointerId);
+              }
+              setVolumeFromPointer(e.clientX);
+              window.setTimeout(() => {
+                isDraggingVolRef.current = false;
+              }, 80);
+            }}
+            onPointerCancel={() => {
+              isDraggingVolRef.current = false;
+            }}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              height: 22,
               display: 'flex',
               alignItems: 'center',
-              gap: 8,
-              minHeight: 38,
-              padding: '0 10px',
-              borderRadius: 10,
-              background: '#121216',
-              border: '1px solid #262630',
-              boxSizing: 'border-box',
-              cursor: 'pointer',
+              position: 'relative',
             }}
-            title="Mute / Unmute"
           >
-            <span style={{ color: '#d4d4dc', fontSize: 14, lineHeight: 1 }}>
-              {volumePct === 0 ? '🔇' : volumePct < 45 ? '🔉' : '🔊'}
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={volumePct}
-              tabIndex={-1}
-              onClick={(e) => e.stopPropagation()}
-              onChange={(e) => defaultSimpClient.setVolume(Number(e.target.value) / 100)}
-              style={{ flex: 1, accentColor: '#2aa3c4', cursor: 'pointer', minWidth: 0 }}
-            />
-            <span style={{ fontSize: 11, fontWeight: 700, minWidth: 32, textAlign: 'right' }}>
-              {volumePct}%
-            </span>
-          </Focusable>
+            <div
+              style={{
+                width: '100%',
+                height: 8,
+                borderRadius: 999,
+                background: '#08080c',
+                border: '1px solid #22222e',
+                overflow: 'hidden',
+                position: 'relative',
+              }}
+            >
+              <div
+                style={{
+                  width: `${Math.max(0, Math.min(100, volumePct))}%`,
+                  height: '100%',
+                  borderRadius: 999,
+                  background: volumeEditMode
+                    ? '#f59e0b'
+                    : isPlaying
+                    ? 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)'
+                    : '#3f3f46',
+                  transition: 'width 60ms linear',
+                }}
+              />
+            </div>
+          </div>
 
-          <Focusable
-            onActivate={() => defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05))}
-            onClick={() => defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05))}
-            style={{ ...btnStyle, minHeight: 38, fontSize: 13 }}
-            title="Volume +5%"
+          <span
+            style={{
+              fontSize: 11,
+              fontFamily: 'monospace',
+              fontWeight: 800,
+              color: volumeEditMode ? '#fcd34d' : isPlaying ? '#d4d4dc' : '#8e8e99',
+              flexShrink: 0,
+              whiteSpace: 'nowrap',
+            }}
           >
-            🔊+
-          </Focusable>
+            {volumeEditMode
+              ? `◄ ${volumePct}% ►`
+              : isPlaying
+              ? `${volumePct}%`
+              : `${volumePct}% • PAUSED`}
+          </span>
         </Focusable>
       </Focusable>
 

@@ -22,6 +22,58 @@ echo "============================================================"
 echo " Building SIMP Release Package (Daemon + UI + Decky + Scripts)"
 echo "============================================================"
 
+# Automatically synchronize release version across package.json, decky-plugin/src/index.tsx, and README.md
+TARGET_VERSION="${1:-}"
+SYNCED_VERSION="$(TARGET_VERSION="${TARGET_VERSION}" python3 - <<'PY'
+import json, os, re
+
+pkg_path = "decky-plugin/package.json"
+with open(pkg_path, "r", encoding="utf-8") as f:
+    pkg = json.load(f)
+
+raw_ver = os.environ.get("TARGET_VERSION", "").strip().lstrip("v")
+if not raw_ver:
+    raw_ver = pkg.get("version", "0.1.0-alpha").lstrip("v")
+else:
+    pkg["version"] = raw_ver
+    with open(pkg_path, "w", encoding="utf-8") as f:
+        json.dump(pkg, f, indent=2)
+        f.write("\n")
+
+# 1. Sync decky-plugin/src/index.tsx SIMP_VERSION constant
+idx_path = "decky-plugin/src/index.tsx"
+if os.path.isfile(idx_path):
+    with open(idx_path, "r", encoding="utf-8") as f:
+        idx_src = f.read()
+    idx_next = re.sub(
+        r"const SIMP_VERSION = 'v[^']+';",
+        f"const SIMP_VERSION = 'v{raw_ver}';",
+        idx_src,
+    )
+    if idx_next != idx_src:
+        with open(idx_path, "w", encoding="utf-8") as f:
+            f.write(idx_next)
+
+# 2. Sync README.md Status shields.io badge
+readme_path = "README.md"
+if os.path.isfile(readme_path):
+    with open(readme_path, "r", encoding="utf-8") as f:
+        readme_src = f.read()
+    shield_ver = raw_ver.replace("-", "--")
+    readme_next = re.sub(
+        r"\[!\[Status: v[^\]]+\]\(https://img\.shields\.io/badge/status-v[^)]+\)\]\(#\)",
+        f"[![Status: v{raw_ver}](https://img.shields.io/badge/status-v{shield_ver}-ff6a00?style=flat-square)](#)",
+        readme_src,
+    )
+    if readme_next != readme_src:
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(readme_next)
+
+print(f"v{raw_ver}", end="")
+PY
+)"
+echo "0/4 Synchronized version ${SYNCED_VERSION} across decky-plugin/package.json, decky-plugin/src/index.tsx & README.md"
+
 echo "1/4 Building production React UI (ui/dist)..."
 npm run build:ui
 
