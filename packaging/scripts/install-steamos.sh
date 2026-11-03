@@ -75,7 +75,14 @@ rm -rf "${UI_DEST:?}/"*
 cp -r "${UI_SRC}/"* "${UI_DEST}/"
 echo "✓ Installed Web UI:     ${UI_DEST}"
 
-# 5. Install Desktop Launcher (.desktop) with expanded user paths
+# 5. Install FreeDesktop / KDE Plasma Icons & Desktop Launcher (.desktop)
+ICONS_DIR="${HOME}/.local/share/icons/hicolor/256x256/apps"
+mkdir -p "${ICONS_DIR}" "${HOME}/.local/share/icons"
+if [[ -f "${UI_DEST}/simp-icon-dark.png" ]]; then
+  cp "${UI_DEST}/simp-icon-dark.png" "${ICONS_DIR}/org.simp.player.png"
+  cp "${UI_DEST}/simp-icon-dark.png" "${HOME}/.local/share/icons/org.simp.player.png"
+fi
+
 DESKTOP_DEST="${APPLICATIONS_DIR}/org.simp.player.desktop"
 sed \
   -e "s|__SIMP_BIN__|${BIN_DEST}/simp|g" \

@@ -5438,8 +5438,8 @@ const ConsoleMainApp: React.FC = () => {
               </button>
             </div>
 
-            {/* 1. Sleep Screen & Pause/Dismiss Quick Actions */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            {/* 1. Sleep Screen, Minimize to Tray/Background & Pause/Dismiss Quick Actions */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
               <button
                 data-default-focus="true"
                 onClick={() => {
@@ -5448,7 +5448,7 @@ const ConsoleMainApp: React.FC = () => {
                 }}
                 style={{
                   minHeight: 62,
-                  padding: '10px 14px',
+                  padding: '10px 12px',
                   borderRadius: 12,
                   background: '#0d1b22',
                   border: '1px solid #2aa3c4',
@@ -5462,7 +5462,32 @@ const ConsoleMainApp: React.FC = () => {
               >
                 <span style={{ fontSize: 13, fontWeight: 800 }}>🌙 Sleep Screen</span>
                 <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                  True-black OLED screen • Wakes on any tap or button
+                  True-black OLED screen • Wakes on any button
+                </span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setPowerModalOpen(false);
+                  dismissConsole();
+                }}
+                style={{
+                  minHeight: 62,
+                  padding: '10px 12px',
+                  borderRadius: 12,
+                  background: '#0f1d18',
+                  border: '1px solid #10b981',
+                  color: '#d1fae5',
+                  textAlign: 'left',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ fontSize: 13, fontWeight: 800 }}>📥 Minimize to Tray</span>
+                <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                  Keep playing in KDE System Tray / Decky QAM
                 </span>
               </button>
 
@@ -5474,7 +5499,7 @@ const ConsoleMainApp: React.FC = () => {
                 }}
                 style={{
                   minHeight: 62,
-                  padding: '10px 14px',
+                  padding: '10px 12px',
                   borderRadius: 12,
                   background: '#12121b',
                   border: '1px solid #2c2c3c',
@@ -5486,9 +5511,9 @@ const ConsoleMainApp: React.FC = () => {
                   cursor: 'pointer',
                 }}
               >
-                <span style={{ fontSize: 13, fontWeight: 800 }}>⏸️ Pause & Dismiss Console</span>
+                <span style={{ fontSize: 13, fontWeight: 800 }}>⏸️ Pause & Dismiss</span>
                 <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                  Pauses audio and returns to Steam Gaming Mode
+                  Silence audio and close SIMP Console
                 </span>
               </button>
             </div>

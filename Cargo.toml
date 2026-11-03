@@ -39,6 +39,8 @@ mimalloc = { version = "0.1", default-features = false }
 base64 = "0.22"
 libc = "0.2"
 sha1 = "0.10"
+dbus = "0.9"
+dbus-crossroads = "0.5"
 
 # Micro-Footprint Release Profile for SteamOS / gamescope
 [profile.release]

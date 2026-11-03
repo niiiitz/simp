@@ -150,17 +150,25 @@ export class SimpDaemonClient {
           this.state = { ...this.state, volume: msg.data.volume };
           this.notifyState();
           break;
-        case 'queue_updated':
+        case 'queue_updated': {
+          const q = msg.data.queue || [];
+          const idx = msg.data.current_index ?? 0;
+          let upNext = q.slice(idx + 1, idx + 6);
+          if (msg.data.repeat_mode === 'queue' && q.length > 1 && upNext.length < 5) {
+            const needed = Math.min(5 - upNext.length, idx);
+            upNext = [...upNext, ...q.slice(0, needed)];
+          }
           this.state = {
             ...this.state,
-            queue_index: msg.data.current_index,
-            queue_length: msg.data.queue.length,
-            up_next: msg.data.queue.slice(msg.data.current_index + 1, msg.data.current_index + 6),
+            queue_index: idx,
+            queue_length: q.length,
+            up_next: upNext,
             shuffle: msg.data.shuffle,
             repeat_mode: msg.data.repeat_mode,
           };
           this.notifyState();
           break;
+        }
         case 'storage_mounts_changed':
           this.state = { ...this.state, mounts: msg.data.mounts };
           this.notifyState();
