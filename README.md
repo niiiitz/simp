@@ -1,12 +1,11 @@
 <div align="center">
   <img src="ui/public/simp-icon-dark.png" width="190" alt="SIMP — Orange Speaker Portal & Sonic Burst Logo" />
 
-  # SIMP — Simple Integrated Media Player
-  ### Product Requirements & Architecture Document (`v0.1.0-alpha`)
+  # Simple Integrated Media Player (decky plugin)
 
-  **A controller-first, OLED-safe, hybrid local + cloud + optical audio platform engineered for SteamOS, Bazzite, and `gamescope` consoles.**
+  **A controller-first, OLED-safe, hybrid local/cloud audio player, primarily targeted for SteamOS, Bazzite, and `gamescope` consoles.**
 
-  [![Status: v0.1.14-alpha](https://img.shields.io/badge/status-v0.1.4--alpha-ff6a00?style=flat-square)](#)
+  [![Status: v0.1.0-alpha.14](https://img.shields.io/badge/status-v0.1.0--alpha.14-ff6a00?style=flat-square)](#)
   [![Target: SteamOS / gamescope](https://img.shields.io/badge/target-SteamOS%20%7C%20Deck%20OLED%20%7C%20Steam%20Machine-000000?style=flat-square)](#)
   [![Daemon: Rust + Tokio + Rodio](https://img.shields.io/badge/daemon-Rust%20%2B%20Tokio%20%2B%20Rodio-dea584?style=flat-square)](#)
   [![Frontend: React + Decky QAM + MusicKit v3](https://img.shields.io/badge/UI-React%20%2B%20Decky%20QAM%20%2B%20MusicKit%20v3-2aa3c4?style=flat-square)](#)
@@ -160,7 +159,7 @@ npm run build:ui && npm run build:decky && cargo test --workspace
 
 ## 6. License & Trademark Disclaimer
 
-Pre-Release Alpha (`v0.1.0-alpha`). All rights reserved.
+Pre-Release Alpha (`v0.1.0-alpha.14`). All rights reserved.
 
 > **Trademark & Non-Affiliation Notice:**
 > **SIMP (Simple Integrated Media Player)** is an independent, third-party software project and is **not** affiliated with, endorsed by, sponsored by, or officially connected to **Valve Corporation**, **Apple Inc.**, **MetaBrainz Foundation**, or any of their subsidiaries or affiliates.

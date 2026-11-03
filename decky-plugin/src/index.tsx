@@ -14,7 +14,7 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.13';
+const SIMP_VERSION = 'v0.1.0-alpha.14';
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 
 let cachedSteamFocusable: any = null;
@@ -308,6 +308,9 @@ function registerSteamControllerButtons(
   const onVgp = (e: any) => {
     const btn = Number(e?.detail?.button);
     if (btn && E_GAMEPAD_BUTTON_MAP[btn]) {
+      // Stop SteamUI's CNavTree from trying to move focus outside the fullscreen route (prevents the SteamUI "bonk" sound)
+      if (typeof e.stopPropagation === 'function') e.stopPropagation();
+      if (typeof e.preventDefault === 'function') e.preventDefault();
       emit(E_GAMEPAD_BUTTON_MAP[btn], e);
     }
   };
@@ -320,6 +323,8 @@ function registerSteamControllerButtons(
       Enter: 'activate',
     };
     if (map[e.key]) {
+      if (typeof e.stopPropagation === 'function') e.stopPropagation();
+      if (typeof e.preventDefault === 'function') e.preventDefault();
       emit(map[e.key], e);
     }
   };
@@ -435,6 +440,17 @@ const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit
     const onMessage = (e: MessageEvent) => {
       if (e.data?.type === 'SIMP_EXIT_CONSOLE') {
         exitConsole();
+      } else if (e.data?.type === 'SIMP_OPEN_OSK') {
+        try {
+          const sc = (window as any).SteamClient;
+          if (sc?.Browser?.ShowVirtualKeyboard) {
+            sc.Browser.ShowVirtualKeyboard();
+          } else if (sc?.URL?.ExecuteSteamURL) {
+            sc.URL.ExecuteSteamURL('steam://open/keyboard');
+          }
+        } catch {
+          // Built-in Console OSK inside SIMP UI handles controller typing as well
+        }
       }
     };
     window.addEventListener('message', onMessage);
@@ -773,36 +789,41 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       });
     };
 
-    const unsubController = registerSteamControllerButtons(
-      (action) => {
-        // Only handle QAM controller events when our drawer is mounted and visible
-        if (!drawerRootRef.current || drawerRootRef.current.offsetParent === null) return;
-        switch (action) {
-          case 'up':
-          case 'down':
-          case 'left':
-          case 'right':
-            moveDrawerFocus(action);
-            break;
-          case 'activate':
-            activateDrawerFocus();
-            break;
-          case 'shuffle':
-            defaultSimpClient.setShuffle(!defaultSimpClient.getState()?.shuffle);
-            break;
-          case 'repeat':
-            defaultSimpClient.cycleRepeat();
-            break;
-          case 'l2':
-            defaultSimpClient.seekRelative(-10_000);
-            break;
-          case 'r2':
-            defaultSimpClient.seekRelative(10_000);
-            break;
-        }
-      },
-      () => drawerRootRef.current?.ownerDocument || null
-    );
+    // When Valve's native `SteamFocusable` is resolved (SteamOS Game Mode), SteamUI's native
+    // `CNavTree` already manages `.gpfocus`, directional movement, and `A` activation across the QAM drawer.
+    // Running a second custom focus loop on top of `SteamFocusable` causes dual blue highlights and volume bleed!
+    const hasNativeSteamFocusable = Boolean(resolveSteamFocusable());
+    const unsubController = hasNativeSteamFocusable
+      ? () => {}
+      : registerSteamControllerButtons(
+          (action) => {
+            if (!drawerRootRef.current || drawerRootRef.current.offsetParent === null) return;
+            switch (action) {
+              case 'up':
+              case 'down':
+              case 'left':
+              case 'right':
+                moveDrawerFocus(action);
+                break;
+              case 'activate':
+                activateDrawerFocus();
+                break;
+              case 'shuffle':
+                defaultSimpClient.setShuffle(!defaultSimpClient.getState()?.shuffle);
+                break;
+              case 'repeat':
+                defaultSimpClient.cycleRepeat();
+                break;
+              case 'l2':
+                defaultSimpClient.seekRelative(-10_000);
+                break;
+              case 'r2':
+                defaultSimpClient.seekRelative(10_000);
+                break;
+            }
+          },
+          () => drawerRootRef.current?.ownerDocument || null
+        );
 
     const timer = window.setTimeout(refreshCatalogs, 350);
     return () => {
@@ -1073,57 +1094,68 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
           </Focusable>
         </Focusable>
 
-        {/* Clean Volume Slider Row (D-Pad Left/Right steps volume; A toggles mute) */}
+        {/* Clean Volume Row: [-5%] | [Mute / Slider] | [+5%] (Zero custom focus trap) */}
         <Focusable
-          data-simp-volume-row="true"
-          onActivate={toggleMute}
-          onMoveLeft={() => {
-            defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05));
-            return true;
-          }}
-          onMoveRight={() => {
-            defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05));
-            return true;
-          }}
+          flowChildren="horizontal"
           style={{
-            display: 'flex',
+            display: 'grid',
+            gridTemplateColumns: '40px 1fr 40px',
+            gap: 6,
             alignItems: 'center',
-            gap: 10,
-            padding: '8px 10px',
-            borderRadius: 8,
-            background: '#121216',
-            border: '1px solid #262630',
           }}
         >
-          <span
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleMute();
-            }}
+          <Focusable
+            onActivate={() => defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05))}
+            onClick={() => defaultSimpClient.setVolume(Math.max(0, (snap?.volume ?? 0.85) - 0.05))}
+            style={{ ...btnStyle, minHeight: 38, fontSize: 13 }}
+            title="Volume -5%"
+          >
+            🔉-
+          </Focusable>
+
+          <Focusable
+            onActivate={toggleMute}
+            onClick={toggleMute}
             style={{
-              color: '#d4d4dc',
-              fontSize: 15,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              minHeight: 38,
+              padding: '0 10px',
+              borderRadius: 10,
+              background: '#121216',
+              border: '1px solid #262630',
+              boxSizing: 'border-box',
               cursor: 'pointer',
-              lineHeight: 1,
             }}
             title="Mute / Unmute"
           >
-            {volumePct === 0 ? '🔇' : volumePct < 45 ? '🔉' : '🔊'}
-          </span>
+            <span style={{ color: '#d4d4dc', fontSize: 14, lineHeight: 1 }}>
+              {volumePct === 0 ? '🔇' : volumePct < 45 ? '🔉' : '🔊'}
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={volumePct}
+              tabIndex={-1}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => defaultSimpClient.setVolume(Number(e.target.value) / 100)}
+              style={{ flex: 1, accentColor: '#2aa3c4', cursor: 'pointer', minWidth: 0 }}
+            />
+            <span style={{ fontSize: 11, fontWeight: 700, minWidth: 32, textAlign: 'right' }}>
+              {volumePct}%
+            </span>
+          </Focusable>
 
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={volumePct}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => defaultSimpClient.setVolume(Number(e.target.value) / 100)}
-            style={{ flex: 1, accentColor: '#2aa3c4', cursor: 'pointer' }}
-          />
-
-          <span style={{ fontSize: 12, fontWeight: 700, minWidth: 34, textAlign: 'right' }}>
-            {volumePct}%
-          </span>
+          <Focusable
+            onActivate={() => defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05))}
+            onClick={() => defaultSimpClient.setVolume(Math.min(1, (snap?.volume ?? 0.85) + 0.05))}
+            style={{ ...btnStyle, minHeight: 38, fontSize: 13 }}
+            title="Volume +5%"
+          >
+            🔊+
+          </Focusable>
         </Focusable>
       </Focusable>
 

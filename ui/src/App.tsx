@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlbumRecord,
   AppleMusicAuthConfig,
@@ -91,8 +91,10 @@ const ConsoleMainApp: React.FC = () => {
   const [activePlaylistId, setActivePlaylistId] = useState<string>('');
   const [playingContextId, setPlayingContextId] = useState<string>('');
 
-  // Custom folder input inside Source Modal
+  // Custom folder input inside Source Modal + Controller On-Screen Keyboard (OSK) state
   const [customFolderPath, setCustomFolderPath] = useState('');
+  const [oskTarget, setOskTarget] = useState<'search' | 'folder' | 'playlist' | null>(null);
+  const lastBridgeMsgTsRef = useRef<number>(0);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   // Apple Music Auth Modal state
@@ -538,7 +540,21 @@ const ConsoleMainApp: React.FC = () => {
   }, []);
 
   // 6. Spatial Focus Navigation Helper (Gamepad D-Pad / Left Stick / Keyboard Arrows)
+  // IMPORTANT: Never call `el.focus()` here! Inside SteamUI's `/simp-console` iframe, calling
+  // `el.focus()` steals browser focus away from the parent SteamUI `<Focusable>` wrapper,
+  // causing SteamUI to play a "bonk" sound on the first D-Pad press and requiring 2 presses per row.
   const applyFocusMarker = useCallback((el: HTMLElement | null) => {
+    const activeDom = document.activeElement as HTMLElement | null;
+    if (
+      activeDom &&
+      activeDom !== document.body &&
+      activeDom !== el &&
+      (activeDom.tagName === 'INPUT' ||
+        activeDom.tagName === 'SELECT' ||
+        activeDom.tagName === 'TEXTAREA')
+    ) {
+      activeDom.blur();
+    }
     document
       .querySelectorAll<HTMLElement>('[data-simp-active-focus="true"], .simp-gpfocus')
       .forEach((node) => {
@@ -550,17 +566,34 @@ const ConsoleMainApp: React.FC = () => {
     if (el) {
       el.setAttribute('data-simp-active-focus', 'true');
       el.classList.add('simp-gpfocus');
-      el.focus();
       el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     }
   }, []);
+
+  // Automatically place the focus marker on the default focus target when entering Browser or opening Modals
+  useEffect(() => {
+    if (view !== 'browser' && !sourceModalOpen && !powerModalOpen) return;
+    const t = window.setTimeout(() => {
+      const rootSelector =
+        sourceModalOpen || powerModalOpen
+          ? '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled])'
+          : 'button[data-default-focus="true"]:not([disabled]), [data-nav-col="left"] button:not([disabled])';
+      const preferred = document.querySelector<HTMLElement>(rootSelector);
+      if (preferred) {
+        applyFocusMarker(preferred);
+      }
+    }, 30);
+    return () => window.clearTimeout(t);
+  }, [view, sourceModalOpen, powerModalOpen, applyFocusMarker]);
 
   const moveSpatialFocus = useCallback(
     (dir: 'up' | 'down' | 'left' | 'right') => {
       setIsDimmed(false);
       setIsSleeping(false);
       const isModalOpen = sourceModalOpen || powerModalOpen;
-      const selector = isModalOpen
+      const selector = oskTarget
+        ? '[data-osk-root="true"] button:not([disabled])'
+        : isModalOpen
         ? '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled]), [data-modal-root="true"] select:not([disabled]), [data-modal-root="true"] a'
         : 'button:not([disabled]), input:not([disabled]), select:not([disabled]), [data-focusable="true"]';
       const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter((el) => {
@@ -579,15 +612,163 @@ const ConsoleMainApp: React.FC = () => {
         return;
       }
 
+      const getCol = (el: HTMLElement): string | null =>
+        el.closest<HTMLElement>('[data-nav-col]')?.dataset.navCol || null;
+
+      // Detect secondary inline row buttons (`✕`, `📌 Pin`, `🔄 Scan`, `⏏`, `+`, `💿`, `<select>`)
+      // so D-Pad Up/Down moves cleanly 1 row per click on primary items, while D-Pad Right/Left reaches inline actions.
+      const isAuxRowElement = (el: HTMLElement): boolean => {
+        if (el.dataset.rowAux === 'true') return true;
+        if (el.tagName === 'SELECT') return true;
+        if (el.parentElement?.closest('[data-focusable="true"]')) return true;
+        const r = el.getBoundingClientRect();
+        if (r.width >= 120) return false;
+        const ry = r.top + r.height / 2;
+        const elCol = getCol(el);
+        return nodes.some((other) => {
+          if (other === el) return false;
+          if (getCol(other) !== elCol) return false;
+          const or = other.getBoundingClientRect();
+          const oy = or.top + or.height / 2;
+          return (
+            Math.abs(oy - ry) <= 16 &&
+            or.left < r.left - 8 &&
+            or.width > r.width * 1.35 &&
+            or.width >= 110
+          );
+        });
+      };
+
       const cur = active.getBoundingClientRect();
       const cx = cur.left + cur.width / 2;
       const cy = cur.top + cur.height / 2;
+      const curCol = getCol(active);
 
+      if (!oskTarget && !isModalOpen && (dir === 'up' || dir === 'down') && curCol) {
+        // 1. Try moving Up/Down among primary row items inside the SAME column (`left` or `right`)
+        let bestInCol: HTMLElement | null = null;
+        let bestInColScore = Infinity;
+
+        for (const candidate of nodes) {
+          if (candidate === active) continue;
+          if (getCol(candidate) !== curCol) continue;
+          if (isAuxRowElement(candidate)) continue;
+
+          const r = candidate.getBoundingClientRect();
+          const tx = r.left + r.width / 2;
+          const ty = r.top + r.height / 2;
+          const dx = tx - cx;
+          const dy = ty - cy;
+
+          if (dir === 'down' && dy <= 6) continue;
+          if (dir === 'up' && dy >= -6) continue;
+
+          // Strongly prioritize vertical proximity within the same column so wide rows vs grid buttons never skip
+          const score = Math.abs(dy) + Math.abs(dx) * 0.22;
+          if (score < bestInColScore) {
+            bestInColScore = score;
+            bestInCol = candidate;
+          }
+        }
+
+        if (bestInCol) {
+          applyFocusMarker(bestInCol);
+          return;
+        }
+
+        // If at the top of a column and pressing Up, allow escaping to the top header bar (`getCol(c) === null`)
+        if (dir === 'up') {
+          let bestHeader: HTMLElement | null = null;
+          let bestHeaderScore = Infinity;
+          for (const candidate of nodes) {
+            if (getCol(candidate) !== null) continue;
+            const r = candidate.getBoundingClientRect();
+            const tx = r.left + r.width / 2;
+            const ty = r.top + r.height / 2;
+            const dy = ty - cy;
+            if (dy >= -6) continue;
+            const score = Math.abs(dy) + Math.abs(tx - cx) * 0.5;
+            if (score < bestHeaderScore) {
+              bestHeaderScore = score;
+              bestHeader = candidate;
+            }
+          }
+          if (bestHeader) {
+            applyFocusMarker(bestHeader);
+            return;
+          }
+        }
+        return;
+      }
+
+      if (!oskTarget && !isModalOpen && (dir === 'left' || dir === 'right') && curCol) {
+        // 1. First look for a sibling control on the SAME horizontal row in the SAME column (e.g. 2x2 sub-tabs, 3 filter pills, or inline `📌`/`✕`/`+` buttons)
+        let bestSameRow: HTMLElement | null = null;
+        let bestSameRowDx = Infinity;
+
+        for (const candidate of nodes) {
+          if (candidate === active) continue;
+          if (getCol(candidate) !== curCol) continue;
+          const r = candidate.getBoundingClientRect();
+          const tx = r.left + r.width / 2;
+          const ty = r.top + r.height / 2;
+          const dx = tx - cx;
+          const dy = ty - cy;
+
+          if (Math.abs(dy) > 22) continue;
+          if (dir === 'right' && dx <= 6) continue;
+          if (dir === 'left' && dx >= -6) continue;
+
+          if (Math.abs(dx) < bestSameRowDx) {
+            bestSameRowDx = Math.abs(dx);
+            bestSameRow = candidate;
+          }
+        }
+
+        if (bestSameRow) {
+          applyFocusMarker(bestSameRow);
+          return;
+        }
+
+        // 2. Otherwise cross directly between the Left Column (`left`) and Right Column (`right`) at the closest vertical Y!
+        const targetCol =
+          curCol === 'left' && dir === 'right'
+            ? 'right'
+            : curCol === 'right' && dir === 'left'
+            ? 'left'
+            : null;
+
+        if (targetCol) {
+          let bestCrossCol: HTMLElement | null = null;
+          let bestCrossColScore = Infinity;
+
+          for (const candidate of nodes) {
+            if (getCol(candidate) !== targetCol) continue;
+            if (isAuxRowElement(candidate)) continue;
+            const r = candidate.getBoundingClientRect();
+            const ty = r.top + r.height / 2;
+            const score = Math.abs(ty - cy) + r.left * 0.05;
+            if (score < bestCrossColScore) {
+              bestCrossColScore = score;
+              bestCrossCol = candidate;
+            }
+          }
+
+          if (bestCrossCol) {
+            applyFocusMarker(bestCrossCol);
+            return;
+          }
+        }
+        return;
+      }
+
+      // Default 2D spatial navigation (Header bar, Modals, On-Screen Keyboard)
       let best: HTMLElement | null = null;
       let bestScore = Infinity;
 
       for (const candidate of nodes) {
         if (candidate === active) continue;
+        if (!oskTarget && (dir === 'up' || dir === 'down') && isAuxRowElement(candidate)) continue;
         const r = candidate.getBoundingClientRect();
         const tx = r.left + r.width / 2;
         const ty = r.top + r.height / 2;
@@ -601,7 +782,7 @@ const ConsoleMainApp: React.FC = () => {
 
         const primary = dir === 'left' || dir === 'right' ? Math.abs(dx) : Math.abs(dy);
         const cross = dir === 'left' || dir === 'right' ? Math.abs(dy) : Math.abs(dx);
-        const score = primary + cross * 2.6;
+        const score = primary + cross * (oskTarget ? 1.8 : 2.2);
 
         if (score < bestScore) {
           bestScore = score;
@@ -613,7 +794,7 @@ const ConsoleMainApp: React.FC = () => {
         applyFocusMarker(best);
       }
     },
-    [sourceModalOpen, powerModalOpen, applyFocusMarker]
+    [sourceModalOpen, powerModalOpen, oskTarget, applyFocusMarker]
   );
 
   // 7. Keyboard shortcuts + Native Decky Fullscreen Route `postMessage` Gamepad Bridge
@@ -629,9 +810,10 @@ const ConsoleMainApp: React.FC = () => {
         return;
       }
 
-      // In the `🎵 Player` (`lock`) view (when modals are closed), D-Pad maps directly
+      // In the `🎵 Player` (`lock`) view (when modals and OSK are closed), D-Pad maps directly
       // to the on-screen transport badges (`◄` Previous, `►` Next, `▲/▼` Volume, `A` Play/Pause)!
-      const isDirectTransportView = view === 'lock' && !sourceModalOpen && !powerModalOpen;
+      const isDirectTransportView =
+        view === 'lock' && !sourceModalOpen && !powerModalOpen && !oskTarget;
 
       switch (action) {
         case 'left':
@@ -670,6 +852,21 @@ const ConsoleMainApp: React.FC = () => {
           const active =
             (document.querySelector<HTMLElement>('[data-simp-active-focus="true"]') as HTMLElement | null) ||
             (document.activeElement as HTMLElement | null);
+          if (active && active.tagName === 'INPUT' && (active as HTMLInputElement).type === 'text') {
+            const targetKind =
+              (active.dataset.oskInput as 'search' | 'folder' | 'playlist' | undefined) || 'search';
+            setOskTarget(targetKind);
+            if (window.parent && window.parent !== window) {
+              window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+            }
+            window.setTimeout(() => {
+              const firstKey = document.querySelector<HTMLElement>(
+                '[data-osk-root="true"] button[data-default-focus="true"], [data-osk-root="true"] button'
+              );
+              if (firstKey) applyFocusMarker(firstKey);
+            }, 40);
+            break;
+          }
           if (active && active !== document.body && typeof active.click === 'function') {
             active.click();
           } else {
@@ -678,7 +875,14 @@ const ConsoleMainApp: React.FC = () => {
           break;
         }
         case 'back':
-          if (volumePopoverOpen || brightnessPopoverOpen) {
+          if (oskTarget) {
+            const prevInputSelector = `[data-osk-input="${oskTarget}"]`;
+            setOskTarget(null);
+            window.setTimeout(() => {
+              const inp = document.querySelector<HTMLElement>(prevInputSelector);
+              if (inp) applyFocusMarker(inp);
+            }, 30);
+          } else if (volumePopoverOpen || brightnessPopoverOpen) {
             setVolumePopoverOpen(false);
             setBrightnessPopoverOpen(false);
           } else if (confirmHardReset) {
@@ -703,6 +907,7 @@ const ConsoleMainApp: React.FC = () => {
           defaultSimpClient.cycleRepeat();
           break;
         case 'l1':
+          setOskTarget(null);
           setView('lock');
           break;
         case 'r1':
@@ -715,6 +920,7 @@ const ConsoleMainApp: React.FC = () => {
           defaultSimpClient.seekRelative(10_000);
           break;
         case 'sources':
+          setOskTarget(null);
           setPowerModalOpen(false);
           setSourceModalOpen((v) => !v);
           break;
@@ -732,6 +938,7 @@ const ConsoleMainApp: React.FC = () => {
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
         if (e.key === 'Escape') {
           (e.target as HTMLElement).blur();
+          setOskTarget(null);
         }
         return;
       }
@@ -765,6 +972,7 @@ const ConsoleMainApp: React.FC = () => {
     const onMessage = (e: MessageEvent) => {
       const data = e.data;
       if (!data || data.type !== 'SIMP_GAMEPAD_ACTION') return;
+      lastBridgeMsgTsRef.current = performance.now();
       handleGamepadAction(data.action);
     };
 
@@ -790,6 +998,7 @@ const ConsoleMainApp: React.FC = () => {
       };
       const action = map[btn];
       if (action) {
+        lastBridgeMsgTsRef.current = performance.now();
         handleGamepadAction(action);
       }
     };
@@ -806,6 +1015,8 @@ const ConsoleMainApp: React.FC = () => {
     };
   }, [
     moveSpatialFocus,
+    applyFocusMarker,
+    oskTarget,
     sourceModalOpen,
     powerModalOpen,
     volumePopoverOpen,
@@ -821,11 +1032,14 @@ const ConsoleMainApp: React.FC = () => {
   ]);
 
   // 8. HTML5 Gamepad API polling across all connected controllers (D-Pad + Left/Right Sticks + ABXY/Bumpers/Triggers)
+  // Note: When running inside the Decky `/simp-console` wrapper, `SIMP_GAMEPAD_ACTION` already bridges
+  // D-Pad and button events; we skip duplicate button/D-Pad polling while the bridge is actively sending events.
   useEffect(() => {
     const prevButtonsByPad = new Map<number, boolean[]>();
     const prevAxisDirByPad = new Map<number, string | null>();
 
     const poll = window.setInterval(() => {
+      const bridgeActive = performance.now() - lastBridgeMsgTsRef.current < 3500;
       const rawPads = navigator.getGamepads ? navigator.getGamepads() : [];
       for (const pad of rawPads) {
         if (!pad || !pad.connected) continue;
@@ -844,69 +1058,97 @@ const ConsoleMainApp: React.FC = () => {
           continue;
         }
 
-        const isDirectTransportView = view === 'lock' && !sourceModalOpen && !powerModalOpen;
+        const isDirectTransportView =
+          view === 'lock' && !sourceModalOpen && !powerModalOpen && !oskTarget;
 
-        if (pressed(0)) {
-          // A Button: In Player view, toggle Play/Pause; in Browser/Modal view, activate focused element
-          setIsDimmed(false);
-          if (isDirectTransportView) {
-            defaultSimpClient.togglePlayPause();
-          } else {
-            const active =
-              (document.querySelector<HTMLElement>('[data-simp-active-focus="true"]') as HTMLElement | null) ||
-              (document.activeElement as HTMLElement | null);
-            if (active && active !== document.body && typeof active.click === 'function') {
-              active.click();
-            } else {
+        if (!bridgeActive) {
+          if (pressed(0)) {
+            // A Button: In Player view, toggle Play/Pause; in Browser/Modal view, activate focused element
+            setIsDimmed(false);
+            if (isDirectTransportView) {
               defaultSimpClient.togglePlayPause();
+            } else {
+              const active =
+                (document.querySelector<HTMLElement>('[data-simp-active-focus="true"]') as HTMLElement | null) ||
+                (document.activeElement as HTMLElement | null);
+              if (active && active.tagName === 'INPUT' && (active as HTMLInputElement).type === 'text') {
+                const targetKind =
+                  (active.dataset.oskInput as 'search' | 'folder' | 'playlist' | undefined) || 'search';
+                setOskTarget(targetKind);
+                if (window.parent && window.parent !== window) {
+                  window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                }
+                window.setTimeout(() => {
+                  const firstKey = document.querySelector<HTMLElement>(
+                    '[data-osk-root="true"] button[data-default-focus="true"], [data-osk-root="true"] button'
+                  );
+                  if (firstKey) applyFocusMarker(firstKey);
+                }, 40);
+              } else if (active && active !== document.body && typeof active.click === 'function') {
+                active.click();
+              } else {
+                defaultSimpClient.togglePlayPause();
+              }
             }
           }
-        }
-        if (pressed(1)) {
-          // B Button: Close popover/modal or return to Player view
-          setIsDimmed(false);
-          if (volumePopoverOpen || brightnessPopoverOpen) {
-            setVolumePopoverOpen(false);
-            setBrightnessPopoverOpen(false);
-          } else if (confirmHardReset) {
-            setConfirmHardReset(false);
-          } else if (powerModalOpen) {
-            setPowerModalOpen(false);
-          } else if (sourceModalOpen) {
-            setSourceModalOpen(false);
-          } else if (view === 'browser') {
-            setView('lock');
+          if (pressed(1)) {
+            // B Button: Close OSK, popover/modal, or return to Player view
+            setIsDimmed(false);
+            if (oskTarget) {
+              const prevInputSelector = `[data-osk-input="${oskTarget}"]`;
+              setOskTarget(null);
+              window.setTimeout(() => {
+                const inp = document.querySelector<HTMLElement>(prevInputSelector);
+                if (inp) applyFocusMarker(inp);
+              }, 30);
+            } else if (volumePopoverOpen || brightnessPopoverOpen) {
+              setVolumePopoverOpen(false);
+              setBrightnessPopoverOpen(false);
+            } else if (confirmHardReset) {
+              setConfirmHardReset(false);
+            } else if (powerModalOpen) {
+              setPowerModalOpen(false);
+            } else if (sourceModalOpen) {
+              setSourceModalOpen(false);
+            } else if (view === 'browser') {
+              setView('lock');
+            }
           }
-        }
-        if (pressed(2)) defaultSimpClient.setShuffle(!snap?.shuffle); // X
-        if (pressed(3)) defaultSimpClient.cycleRepeat(); // Y
-        if (pressed(4)) setView('lock'); // L1
-        if (pressed(5)) setView('browser'); // R1
-        if (pressed(6)) defaultSimpClient.seekRelative(-10_000); // L2 (Rewind 10s)
-        if (pressed(7)) defaultSimpClient.seekRelative(10_000); // R2 (Fast-Forward 10s)
-        if (pressed(8)) {
-          setPowerModalOpen(false);
-          setSourceModalOpen((v) => !v); // Select -> Sources
-        }
-        if (pressed(9)) {
-          setSourceModalOpen(false);
-          setPowerModalOpen((v) => !v); // Start -> Power Menu
-        }
-        if (pressed(12)) {
-          if (isDirectTransportView) applyVolume(currentVolume + 0.05);
-          else moveSpatialFocus('up'); // D-Up
-        }
-        if (pressed(13)) {
-          if (isDirectTransportView) applyVolume(currentVolume - 0.05);
-          else moveSpatialFocus('down'); // D-Down
-        }
-        if (pressed(14)) {
-          if (isDirectTransportView) defaultSimpClient.previous();
-          else moveSpatialFocus('left'); // D-Left
-        }
-        if (pressed(15)) {
-          if (isDirectTransportView) defaultSimpClient.next();
-          else moveSpatialFocus('right'); // D-Right
+          if (pressed(2)) defaultSimpClient.setShuffle(!snap?.shuffle); // X
+          if (pressed(3)) defaultSimpClient.cycleRepeat(); // Y
+          if (pressed(4)) {
+            setOskTarget(null);
+            setView('lock'); // L1
+          }
+          if (pressed(5)) setView('browser'); // R1
+          if (pressed(6)) defaultSimpClient.seekRelative(-10_000); // L2 (Rewind 10s)
+          if (pressed(7)) defaultSimpClient.seekRelative(10_000); // R2 (Fast-Forward 10s)
+          if (pressed(8)) {
+            setOskTarget(null);
+            setPowerModalOpen(false);
+            setSourceModalOpen((v) => !v); // Select -> Sources
+          }
+          if (pressed(9)) {
+            setOskTarget(null);
+            setSourceModalOpen(false);
+            setPowerModalOpen((v) => !v); // Start -> Power Menu
+          }
+          if (pressed(12)) {
+            if (isDirectTransportView) applyVolume(currentVolume + 0.05);
+            else moveSpatialFocus('up'); // D-Up
+          }
+          if (pressed(13)) {
+            if (isDirectTransportView) applyVolume(currentVolume - 0.05);
+            else moveSpatialFocus('down'); // D-Down
+          }
+          if (pressed(14)) {
+            if (isDirectTransportView) defaultSimpClient.previous();
+            else moveSpatialFocus('left'); // D-Left
+          }
+          if (pressed(15)) {
+            if (isDirectTransportView) defaultSimpClient.next();
+            else moveSpatialFocus('right'); // D-Right
+          }
         }
 
         // Left Stick 2D Spatial Navigation (with edge-trigger debounce)
@@ -950,6 +1192,8 @@ const ConsoleMainApp: React.FC = () => {
     applyVolume,
     currentVolume,
     moveSpatialFocus,
+    applyFocusMarker,
+    oskTarget,
     sourceModalOpen,
     powerModalOpen,
     volumePopoverOpen,
@@ -1993,6 +2237,7 @@ const ConsoleMainApp: React.FC = () => {
         <main style={{ flex: 1, display: 'grid', gridTemplateColumns: '38% 62%', overflow: 'hidden', boxSizing: 'border-box', width: '100%' }}>
           {/* Left Column: Source Filter Pills, Storage Mounts, Playlists & Albums */}
           <div
+            data-nav-col="left"
             style={{
               borderRight: '1px solid #16161c',
               padding: 16,
@@ -2031,6 +2276,7 @@ const ConsoleMainApp: React.FC = () => {
                   return (
                     <button
                       key={st.id}
+                      data-default-focus={st.id === 'pinned' ? 'true' : undefined}
                       onClick={() => {
                         setAppleSubTab(st.id);
                         if (st.id !== 'pinned' && browserSourceFilter === 'local') {
@@ -2073,13 +2319,20 @@ const ConsoleMainApp: React.FC = () => {
               <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
                 <input
                   type="text"
+                  data-osk-input="search"
                   placeholder={
                     browserSourceFilter === 'local'
-                      ? '🔍 Filter local playlists, albums, or tracks...'
-                      : '🔍 Search SIMP library or Apple Music catalog...'
+                      ? '🔍 Filter local playlists, albums, or tracks... (Press A for Keyboard)'
+                      : '🔍 Search SIMP library or Apple Music catalog... (Press A for Keyboard)'
                   }
                   value={browserSearch}
                   onChange={(e) => setBrowserSearch(e.target.value)}
+                  onClick={() => {
+                    setOskTarget('search');
+                    if (window.parent && window.parent !== window) {
+                      window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                    }
+                  }}
                   style={{
                     width: '100%',
                     minHeight: 36,
@@ -2094,6 +2347,7 @@ const ConsoleMainApp: React.FC = () => {
                 />
                 {browserSearch && (
                   <button
+                    data-row-aux="true"
                     onClick={() => setBrowserSearch('')}
                     title="Clear search"
                     style={{
@@ -3497,9 +3751,16 @@ const ConsoleMainApp: React.FC = () => {
                   <div style={{ display: 'flex', gap: 6 }}>
                     <input
                       type="text"
-                      placeholder="Playlist name (mixes Local + Apple Music)..."
+                      data-osk-input="playlist"
+                      placeholder="Playlist name (Press A for Keyboard)..."
                       value={newPlaylistName}
                       onChange={(e) => setNewPlaylistName(e.target.value)}
+                      onClick={() => {
+                        setOskTarget('playlist');
+                        if (window.parent && window.parent !== window) {
+                          window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                        }
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') handleCreatePlaylist();
                       }}
@@ -4036,6 +4297,7 @@ const ConsoleMainApp: React.FC = () => {
 
           {/* Right Column: Tracks for Selected Album, Playlist, Cloud Item, or Storage Mount */}
           <div
+            data-nav-col="right"
             style={{
               padding: 20,
               overflowY: 'auto',
@@ -4513,6 +4775,7 @@ const ConsoleMainApp: React.FC = () => {
                     {t.source === 'apple_music' &&
                       browserTarget?.kind !== 'cloud_album' && (
                         <button
+                          data-row-aux="true"
                           onClick={(e) => {
                             e.stopPropagation();
                             handleOpenFullAppleAlbum({
@@ -4538,6 +4801,7 @@ const ConsoleMainApp: React.FC = () => {
                       )}
                     {isViewingLocalPlaylist && browserTarget ? (
                       <button
+                        data-row-aux="true"
                         onClick={(e) => {
                           e.stopPropagation();
                           handleRemoveTrackFromPlaylist(browserTarget.id, t.uri, t.title);
@@ -4559,6 +4823,7 @@ const ConsoleMainApp: React.FC = () => {
                       </button>
                     ) : t.source !== 'cdda' && browserTarget?.kind !== 'cdda' ? (
                       <button
+                        data-row-aux="true"
                         onClick={(e) => {
                           e.stopPropagation();
                           handleAddTracksToPlaylist([t.uri], `"${t.title}"`);
@@ -4661,9 +4926,16 @@ const ConsoleMainApp: React.FC = () => {
               <div style={{ display: 'flex', gap: 8 }}>
                 <input
                   type="text"
-                  placeholder="/mnt/c/Users/<you>/Music or /home/deck/Music"
+                  data-osk-input="folder"
+                  placeholder="/mnt/c/Users/<you>/Music or /home/deck/Music (Press A for Keyboard)"
                   value={customFolderPath}
                   onChange={(e) => setCustomFolderPath(e.target.value)}
+                  onClick={() => {
+                    setOskTarget('folder');
+                    if (window.parent && window.parent !== window) {
+                      window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                    }
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleAddFolder(customFolderPath);
                   }}
@@ -5471,6 +5743,194 @@ const ConsoleMainApp: React.FC = () => {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Controller-Navigable On-Screen Keyboard (OSK) Bar for Search, Playlist Name & Folder Path */}
+      {oskTarget && (
+        <div
+          data-osk-root="true"
+          style={{
+            position: 'fixed',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 95,
+            background: 'rgba(8, 8, 12, 0.96)',
+            borderTop: '2px solid #2aa3c4',
+            boxShadow: '0 -12px 32px rgba(0, 0, 0, 0.85)',
+            padding: '10px 18px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 12,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+              <span
+                style={{
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  color: '#2aa3c4',
+                  fontWeight: 800,
+                  flexShrink: 0,
+                }}
+              >
+                {oskTarget === 'search'
+                  ? '⌨️ SEARCH:'
+                  : oskTarget === 'playlist'
+                  ? '⌨️ PLAYLIST NAME:'
+                  : '⌨️ FOLDER PATH:'}
+              </span>
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 32,
+                  padding: '0 12px',
+                  borderRadius: 8,
+                  background: '#050508',
+                  border: '1px solid #2aa3c4',
+                  color: '#f4f4f6',
+                  fontSize: 13,
+                  fontFamily: 'monospace',
+                  display: 'flex',
+                  alignItems: 'center',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {(oskTarget === 'search'
+                  ? browserSearch
+                  : oskTarget === 'playlist'
+                  ? newPlaylistName
+                  : customFolderPath) || (
+                  <span style={{ color: '#71717a' }}>Type with D-Pad + (A) or press (B) when done...</span>
+                )}
+                <span style={{ color: '#2aa3c4', marginLeft: 2, fontWeight: 900 }}>▋</span>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+              <button
+                onClick={() => {
+                  if (oskTarget === 'search') setBrowserSearch((v) => v.slice(0, -1));
+                  else if (oskTarget === 'playlist') setNewPlaylistName((v) => v.slice(0, -1));
+                  else setCustomFolderPath((v) => v.slice(0, -1));
+                }}
+                style={{
+                  minHeight: 34,
+                  padding: '0 12px',
+                  borderRadius: 8,
+                  background: '#161622',
+                  border: '1px solid #2e2e3e',
+                  color: '#fca5a5',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                ⌫ Backspace
+              </button>
+              <button
+                onClick={() => {
+                  if (oskTarget === 'search') setBrowserSearch('');
+                  else if (oskTarget === 'playlist') setNewPlaylistName('');
+                  else setCustomFolderPath('');
+                }}
+                style={{
+                  minHeight: 34,
+                  padding: '0 12px',
+                  borderRadius: 8,
+                  background: '#161622',
+                  border: '1px solid #2e2e3e',
+                  color: '#9ca3af',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Clear
+              </button>
+              <button
+                onClick={() => {
+                  const prevInputSelector = `[data-osk-input="${oskTarget}"]`;
+                  setOskTarget(null);
+                  window.setTimeout(() => {
+                    const inp = document.querySelector<HTMLElement>(prevInputSelector);
+                    if (inp) applyFocusMarker(inp);
+                  }, 30);
+                }}
+                style={{
+                  minHeight: 34,
+                  padding: '0 14px',
+                  borderRadius: 8,
+                  background: '#0f222a',
+                  border: '1px solid #2aa3c4',
+                  color: '#bfeaf5',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                ✓ Done (B)
+              </button>
+            </div>
+          </div>
+
+          {[
+            ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '/'],
+            ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
+            ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', "'"],
+            ['z', 'x', 'c', 'v', 'b', 'n', 'm', '.', '_', 'SPACE'],
+          ].map((row, rIdx) => (
+            <div
+              key={rIdx}
+              style={{
+                display: 'flex',
+                justifyContent: 'center',
+                gap: 5,
+              }}
+            >
+              {row.map((keyChar) => {
+                const isSpace = keyChar === 'SPACE';
+                return (
+                  <button
+                    key={keyChar}
+                    data-default-focus={keyChar === 'a' ? 'true' : undefined}
+                    onClick={() => {
+                      const ch = isSpace ? ' ' : keyChar;
+                      if (oskTarget === 'search') setBrowserSearch((v) => v + ch);
+                      else if (oskTarget === 'playlist') setNewPlaylistName((v) => v + ch);
+                      else setCustomFolderPath((v) => v + ch);
+                    }}
+                    style={{
+                      flex: isSpace ? 2.6 : 1,
+                      maxWidth: isSpace ? 180 : 62,
+                      minHeight: 36,
+                      borderRadius: 8,
+                      background: '#12121a',
+                      border: '1px solid #262636',
+                      color: '#e4e4ec',
+                      fontSize: 13,
+                      fontFamily: 'monospace',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {isSpace ? '␣ Space' : keyChar.toUpperCase()}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
     </div>
