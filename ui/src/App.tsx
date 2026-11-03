@@ -992,7 +992,7 @@ const ConsoleMainApp: React.FC = () => {
         11: 'left',
         12: 'right',
         13: 'sources',
-        14: 'sources',
+        14: 'power',
       };
       const action = map[btn];
       if (action) {
@@ -3421,7 +3421,9 @@ const ConsoleMainApp: React.FC = () => {
             ) : (
               /* 📌 PINNED IN SIMP (Generic across All Sources, Local / Steam, and Apple Music) */
               <>
-                {browserSourceFilter !== 'apple_music' && (
+                {/* When searching (`browserSearch.trim()`), place Search Results right under the search input
+                    by keeping Storage Mounts & Optical CD Drive at the top ONLY when not actively searching */}
+                {!browserSearch.trim() && browserSourceFilter !== 'apple_music' && (
                   <>
                     <div
                       style={{
@@ -3660,279 +3662,14 @@ const ConsoleMainApp: React.FC = () => {
                   </>
                 )}
 
-                {/* Playlists Section (Pinned & Hybrid) */}
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginTop: 8,
-                  }}
-                >
-                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
-                    {browserSourceFilter === 'apple_music'
-                      ? `PINNED PLAYLISTS (${filteredPlaylists.length})`
-                      : `PLAYLISTS (${filteredPlaylists.length})`}
-                  </span>
-                  {browserSourceFilter !== 'apple_music' && (
-                    <button
-                      onClick={() => setCreatingPlaylist((v) => !v)}
-                      style={{
-                        padding: '4px 10px',
-                        borderRadius: 8,
-                        background: '#12121a',
-                        border: '1px solid #262634',
-                        color: '#2aa3c4',
-                        fontSize: 11,
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      {creatingPlaylist ? 'Cancel' : '+ New Hybrid Playlist'}
-                    </button>
-                  )}
-                </div>
-
-                {creatingPlaylist && browserSourceFilter !== 'apple_music' && (
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <input
-                      type="text"
-                      data-osk-input="playlist"
-                      placeholder="Playlist name (Press A for Keyboard)..."
-                      value={newPlaylistName}
-                      onChange={(e) => setNewPlaylistName(e.target.value)}
-                      onClick={() => {
-                        setOskTarget('playlist');
-                        if (window.parent && window.parent !== window) {
-                          window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
-                        }
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleCreatePlaylist();
-                      }}
-                      style={{
-                        flex: 1,
-                        minHeight: 40,
-                        padding: '0 10px',
-                        borderRadius: 10,
-                        background: '#08080c',
-                        border: '1px solid #2e2e3c',
-                        color: '#d4d4dc',
-                        fontSize: 12,
-                      }}
-                    />
-                    <button
-                      onClick={handleCreatePlaylist}
-                      style={{
-                        minHeight: 40,
-                        padding: '0 14px',
-                        borderRadius: 10,
-                        background: '#0f222a',
-                        color: '#bfeaf5',
-                        border: '1px solid #2aa3c4',
-                        fontWeight: 800,
-                        fontSize: 12,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      Save
-                    </button>
-                  </div>
-                )}
-
-                {filteredPlaylists.map((pl) => {
-                  const isSelected =
-                    browserTarget?.kind === 'playlist' && browserTarget.id === pl.id;
-                  const isLocalPlaylist = pl.origin === 'simp_local';
-                  return (
-                    <div
-                      key={pl.id}
-                      style={{
-                        minHeight: 48,
-                        padding: '6px 10px',
-                        borderRadius: 12,
-                        background: isSelected ? '#0d1b22' : '#0a0a0e',
-                        border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
-                        color: '#d4d4dc',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        gap: 8,
-                      }}
-                    >
-                      <button
-                        onClick={() => {
-                          if (isLocalPlaylist) {
-                            setActivePlaylistId(pl.id);
-                          }
-                          setBrowserTarget({ kind: 'playlist', id: pl.id });
-                        }}
-                        style={{
-                          flex: 1,
-                          minWidth: 0,
-                          background: 'transparent',
-                          border: 'none',
-                          color: '#d4d4dc',
-                          textAlign: 'left',
-                          cursor: 'pointer',
-                          padding: '2px 0',
-                        }}
-                      >
-                        <div
-                          style={{
-                            fontSize: 13,
-                            fontWeight: 700,
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {isLocalPlaylist ? `🎵 ${pl.name}` : `📌 ${pl.name}`}
-                        </div>
-                        <div
-                          style={{ fontSize: 11, color: isLocalPlaylist ? '#2aa3c4' : '#fda4af' }}
-                        >
-                          {isLocalPlaylist
-                            ? '★ SIMP Hybrid Playlist (Local + Apple Music)'
-                            : 'Pinned Apple Music Playlist'}
-                        </div>
-                      </button>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                        <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                          {pl.track_count}
-                        </span>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeletePlaylist(pl.id, pl.name);
-                          }}
-                          title={
-                            isLocalPlaylist
-                              ? `Delete playlist "${pl.name}"`
-                              : `Unpin "${pl.name}" from SIMP`
-                          }
-                          style={{
-                            padding: '3px 7px',
-                            borderRadius: 6,
-                            background: '#1f1216',
-                            border: '1px solid #4c2228',
-                            color: '#f87171',
-                            fontSize: 11,
-                            fontWeight: 700,
-                            cursor: 'pointer',
-                          }}
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {/* Albums & Soundtracks Section */}
-                <div style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a', marginTop: 8 }}>
-                  {browserSourceFilter === 'apple_music'
-                    ? `PINNED FULL ALBUMS (${albums.length})`
-                    : `ALBUMS & SOUNDTRACKS (${albums.length})`}
-                  {browserTarget?.kind === 'mount' && selectedMountObj
-                    ? ` — ${selectedMountObj.label}`
-                    : ''}
-                </div>
-                {albums.map((alb) => {
-                  const isSelected =
-                    browserTarget?.kind === 'album' && browserTarget.id === alb.id;
-                  const isAppleAlbum = alb.id.startsWith('applemusic:album:');
-                  return (
-                    <div
-                      key={alb.id}
-                      style={{
-                        minHeight: 52,
-                        padding: '8px 12px',
-                        borderRadius: 12,
-                        background: isSelected ? '#0d1b22' : '#0a0a0e',
-                        border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
-                        color: '#d4d4dc',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        gap: 8,
-                      }}
-                    >
-                      <button
-                        onClick={() => setBrowserTarget({ kind: 'album', id: alb.id })}
-                        style={{
-                          minWidth: 0,
-                          flex: 1,
-                          background: 'transparent',
-                          border: 'none',
-                          color: '#d4d4dc',
-                          textAlign: 'left',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        <div
-                          style={{
-                            fontSize: 13,
-                            fontWeight: 700,
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {alb.title}
-                        </div>
-                        <div
-                          style={{
-                            fontSize: 12,
-                            color: '#8e8e99',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {alb.album_artist}
-                        </div>
-                      </button>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                        <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                          {alb.track_count}
-                        </span>
-                        {isAppleAlbum && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteAlbum(alb.id, alb.title);
-                            }}
-                            title={`Unpin album "${alb.title}" from SIMP`}
-                            style={{
-                              padding: '3px 7px',
-                              borderRadius: 6,
-                              background: '#1f1216',
-                              border: '1px solid #4c2228',
-                              color: '#f87171',
-                              fontSize: 11,
-                              fontWeight: 700,
-                              cursor: 'pointer',
-                            }}
-                          >
-                            ✕
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {/* Unified Live Apple Music Catalog Search Results (shown alongside or below local/pinned matches when typing in All Sources or Apple Music) */}
+                {/* Unified Live Apple Music Catalog Search Results right under the search bar when searching */}
                 {browserSearch.trim() &&
                   browserSourceFilter !== 'local' &&
                   snap?.apple_authenticated && (
                     <>
                       <div
                         style={{
-                          marginTop: 10,
-                          paddingTop: 10,
-                          borderTop: '1px solid #1e1e2a',
+                          marginTop: 4,
                           fontSize: 11,
                           fontFamily: 'monospace',
                           color: '#fda4af',
@@ -4237,6 +3974,269 @@ const ConsoleMainApp: React.FC = () => {
                       )}
                     </>
                   )}
+
+                {/* Playlists Section (Pinned & Hybrid) */}
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginTop: 8,
+                  }}
+                >
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
+                    {browserSourceFilter === 'apple_music'
+                      ? `PINNED PLAYLISTS (${filteredPlaylists.length})`
+                      : `PLAYLISTS (${filteredPlaylists.length})`}
+                  </span>
+                  {browserSourceFilter !== 'apple_music' && (
+                    <button
+                      onClick={() => setCreatingPlaylist((v) => !v)}
+                      style={{
+                        padding: '4px 10px',
+                        borderRadius: 8,
+                        background: '#12121a',
+                        border: '1px solid #262634',
+                        color: '#2aa3c4',
+                        fontSize: 11,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {creatingPlaylist ? 'Cancel' : '+ New Hybrid Playlist'}
+                    </button>
+                  )}
+                </div>
+
+                {creatingPlaylist && browserSourceFilter !== 'apple_music' && (
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input
+                      type="text"
+                      data-osk-input="playlist"
+                      placeholder="Playlist name (Press A for Keyboard)..."
+                      value={newPlaylistName}
+                      onChange={(e) => setNewPlaylistName(e.target.value)}
+                      onClick={() => {
+                        setOskTarget('playlist');
+                        if (window.parent && window.parent !== window) {
+                          window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleCreatePlaylist();
+                      }}
+                      style={{
+                        flex: 1,
+                        minHeight: 40,
+                        padding: '0 10px',
+                        borderRadius: 10,
+                        background: '#08080c',
+                        border: '1px solid #2e2e3c',
+                        color: '#d4d4dc',
+                        fontSize: 12,
+                      }}
+                    />
+                    <button
+                      onClick={handleCreatePlaylist}
+                      style={{
+                        minHeight: 40,
+                        padding: '0 14px',
+                        borderRadius: 10,
+                        background: '#0f222a',
+                        color: '#bfeaf5',
+                        border: '1px solid #2aa3c4',
+                        fontWeight: 800,
+                        fontSize: 12,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Save
+                    </button>
+                  </div>
+                )}
+
+                {filteredPlaylists.map((pl) => {
+                  const isSelected =
+                    browserTarget?.kind === 'playlist' && browserTarget.id === pl.id;
+                  const isLocalPlaylist = pl.origin === 'simp_local';
+                  return (
+                    <div
+                      key={pl.id}
+                      style={{
+                        minHeight: 48,
+                        padding: '6px 10px',
+                        borderRadius: 12,
+                        background: isSelected ? '#0d1b22' : '#0a0a0e',
+                        border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
+                        color: '#d4d4dc',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
+                    >
+                      <button
+                        onClick={() => {
+                          if (isLocalPlaylist) {
+                            setActivePlaylistId(pl.id);
+                          }
+                          setBrowserTarget({ kind: 'playlist', id: pl.id });
+                        }}
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          background: 'transparent',
+                          border: 'none',
+                          color: '#d4d4dc',
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          padding: '2px 0',
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 700,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {isLocalPlaylist ? `🎵 ${pl.name}` : `📌 ${pl.name}`}
+                        </div>
+                        <div
+                          style={{ fontSize: 11, color: isLocalPlaylist ? '#2aa3c4' : '#fda4af' }}
+                        >
+                          {isLocalPlaylist
+                            ? '★ SIMP Hybrid Playlist (Local + Apple Music)'
+                            : 'Pinned Apple Music Playlist'}
+                        </div>
+                      </button>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                        <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                          {pl.track_count}
+                        </span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeletePlaylist(pl.id, pl.name);
+                          }}
+                          title={
+                            isLocalPlaylist
+                              ? `Delete playlist "${pl.name}"`
+                              : `Unpin "${pl.name}" from SIMP`
+                          }
+                          style={{
+                            padding: '3px 7px',
+                            borderRadius: 6,
+                            background: '#1f1216',
+                            border: '1px solid #4c2228',
+                            color: '#f87171',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Albums & Soundtracks Section */}
+                <div style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a', marginTop: 8 }}>
+                  {browserSourceFilter === 'apple_music'
+                    ? `PINNED FULL ALBUMS (${albums.length})`
+                    : `ALBUMS & SOUNDTRACKS (${albums.length})`}
+                  {browserTarget?.kind === 'mount' && selectedMountObj
+                    ? ` — ${selectedMountObj.label}`
+                    : ''}
+                </div>
+                {albums.map((alb) => {
+                  const isSelected =
+                    browserTarget?.kind === 'album' && browserTarget.id === alb.id;
+                  const isAppleAlbum = alb.id.startsWith('applemusic:album:');
+                  return (
+                    <div
+                      key={alb.id}
+                      style={{
+                        minHeight: 52,
+                        padding: '8px 12px',
+                        borderRadius: 12,
+                        background: isSelected ? '#0d1b22' : '#0a0a0e',
+                        border: isSelected ? '1px solid #2aa3c4' : '1px solid #181820',
+                        color: '#d4d4dc',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
+                    >
+                      <button
+                        onClick={() => setBrowserTarget({ kind: 'album', id: alb.id })}
+                        style={{
+                          minWidth: 0,
+                          flex: 1,
+                          background: 'transparent',
+                          border: 'none',
+                          color: '#d4d4dc',
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 700,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {alb.title}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            color: '#8e8e99',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {alb.album_artist}
+                        </div>
+                      </button>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                        <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                          {alb.track_count}
+                        </span>
+                        {isAppleAlbum && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteAlbum(alb.id, alb.title);
+                            }}
+                            title={`Unpin album "${alb.title}" from SIMP`}
+                            style={{
+                              padding: '3px 7px',
+                              borderRadius: 6,
+                              background: '#1f1216',
+                              border: '1px solid #4c2228',
+                              color: '#f87171',
+                              fontSize: 11,
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </>
             )}
           </div>
@@ -5467,6 +5467,94 @@ const ConsoleMainApp: React.FC = () => {
                   Silence audio and close SIMP Console
                 </span>
               </button>
+            </div>
+
+            {/* 1b. Gamepad-Accessible OLED Screen Brightness Control (`Start` menu) */}
+            <div
+              style={{
+                padding: '10px 14px',
+                borderRadius: 12,
+                background: '#0d0d14',
+                border: '1px solid #222230',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
+                  🔅 OLED Active Luminance ({brightnessPct}%)
+                </span>
+                <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#71717a' }}>
+                  Idle Dim: {Math.round(brightnessPct * 0.5)}%
+                </span>
+              </div>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(7, 1fr)',
+                  gap: 6,
+                }}
+              >
+                <button
+                  onClick={() => setBrightnessPct((b) => Math.max(25, b - 10))}
+                  style={{
+                    minHeight: 36,
+                    borderRadius: 8,
+                    background: '#161622',
+                    border: '1px solid #2b2b3c',
+                    color: '#d4d4dc',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  −10%
+                </button>
+                {[25, 50, 75, 86, 100].map((preset) => {
+                  const active = brightnessPct === preset;
+                  return (
+                    <button
+                      key={preset}
+                      onClick={() => setBrightnessPct(preset)}
+                      style={{
+                        minHeight: 36,
+                        borderRadius: 8,
+                        background: active ? '#0f222a' : '#101018',
+                        border: active ? '1px solid #2aa3c4' : '1px solid #222230',
+                        color: active ? '#67e8f9' : '#9ca3af',
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {preset}%
+                    </button>
+                  );
+                })}
+                <button
+                  onClick={() => setBrightnessPct((b) => Math.min(100, b + 10))}
+                  style={{
+                    minHeight: 36,
+                    borderRadius: 8,
+                    background: '#161622',
+                    border: '1px solid #2b2b3c',
+                    color: '#d4d4dc',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  +10%
+                </button>
+              </div>
             </div>
 
             {/* 2. Reset Services & Shutdown Background Daemon */}

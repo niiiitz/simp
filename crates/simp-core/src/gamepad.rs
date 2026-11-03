@@ -2,10 +2,16 @@ use simp_protocol::PlaybackEvent;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
+
+/// Linux `joydev` ioctl `JSIOCGBTNMAP` (`_IOR('j', 0x34, __u16[KEY_MAX - BTN_MISC + 1])`)
+/// Queries the exact kernel `BTN_*` keycode mapped to each `js_event.number` button index.
+#[cfg(target_os = "linux")]
+const JSIOCGBTNMAP: libc::Ioctl = 0x80406a34u32 as libc::Ioctl;
 
 /// Spawns a lightweight Linux `/dev/input/js*` gamepad reader thread so standalone KDE Plasma
 /// windows (including Flatpak browsers whose sandbox hides `/dev/input`) receive controller
@@ -70,13 +76,68 @@ pub fn spawn_linux_gamepad_reader(broadcast_tx: broadcast::Sender<PlaybackEvent>
 }
 
 #[cfg(target_os = "linux")]
+fn map_button_index_to_action(number: u8, btn_map: Option<&[u16; 640]>) -> Option<&'static str> {
+    if let Some(map) = btn_map {
+        let code = map.get(number as usize).copied().unwrap_or(0);
+        match code {
+            0x130 => return Some("activate"), // BTN_SOUTH (A / Cross)
+            0x131 => return Some("back"),     // BTN_EAST (B / Circle)
+            0x133 => return Some("shuffle"),  // BTN_NORTH (X / Square)
+            0x134 => return Some("repeat"),   // BTN_WEST (Y / Triangle)
+            0x136 => return Some("l1"),       // BTN_TL (L1 / LB)
+            0x137 => return Some("r1"),       // BTN_TR (R1 / RB)
+            0x138 => return Some("l2"),       // BTN_TL2 (Digital L2)
+            0x139 => return Some("r2"),       // BTN_TR2 (Digital R2)
+            0x13a => return Some("sources"),  // BTN_SELECT (Select / View)
+            0x13b => return Some("power"),    // BTN_START (Start / Menu)
+            0x220 => return Some("up"),       // BTN_DPAD_UP
+            0x221 => return Some("down"),     // BTN_DPAD_DOWN
+            0x222 => return Some("left"),     // BTN_DPAD_LEFT
+            0x223 => return Some("right"),    // BTN_DPAD_RIGHT
+            _ => {}
+        }
+    }
+
+    // Fallback positional mapping if `JSIOCGBTNMAP` is unavailable
+    match number {
+        0 => Some("activate"), // A / Cross
+        1 => Some("back"),     // B / Circle
+        2 => Some("shuffle"),  // X / Square
+        3 => Some("repeat"),   // Y / Triangle
+        4 => Some("l1"),       // L1 / LB
+        5 => Some("r1"),       // R1 / RB
+        6 => Some("sources"),  // Select / View
+        7 => Some("power"),    // Start / Menu
+        11 => Some("left"),    // D-Pad Left
+        12 => Some("right"),   // D-Pad Right
+        13 => Some("up"),      // D-Pad Up
+        14 => Some("down"),    // D-Pad Down
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn read_joystick_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sender<PlaybackEvent>) {
     let mut file = match File::open(dev_path) {
         Ok(f) => f,
         Err(_) => return,
     };
 
-    tracing::info!("Linux gamepad reader attached to {dev_path} (js{idx})");
+    // Query exact kernel `BTN_*` button mapping (`JSIOCGBTNMAP`) so controllers that register
+    // `BTN_C` / `BTN_Z` (Bluetooth Xbox, DualSense, 8BitDo, Switch Pro) still map L1/R1/Select/Start accurately.
+    let mut raw_btn_map = [0u16; 640];
+    let has_btn_map = unsafe {
+        libc::ioctl(file.as_raw_fd(), JSIOCGBTNMAP, raw_btn_map.as_mut_ptr()) >= 0
+    };
+    let btn_map_ref = if has_btn_map {
+        Some(&raw_btn_map)
+    } else {
+        None
+    };
+
+    tracing::info!(
+        "Linux gamepad reader attached to {dev_path} (js{idx}, kernel_btn_map={has_btn_map})"
+    );
 
     let mut buf = [0u8; 8];
     let mut stick_x_dir: i8 = 0;
@@ -107,22 +168,7 @@ fn read_joystick_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sende
         if ev_type == 0x01 {
             // JS_EVENT_BUTTON (value == 1 on press)
             if value == 1 {
-                let action = match number {
-                    0 => Some("activate"), // A / Cross
-                    1 => Some("back"),     // B / Circle
-                    2 => Some("shuffle"),  // X / Square
-                    3 => Some("repeat"),   // Y / Triangle
-                    4 => Some("l1"),       // L1 / LB
-                    5 => Some("r1"),       // R1 / RB
-                    6 => Some("sources"),  // Select / View
-                    7 => Some("power"),    // Start / Menu
-                    11 => Some("left"),    // D-Pad Left (button-mapped)
-                    12 => Some("right"),   // D-Pad Right (button-mapped)
-                    13 => Some("up"),      // D-Pad Up (button-mapped)
-                    14 => Some("down"),    // D-Pad Down (button-mapped)
-                    _ => None,
-                };
-                if let Some(act) = action {
+                if let Some(act) = map_button_index_to_action(number, btn_map_ref) {
                     emit(act);
                 }
             }
@@ -240,4 +286,3 @@ fn read_joystick_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sende
         }
     }
 }
-

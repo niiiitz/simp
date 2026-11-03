@@ -14,7 +14,7 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.19';
+const SIMP_VERSION = 'v0.1.0-alpha.20';
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 
 let cachedSteamFocusable: any = null;
@@ -216,7 +216,8 @@ export type SteamPadAction =
   | 'r1'
   | 'l2'
   | 'r2'
-  | 'sources';
+  | 'sources'
+  | 'power';
 
 let isSimpRouteRegistered = false;
 let lastFocusableClickTs = 0;
@@ -232,8 +233,8 @@ function resolveDeckyRouterHook(serverApi?: any): any {
 }
 
 /**
- * Maps Valve's `EGamepadButton` (`@decky/ui` / `decky-frontend-lib` / `vgp_onbuttondown` /
- * `SteamClient.Input.RegisterForControllerInputMessages`) to canonical SIMP actions:
+ * Maps Valve's `EGamepadButton` (`@decky/ui` / `decky-frontend-lib` / `vgp_onbuttondown`)
+ * to canonical SIMP actions:
  *   1 = OK (A), 2 = CANCEL (B), 3 = SECONDARY (X), 4 = OPTIONS (Y),
  *   5 = BUMPER_LEFT (L1), 6 = BUMPER_RIGHT (R1), 7 = TRIGGER_LEFT (L2), 8 = TRIGGER_RIGHT (R2),
  *   9 = DIR_UP, 10 = DIR_DOWN, 11 = DIR_LEFT, 12 = DIR_RIGHT, 13 = SELECT, 14 = START
@@ -252,14 +253,13 @@ const E_GAMEPAD_BUTTON_MAP: Record<number, SteamPadAction> = {
   11: 'left',
   12: 'right',
   13: 'sources',
-  14: 'sources',
+  14: 'power',
 };
 
 /**
  * Multi-source deduplicated SteamOS controller listener for both the QAM drawer and `/simp-console`:
  *   1. SteamUI DOM `vgp_onbuttondown` & `vgp_ondirection` events on the active window/document (capture phase)
- *   2. `SteamClient.Input.RegisterForControllerInputMessages` (both array and positional callback shapes)
- *   3. Standard `keydown` (`ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Enter`)
+ *   2. Standard `keydown` (`ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Enter`)
  */
 function registerSteamControllerButtons(
   onAction: (action: SteamPadAction, rawEvent?: Event) => boolean | void,
@@ -281,34 +281,7 @@ function registerSteamControllerButtons(
     return consumed;
   };
 
-  // 1. SteamClient.Input.RegisterForControllerInputMessages
-  try {
-    const input = (window as any).SteamClient?.Input;
-    if (input?.RegisterForControllerInputMessages) {
-      const reg = input.RegisterForControllerInputMessages(
-        (arg0: any, arg1?: any, arg2?: any) => {
-          if (Array.isArray(arg0)) {
-            for (const msg of arg0) {
-              const isDown = Boolean(msg?.bState ?? msg?.bPressed ?? msg?.isDown);
-              const btn = Number(msg?.eButton ?? msg?.nButton ?? msg?.button);
-              if (isDown && btn) {
-                emit(E_GAMEPAD_BUTTON_MAP[btn]);
-              }
-            }
-          } else if (arg2 === true) {
-            emit(E_GAMEPAD_BUTTON_MAP[Number(arg1)]);
-          }
-        }
-      );
-      if (reg && typeof reg.unregister === 'function') {
-        disposers.push(() => reg.unregister());
-      }
-    }
-  } catch (err) {
-    console.warn('[SIMP Decky] RegisterForControllerInputMessages failed:', err);
-  }
-
-  // 2. Attach `vgp_onbuttondown`, `vgp_ondirection`, and `keydown` to both `window` and `ownerDocument`
+  // Attach `vgp_onbuttondown`, `vgp_ondirection`, and `keydown` to both `window` and `ownerDocument`
   const attachedTargets = new Set<EventTarget>();
   const onVgp = (e: any) => {
     const btn = Number(e?.detail?.button);
@@ -498,7 +471,7 @@ const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit
       onCancelButton={() => sendAction('back')}
       onSecondaryButton={() => sendAction('shuffle')}
       onOptionsButton={() => sendAction('repeat')}
-      onMenuButton={() => sendAction('sources')}
+      onMenuButton={() => sendAction('power')}
       onMoveUp={() => {
         sendAction('up');
         return true;
