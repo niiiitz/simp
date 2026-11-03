@@ -187,6 +187,13 @@ export class SimpDaemonClient {
             fn(msg.data as AppleSinkCommandPayload);
           }
           break;
+        case 'gamepad_input':
+          if (typeof window !== 'undefined' && msg.data?.action) {
+            window.dispatchEvent(
+              new CustomEvent('simp-daemon-gamepad', { detail: { action: msg.data.action } })
+            );
+          }
+          break;
       }
     }
   }

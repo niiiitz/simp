@@ -45,6 +45,10 @@ pub enum PlaybackEvent {
         position_ms: Option<u32>,
         volume: Option<f64>,
     },
+    /// Emitted by the native Linux `/dev/input/js*` gamepad reader for standalone KDE windows
+    GamepadInput {
+        action: String,
+    },
 
     // High-Frequency Event (500ms tick — suppressed when 0 WebSocket clients connected)
     ProgressTick {

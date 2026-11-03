@@ -67,6 +67,9 @@ pub async fn run_daemon() -> anyhow::Result<()> {
     // 2. Spawn native KDE Plasma / FreeDesktop StatusNotifierItem system tray hook
     simp_core::tray::spawn_system_tray(orchestrator_state.clone(), cmd_tx.clone());
 
+    // 2b. Spawn native Linux `/dev/input/js*` gamepad reader for standalone KDE windows
+    simp_core::gamepad::spawn_linux_gamepad_reader(broadcast_tx.clone());
+
     // 3. Trigger initial non-blocking background storage & Steam OST crawl
     let _ = cmd_tx.send(AudioCommand::RescanStorage);
 

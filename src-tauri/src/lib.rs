@@ -102,6 +102,7 @@ pub fn run_ui() {
         {
             if let Ok(mut child) = Command::new("flatpak")
                 .arg("run")
+                .arg("--device=all")
                 .arg(app_id)
                 .arg(format!("--app={ui_url}"))
                 .arg("--window-size=1280,800")

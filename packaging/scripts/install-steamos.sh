@@ -108,7 +108,8 @@ fi
 # 7. Optional Decky Loader plugin installation (if ~/homebrew/plugins exists)
 if [[ -d "${DECKY_PLUGINS_DIR}" ]]; then
   DECKY_TARGET="${DECKY_PLUGINS_DIR}/simp-decky"
-  if [[ -w "${DECKY_PLUGINS_DIR}" ]]; then
+  if [[ -w "${DECKY_PLUGINS_DIR}" ]] || [[ -w "${DECKY_TARGET}" ]]; then
+    rm -rf "${DECKY_TARGET}/simp-decky" "${DECKY_TARGET}/bin" "${DECKY_TARGET}/ui"
     mkdir -p "${DECKY_TARGET}/dist"
     cp "${DECKY_SRC}/plugin.json" "${DECKY_TARGET}/"
     cp "${DECKY_SRC}/package.json" "${DECKY_TARGET}/"
@@ -119,7 +120,7 @@ if [[ -d "${DECKY_PLUGINS_DIR}" ]]; then
     echo "✓ Installed Decky QAM:  ${DECKY_TARGET}"
   else
     echo "ℹ Decky directory (${DECKY_PLUGINS_DIR}) requires permissions; run:"
-    echo "   sudo cp -r \"${DECKY_SRC}\" \"${DECKY_TARGET}\" && sudo systemctl restart plugin_loader"
+    echo "   sudo rm -rf \"${DECKY_TARGET}\" && sudo cp -r \"${DECKY_SRC}\" \"${DECKY_TARGET}\" && sudo systemctl restart plugin_loader"
   fi
 fi
 

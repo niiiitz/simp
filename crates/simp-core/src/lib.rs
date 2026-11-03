@@ -1,3 +1,4 @@
+pub mod gamepad;
 pub mod library;
 pub mod mpris;
 pub mod orchestrator;

@@ -23,7 +23,7 @@ echo " Building SIMP Release Package (Daemon + UI + Decky + Scripts)"
 echo "============================================================"
 
 # Automatically synchronize release version across Cargo.toml, Cargo.lock, package.json files, decky-plugin/src/index.tsx, and README.md
-TARGET_VERSION="${1:-}"
+TARGET_VERSION="${1:-${SIMP_VERSION:-}}"
 SYNCED_VERSION="$(TARGET_VERSION="${TARGET_VERSION}" python3 - <<'PY'
 import json, os, re
 
