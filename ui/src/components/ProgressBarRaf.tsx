@@ -9,18 +9,22 @@ interface Props {
  * "Single-Shot" Hardware-Accelerated Tall Progress & Scrub Bar.
  * - Never triggers React `useState` re-renders on 500ms ticks; interpolates bar fill & thumb
  *   at 60/90fps directly in the DOM via `useRef` and `requestAnimationFrame`.
- * - Features a 54px touch hit target with a 22px visual pill bar + glowing playhead thumb
- *   for effortless fat-finger scrubbing on the Steam Deck OLED screen.
- * - Supports both tap-to-seek and continuous pointer-drag scrubbing, plus clickable `-10s` / `+10s` pills.
+ * - Includes monotonic forward anti-jitter clamping so coarse/rounded streaming `timeupdate`
+ *   anchors (e.g., Apple MusicKit v3 whole-second `currentPlaybackTime` reports or background
+ *   headless worker timer jitter) never cause the playhead to "inchworm" backward and forward.
+ * - Insets the horizontal rail (`padding: 0 14px`) so the 26px playhead thumb (`±13px` radius)
+ *   stays cleanly inside the column bounds at `0%` and `100%` without clipping or overlapping adjacent art.
  */
 export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
   const trackContainerRef = useRef<HTMLDivElement | null>(null);
+  const railRef = useRef<HTMLDivElement | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
   const timeTextRef = useRef<HTMLSpanElement | null>(null);
 
   const anchorPosRef = useRef(0);
   const anchorPerfRef = useRef(performance.now());
+  const lastRenderedMsRef = useRef(0);
   const isPlayingRef = useRef(false);
   const isDraggingRef = useRef(false);
   const dragPreviewMsRef = useRef(0);
@@ -28,9 +32,47 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
 
   useEffect(() => {
     const unsub = defaultSimpClient.subscribeProgress((posMs, perfNow, playing) => {
-      anchorPosRef.current = posMs;
-      anchorPerfRef.current = perfNow;
+      const wasPlaying = isPlayingRef.current;
       isPlayingRef.current = playing;
+
+      if (!playing) {
+        anchorPosRef.current = posMs;
+        anchorPerfRef.current = perfNow;
+        lastRenderedMsRef.current = posMs;
+        return;
+      }
+
+      // Compute our current smooth rAF-extrapolated playhead position
+      const predictedMs = wasPlaying
+        ? anchorPosRef.current + (perfNow - anchorPerfRef.current)
+        : anchorPosRef.current;
+      const driftMs = posMs - predictedMs;
+
+      // Track restart or explicit backward seek (> 2.2s backward jump, or reset near 0:00)
+      if (posMs <= 400 && predictedMs > 1200) {
+        anchorPosRef.current = posMs;
+        anchorPerfRef.current = perfNow;
+        lastRenderedMsRef.current = posMs;
+        return;
+      }
+      if (driftMs < -2200 || driftMs > 2200) {
+        // Explicit seek or major buffer resync: snap immediately
+        anchorPosRef.current = posMs;
+        anchorPerfRef.current = perfNow;
+        lastRenderedMsRef.current = posMs;
+        return;
+      }
+
+      // Normal streaming / playback tick (`|driftMs| <= 2200ms`):
+      // Apple MusicKit v3 `playbackTimeDidChange` often reports coarse/truncated timestamps or
+      // fires from a throttled headless Chromium worker, arriving 200ms–1100ms behind or ahead
+      // of our smooth rAF clock. Never allow a normal tick to pull the playhead backward!
+      const nextAnchorMs = Math.max(
+        lastRenderedMsRef.current,
+        predictedMs + driftMs * 0.25
+      );
+      anchorPosRef.current = nextAnchorMs;
+      anchorPerfRef.current = perfNow;
     });
 
     let rafId = 0;
@@ -38,8 +80,14 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
       let currentMs = anchorPosRef.current;
       if (isDraggingRef.current) {
         currentMs = dragPreviewMsRef.current;
+        lastRenderedMsRef.current = currentMs;
       } else if (isPlayingRef.current) {
-        currentMs += performance.now() - anchorPerfRef.current;
+        const rawMs = anchorPosRef.current + (performance.now() - anchorPerfRef.current);
+        // Monotonic forward guard during active playback
+        currentMs = Math.max(lastRenderedMsRef.current, rawMs);
+        lastRenderedMsRef.current = currentMs;
+      } else {
+        lastRenderedMsRef.current = currentMs;
       }
 
       const pct = durationMs > 0 ? Math.max(0, Math.min((currentMs / durationMs) * 100, 100)) : 0;
@@ -64,7 +112,7 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
   }, [durationMs]);
 
   const computeMsFromPointer = (clientX: number): number => {
-    const el = trackContainerRef.current;
+    const el = railRef.current || trackContainerRef.current;
     if (!el || durationMs <= 0) return 0;
     const rect = el.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
@@ -78,6 +126,7 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
     const targetMs = computeMsFromPointer(e.clientX);
     dragPreviewMsRef.current = targetMs;
     anchorPosRef.current = targetMs;
+    lastRenderedMsRef.current = targetMs;
     anchorPerfRef.current = performance.now();
     defaultSimpClient.seek(targetMs);
     lastDragSeekSentRef.current = performance.now();
@@ -92,6 +141,7 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
     const now = performance.now();
     if (now - lastDragSeekSentRef.current > 120) {
       anchorPosRef.current = targetMs;
+      lastRenderedMsRef.current = targetMs;
       anchorPerfRef.current = now;
       defaultSimpClient.seek(targetMs);
       lastDragSeekSentRef.current = now;
@@ -107,13 +157,14 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
     if (durationMs > 0) {
       const finalMs = computeMsFromPointer(e.clientX);
       anchorPosRef.current = finalMs;
+      lastRenderedMsRef.current = finalMs;
       anchorPerfRef.current = performance.now();
       defaultSimpClient.seek(finalMs);
     }
   };
 
   return (
-    <div style={{ userSelect: 'none', touchAction: 'none' }}>
+    <div style={{ userSelect: 'none', touchAction: 'none', padding: '0 14px', boxSizing: 'border-box' }}>
       {/* 54px Tall Fat-Finger Touch Hit Zone */}
       <div
         ref={trackContainerRef}
@@ -129,47 +180,58 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
           position: 'relative',
         }}
       >
-        {/* 22px Tall Visual Pill Track */}
         <div
+          ref={railRef}
           style={{
             width: '100%',
             height: 22,
-            background: '#0d0d12',
-            borderRadius: 999,
-            overflow: 'hidden',
-            border: '1px solid #1e1e28',
             position: 'relative',
+            display: 'flex',
+            alignItems: 'center',
           }}
         >
+          {/* 22px Tall Visual Pill Track */}
           <div
-            ref={barRef}
             style={{
               width: '100%',
-              height: '100%',
-              background: 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
-              transformOrigin: 'left center',
-              transform: 'scaleX(0)',
+              height: 22,
+              background: '#0d0d12',
+              borderRadius: 999,
+              overflow: 'hidden',
+              border: '1px solid #1e1e28',
+              position: 'relative',
+            }}
+          >
+            <div
+              ref={barRef}
+              style={{
+                width: '100%',
+                height: '100%',
+                background: 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
+                transformOrigin: 'left center',
+                transform: 'scaleX(0)',
+              }}
+            />
+          </div>
+
+          {/* OLED-Safe Low-Luminance Playhead Thumb */}
+          <div
+            ref={thumbRef}
+            style={{
+              position: 'absolute',
+              left: '0%',
+              top: '50%',
+              width: 26,
+              height: 26,
+              borderRadius: 999,
+              background: '#c8c8d2',
+              border: '3px solid #2aa3c4',
+              transform: 'translate(-50%, -50%)',
+              boxShadow: '0 1px 6px rgba(0, 0, 0, 0.7)',
+              pointerEvents: 'none',
             }}
           />
         </div>
-
-        {/* OLED-Safe Low-Luminance Playhead Thumb */}
-        <div
-          ref={thumbRef}
-          style={{
-            position: 'absolute',
-            left: '0%',
-            top: '50%',
-            width: 26,
-            height: 26,
-            borderRadius: 999,
-            background: '#c8c8d2',
-            border: '3px solid #2aa3c4',
-            transform: 'translate(-50%, -50%)',
-            boxShadow: '0 1px 6px rgba(0, 0, 0, 0.7)',
-            pointerEvents: 'none',
-          }}
-        />
       </div>
 
       {/* Clean Elapsed & Total Timestamps */}
