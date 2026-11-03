@@ -5,7 +5,7 @@
 
   **A controller-first, OLED-safe, hybrid local/cloud audio player, primarily targeted for SteamOS, Bazzite, and `gamescope` consoles.**
 
-  [![Status: v0.1.13-alpha](https://img.shields.io/badge/status-v0.1.3--alpha-ff6a00?style=flat-square)](#)
+  [![Status: v0.1.0-alpha.15](https://img.shields.io/badge/status-v0.1.0--alpha.15-ff6a00?style=flat-square)](#)
   [![Target: SteamOS / gamescope](https://img.shields.io/badge/target-SteamOS%20%7C%20Deck%20OLED%20%7C%20Steam%20Machine-000000?style=flat-square)](#)
   [![Daemon: Rust + Tokio + Rodio](https://img.shields.io/badge/daemon-Rust%20%2B%20Tokio%20%2B%20Rodio-dea584?style=flat-square)](#)
   [![Frontend: React + Decky QAM + MusicKit v3](https://img.shields.io/badge/UI-React%20%2B%20Decky%20QAM%20%2B%20MusicKit%20v3-2aa3c4?style=flat-square)](#)
@@ -117,12 +117,12 @@ flowchart LR
 
 | Control | `🎵 Player` View (`L1`) | `📚 Library & Queue` View (`R1`) / Modals |
 | :--- | :--- | :--- |
-| **`A` Button / `Enter`** | Toggle Play / Pause (`⏯`) | Activate focused item, play track, or toggle button |
-| **`B` Button / `Esc`** | Close active modal/popover or exit fullscreen console | Return to `🎵 Player` view or close active modal |
+| **`A` Button / `Enter`** | Toggle Play / Pause (`⏯`) | Activate focused item, play track, or open On-Screen Keyboard on text inputs |
+| **`B` Button / `Esc`** | Close active modal/popover or exit fullscreen console | Close On-Screen Keyboard / modal, or return to `🎵 Player` view |
 | **`X` Button** | Toggle Queue Shuffle (`🔀`) | Play selected Album / Playlist / CD in Shuffle mode |
 | **`Y` Button** | Cycle Repeat Mode (`Off` → `Queue` → `Track`) | Cycle Repeat Mode |
 | **`D-Pad Left / Right`** | Previous (`⏮`) / Next (`⏭`) Track | 2D Spatial Focus Navigation across columns |
-| **`D-Pad Up / Down`** | Master Volume `+5%` / `-5%` | 2D Spatial Focus Navigation up/down lists |
+| **`D-Pad Up / Down`** | Master Volume `+5%` / `-5%` | 2D Spatial Focus Navigation up/down lists (1 row per click) |
 | **`L1` / `R1` Bumpers** | Switch to `🎵 Player` (`L1`) / `📚 Library & Queue` (`R1`) | Switch between `🎵 Player` (`L1`) and `📚 Library & Queue` (`R1`) |
 | **`L2` / `R2` Triggers** | Seek `-10s` (`⏪`) / `+10s` (`⏩`) | Seek `-10s` (`⏪`) / `+10s` (`⏩`) |
 | **`Select` / `View`** | Open **Sources, Optical CD & Auth** Modal | Open/Close **Sources, Optical CD & Auth** Modal |
@@ -130,7 +130,31 @@ flowchart LR
 
 ---
 
-## 5. Repository Layout & Developer Quick Start
+## 5. Installation & First-Time Setup (SteamOS / Bazzite)
+
+Download `simp-steamos-userland-x86_64.tar.gz` from the [latest GitHub Release](https://github.com/niiiitz/simp/releases), then run the following 4 commands in a terminal (or over SSH):
+
+```bash
+tar -xzf simp-steamos-userland-x86_64.tar.gz -C /tmp
+cd /tmp/simp-steamos-userland
+./install-steamos.sh
+sudo cp -r "/tmp/simp-steamos-userland/simp-decky" "/home/deck/homebrew/plugins/simp-decky" && sudo systemctl restart plugin_loader
+```
+
+> **Note:** `./install-steamos.sh` installs the userland `simp` binary (`~/.local/share/simp/bin/simp`), Web UI (`~/.local/share/simp/ui`), desktop launcher, and `systemd --user` service (`simp.service`) without disabling `steamos-readonly`. Because Decky Loader owns `/home/deck/homebrew/plugins` as `root`, the final `sudo cp -r ... && sudo systemctl restart plugin_loader` command deploys the `simp-decky` QAM plugin and reloads Decky.
+
+### Apple Music Pairing Guidance & Known `steamwebhelper` Limitation
+
+> [!IMPORTANT]
+> **Pair Apple Music in Desktop Mode or via a LAN Browser (`http://<device-ip>:18888/pair`):**
+> Initial Apple Music authorization is best performed in **SteamOS Desktop Mode** (opening `http://127.0.0.1:18888/pair` in Firefox/Chrome/Brave) or by scanning the **Companion QR Code** on a phone/PC on the same network.
+>
+> **Known Issue ([#7](https://github.com/niiiitz/simp/issues/7) — `steamwebhelper` Game Mode OAuth Consent Popup):**
+> When attempting to sign into Apple Music directly inside the Game Mode `steamwebhelper` overlay, Apple's initial sign-in window opens and accepts credentials/2FA, but `steamwebhelper` fails to transition to or open the subsequent Apple Music data-access consent screen ("Allow access to your Apple Music account"). Because the user cannot click *Continue/Agree* on that second step, backing out of the overlay results in an invalid/incomplete OAuth error and the app remains signed out. Completing the one-time pairing in **Desktop Mode** (or via the LAN `/pair` portal) stores the `Music-User-Token` in the daemon (`~/.config/simp/settings.vdf`), after which playback and browsing work natively inside Game Mode.
+
+---
+
+## 6. Repository Layout & Developer Quick Start
 
 ```text
 simp/
@@ -160,7 +184,7 @@ npm run build:ui && npm run build:decky && cargo test --workspace
 
 ---
 
-## 6. License & Trademark Disclaimer
+## 7. License & Trademark Disclaimer
 
 
 > **Trademark & Non-Affiliation Notice:**
