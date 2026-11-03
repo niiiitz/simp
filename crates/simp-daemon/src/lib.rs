@@ -19,7 +19,10 @@ pub async fn run_daemon() -> anyhow::Result<()> {
         )
         .try_init();
 
-    tracing::info!("Starting SIMP (Simple Integrated Media Player) headless daemon...");
+    tracing::info!(
+        "Starting SIMP v{} (Simple Integrated Media Player) headless daemon...",
+        env!("CARGO_PKG_VERSION")
+    );
 
     let settings = Arc::new(Mutex::new(load_or_create_settings()));
     let db_path = library_db_path();

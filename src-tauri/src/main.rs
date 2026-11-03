@@ -8,6 +8,11 @@ static GLOBAL: MiMalloc = MiMalloc;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("simp v{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     // Mode 1: Headless systemd Daemon (`simp --daemon`)
     // Runs on a tight 2-thread Tokio runtime without initializing GTK or WebKitGTK.
     if args.iter().any(|arg| arg == "--daemon" || arg == "-d") {

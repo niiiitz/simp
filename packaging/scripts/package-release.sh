@@ -22,7 +22,7 @@ echo "============================================================"
 echo " Building SIMP Release Package (Daemon + UI + Decky + Scripts)"
 echo "============================================================"
 
-# Automatically synchronize release version across package.json, decky-plugin/src/index.tsx, and README.md
+# Automatically synchronize release version across Cargo.toml, Cargo.lock, package.json files, decky-plugin/src/index.tsx, and README.md
 TARGET_VERSION="${1:-}"
 SYNCED_VERSION="$(TARGET_VERSION="${TARGET_VERSION}" python3 - <<'PY'
 import json, os, re
@@ -34,13 +34,48 @@ with open(pkg_path, "r", encoding="utf-8") as f:
 raw_ver = os.environ.get("TARGET_VERSION", "").strip().lstrip("v")
 if not raw_ver:
     raw_ver = pkg.get("version", "0.1.0-alpha").lstrip("v")
-else:
-    pkg["version"] = raw_ver
-    with open(pkg_path, "w", encoding="utf-8") as f:
-        json.dump(pkg, f, indent=2)
-        f.write("\n")
 
-# 1. Sync decky-plugin/src/index.tsx SIMP_VERSION constant
+# 1. Sync all workspace package.json files
+for p_path in ["decky-plugin/package.json", "package.json", "ui/package.json", "packages/simp-client/package.json"]:
+    if os.path.isfile(p_path):
+        with open(p_path, "r", encoding="utf-8") as f:
+            p_data = json.load(f)
+        if p_data.get("version") != raw_ver:
+            p_data["version"] = raw_ver
+            with open(p_path, "w", encoding="utf-8") as f:
+                json.dump(p_data, f, indent=2)
+                f.write("\n")
+
+# 2. Sync root Cargo.toml [workspace.package] version
+cargo_toml = "Cargo.toml"
+if os.path.isfile(cargo_toml):
+    with open(cargo_toml, "r", encoding="utf-8") as f:
+        ct_src = f.read()
+    ct_next = re.sub(
+        r'(\[workspace\.package\]\s*\nversion\s*=\s*)"[^"]+"',
+        rf'\1"{raw_ver}"',
+        ct_src,
+        count=1,
+    )
+    if ct_next != ct_src:
+        with open(cargo_toml, "w", encoding="utf-8") as f:
+            f.write(ct_next)
+
+# 3. Sync workspace crate versions in Cargo.lock so offline builds stay lock-consistent
+cargo_lock = "Cargo.lock"
+if os.path.isfile(cargo_lock):
+    with open(cargo_lock, "r", encoding="utf-8") as f:
+        cl_src = f.read()
+    cl_next = re.sub(
+        r'(name = "(?:simp|simp-core|simp-daemon|simp-protocol)"\nversion = )"[^"]+"',
+        rf'\1"{raw_ver}"',
+        cl_src,
+    )
+    if cl_next != cl_src:
+        with open(cargo_lock, "w", encoding="utf-8") as f:
+            f.write(cl_next)
+
+# 4. Sync decky-plugin/src/index.tsx SIMP_VERSION constant
 idx_path = "decky-plugin/src/index.tsx"
 if os.path.isfile(idx_path):
     with open(idx_path, "r", encoding="utf-8") as f:
@@ -54,7 +89,7 @@ if os.path.isfile(idx_path):
         with open(idx_path, "w", encoding="utf-8") as f:
             f.write(idx_next)
 
-# 2. Sync README.md Status shields.io badge
+# 5. Sync README.md Status shields.io badge
 readme_path = "README.md"
 if os.path.isfile(readme_path):
     with open(readme_path, "r", encoding="utf-8") as f:
@@ -72,7 +107,7 @@ if os.path.isfile(readme_path):
 print(f"v{raw_ver}", end="")
 PY
 )"
-echo "0/4 Synchronized version ${SYNCED_VERSION} across decky-plugin/package.json, decky-plugin/src/index.tsx & README.md"
+echo "0/4 Synchronized version ${SYNCED_VERSION} across Cargo.toml, package.json, decky-plugin & README.md"
 
 echo "1/4 Building production React UI (ui/dist)..."
 npm run build:ui
