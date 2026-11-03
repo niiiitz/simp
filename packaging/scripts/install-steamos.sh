@@ -75,7 +75,14 @@ rm -rf "${UI_DEST:?}/"*
 cp -r "${UI_SRC}/"* "${UI_DEST}/"
 echo "✓ Installed Web UI:     ${UI_DEST}"
 
-# 5. Install Desktop Launcher (.desktop) with expanded user paths
+# 5. Install FreeDesktop / KDE Plasma Icons & Desktop Launcher (.desktop)
+ICONS_DIR="${HOME}/.local/share/icons/hicolor/256x256/apps"
+mkdir -p "${ICONS_DIR}" "${HOME}/.local/share/icons"
+if [[ -f "${UI_DEST}/simp-icon-dark.png" ]]; then
+  cp "${UI_DEST}/simp-icon-dark.png" "${ICONS_DIR}/org.simp.player.png"
+  cp "${UI_DEST}/simp-icon-dark.png" "${HOME}/.local/share/icons/org.simp.player.png"
+fi
+
 DESKTOP_DEST="${APPLICATIONS_DIR}/org.simp.player.desktop"
 sed \
   -e "s|__SIMP_BIN__|${BIN_DEST}/simp|g" \
@@ -101,7 +108,8 @@ fi
 # 7. Optional Decky Loader plugin installation (if ~/homebrew/plugins exists)
 if [[ -d "${DECKY_PLUGINS_DIR}" ]]; then
   DECKY_TARGET="${DECKY_PLUGINS_DIR}/simp-decky"
-  if [[ -w "${DECKY_PLUGINS_DIR}" ]]; then
+  if [[ -w "${DECKY_PLUGINS_DIR}" ]] || [[ -w "${DECKY_TARGET}" ]]; then
+    rm -rf "${DECKY_TARGET}/simp-decky" "${DECKY_TARGET}/bin" "${DECKY_TARGET}/ui"
     mkdir -p "${DECKY_TARGET}/dist"
     cp "${DECKY_SRC}/plugin.json" "${DECKY_TARGET}/"
     cp "${DECKY_SRC}/package.json" "${DECKY_TARGET}/"
@@ -112,7 +120,7 @@ if [[ -d "${DECKY_PLUGINS_DIR}" ]]; then
     echo "✓ Installed Decky QAM:  ${DECKY_TARGET}"
   else
     echo "ℹ Decky directory (${DECKY_PLUGINS_DIR}) requires permissions; run:"
-    echo "   sudo cp -r \"${DECKY_SRC}\" \"${DECKY_TARGET}\" && sudo systemctl restart plugin_loader"
+    echo "   sudo rm -rf \"${DECKY_TARGET}\" && sudo cp -r \"${DECKY_SRC}\" \"${DECKY_TARGET}\" && sudo systemctl restart plugin_loader"
   fi
 fi
 

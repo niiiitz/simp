@@ -19,7 +19,10 @@ pub async fn run_daemon() -> anyhow::Result<()> {
         )
         .try_init();
 
-    tracing::info!("Starting SIMP (Simple Integrated Media Player) headless daemon...");
+    tracing::info!(
+        "Starting SIMP v{} (Simple Integrated Media Player) headless daemon...",
+        env!("CARGO_PKG_VERSION")
+    );
 
     let settings = Arc::new(Mutex::new(load_or_create_settings()));
     let db_path = library_db_path();
@@ -61,7 +64,13 @@ pub async fn run_daemon() -> anyhow::Result<()> {
 
     let orchestrator_state = state_ready_rx.await?;
 
-    // 2. Trigger initial non-blocking background storage & Steam OST crawl
+    // 2. Spawn native KDE Plasma / FreeDesktop StatusNotifierItem system tray hook
+    simp_core::tray::spawn_system_tray(orchestrator_state.clone(), cmd_tx.clone());
+
+    // 2b. Spawn native Linux `/dev/input/js*` gamepad reader for standalone KDE windows
+    simp_core::gamepad::spawn_linux_gamepad_reader(broadcast_tx.clone());
+
+    // 3. Trigger initial non-blocking background storage & Steam OST crawl
     let _ = cmd_tx.send(AudioCommand::RescanStorage);
 
     // 3. Run the local loopback WebSocket + Artwork HTTP server on 127.0.0.1:18888

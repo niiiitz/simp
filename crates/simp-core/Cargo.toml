@@ -26,3 +26,7 @@ base64.workspace = true
 libc.workspace = true
 sha1.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus.workspace = true
+dbus-crossroads.workspace = true
+

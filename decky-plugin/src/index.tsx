@@ -14,7 +14,7 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.17';
+const SIMP_VERSION = 'v0.1.0-alpha.19';
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 
 let cachedSteamFocusable: any = null;
@@ -535,7 +535,7 @@ const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit
       >
         <iframe
           ref={iframeRef}
-          src="http://127.0.0.1:18888"
+          src={`http://127.0.0.1:18888/?v=${encodeURIComponent(SIMP_VERSION)}`}
           title="SIMP Console"
           allow="autoplay; encrypted-media; clipboard-write"
           style={{

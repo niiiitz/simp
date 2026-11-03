@@ -1,8 +1,10 @@
+pub mod gamepad;
 pub mod library;
 pub mod mpris;
 pub mod orchestrator;
 pub mod sinks;
 pub mod time_tracker;
+pub mod tray;
 
 pub use orchestrator::AudioOrchestrator;
 pub use time_tracker::LocalTimeTracker;

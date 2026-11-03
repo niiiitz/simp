@@ -786,6 +786,9 @@ const ConsoleMainApp: React.FC = () => {
   );
 
   // 7. Keyboard shortcuts + Native Decky Fullscreen Route `postMessage` Gamepad Bridge
+  const gamepadActionRef = useRef<(action: string) => void>(() => {});
+  const lastWebGamepadTsRef = useRef<number>(0);
+
   useEffect(() => {
     const lastActionTs: Record<string, number> = {};
     const handleGamepadAction = (action: string) => {
@@ -912,6 +915,11 @@ const ConsoleMainApp: React.FC = () => {
           setPowerModalOpen(false);
           setSourceModalOpen((v) => !v);
           break;
+        case 'power':
+          setOskTarget(null);
+          setSourceModalOpen(false);
+          setPowerModalOpen((v) => !v);
+          break;
         case 'vol_up':
           applyVolume(currentVolume + 0.05);
           break;
@@ -920,6 +928,8 @@ const ConsoleMainApp: React.FC = () => {
           break;
       }
     };
+
+    gamepadActionRef.current = handleGamepadAction;
 
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -991,15 +1001,30 @@ const ConsoleMainApp: React.FC = () => {
       }
     };
 
+    // Native Linux `/dev/input/js*` daemon gamepad fallback for standalone KDE windows
+    const onDaemonGamepad = (e: any) => {
+      const action = e?.detail?.action;
+      if (!action) return;
+      if (window.parent !== window) return;
+      if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+      const now = performance.now();
+      if (now - lastBridgeMsgTsRef.current < 220 || now - lastWebGamepadTsRef.current < 220) {
+        return;
+      }
+      handleGamepadAction(action);
+    };
+
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('message', onMessage);
     window.addEventListener('vgp_onbuttondown', onVgpEvent as EventListener, true);
     window.addEventListener('vgp_ondirection', onVgpEvent as EventListener, true);
+    window.addEventListener('simp-daemon-gamepad', onDaemonGamepad as EventListener);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('message', onMessage);
       window.removeEventListener('vgp_onbuttondown', onVgpEvent as EventListener, true);
       window.removeEventListener('vgp_ondirection', onVgpEvent as EventListener, true);
+      window.removeEventListener('simp-daemon-gamepad', onDaemonGamepad as EventListener);
     };
   }, [
     moveSpatialFocus,
@@ -1025,6 +1050,7 @@ const ConsoleMainApp: React.FC = () => {
   useEffect(() => {
     const prevButtonsByPad = new Map<number, boolean[]>();
     const prevAxisDirByPad = new Map<number, string | null>();
+    const prevHatDirByPad = new Map<number, string | null>();
 
     const poll = window.setInterval(() => {
       const bridgeActive = performance.now() - lastBridgeMsgTsRef.current < 3500;
@@ -1039,6 +1065,7 @@ const ConsoleMainApp: React.FC = () => {
         if (isSleeping && anyButtonPressed) {
           setIsSleeping(false);
           setIsDimmed(false);
+          lastWebGamepadTsRef.current = performance.now();
           prevButtonsByPad.set(
             pad.index,
             pad.buttons.map((b) => b.pressed)
@@ -1046,97 +1073,41 @@ const ConsoleMainApp: React.FC = () => {
           continue;
         }
 
-        const isDirectTransportView =
-          view === 'lock' && !sourceModalOpen && !powerModalOpen && !oskTarget;
+        const fireWebPad = (action: string) => {
+          lastWebGamepadTsRef.current = performance.now();
+          gamepadActionRef.current(action);
+        };
 
         if (!bridgeActive) {
-          if (pressed(0)) {
-            // A Button: In Player view, toggle Play/Pause; in Browser/Modal view, activate focused element
-            setIsDimmed(false);
-            if (isDirectTransportView) {
-              defaultSimpClient.togglePlayPause();
-            } else {
-              const active =
-                (document.querySelector<HTMLElement>('[data-simp-active-focus="true"]') as HTMLElement | null) ||
-                (document.activeElement as HTMLElement | null);
-              if (active && active.tagName === 'INPUT' && (active as HTMLInputElement).type === 'text') {
-                const targetKind =
-                  (active.dataset.oskInput as 'search' | 'folder' | 'playlist' | undefined) || 'search';
-                setOskTarget(targetKind);
-                if (window.parent && window.parent !== window) {
-                  window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
-                }
-                window.setTimeout(() => {
-                  const firstKey = document.querySelector<HTMLElement>(
-                    '[data-osk-root="true"] button[data-default-focus="true"], [data-osk-root="true"] button'
-                  );
-                  if (firstKey) applyFocusMarker(firstKey);
-                }, 40);
-              } else if (active && active !== document.body && typeof active.click === 'function') {
-                active.click();
-              } else {
-                defaultSimpClient.togglePlayPause();
-              }
-            }
+          if (pressed(0)) fireWebPad('activate'); // A
+          if (pressed(1)) fireWebPad('back'); // B
+          if (pressed(2)) fireWebPad('shuffle'); // X
+          if (pressed(3)) fireWebPad('repeat'); // Y
+          if (pressed(4)) fireWebPad('l1'); // L1
+          if (pressed(5)) fireWebPad('r1'); // R1
+          if (pressed(6)) fireWebPad(pad.mapping === 'standard' ? 'l2' : 'sources'); // L2 or raw Linux Select
+          if (pressed(7)) fireWebPad(pad.mapping === 'standard' ? 'r2' : 'power'); // R2 or raw Linux Start
+          if (pressed(8)) fireWebPad('sources'); // Select
+          if (pressed(9)) fireWebPad('power'); // Start
+          if (pressed(12)) fireWebPad('up'); // D-Up
+          if (pressed(13)) fireWebPad('down'); // D-Down
+          if (pressed(14)) fireWebPad('left'); // D-Left
+          if (pressed(15)) fireWebPad('right'); // D-Right
+
+          // Linux raw `joydev` D-Pad Hat Axes (`ABS_HAT0X` = axes[6], `ABS_HAT0Y` = axes[7])
+          const hx = pad.axes[6] ?? 0;
+          const hy = pad.axes[7] ?? 0;
+          let hatDir: 'up' | 'down' | 'left' | 'right' | null = null;
+          if (hy < -0.5) hatDir = 'up';
+          else if (hy > 0.5) hatDir = 'down';
+          else if (hx < -0.5) hatDir = 'left';
+          else if (hx > 0.5) hatDir = 'right';
+
+          const prevHat = prevHatDirByPad.get(pad.index) || null;
+          if (hatDir && hatDir !== prevHat) {
+            fireWebPad(hatDir);
           }
-          if (pressed(1)) {
-            // B Button: Close OSK, popover/modal, or return to Player view
-            setIsDimmed(false);
-            if (oskTarget) {
-              const prevInputSelector = `[data-osk-input="${oskTarget}"]`;
-              setOskTarget(null);
-              window.setTimeout(() => {
-                const inp = document.querySelector<HTMLElement>(prevInputSelector);
-                if (inp) applyFocusMarker(inp);
-              }, 30);
-            } else if (volumePopoverOpen || brightnessPopoverOpen) {
-              setVolumePopoverOpen(false);
-              setBrightnessPopoverOpen(false);
-            } else if (confirmHardReset) {
-              setConfirmHardReset(false);
-            } else if (powerModalOpen) {
-              setPowerModalOpen(false);
-            } else if (sourceModalOpen) {
-              setSourceModalOpen(false);
-            } else if (view === 'browser') {
-              setView('lock');
-            }
-          }
-          if (pressed(2)) defaultSimpClient.setShuffle(!snap?.shuffle); // X
-          if (pressed(3)) defaultSimpClient.cycleRepeat(); // Y
-          if (pressed(4)) {
-            setOskTarget(null);
-            setView('lock'); // L1
-          }
-          if (pressed(5)) setView('browser'); // R1
-          if (pressed(6)) defaultSimpClient.seekRelative(-10_000); // L2 (Rewind 10s)
-          if (pressed(7)) defaultSimpClient.seekRelative(10_000); // R2 (Fast-Forward 10s)
-          if (pressed(8)) {
-            setOskTarget(null);
-            setPowerModalOpen(false);
-            setSourceModalOpen((v) => !v); // Select -> Sources
-          }
-          if (pressed(9)) {
-            setOskTarget(null);
-            setSourceModalOpen(false);
-            setPowerModalOpen((v) => !v); // Start -> Power Menu
-          }
-          if (pressed(12)) {
-            if (isDirectTransportView) applyVolume(currentVolume + 0.05);
-            else moveSpatialFocus('up'); // D-Up
-          }
-          if (pressed(13)) {
-            if (isDirectTransportView) applyVolume(currentVolume - 0.05);
-            else moveSpatialFocus('down'); // D-Down
-          }
-          if (pressed(14)) {
-            if (isDirectTransportView) defaultSimpClient.previous();
-            else moveSpatialFocus('left'); // D-Left
-          }
-          if (pressed(15)) {
-            if (isDirectTransportView) defaultSimpClient.next();
-            else moveSpatialFocus('right'); // D-Right
-          }
+          prevHatDirByPad.set(pad.index, hatDir);
         }
 
         // Left Stick 2D Spatial Navigation (with edge-trigger debounce)
@@ -1150,20 +1121,14 @@ const ConsoleMainApp: React.FC = () => {
 
         const prevDir = prevAxisDirByPad.get(pad.index) || null;
         if (stickDir && stickDir !== prevDir) {
-          if (isDirectTransportView) {
-            if (stickDir === 'left') defaultSimpClient.previous();
-            else if (stickDir === 'right') defaultSimpClient.next();
-            else if (stickDir === 'up') applyVolume(currentVolume + 0.05);
-            else if (stickDir === 'down') applyVolume(currentVolume - 0.05);
-          } else {
-            moveSpatialFocus(stickDir);
-          }
+          fireWebPad(stickDir);
         }
         prevAxisDirByPad.set(pad.index, stickDir);
 
         // Right Stick Y-Axis Volume Adjustment
-        const ry = pad.axes[3] ?? 0;
+        const ry = (pad.mapping === 'standard' ? pad.axes[3] : pad.axes[4] ?? pad.axes[3]) ?? 0;
         if (Math.abs(ry) > 0.6) {
+          lastWebGamepadTsRef.current = performance.now();
           applyVolume(currentVolume + (ry < 0 ? 0.02 : -0.02));
         }
 
@@ -1175,21 +1140,7 @@ const ConsoleMainApp: React.FC = () => {
     }, 50);
 
     return () => window.clearInterval(poll);
-  }, [
-    snap?.shuffle,
-    applyVolume,
-    currentVolume,
-    moveSpatialFocus,
-    applyFocusMarker,
-    oskTarget,
-    sourceModalOpen,
-    powerModalOpen,
-    volumePopoverOpen,
-    brightnessPopoverOpen,
-    confirmHardReset,
-    isSleeping,
-    view,
-  ]);
+  }, [applyVolume, currentVolume, isSleeping]);
 
   // 8. Playlist & Custom Folder Handlers
   const handleCreatePlaylist = async () => {
@@ -5438,8 +5389,8 @@ const ConsoleMainApp: React.FC = () => {
               </button>
             </div>
 
-            {/* 1. Sleep Screen & Pause/Dismiss Quick Actions */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            {/* 1. Sleep Screen, Minimize to Tray/Background & Pause/Dismiss Quick Actions */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
               <button
                 data-default-focus="true"
                 onClick={() => {
@@ -5448,7 +5399,7 @@ const ConsoleMainApp: React.FC = () => {
                 }}
                 style={{
                   minHeight: 62,
-                  padding: '10px 14px',
+                  padding: '10px 12px',
                   borderRadius: 12,
                   background: '#0d1b22',
                   border: '1px solid #2aa3c4',
@@ -5462,7 +5413,32 @@ const ConsoleMainApp: React.FC = () => {
               >
                 <span style={{ fontSize: 13, fontWeight: 800 }}>🌙 Sleep Screen</span>
                 <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                  True-black OLED screen • Wakes on any tap or button
+                  True-black OLED screen • Wakes on any button
+                </span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setPowerModalOpen(false);
+                  dismissConsole();
+                }}
+                style={{
+                  minHeight: 62,
+                  padding: '10px 12px',
+                  borderRadius: 12,
+                  background: '#0f1d18',
+                  border: '1px solid #10b981',
+                  color: '#d1fae5',
+                  textAlign: 'left',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ fontSize: 13, fontWeight: 800 }}>📥 Minimize to Tray</span>
+                <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                  Keep playing in KDE System Tray / Decky QAM
                 </span>
               </button>
 
@@ -5474,7 +5450,7 @@ const ConsoleMainApp: React.FC = () => {
                 }}
                 style={{
                   minHeight: 62,
-                  padding: '10px 14px',
+                  padding: '10px 12px',
                   borderRadius: 12,
                   background: '#12121b',
                   border: '1px solid #2c2c3c',
@@ -5486,9 +5462,9 @@ const ConsoleMainApp: React.FC = () => {
                   cursor: 'pointer',
                 }}
               >
-                <span style={{ fontSize: 13, fontWeight: 800 }}>⏸️ Pause & Dismiss Console</span>
+                <span style={{ fontSize: 13, fontWeight: 800 }}>⏸️ Pause & Dismiss</span>
                 <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                  Pauses audio and returns to Steam Gaming Mode
+                  Silence audio and close SIMP Console
                 </span>
               </button>
             </div>

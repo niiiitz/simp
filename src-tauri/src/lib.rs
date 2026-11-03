@@ -37,6 +37,24 @@ pub fn run_ui() {
         return;
     }
 
+    // If an `org.simp.player` desktop window is already open on X11/KDE, raise/activate it first
+    if Command::new("wmctrl")
+        .args(["-xa", "org.simp.player"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let window_profile_dir = std::env::var("HOME")
+        .map(|h| format!("{h}/.local/share/simp/window-profile"))
+        .unwrap_or_else(|_| "/tmp/simp-window-profile".to_string());
+    let _ = std::fs::create_dir_all(&window_profile_dir);
+    let user_data_arg = format!("--user-data-dir={window_profile_dir}");
+
     // 1. Try native Chromium/Chrome/Edge/Brave in chromeless 1280x800 app mode
     let native_browsers = [
         "chromium",
@@ -53,6 +71,7 @@ pub fn run_ui() {
             .arg(format!("--app={ui_url}"))
             .arg("--window-size=1280,800")
             .arg("--class=org.simp.player")
+            .arg(&user_data_arg)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -83,10 +102,12 @@ pub fn run_ui() {
         {
             if let Ok(mut child) = Command::new("flatpak")
                 .arg("run")
+                .arg("--device=all")
                 .arg(app_id)
                 .arg(format!("--app={ui_url}"))
                 .arg("--window-size=1280,800")
                 .arg("--class=org.simp.player")
+                .arg(&user_data_arg)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

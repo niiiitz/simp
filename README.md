@@ -5,7 +5,7 @@
 
   **A controller-first, OLED-safe, hybrid local/cloud audio player, primarily targeted for SteamOS, Bazzite, and `gamescope` consoles.**
 
-  [![Status: v0.1.0-alpha.17](https://img.shields.io/badge/status-v0.1.0--alpha.17-ff6a00?style=flat-square)](#)
+  [![Status: v0.1.0-alpha.19](https://img.shields.io/badge/status-v0.1.0--alpha.19-ff6a00?style=flat-square)](#)
   [![Target: SteamOS / gamescope](https://img.shields.io/badge/target-SteamOS%20%7C%20Deck%20OLED%20%7C%20Steam%20Machine-000000?style=flat-square)](#)
   [![Daemon: Rust + Tokio + Rodio](https://img.shields.io/badge/daemon-Rust%20%2B%20Tokio%20%2B%20Rodio-dea584?style=flat-square)](#)
   [![Frontend: React + Decky QAM + MusicKit v3](https://img.shields.io/badge/UI-React%20%2B%20Decky%20QAM%20%2B%20MusicKit%20v3-2aa3c4?style=flat-square)](#)
@@ -135,10 +135,10 @@ flowchart LR
 Download `simp-steamos-userland-x86_64.tar.gz` from the [latest GitHub Release](https://github.com/niiiitz/simp/releases), then run the following 4 commands in a terminal (or over SSH):
 
 ```bash
-tar -xzf simp-steamos-userland-x86_64.tar.gz -C /tmp
+rm -rf /tmp/simp-steamos-userland && tar -xzf simp-steamos-userland-x86_64.tar.gz -C /tmp
 cd /tmp/simp-steamos-userland
 ./install-steamos.sh
-sudo cp -r "/tmp/simp-steamos-userland/simp-decky" "/home/deck/homebrew/plugins/simp-decky" && sudo systemctl restart plugin_loader
+sudo rm -rf "/home/deck/homebrew/plugins/simp-decky" && sudo cp -r "/tmp/simp-steamos-userland/simp-decky" "/home/deck/homebrew/plugins/simp-decky" && sudo systemctl restart plugin_loader
 ```
 
 > **Note:** `./install-steamos.sh` installs the userland `simp` binary (`~/.local/share/simp/bin/simp`), Web UI (`~/.local/share/simp/ui`), desktop launcher, and `systemd --user` service (`simp.service`) without disabling `steamos-readonly`. Because Decky Loader owns `/home/deck/homebrew/plugins` as `root`, the final `sudo cp -r ... && sudo systemctl restart plugin_loader` command deploys the `simp-decky` QAM plugin and reloads Decky.

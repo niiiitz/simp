@@ -111,6 +111,15 @@ def _provision_and_start_userland():
     )
     user, home, uid, gid = _resolve_target_user()
 
+    # 0. Self-heal nested `simp-decky/simp-decky` directory if created by `cp -r SRC DEST` when DEST existed
+    nested_dir = os.path.join(plugin_dir, "simp-decky")
+    if os.path.isdir(nested_dir):
+        try:
+            shutil.copytree(nested_dir, plugin_dir, dirs_exist_ok=True)
+            shutil.rmtree(nested_dir, ignore_errors=True)
+        except Exception:
+            pass
+
     # 1. Ensure user `deck` owns `~/homebrew/plugins/simp-decky` so userland updates work without sudo
     _chown_tree(plugin_dir, uid, gid)
 
@@ -129,7 +138,20 @@ def _provision_and_start_userland():
     binary_updated = False
 
     # 2. If `simp-decky.zip` includes the bundled `bin/simp` + `ui/`, install/update them into userland
+    # Never overwrite a newer `~/.local/share/simp/bin/simp` (installed via `install-steamos.sh`) with an older bundle!
+    bundled_is_newer = False
     if os.path.isfile(bundled_bin):
+        if not os.path.isfile(dest_bin):
+            bundled_is_newer = True
+        else:
+            try:
+                bundled_is_newer = os.path.getmtime(bundled_bin) > (
+                    os.path.getmtime(dest_bin) + 2.0
+                )
+            except Exception:
+                bundled_is_newer = False
+
+    if os.path.isfile(bundled_bin) and bundled_is_newer:
         if _sha256_file(bundled_bin) != _sha256_file(dest_bin):
             binary_updated = True
             _run_as_user(
@@ -150,6 +172,11 @@ def _provision_and_start_userland():
             os.chmod(tmp_dest, 0o755)
             os.replace(tmp_dest, dest_bin)
 
+        if os.path.isfile(os.path.join(bundled_ui, "index.html")):
+            shutil.copytree(bundled_ui, ui_dest_dir, dirs_exist_ok=True)
+            binary_updated = True
+
+    if os.path.isfile(dest_bin):
         symlink_path = os.path.join(local_bin_dir, "simp")
         try:
             if os.path.lexists(symlink_path):
@@ -157,10 +184,6 @@ def _provision_and_start_userland():
             os.symlink(dest_bin, symlink_path)
         except Exception:
             pass
-
-    if os.path.isfile(os.path.join(bundled_ui, "index.html")):
-        shutil.copytree(bundled_ui, ui_dest_dir, dirs_exist_ok=True)
-        binary_updated = True
 
     # 3. Ensure `~/.config/systemd/user/simp.service` is present and up to date
     unit_path = os.path.join(systemd_user_dir, "simp.service")

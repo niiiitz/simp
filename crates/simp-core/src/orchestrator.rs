@@ -808,6 +808,7 @@ impl AudioOrchestrator {
             is_playing: true,
             position_ms: 0,
         });
+        self.emit_queue_updated();
         self.persist_session_to_vdf();
     }
 
@@ -1024,13 +1025,17 @@ pub fn build_state_snapshot(
     db: &LibraryDatabase,
 ) -> ServerEnvelope {
     let st = state.lock().unwrap();
-    let up_next: Vec<TrackMetadata> = st
+    let mut up_next: Vec<TrackMetadata> = st
         .queue
         .iter()
         .skip(st.queue_index + 1)
         .take(5)
         .cloned()
         .collect();
+    if st.repeat_mode == RepeatMode::Queue && st.queue.len() > 1 && up_next.len() < 5 {
+        let needed = (5 - up_next.len()).min(st.queue_index);
+        up_next.extend(st.queue.iter().take(needed).cloned());
+    }
     let mounts = db.get_mounts().unwrap_or_default();
     let power = read_power_state();
 
