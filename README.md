@@ -5,7 +5,7 @@
 
   **A controller-first, OLED-safe, hybrid local/cloud audio player, primarily targeted for SteamOS, Bazzite, and `gamescope` consoles.**
 
-  [![Status: v0.1.0-alpha.14](https://img.shields.io/badge/status-v0.1.0--alpha.14-ff6a00?style=flat-square)](#)
+  [![Status: v0.1.13-alpha](https://img.shields.io/badge/status-v0.1.3--alpha-ff6a00?style=flat-square)](#)
   [![Target: SteamOS / gamescope](https://img.shields.io/badge/target-SteamOS%20%7C%20Deck%20OLED%20%7C%20Steam%20Machine-000000?style=flat-square)](#)
   [![Daemon: Rust + Tokio + Rodio](https://img.shields.io/badge/daemon-Rust%20%2B%20Tokio%20%2B%20Rodio-dea584?style=flat-square)](#)
   [![Frontend: React + Decky QAM + MusicKit v3](https://img.shields.io/badge/UI-React%20%2B%20Decky%20QAM%20%2B%20MusicKit%20v3-2aa3c4?style=flat-square)](#)
@@ -13,11 +13,14 @@
 
 ---
 
-## 1. Project Summary & Alignment
+## 1. Why create this?
+
+SIMP seeks to fill a void with media playback from within gamescope; therefore this project seeks to produce an installable artifact that can offer native feeling playback for audio across a range of sources. 
+
 
 Modern Linux gaming handhelds (**Steam Deck OLED**) and living-room consoles (**SteamOS / Bazzite Steam Machines**) run inside `gamescope` (Steam Game Mode). While Game Mode excels at launching games, audio and music playback remain fragmented and hostile to a console/handheld environment:
 
-1. **No Native Apple Music Path on SteamOS:** There is no official Apple Music client for Linux or SteamOS, and attempting to run the full Apple Music web app inside a nested desktop browser window in Game Mode is unusable with a controller, breaks background playback when closed, and struggles with hardware security keys (FIDO2 / Passkeys) inside embedded CEF views.
+1. **No Native Apple Music Path on SteamOS:** There is no official Apple Music client for Linux or SteamOS, and attempting to run the full Apple Music web app inside a nested desktop browser window in Game Mode is unusable with a controller, breaks background playback when closed.
 2. **Ununified Audio Silos:** A player's music is split across downloaded **Steam Soundtracks (OSTs)**, local `FLAC`/`MP3` folders on SD cards or USB drives, **Apple Music** cloud streams, and—on docked/living-room Steam Machines—**physical Audio CDs** in an external USB optical drive.
 3. **OLED Burn-In & Resource Bleed:** Leaving a traditional media player open on an OLED display risks static sub-pixel wear, while heavyweight desktop players waste hundreds of megabytes of RAM and keep PipeWire audio graphs awake even when paused.
 
@@ -159,7 +162,6 @@ npm run build:ui && npm run build:decky && cargo test --workspace
 
 ## 6. License & Trademark Disclaimer
 
-Pre-Release Alpha (`v0.1.0-alpha.14`). All rights reserved.
 
 > **Trademark & Non-Affiliation Notice:**
 > **SIMP (Simple Integrated Media Player)** is an independent, third-party software project and is **not** affiliated with, endorsed by, sponsored by, or officially connected to **Valve Corporation**, **Apple Inc.**, **MetaBrainz Foundation**, or any of their subsidiaries or affiliates.

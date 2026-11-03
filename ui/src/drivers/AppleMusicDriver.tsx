@@ -761,10 +761,25 @@ export const AppleMusicDriver: React.FC = () => {
       const Events = window.MusicKit.Events;
       const States = window.MusicKit.PlaybackStates;
 
+      const readPrecisePlaybackMs = (): { posMs: number; durMs: number } => {
+        const audioEl = document.getElementById('apple-music-player') as HTMLAudioElement | null;
+        const rawPosSec =
+          audioEl && Number.isFinite(audioEl.currentTime) && audioEl.currentTime > 0
+            ? audioEl.currentTime
+            : Number(mk.currentPlaybackTime || 0);
+        const rawDurSec =
+          audioEl && Number.isFinite(audioEl.duration) && audioEl.duration > 0
+            ? audioEl.duration
+            : Number(mk.currentPlaybackDuration || 0);
+        return {
+          posMs: Math.round(rawPosSec * 1000),
+          durMs: Math.round(rawDurSec * 1000),
+        };
+      };
+
       const reportCurrentItemIfAny = (stateName: 'playing' | 'paused' = 'playing') => {
         const item = mk.nowPlayingItem;
-        const posMs = Math.round(Number(mk.currentPlaybackTime || 0) * 1000);
-        const durMs = Math.round(Number(mk.currentPlaybackDuration || 0) * 1000);
+        const { posMs, durMs } = readPrecisePlaybackMs();
         const mapped = item ? mapAppleItemToTrack(item) : null;
         if (mapped && durMs > 0 && mapped.duration_ms === 0) {
           mapped.duration_ms = durMs;
@@ -779,8 +794,7 @@ export const AppleMusicDriver: React.FC = () => {
 
       mk.addEventListener(Events.playbackStateDidChange, () => {
         const st = mk.playbackState;
-        const posMs = Math.round(Number(mk.currentPlaybackTime || 0) * 1000);
-        const durMs = Math.round(Number(mk.currentPlaybackDuration || 0) * 1000);
+        const { posMs, durMs } = readPrecisePlaybackMs();
 
         if (st === States.playing) {
           isLoadingRef.current = false;
@@ -806,8 +820,7 @@ export const AppleMusicDriver: React.FC = () => {
 
       mk.addEventListener(Events.playbackTimeDidChange, () => {
         if (isLoadingRef.current) return;
-        const posMs = Math.round(Number(mk.currentPlaybackTime || 0) * 1000);
-        const durMs = Math.round(Number(mk.currentPlaybackDuration || 0) * 1000);
+        const { posMs, durMs } = readPrecisePlaybackMs();
         defaultSimpClient.reportAppleWorkerEvent('time_update', posMs, null, durMs);
       });
 
@@ -948,9 +961,17 @@ export const AppleMusicDriver: React.FC = () => {
             if (item) {
               const mapped = mapAppleItemToTrack(item);
               if (mapped) {
+                const livePosSec =
+                  audioEl && Number.isFinite(audioEl.currentTime) && audioEl.currentTime > 0
+                    ? audioEl.currentTime
+                    : Number(mk.currentPlaybackTime || 0);
+                const livePosMs = Math.max(
+                  cmd.position_ms || 0,
+                  Math.round(livePosSec * 1000)
+                );
                 defaultSimpClient.reportAppleWorkerEvent(
                   'playing',
-                  cmd.position_ms || 0,
+                  livePosMs,
                   mapped,
                   mapped.duration_ms
                 );
