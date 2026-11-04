@@ -1,0 +1,19 @@
+{
+  "source": "builtin",
+  "applications": [
+    {
+      "app_key": "org.simp.player",
+      "launch_type": "binary",
+      "binary_path_linux": "__SIMP_BIN__",
+      "is_dashboard_overlay": true,
+      "image_path": "__SIMP_ICON__",
+      "strings": {
+        "en_us": {
+          "name": "SIMP Media Player",
+          "description": "Simple Integrated Media Player — Native Console & SteamVR Audio Hub"
+        }
+      }
+    }
+  ]
+}
+

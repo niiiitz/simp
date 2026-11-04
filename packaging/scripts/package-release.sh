@@ -12,14 +12,21 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 CARGO_BIN="${CARGO_BIN:-$(command -v cargo || echo "${HOME}/.cargo/bin/cargo")}"
-ARCH="$(uname -m)"
+HOST_ARCH="$(uname -m)"
+ARCH="${SIMP_TARGET_ARCH:-${HOST_ARCH}}"
 OUT_DIR="${REPO_ROOT}/dist/simp-steamos-userland"
 ARCHIVE="${REPO_ROOT}/dist/simp-steamos-userland.tar.gz"
 ARCH_ARCHIVE="${REPO_ROOT}/dist/simp-steamos-userland-${ARCH}.tar.gz"
 DECKY_ZIP="${REPO_ROOT}/dist/simp-decky.zip"
+# Default to Decky-free on Steam Frame (aarch64); optional separate artifact on x86_64
+if [[ "${ARCH}" == "aarch64" ]]; then
+  WITH_DECKY="${SIMP_WITH_DECKY:-0}"
+else
+  WITH_DECKY="${SIMP_WITH_DECKY:-1}"
+fi
 
 echo "============================================================"
-echo " Building SIMP Release Package (Daemon + UI + Decky + Scripts)"
+echo " Building SIMP Release Package (Arch: ${ARCH}, Decky Add-On: ${WITH_DECKY})"
 echo "============================================================"
 
 # Automatically synchronize release version across Cargo.toml, Cargo.lock, package.json files, decky-plugin/src/index.tsx, and README.md
@@ -112,10 +119,14 @@ echo "0/4 Synchronized version ${SYNCED_VERSION} across Cargo.toml, package.json
 echo "1/4 Building production React UI (ui/dist)..."
 npm run build:ui
 
-echo "2/4 Building Decky QAM plugin bundle (decky-plugin/dist)..."
-npm run build:decky
+if [[ "${WITH_DECKY}" == "1" ]]; then
+  echo "2/4 Building optional Decky QAM add-on bundle (decky-plugin/dist)..."
+  npm run build:decky
+else
+  echo "2/4 Skipping Decky QAM plugin build (Decky-free ${ARCH} target)..."
+fi
 
-echo "3/4 Building release Rust binary (simp)..."
+echo "3/4 Building release Rust binary (simp for ${ARCH})..."
 if [[ -f "${REPO_ROOT}/.env" && -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
   EMBEDDED_JWT="$(python3 - <<'PY' || true
 import base64, json, os, subprocess, time
@@ -169,31 +180,29 @@ if [[ -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
   echo "   ❌ ERROR: SIMP_EMBEDDED_APPLE_DEV_TOKEN was not generated (check APPLE_PRIVATE_KEY_PATH accessibility; run outside sandbox if key is on /mnt/c)." >&2
   exit 1
 fi
-"${CARGO_BIN}" build --release -p simp --offline
+if [[ "${ARCH}" != "${HOST_ARCH}" ]]; then
+  RUST_TARGET="${ARCH}-unknown-linux-gnu"
+  "${CARGO_BIN}" build --release -p simp --target "${RUST_TARGET}" --offline
+  BUILT_BIN="${REPO_ROOT}/target/${RUST_TARGET}/release/simp"
+else
+  "${CARGO_BIN}" build --release -p simp --offline
+  BUILT_BIN="${REPO_ROOT}/target/release/simp"
+fi
 
-echo "4/4 Assembling dist/simp-steamos-userland/..."
+echo "4/4 Assembling Decky-free dist/simp-steamos-userland/..."
 rm -rf "${OUT_DIR}"
 mkdir -p \
   "${OUT_DIR}/bin" \
   "${OUT_DIR}/ui" \
   "${OUT_DIR}/systemd" \
   "${OUT_DIR}/desktop" \
-  "${OUT_DIR}/simp-decky/dist" \
-  "${OUT_DIR}/simp-decky/bin" \
-  "${OUT_DIR}/simp-decky/ui"
+  "${OUT_DIR}/openvr"
 
-cp "${REPO_ROOT}/target/release/simp" "${OUT_DIR}/bin/simp"
+cp "${BUILT_BIN}" "${OUT_DIR}/bin/simp"
 cp -r "${REPO_ROOT}/ui/dist/"* "${OUT_DIR}/ui/"
 cp "${REPO_ROOT}/packaging/systemd/simp.service" "${OUT_DIR}/systemd/simp.service"
 cp "${REPO_ROOT}/packaging/desktop/org.simp.player.desktop" "${OUT_DIR}/desktop/org.simp.player.desktop"
-
-cp "${REPO_ROOT}/decky-plugin/plugin.json" "${OUT_DIR}/simp-decky/"
-cp "${REPO_ROOT}/decky-plugin/package.json" "${OUT_DIR}/simp-decky/"
-cp "${REPO_ROOT}/decky-plugin/main.py" "${OUT_DIR}/simp-decky/"
-cp "${REPO_ROOT}/decky-plugin/dist/"* "${OUT_DIR}/simp-decky/dist/"
-cp "${OUT_DIR}/bin/simp" "${OUT_DIR}/simp-decky/bin/simp"
-cp -r "${OUT_DIR}/ui/"* "${OUT_DIR}/simp-decky/ui/"
-chmod +x "${OUT_DIR}/simp-decky/bin/simp"
+cp "${REPO_ROOT}/packaging/openvr/org.simp.player.vrmanifest" "${OUT_DIR}/openvr/org.simp.player.vrmanifest"
 
 cp "${REPO_ROOT}/packaging/scripts/install-steamos.sh" "${OUT_DIR}/install-steamos.sh"
 cp "${REPO_ROOT}/packaging/scripts/uninstall-steamos.sh" "${OUT_DIR}/uninstall-steamos.sh"
@@ -202,14 +211,28 @@ chmod +x "${OUT_DIR}/install-steamos.sh" "${OUT_DIR}/uninstall-steamos.sh" "${OU
 
 tar -C "${REPO_ROOT}/dist" -czf "${ARCHIVE}" "simp-steamos-userland"
 cp "${ARCHIVE}" "${ARCH_ARCHIVE}"
-python3 -m zipfile -c "${DECKY_ZIP}" "${OUT_DIR}/simp-decky"
-# Ensure zip root folder is `simp-decky/` (Decky Loader ZIP standard)
-(cd "${OUT_DIR}" && python3 -m zipfile -c "${DECKY_ZIP}" simp-decky)
+
+if [[ "${WITH_DECKY}" == "1" ]]; then
+  DECKY_STAGE="${REPO_ROOT}/dist/decky-staging"
+  rm -rf "${DECKY_STAGE}"
+  mkdir -p "${DECKY_STAGE}/simp-decky/dist" "${DECKY_STAGE}/simp-decky/bin" "${DECKY_STAGE}/simp-decky/ui"
+  cp "${REPO_ROOT}/decky-plugin/plugin.json" "${DECKY_STAGE}/simp-decky/"
+  cp "${REPO_ROOT}/decky-plugin/package.json" "${DECKY_STAGE}/simp-decky/"
+  cp "${REPO_ROOT}/decky-plugin/main.py" "${DECKY_STAGE}/simp-decky/"
+  cp "${REPO_ROOT}/decky-plugin/dist/"* "${DECKY_STAGE}/simp-decky/dist/"
+  cp "${OUT_DIR}/bin/simp" "${DECKY_STAGE}/simp-decky/bin/simp"
+  cp -r "${OUT_DIR}/ui/"* "${DECKY_STAGE}/simp-decky/ui/"
+  chmod +x "${DECKY_STAGE}/simp-decky/bin/simp"
+  (cd "${DECKY_STAGE}" && python3 -m zipfile -c "${DECKY_ZIP}" simp-decky)
+  rm -rf "${DECKY_STAGE}"
+fi
 
 echo "============================================================"
-echo "✅ Release Bundle Ready:"
-echo "   • Directory:   ${OUT_DIR}"
+echo "✅ Release Bundle Ready (${ARCH}):"
+echo "   • Directory:   ${OUT_DIR} (100% Decky-free core + OpenVR manifest)"
 echo "   • Tarball:     ${ARCH_ARCHIVE}"
-echo "   • Decky ZIP:   ${DECKY_ZIP}"
+if [[ "${WITH_DECKY}" == "1" ]]; then
+  echo "   • Decky ZIP:   ${DECKY_ZIP} (separate optional add-on)"
+fi
 echo "============================================================"
 

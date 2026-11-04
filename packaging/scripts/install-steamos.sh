@@ -56,6 +56,7 @@ if [[ -f "${SCRIPT_DIR}/bin/simp" ]]; then
   UI_SRC="${BUNDLE_ROOT}/ui"
   SERVICE_SRC="${BUNDLE_ROOT}/systemd/simp.service"
   DESKTOP_SRC="${BUNDLE_ROOT}/desktop/org.simp.player.desktop"
+  VRMANIFEST_SRC="${BUNDLE_ROOT}/openvr/org.simp.player.vrmanifest"
   DECKY_SRC="${BUNDLE_ROOT}/simp-decky"
 else
   REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -64,6 +65,7 @@ else
   UI_SRC="${REPO_ROOT}/ui/dist"
   SERVICE_SRC="${REPO_ROOT}/packaging/systemd/simp.service"
   DESKTOP_SRC="${REPO_ROOT}/packaging/desktop/org.simp.player.desktop"
+  VRMANIFEST_SRC="${REPO_ROOT}/packaging/openvr/org.simp.player.vrmanifest"
   DECKY_SRC="${REPO_ROOT}/decky-plugin"
 fi
 
@@ -107,7 +109,7 @@ if [[ ! -f "${INSTALL_ROOT}/lib/libwidevinecdm.so" ]]; then
     cp "${FOUND_CDM}" "${INSTALL_ROOT}/lib/libwidevinecdm.so" >/dev/null 2>&1 || true
     chmod 0755 "${INSTALL_ROOT}/lib/libwidevinecdm.so" >/dev/null 2>&1 || true
     echo "✓ Staged Widevine CDM:  ${INSTALL_ROOT}/lib/libwidevinecdm.so"
-  elif command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  elif [[ "$(uname -m)" == "x86_64" ]] && command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
     TMP_CRX="${INSTALL_ROOT}/lib/.widevine_dl.crx3"
     WV_URL="https://edgedl.me.gvt1.com/edgedl/release2/chrome_component/acqexsh26ysyu3zxeotqtsp63idq_4.10.3112.0/oimompecagnajdejgnnjijobebaeigek_4.10.3112.0_linux64_ad7kyx4q7wx7xknykmkbonbbmnwq.crx3"
     if curl -fsSL --max-time 25 -o "${TMP_CRX}" "${WV_URL}" 2>/dev/null; then
@@ -210,6 +212,18 @@ if command -v update-desktop-database >/dev/null 2>&1; then
 fi
 echo "✓ Installed launcher:   ${DESKTOP_DEST}"
 
+# 5b. Install OpenVR / SteamVR Application Manifest (`org.simp.player.vrmanifest`) for Steam Frame & VR
+OPENVR_DEST_DIR="${INSTALL_ROOT}/openvr"
+mkdir -p "${OPENVR_DEST_DIR}"
+if [[ -f "${VRMANIFEST_SRC}" ]]; then
+  sed \
+    -e "s|__SIMP_BIN__|${BIN_DEST}/simp|g" \
+    -e "s|__SIMP_ICON__|${UI_DEST}/simp-icon-dark.png|g" \
+    "${VRMANIFEST_SRC}" > "${OPENVR_DEST_DIR}/org.simp.player.vrmanifest"
+  chmod 0644 "${OPENVR_DEST_DIR}/org.simp.player.vrmanifest"
+  echo "✓ Installed OpenVR:     ${OPENVR_DEST_DIR}/org.simp.player.vrmanifest"
+fi
+
 # 6. Install and start systemd user service
 cp "${SERVICE_SRC}" "${SYSTEMD_USER_DIR}/simp.service"
 
@@ -231,8 +245,8 @@ else
   echo "ℹ systemd user bus not active in this shell; launch with: simp --daemon"
 fi
 
-# 7. Optional Decky Loader plugin installation (if ~/homebrew/plugins exists)
-if [[ -d "${DECKY_PLUGINS_DIR}" ]]; then
+# 7. Optional Decky Loader plugin installation (strictly opt-in via SIMP_INSTALL_DECKY=1 if present)
+if [[ "${SIMP_INSTALL_DECKY:-0}" == "1" && -d "${DECKY_PLUGINS_DIR}" && -d "${DECKY_SRC}" ]]; then
   DECKY_TARGET="${DECKY_PLUGINS_DIR}/simp-decky"
   if [[ "${EUID:-$(id -u)}" -eq 0 ]] || { [[ ! -w "${DECKY_PLUGINS_DIR}" ]] && [[ ! -w "${DECKY_TARGET}" ]]; }; then
     echo "ℹ Granting ${REAL_USER} ownership on ${DECKY_TARGET} so future 1-click updates require zero sudo..."

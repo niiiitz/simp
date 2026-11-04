@@ -70,6 +70,9 @@ pub async fn run_daemon() -> anyhow::Result<()> {
     // 2b. Spawn native Linux `/dev/input/js*` gamepad reader for standalone KDE windows
     simp_core::gamepad::spawn_linux_gamepad_reader(broadcast_tx.clone());
 
+    // 2c. Spawn native OpenVR (`libopenvr_api.so`) dashboard & `.vrmanifest` overlay bridge for Steam Frame / SteamVR
+    simp_core::vr_overlay::spawn_openvr_overlay_bridge(orchestrator_state.clone(), cmd_tx.clone());
+
     // 3. Trigger initial non-blocking background storage & Steam OST crawl
     let _ = cmd_tx.send(AudioCommand::RescanStorage);
 
