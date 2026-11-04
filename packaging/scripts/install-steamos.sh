@@ -55,11 +55,19 @@ fi
 # 1. Create userland directories
 mkdir -p "${BIN_DEST}" "${UI_DEST}" "${LOCAL_BIN}" "${SYSTEMD_USER_DIR}" "${APPLICATIONS_DIR}"
 
-# 2. Stop running service or standalone daemon before replacing binary
+# 2. Stop running service, standalone daemon, and any orphaned Widevine worker before replacing binary
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --user stop simp.service >/dev/null 2>&1 || true
 fi
 pkill -f "simp --daemon" >/dev/null 2>&1 || true
+pkill -f "simp-widevine-worker" >/dev/null 2>&1 || true
+pkill -f "18888/?worker=apple" >/dev/null 2>&1 || true
+rm -f "${HOME}/.local/share/simp/simp-widevine-worker/lock" \
+      "${HOME}/.local/share/simp/simp-widevine-worker/.parentlock" \
+      "${HOME}/.local/share/simp/simp-widevine-worker/parent.lock" \
+      "${HOME}/.local/share/simp/simp-widevine-worker/SingletonLock" \
+      "${HOME}/.local/share/simp/simp-widevine-worker/SingletonCookie" \
+      "${HOME}/.local/share/simp/simp-widevine-worker/SingletonSocket" >/dev/null 2>&1 || true
 sleep 0.3
 
 # 3. Install binary, uninstaller & CLI symlink

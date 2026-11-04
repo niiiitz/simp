@@ -92,6 +92,16 @@ impl AppleMusicSink {
             }
             *guard = None;
         }
+        let _ = Command::new("pkill")
+            .args(["-f", "simp-widevine-worker"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("pkill")
+            .args(["-f", "18888/?worker=apple"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 
     /// Ensures a headless Widevine CDM browser worker (`http://127.0.0.1:18888/?worker=apple`)
@@ -438,6 +448,11 @@ user_pref("media.autoplay.blocking_policy", 0);
 user_pref("media.block-autoplay-until-in-foreground", false);
 user_pref("media.autoplay.allow-extension-background-pages", true);
 user_pref("dom.AudioContext.autoplay", true);
+user_pref("media.hardwaremediakeys.enabled", false);
+user_pref("dom.media.mediasession.enabled", false);
+user_pref("toolkit.startup.max_resumed_crashes", -1);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
 "#;
 
 fn copy_dir_recursive(src: &Path, dst: &Path) {
@@ -448,9 +463,25 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
             let dest_path = dst.join(entry.file_name());
             if path.is_dir() {
                 copy_dir_recursive(&path, &dest_path);
-            } else {
+            } else if !dest_path.is_file() {
                 let _ = std::fs::copy(&path, &dest_path);
             }
+        }
+    }
+}
+
+fn clean_stale_profile_locks(dir: &Path) {
+    for lock_name in [
+        "lock",
+        ".parentlock",
+        "parent.lock",
+        "SingletonLock",
+        "SingletonCookie",
+        "SingletonSocket",
+    ] {
+        let p = dir.join(lock_name);
+        if p.exists() || p.symlink_metadata().is_ok() {
+            let _ = std::fs::remove_file(&p);
         }
     }
 }
@@ -491,6 +522,7 @@ fn prepare_firefox_widevine_profile(ff_root: &Path, require_cdm_present: bool) -
 
     let worker_dir = ff_root.join("simp-widevine-worker");
     let _ = std::fs::create_dir_all(&worker_dir);
+    clean_stale_profile_locks(&worker_dir);
 
     if let Some(src_profile) = best_profile {
         let src_gmp = src_profile.join("gmp-widevinecdm");
@@ -502,7 +534,7 @@ fn prepare_firefox_widevine_profile(ff_root: &Path, require_cdm_present: bool) -
             let _ = std::fs::copy(&src_prefs, worker_dir.join("prefs.js"));
         }
         let src_store = src_profile.join("webappsstore.sqlite");
-        if src_store.is_file() {
+        if src_store.is_file() && !worker_dir.join("webappsstore.sqlite").is_file() {
             let _ = std::fs::copy(&src_store, worker_dir.join("webappsstore.sqlite"));
         }
     }
@@ -512,6 +544,7 @@ fn prepare_firefox_widevine_profile(ff_root: &Path, require_cdm_present: bool) -
 }
 
 fn apply_pipewire_env(cmd: &mut Command) {
+    cmd.env("MOZ_NO_REMOTE", "1");
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .ok()
         .map(PathBuf::from)
@@ -530,6 +563,20 @@ fn apply_pipewire_env(cmd: &mut Command) {
 fn spawn_headless_widevine_browser() -> Option<Child> {
     let worker_url = "http://127.0.0.1:18888/?worker=apple";
     let home = dirs::home_dir()?;
+
+    // Ensure any orphaned headless worker from a previous daemon run is terminated before
+    // opening the `simp-widevine-worker` profile so `.parentlock` is never contended.
+    let _ = Command::new("pkill")
+        .args(["-f", "simp-widevine-worker"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("pkill")
+        .args(["-f", "18888/?worker=apple"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    std::thread::sleep( std::time::Duration::from_millis(120));
 
     // Pass 1: Prefer a browser whose profile ALREADY has a provisioned Widevine CDM binary on disk
     // (`gmp-widevinecdm` in Firefox or `WidevineCdm` in Chrome/Brave/Edge), then fall back in Pass 2
@@ -607,6 +654,8 @@ fn spawn_headless_widevine_browser() -> Option<Child> {
             {
                 let worker_dir = cfg_root.join("simp-widevine-worker");
                 let _ = std::fs::create_dir_all(&worker_dir);
+                clean_stale_profile_locks(&worker_dir);
+                let _ = std::fs::File::create(worker_dir.join("First Run"));
                 if cfg_root.join("WidevineCdm").is_dir() && !worker_dir.join("WidevineCdm").is_dir()
                 {
                     copy_dir_recursive(&cfg_root.join("WidevineCdm"), &worker_dir.join("WidevineCdm"));
@@ -618,6 +667,9 @@ fn spawn_headless_widevine_browser() -> Option<Child> {
                     "--filesystem=xdg-run/pipewire-0",
                     app_id,
                     "--headless=new",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-features=HardwareMediaKeyHandling,MediaSessionService",
                     "--autoplay-policy=no-user-gesture-required",
                     "--enable-audio-service",
                     &format!("--user-data-dir={}", worker_dir.display()),
@@ -646,6 +698,9 @@ fn spawn_headless_widevine_browser() -> Option<Child> {
         let mut cmd = Command::new(bin);
         cmd.args([
             "--headless=new",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-features=HardwareMediaKeyHandling,MediaSessionService",
             "--autoplay-policy=no-user-gesture-required",
             "--enable-audio-service",
             worker_url,

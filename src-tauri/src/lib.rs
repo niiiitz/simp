@@ -10,6 +10,22 @@ pub fn ensure_daemon_running() {
         return;
     }
 
+    // 1. Prefer starting the managed systemd user unit if installed
+    let _ = Command::new("systemctl")
+        .args(["--user", "start", "simp.service"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    for _ in 0..8 {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // 2. Fallback: spawn `simp --daemon` directly if systemd user unit wasn't active
     if let Ok(exe) = std::env::current_exe() {
         let _ = Command::new(exe)
             .arg("--daemon")
@@ -53,6 +69,12 @@ pub fn run_ui() {
         .map(|h| format!("{h}/.local/share/simp/window-profile"))
         .unwrap_or_else(|_| "/tmp/simp-window-profile".to_string());
     let _ = std::fs::create_dir_all(&window_profile_dir);
+    // Create the Chromium "First Run" sentinel file and clear any stale Crash/Singleton locks
+    let profile_path = std::path::Path::new(&window_profile_dir);
+    let _ = std::fs::File::create(profile_path.join("First Run"));
+    for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"] {
+        let _ = std::fs::remove_file(profile_path.join(lock_name));
+    }
     let user_data_arg = format!("--user-data-dir={window_profile_dir}");
 
     // 1. Try native Chromium/Chrome/Edge/Brave in chromeless 1280x800 app mode
@@ -71,6 +93,9 @@ pub fn run_ui() {
             .arg(format!("--app={ui_url}"))
             .arg("--window-size=1280,800")
             .arg("--class=org.simp.player")
+            .arg("--no-first-run")
+            .arg("--no-default-browser-check")
+            .arg("--disable-features=HardwareMediaKeyHandling,MediaSessionService")
             .arg(&user_data_arg)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -83,6 +108,8 @@ pub fn run_ui() {
     }
 
     // 2. Try SteamOS Flatpak browsers in chromeless 1280x800 app mode
+    // Pass `--filesystem=xdg-data/simp:create` so Flatpak mounts `~/.local/share/simp/window-profile`
+    // persistently instead of an ephemeral tmpfs (preventing repeated Chrome First-Run ToS dialogs and crashes).
     let flatpak_browsers = [
         "org.chromium.Chromium",
         "com.google.Chrome",
@@ -102,11 +129,15 @@ pub fn run_ui() {
         {
             if let Ok(mut child) = Command::new("flatpak")
                 .arg("run")
+                .arg("--filesystem=xdg-data/simp:create")
                 .arg("--device=all")
                 .arg(app_id)
                 .arg(format!("--app={ui_url}"))
                 .arg("--window-size=1280,800")
                 .arg("--class=org.simp.player")
+                .arg("--no-first-run")
+                .arg("--no-default-browser-check")
+                .arg("--disable-features=HardwareMediaKeyHandling,MediaSessionService")
                 .arg(&user_data_arg)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

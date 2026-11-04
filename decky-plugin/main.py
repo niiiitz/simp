@@ -167,6 +167,18 @@ def _provision_and_start_userland():
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            subprocess.run(
+                ["pkill", "-f", "simp-widevine-worker"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["pkill", "-f", "18888/?worker=apple"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             tmp_dest = dest_bin + ".new"
             shutil.copy2(bundled_bin, tmp_dest)
             os.chmod(tmp_dest, 0o755)

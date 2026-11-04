@@ -63,9 +63,6 @@ impl AudioOrchestrator {
                 .is_some()
         };
         apple_sink.is_authenticated = initial_apple_auth;
-        if initial_apple_auth {
-            AppleMusicSink::ensure_headless_widevine_worker();
-        }
 
         let mpris_controls = initialize_mpris(cmd_tx);
 
@@ -689,6 +686,13 @@ impl AudioOrchestrator {
                 self.pause_active_engine();
                 self.local_engine.release_pipewire_stream();
                 AppleMusicSink::kill_headless_widevine_worker();
+                // Also stop the systemd user service if running under systemd so `Restart=always` doesn't respawn
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "stop", "simp.service"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
                 std::process::exit(0);
             }
         }

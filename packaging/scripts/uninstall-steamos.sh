@@ -31,8 +31,10 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl --user disable simp.service >/dev/null 2>&1 || true
 fi
 
-# Also terminate any manually-spawned simp --daemon process
+# Also terminate any manually-spawned simp --daemon process or orphaned headless Widevine worker
 pkill -f "simp --daemon" >/dev/null 2>&1 || true
+pkill -f "simp-widevine-worker" >/dev/null 2>&1 || true
+pkill -f "18888/?worker=apple" >/dev/null 2>&1 || true
 
 if [[ -f "${SERVICE_FILE}" ]]; then
   rm -f "${SERVICE_FILE}"

@@ -836,13 +836,22 @@ export const AppleMusicDriver: React.FC = () => {
       new URLSearchParams(window.location.search).get('worker') === 'apple';
 
     const ensureInstance = async (fromCommand = false): Promise<any | null> => {
-      if (mkRef.current) return mkRef.current;
       const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
       if (!cfg.configured || !cfg.developer_token || cancelled) return null;
 
       if (cfg.headless_worker_active && !isDedicatedWorker) {
+        if (mkRef.current) {
+          try {
+            await mkRef.current.stop();
+          } catch {
+            // ignore
+          }
+          mkRef.current = null;
+        }
         return null;
       }
+
+      if (mkRef.current) return mkRef.current;
 
       const hasWidevine = await checkWidevineDrm();
       if (!hasWidevine && !isDedicatedWorker) {
@@ -929,6 +938,19 @@ export const AppleMusicDriver: React.FC = () => {
                 startPlaying: true,
               });
               if (mySeq !== loadSeqRef.current) return;
+              // Allow initial Widevine EME license handshake (`loading` / `waiting` states) to settle
+              // before issuing a second `mk.play()` call that could abort the first track's stream.
+              for (let attempt = 0; attempt < 10; attempt++) {
+                if (mySeq !== loadSeqRef.current) return;
+                if (mk.playbackState === States?.playing) break;
+                const isHandshakeInFlight =
+                  mk.playbackState === States?.loading ||
+                  mk.playbackState === States?.waiting ||
+                  mk.playbackState === States?.stalled;
+                if (!isHandshakeInFlight && attempt >= 2) break;
+                await new Promise((r) => setTimeout(r, 150));
+              }
+              if (mySeq !== loadSeqRef.current) return;
               if (cmd.position_ms && cmd.position_ms > 0) {
                 await mk.seekToTime(cmd.position_ms / 1000).catch(() => {});
               }
@@ -951,7 +973,7 @@ export const AppleMusicDriver: React.FC = () => {
               if (cmd.volume != null) {
                 audioEl.volume = Math.max(0, Math.min(1, cmd.volume));
               }
-              if (audioEl.paused) {
+              if (audioEl.paused && mk.playbackState !== States?.loading && mk.playbackState !== States?.waiting) {
                 await audioEl.play().catch(() => {});
               }
             }

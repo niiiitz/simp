@@ -118,6 +118,11 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         );
     }
 
+    let initial_apple_auth = ipc_state
+        .orchestrator_state
+        .lock()
+        .unwrap()
+        .apple_authenticated;
     let app = app.layer(CorsLayer::permissive()).with_state(ipc_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 18888));
@@ -130,6 +135,12 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         tracing::info!("SIMP Daemon IPC, Art & UI Server listening on http://{addr}");
     }
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    if initial_apple_auth {
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            simp_core::sinks::apple::AppleMusicSink::ensure_headless_widevine_worker();
+        });
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }
