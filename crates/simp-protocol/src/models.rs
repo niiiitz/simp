@@ -95,6 +95,57 @@ pub struct SimpSettings {
     pub ui: UiSettings,
     pub library: LibrarySettings,
     pub services: ServiceSettings,
+    #[serde(default)]
+    pub provisioning: ProvisioningSettings,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProvisioningSettings {
+    #[serde(default = "default_widevine_version")]
+    pub widevine_cdm_version: String,
+    #[serde(default = "default_widevine_url_x86_64_linux")]
+    pub widevine_cdm_url_x86_64_linux: String,
+    #[serde(default = "default_widevine_url_aarch64_linux")]
+    pub widevine_cdm_url_aarch64_linux: String,
+    #[serde(default)]
+    pub widevine_cdm_custom_path: String,
+    #[serde(default = "default_github_releases_api_url")]
+    pub github_releases_api_url: String,
+    #[serde(default = "default_release_asset_template")]
+    pub release_asset_template: String,
+}
+
+fn default_widevine_version() -> String {
+    "4.10.3112.0".to_string()
+}
+
+fn default_widevine_url_x86_64_linux() -> String {
+    "https://edgedl.me.gvt1.com/edgedl/release2/chrome_component/acqexsh26ysyu3zxeotqtsp63idq_4.10.3112.0/oimompecagnajdejgnnjijobebaeigek_4.10.3112.0_linux64_ad7kyx4q7wx7xknykmkbonbbmnwq.crx3".to_string()
+}
+
+fn default_widevine_url_aarch64_linux() -> String {
+    "https://dl.google.com/widevine-cdm/4.10.2710.0-linux-arm64.zip".to_string()
+}
+
+fn default_github_releases_api_url() -> String {
+    "https://api.github.com/repos/niiiitz/simp/releases?per_page=8".to_string()
+}
+
+fn default_release_asset_template() -> String {
+    "https://github.com/niiiitz/simp/releases/download/{tag}/simp-steamos-userland-{arch}.tar.gz".to_string()
+}
+
+impl Default for ProvisioningSettings {
+    fn default() -> Self {
+        Self {
+            widevine_cdm_version: default_widevine_version(),
+            widevine_cdm_url_x86_64_linux: default_widevine_url_x86_64_linux(),
+            widevine_cdm_url_aarch64_linux: default_widevine_url_aarch64_linux(),
+            widevine_cdm_custom_path: String::new(),
+            github_releases_api_url: default_github_releases_api_url(),
+            release_asset_template: default_release_asset_template(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -173,6 +224,7 @@ impl Default for SimpSettings {
                 apple_developer_token: String::new(),
                 apple_music_user_token: String::new(),
             },
+            provisioning: ProvisioningSettings::default(),
         }
     }
 }

@@ -1,10 +1,17 @@
 use simp_protocol::PlaybackEvent;
+#[cfg(target_os = "linux")]
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::io::Read;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
+#[cfg(target_os = "linux")]
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
@@ -17,6 +24,8 @@ const JSIOCGBTNMAP: libc::Ioctl = 0x80406a34u32 as libc::Ioctl;
 /// windows (including Flatpak browsers whose sandbox hides `/dev/input`) receive controller
 /// navigation and transport actions over the local WebSocket (`PlaybackEvent::GamepadInput`).
 pub fn spawn_linux_gamepad_reader(broadcast_tx: broadcast::Sender<PlaybackEvent>) {
+    #[cfg(not(target_os = "linux"))]
+    let _ = broadcast_tx;
     #[cfg(target_os = "linux")]
     {
         let active_devices: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -30,10 +39,11 @@ pub fn spawn_linux_gamepad_reader(broadcast_tx: broadcast::Sender<PlaybackEvent>
                     }
 
                     // Filter out motion sensors, accelerometers, gyros, and touchpads
+                    // (keep VR "Motion Controller" nodes intact on Steam Frame)
                     let sys_name_path = format!("/sys/class/input/js{idx}/device/name");
                     if let Ok(name) = std::fs::read_to_string(&sys_name_path) {
                         let lower = name.to_lowercase();
-                        if lower.contains("motion")
+                        if lower.contains("motion sensor")
                             || lower.contains("sensor")
                             || lower.contains("imu")
                             || lower.contains("accel")

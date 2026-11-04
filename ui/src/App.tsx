@@ -807,7 +807,7 @@ const ConsoleMainApp: React.FC = () => {
       {/* Headless Apple Music Virtual Sink Bridge (MusicKit v3) */}
       <AppleMusicDriver />
 
-      {/* Gamepad & Keyboard Focus Ring Style */}
+      {/* Gamepad & Keyboard Focus Ring Style + Adaptive Input Modality (`data-simp-input="pointer" | "gamepad"`) */}
       <style>{`
         button:focus, button:focus-visible,
         input:focus, input:focus-visible,
@@ -817,6 +817,15 @@ const ConsoleMainApp: React.FC = () => {
           outline: 2px solid #2aa3c4 !important;
           outline-offset: 2px !important;
           box-shadow: 0 0 0 3px rgba(42, 163, 196, 0.28) !important;
+        }
+        html[data-simp-input="pointer"] .simp-gp-badge {
+          display: none !important;
+        }
+        html[data-simp-input="pointer"] .simp-gpfocus,
+        html[data-simp-input="pointer"] [data-simp-active-focus="true"],
+        html[data-simp-input="pointer"] button:focus:not(:focus-visible) {
+          outline: none !important;
+          box-shadow: none !important;
         }
       `}</style>
 
@@ -977,6 +986,7 @@ const ConsoleMainApp: React.FC = () => {
           <span>Source: {track?.source?.toUpperCase() || 'LOCAL / USB'}</span>
           <span style={{ color: '#71717a' }}>▾</span>
           <span
+            className="simp-gp-badge"
             style={{
               padding: '2px 6px',
               borderRadius: 6,
@@ -1002,7 +1012,10 @@ const ConsoleMainApp: React.FC = () => {
             border: '1px solid #1c1c24',
           }}
         >
-          <span style={{ padding: '4px 8px', fontSize: 11, fontFamily: 'monospace', color: '#71717a' }}>
+          <span
+            className="simp-gp-badge"
+            style={{ padding: '4px 8px', fontSize: 11, fontFamily: 'monospace', color: '#71717a' }}
+          >
             L1
           </span>
           <button
@@ -1037,7 +1050,10 @@ const ConsoleMainApp: React.FC = () => {
           >
             📚 Library & Queue
           </button>
-          <span style={{ padding: '4px 8px', fontSize: 11, fontFamily: 'monospace', color: '#71717a' }}>
+          <span
+            className="simp-gp-badge"
+            style={{ padding: '4px 8px', fontSize: 11, fontFamily: 'monospace', color: '#71717a' }}
+          >
             R1
           </span>
         </div>
@@ -1575,7 +1591,7 @@ const ConsoleMainApp: React.FC = () => {
                   cursor: 'pointer',
                 }}
               >
-                ✓ Done (B)
+                ✓ Done<span className="simp-gp-badge"> (B)</span>
               </button>
             </div>
           </div>

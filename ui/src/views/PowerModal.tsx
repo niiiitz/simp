@@ -96,7 +96,7 @@ export const PowerModal: React.FC<PowerModalProps> = ({
               cursor: 'pointer',
             }}
           >
-            ✕ B
+            ✕<span className="simp-gp-badge"> B</span>
           </button>
         </div>
 

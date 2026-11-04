@@ -204,7 +204,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               whiteSpace: 'nowrap',
             }}
           >
-            {track?.artists?.join(', ') || 'Select a track from Library & Queue (R1)'}
+            {track?.artists?.join(', ') || (
+              <>
+                Select a track from Library & Queue<span className="simp-gp-badge"> (R1)</span>
+              </>
+            )}
             {track?.album ? ` • ${track.album}` : ''}
           </p>
         </div>
@@ -245,6 +249,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           >
             <span style={{ fontSize: 30 }}>{isPlaying ? '⏸' : '▶'}</span>
             <span
+              className="simp-gp-badge"
               style={{
                 padding: '2px 10px',
                 borderRadius: 99,
@@ -380,6 +385,7 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({ icon, badge, active,
   >
     <span style={{ fontSize: 24 }}>{icon}</span>
     <span
+      className="simp-gp-badge"
       style={{
         padding: '2px 8px',
         borderRadius: 99,

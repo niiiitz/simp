@@ -117,7 +117,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               cursor: 'pointer',
             }}
           >
-            ✕ B
+            ✕<span className="simp-gp-badge"> B</span>
           </button>
         </div>
 

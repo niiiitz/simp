@@ -58,32 +58,38 @@ pub fn is_newer_version(current: &str, candidate: &str) -> bool {
     parse_version_tuple(candidate) > parse_version_tuple(current)
 }
 
-/// Queries GitHub Releases (`niiiitz/simp`) for the newest release (including `-alpha.X` pre-releases).
+fn load_provisioning_settings() -> simp_protocol::ProvisioningSettings {
+    if let Some(cfg_dir) = dirs::config_dir() {
+        let path = cfg_dir.join("simp").join("settings.vdf");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(parsed) = keyvalues_serde::from_str::<simp_protocol::SimpSettings>(&text) {
+                return parsed.provisioning;
+            }
+        }
+    }
+    simp_protocol::ProvisioningSettings::default()
+}
+
+/// Queries GitHub Releases (`niiiitz/simp` or configured `github_releases_api_url` in `settings.vdf`)
+/// for the newest release (including `-alpha.X` pre-releases).
 pub fn check_for_updates() -> Result<UpdateStatus> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let output = Command::new("curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            "8",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            "User-Agent: SIMP-Updater",
-            "https://api.github.com/repos/niiiitz/simp/releases?per_page=8",
-        ])
-        .output()
-        .map_err(|e| anyhow!("Failed to run curl to check GitHub releases: {e}"))?;
+    let prov = load_provisioning_settings();
+    let api_url = if prov.github_releases_api_url.trim().is_empty() {
+        "https://api.github.com/repos/niiiitz/simp/releases?per_page=8"
+    } else {
+        prov.github_releases_api_url.trim()
+    };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "GitHub API request failed: {}",
-            stderr.trim()
-        ));
-    }
+    let bytes = crate::http_pool::http_get_bytes(
+        api_url,
+        &[("Accept", "application/vnd.github+json")],
+        None,
+        8,
+    )
+    .map_err(|e| anyhow!("GitHub API request failed: {e}"))?;
 
-    let releases: Vec<GithubReleaseItem> = serde_json::from_slice(&output.stdout)
+    let releases: Vec<GithubReleaseItem> = serde_json::from_slice(&bytes)
         .map_err(|e| anyhow!("Failed to parse GitHub releases JSON: {e}"))?;
 
     let newest = releases
@@ -177,10 +183,18 @@ pub fn apply_self_update(
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir)?;
 
-    let tarball_path = tmp_dir.join("simp-steamos-userland-x86_64.tar.gz");
-    let download_url = format!(
-        "https://github.com/niiiitz/simp/releases/download/{tag}/simp-steamos-userland-x86_64.tar.gz"
-    );
+    let prov = load_provisioning_settings();
+    let arch = std::env::consts::ARCH; // "x86_64" on Deck/PC, "aarch64" on Steam Frame
+    let tarball_name = format!("simp-steamos-userland-{arch}.tar.gz");
+    let tarball_path = tmp_dir.join(&tarball_name);
+    let template = if prov.release_asset_template.trim().is_empty() {
+        "https://github.com/niiiitz/simp/releases/download/{tag}/simp-steamos-userland-{arch}.tar.gz"
+    } else {
+        prov.release_asset_template.trim()
+    };
+    let download_url = template
+        .replace("{tag}", &tag)
+        .replace("{arch}", arch);
 
     let dl_status = Command::new("curl")
         .args(["-fsSL", "--max-time", "90", "-o"])

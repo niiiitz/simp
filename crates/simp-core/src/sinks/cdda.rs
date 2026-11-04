@@ -3,20 +3,31 @@ use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rodio::{source::SeekError as RodioSeekError, Source};
 use sha1::{Digest, Sha1};
-use simp_protocol::{OpticalDiscStatus, TrackMetadata};
+#[cfg(target_os = "linux")]
+use simp_protocol::TrackMetadata;
+use simp_protocol::OpticalDiscStatus;
+#[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::time::Duration;
 
 // Linux <linux/cdrom.h> ioctl constants & structures
-const CDROMREADTOCHDR: libc::c_ulong = 0x5305;
-const CDROMREADTOCENTRY: libc::c_ulong = 0x5306;
-const CDROMEJECT: libc::c_ulong = 0x5309;
-const CDROMREADAUDIO: libc::c_ulong = 0x530e;
-const CDROM_DRIVE_STATUS: libc::c_ulong = 0x5326;
-const CDROM_DISC_STATUS: libc::c_ulong = 0x5327;
+#[cfg(target_os = "linux")]
+const CDROMREADTOCHDR: libc::Ioctl = 0x5305;
+#[cfg(target_os = "linux")]
+const CDROMREADTOCENTRY: libc::Ioctl = 0x5306;
+#[cfg(target_os = "linux")]
+const CDROMEJECT: libc::Ioctl = 0x5309;
+#[cfg(target_os = "linux")]
+const CDROMREADAUDIO: libc::Ioctl = 0x530e;
+#[cfg(target_os = "linux")]
+const CDROM_DRIVE_STATUS: libc::Ioctl = 0x5326;
+#[cfg(target_os = "linux")]
+const CDROM_DISC_STATUS: libc::Ioctl = 0x5327;
 
 const CDROM_LBA: u8 = 0x01;
 const CDROM_MSF: u8 = 0x02;
@@ -157,6 +168,15 @@ pub fn compute_musicbrainz_disc_id(
 }
 
 /// Reads the Table of Contents (TOC) from an optical drive via Linux `ioctl` without requiring `sudo`.
+#[cfg(not(target_os = "linux"))]
+pub fn read_cd_toc(device_path: &str) -> Result<CdToc> {
+    Err(anyhow!(
+        "Direct optical CD-DA TOC ioctl is only supported on Linux ({device_path})"
+    ))
+}
+
+/// Reads the Table of Contents (TOC) from an optical drive via Linux `ioctl` without requiring `sudo`.
+#[cfg(target_os = "linux")]
 pub fn read_cd_toc(device_path: &str) -> Result<CdToc> {
     let file = OpenOptions::new()
         .read(true)
@@ -269,6 +289,30 @@ pub fn read_cd_toc(device_path: &str) -> Result<CdToc> {
 
 /// Scans an optical drive on-demand (invoked only when the user opens Sources / CD view or clicks Scan).
 /// Resolves track titles and album cover art via MusicBrainz + Cover Art Archive and caches by `disc_id` in SQLite.
+#[cfg(not(target_os = "linux"))]
+pub fn scan_optical_disc(
+    _db: &LibraryDatabase,
+    preferred_device: Option<&str>,
+    _force_refresh: bool,
+) -> OpticalDiscStatus {
+    OpticalDiscStatus {
+        drive_present: false,
+        device_path: preferred_device.unwrap_or("/dev/sr0").to_string(),
+        disc_present: false,
+        is_audio_cd: false,
+        disc_id: None,
+        album_title: String::new(),
+        artist_name: String::new(),
+        release_year: None,
+        art_url: None,
+        tracks: Vec::new(),
+        status_message: "Direct optical CD-DA drive scanning is supported on Linux".to_string(),
+    }
+}
+
+/// Scans an optical drive on-demand (invoked only when the user opens Sources / CD view or clicks Scan).
+/// Resolves track titles and album cover art via MusicBrainz + Cover Art Archive and caches by `disc_id` in SQLite.
+#[cfg(target_os = "linux")]
 pub fn scan_optical_disc(
     db: &LibraryDatabase,
     preferred_device: Option<&str>,
@@ -528,6 +572,13 @@ pub fn scan_optical_disc(
 }
 
 /// Ejects the optical disc tray via `CDROMEJECT` ioctl (or `eject` CLI fallback).
+#[cfg(not(target_os = "linux"))]
+pub fn eject_optical_disc(_preferred_device: Option<&str>) -> Result<String> {
+    Err(anyhow!("No optical drive found"))
+}
+
+/// Ejects the optical disc tray via `CDROMEJECT` ioctl (or `eject` CLI fallback).
+#[cfg(target_os = "linux")]
 pub fn eject_optical_disc(preferred_device: Option<&str>) -> Result<String> {
     let Some(device_path) = find_optical_device(preferred_device) else {
         return Err(anyhow!("No optical drive found"));
@@ -742,6 +793,7 @@ pub fn parse_cdda_uri(uri: &str) -> Option<(String, u8)> {
 /// Red Book CD-DA (`44.1 kHz`, 16-bit stereo little-endian) streaming `rodio::Source`
 /// reading directly from `/dev/sr0` via `CDROMREADAUDIO` in 25-sector buffered chunks.
 pub struct CddaTrackSource {
+    #[cfg(target_os = "linux")]
     file: std::fs::File,
     start_lba: i32,
     end_lba: i32,
@@ -752,6 +804,12 @@ pub struct CddaTrackSource {
 }
 
 impl CddaTrackSource {
+    #[cfg(not(target_os = "linux"))]
+    pub fn open_uri(uri: &str) -> Result<Self> {
+        Err(anyhow!("Direct optical CD-DA playback is only supported on Linux ({uri})"))
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn open_uri(uri: &str) -> Result<Self> {
         let (device_path, track_number) =
             parse_cdda_uri(uri).ok_or_else(|| anyhow!("Invalid cdda:// URI: {uri}"))?;
@@ -786,6 +844,12 @@ impl CddaTrackSource {
         Ok(source)
     }
 
+    #[cfg(not(target_os = "linux"))]
+    fn fill_next_chunk(&mut self) -> Result<bool> {
+        Ok(false)
+    }
+
+    #[cfg(target_os = "linux")]
     fn fill_next_chunk(&mut self) -> Result<bool> {
         if self.current_lba >= self.end_lba {
             return Ok(false);

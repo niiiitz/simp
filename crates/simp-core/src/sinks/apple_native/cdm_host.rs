@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Describes the location and ABI capabilities of a discovered `libwidevinecdm.so` binary on Linux/SteamOS.
+/// Describes the location and ABI capabilities of a discovered Widevine CDM binary
+/// (`libwidevinecdm.so` on Linux/SteamOS/Steam Frame, `libwidevinecdm.dylib` on macOS, `widevinecdm.dll` on Windows).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredWidevineCdm {
     pub library_path: PathBuf,
@@ -19,13 +20,35 @@ pub struct DiscoveredWidevineCdm {
     pub cdm_version: Option<String>,
 }
 
-/// Discovers an installed `libwidevinecdm.so` on the system without spawning any browser process.
+fn load_provisioning_settings() -> simp_protocol::ProvisioningSettings {
+    if let Some(cfg_dir) = dirs::config_dir() {
+        let path = cfg_dir.join("simp").join("settings.vdf");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(parsed) = keyvalues_serde::from_str::<simp_protocol::SimpSettings>(&text) {
+                return parsed.provisioning;
+            }
+        }
+    }
+    simp_protocol::ProvisioningSettings::default()
+}
+
+const fn platform_cdm_filename() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "libwidevinecdm.dylib"
+    } else if cfg!(target_os = "windows") {
+        "widevinecdm.dll"
+    } else {
+        "libwidevinecdm.so"
+    }
+}
+
+/// Discovers an installed Widevine CDM library (`libwidevinecdm.so`, `libwidevinecdm.dylib`, or `widevinecdm.dll`)
+/// on the system without spawning any browser process.
 /// Searches:
-/// 1. `~/.local/share/simp/lib/libwidevinecdm.so` (user/SIMP drop-in path)
-/// 2. Flatpak Firefox (`~/.var/app/org.mozilla.firefox/.mozilla/firefox/*/gmp-widevinecdm/*/libwidevinecdm.so`)
-/// 3. Native Firefox (`~/.mozilla/firefox/*/gmp-widevinecdm/*/libwidevinecdm.so`)
-/// 4. Flatpak / Native Chrome, Brave, Edge, and Chromium `WidevineCdm` directories
-/// 5. System `/opt/google/chrome/WidevineCdm` and `/usr/lib/chromium/libwidevinecdm.so`
+/// 1. `SIMP_WIDEVINE_CDM_PATH` or `settings.vdf` `[provisioning] widevine_cdm_custom_path`
+/// 2. `~/.local/share/simp/lib/<cdm_filename>` (user/SIMP drop-in path)
+/// 3. Firefox & Chromium/Chrome/Brave/Edge WidevineCdm directories across Linux, macOS, and Windows
+/// 4. Declarative auto-provisioning from `settings.vdf` `[provisioning]` URLs for the current `(OS, ARCH)`
 pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
     if let Ok(env_path) = std::env::var("SIMP_WIDEVINE_CDM_PATH") {
         let p = PathBuf::from(env_path.trim());
@@ -38,39 +61,79 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
         }
     }
 
+    let prov = load_provisioning_settings();
+    if !prov.widevine_cdm_custom_path.trim().is_empty() {
+        let custom_p = crate::library::vdf::normalize_platform_path(prov.widevine_cdm_custom_path.trim());
+        if custom_p.is_file() {
+            return Some(DiscoveredWidevineCdm {
+                library_path: custom_p,
+                source_label: "settings-vdf-custom".to_string(),
+                cdm_version: None,
+            });
+        }
+    }
+
     let home = dirs::home_dir()?;
+    let cdm_file = platform_cdm_filename();
 
     // 1. Explicit SIMP userland library folder
-    let simp_lib = home.join(".local/share/simp/lib/libwidevinecdm.so");
-    if simp_lib.is_file() {
+    let simp_lib = dirs::data_local_dir()
+        .unwrap_or_else(|| home.join(".local/share"))
+        .join("simp")
+        .join("lib")
+        .join(cdm_file);
+    if simp_lib.is_file() && is_compatible_cdm_binary(&simp_lib) {
         return Some(DiscoveredWidevineCdm {
             library_path: simp_lib,
             source_label: "simp-userland".to_string(),
             cdm_version: None,
         });
     }
+    // Also check ~/.local/share/simp/lib on macOS/Linux in case staged there
+    let legacy_simp_lib = home.join(".local/share/simp/lib").join(cdm_file);
+    if legacy_simp_lib.is_file() && is_compatible_cdm_binary(&legacy_simp_lib) {
+        return Some(DiscoveredWidevineCdm {
+            library_path: legacy_simp_lib,
+            source_label: "simp-userland".to_string(),
+            cdm_version: None,
+        });
+    }
 
-    // 2. Firefox profiles (Flatpak & Native)
-    for (label, ff_root) in [
+    // 2. Firefox profiles (Flatpak, Native Linux, macOS, Windows)
+    let mut ff_roots: Vec<(&str, PathBuf)> = vec![
         (
             "firefox-flatpak",
             home.join(".var/app/org.mozilla.firefox/.mozilla/firefox"),
         ),
         ("firefox-native", home.join(".mozilla/firefox")),
-    ] {
-        if let Some(found) = scan_for_file_named(&ff_root, "libwidevinecdm.so", 4) {
-            stage_cdm_into_userland(&found, &simp_lib);
-            let active_path = if simp_lib.is_file() { simp_lib } else { found };
-            return Some(DiscoveredWidevineCdm {
-                library_path: active_path,
-                source_label: label.to_string(),
-                cdm_version: None,
-            });
+    ];
+    if cfg!(target_os = "macos") {
+        ff_roots.push((
+            "firefox-macos",
+            home.join("Library/Application Support/Firefox/Profiles"),
+        ));
+    } else if cfg!(target_os = "windows") {
+        if let Some(appdata) = dirs::config_dir() {
+            ff_roots.push(("firefox-windows", appdata.join("Mozilla/Firefox/Profiles")));
         }
     }
 
-    // 3. Chromium/Chrome/Brave/Edge WidevineCdm directories
-    for (label, chr_root) in [
+    for (label, ff_root) in ff_roots {
+        if let Some(found) = scan_for_file_named(&ff_root, cdm_file, 4) {
+            if is_compatible_cdm_binary(&found) {
+                stage_cdm_into_userland(&found, &simp_lib);
+                let active_path = if simp_lib.is_file() { simp_lib } else { found };
+                return Some(DiscoveredWidevineCdm {
+                    library_path: active_path,
+                    source_label: label.to_string(),
+                    cdm_version: None,
+                });
+            }
+        }
+    }
+
+    // 3. Chromium/Chrome/Brave/Edge WidevineCdm directories (Linux, macOS, Windows)
+    let mut chr_roots: Vec<(&str, PathBuf)> = vec![
         (
             "chrome-flatpak",
             home.join(".var/app/com.google.Chrome/config/google-chrome/WidevineCdm"),
@@ -95,24 +158,62 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
             "opt-chrome",
             PathBuf::from("/opt/google/chrome/WidevineCdm"),
         ),
-    ] {
-        if let Some(found) = scan_for_file_named(&chr_root, "libwidevinecdm.so", 5) {
-            stage_cdm_into_userland(&found, &simp_lib);
-            let active_path = if simp_lib.is_file() { simp_lib } else { found };
-            return Some(DiscoveredWidevineCdm {
-                library_path: active_path,
-                source_label: label.to_string(),
-                cdm_version: None,
-            });
+    ];
+    if cfg!(target_os = "macos") {
+        chr_roots.push((
+            "chrome-macos-user",
+            home.join("Library/Application Support/Google/Chrome/WidevineCdm"),
+        ));
+        chr_roots.push((
+            "brave-macos-user",
+            home.join("Library/Application Support/BraveSoftware/Brave-Browser/WidevineCdm"),
+        ));
+        chr_roots.push((
+            "edge-macos-user",
+            home.join("Library/Application Support/Microsoft Edge/WidevineCdm"),
+        ));
+        chr_roots.push((
+            "chrome-macos-app",
+            PathBuf::from("/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/Current/Libraries/WidevineCdm"),
+        ));
+    } else if cfg!(target_os = "windows") {
+        if let Some(local_app) = dirs::data_local_dir() {
+            chr_roots.push((
+                "chrome-win-user",
+                local_app.join("Google/Chrome/User Data/WidevineCdm"),
+            ));
+            chr_roots.push((
+                "edge-win-user",
+                local_app.join("Microsoft/Edge/User Data/WidevineCdm"),
+            ));
+            chr_roots.push((
+                "brave-win-user",
+                local_app.join("BraveSoftware/Brave-Browser/User Data/WidevineCdm"),
+            ));
+        }
+    }
+
+    for (label, chr_root) in chr_roots {
+        if let Some(found) = scan_for_file_named(&chr_root, cdm_file, 5) {
+            if is_compatible_cdm_binary(&found) {
+                stage_cdm_into_userland(&found, &simp_lib);
+                let active_path = if simp_lib.is_file() { simp_lib } else { found };
+                return Some(DiscoveredWidevineCdm {
+                    library_path: active_path,
+                    source_label: label.to_string(),
+                    cdm_version: None,
+                });
+            }
         }
     }
 
     for sys_path in [
         "/usr/lib/chromium/libwidevinecdm.so",
         "/usr/lib64/chromium/libwidevinecdm.so",
+        "/usr/lib/aarch64-linux-gnu/chromium/libwidevinecdm.so",
     ] {
         let p = Path::new(sys_path);
-        if p.is_file() {
+        if p.is_file() && is_compatible_cdm_binary(p) {
             stage_cdm_into_userland(p, &simp_lib);
             let active_path = if simp_lib.is_file() {
                 simp_lib
@@ -127,8 +228,11 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
         }
     }
 
-    // 4. Auto-provision official Linux x64 Widevine CDM 4.10.3112.0 into userland if missing
-    if auto_provision_widevine_cdm(&simp_lib) && simp_lib.is_file() {
+    // 4. Auto-provision Widevine CDM into userland using URLs from `settings.vdf` `[provisioning]`
+    if auto_provision_widevine_cdm(&simp_lib, &prov)
+        && simp_lib.is_file()
+        && is_compatible_cdm_binary(&simp_lib)
+    {
         return Some(DiscoveredWidevineCdm {
             library_path: simp_lib,
             source_label: "simp-auto-provisioned".to_string(),
@@ -139,73 +243,107 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
     None
 }
 
+/// Verifies that an ELF/Mach-O/PE shared library matches the current CPU architecture (`x86_64` vs `aarch64`)
+/// before attempting `dlopen`, preventing an `x86_64` `.so` from breaking a Steam Frame `aarch64` build.
+fn is_compatible_cdm_binary(path: &Path) -> bool {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    let mut hdr = [0u8; 20];
+    if f.read_exact(&mut hdr).is_err() {
+        return false;
+    }
+    // Check ELF header (`\x7FELF`) e_machine field (little-endian u16 at offset 18)
+    if &hdr[0..4] == b"\x7fELF" {
+        let e_machine = u16::from_le_bytes([hdr[18], hdr[19]]);
+        if cfg!(target_arch = "x86_64") {
+            return e_machine == 0x3E; // EM_X86_64 (62)
+        } else if cfg!(target_arch = "aarch64") {
+            return e_machine == 0xB7; // EM_AARCH64 (183)
+        }
+    }
+    true
+}
+
 static AUTO_PROVISION_ATTEMPTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn auto_provision_widevine_cdm(dest: &Path) -> bool {
-    if dest.is_file() {
+fn auto_provision_widevine_cdm(dest: &Path, prov: &simp_protocol::ProvisioningSettings) -> bool {
+    if dest.is_file() && is_compatible_cdm_binary(dest) {
         return true;
     }
     if AUTO_PROVISION_ATTEMPTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return dest.is_file();
+        return dest.is_file() && is_compatible_cdm_binary(dest);
     }
+    let url = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        prov.widevine_cdm_url_x86_64_linux.trim()
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        prov.widevine_cdm_url_aarch64_linux.trim()
+    } else {
+        ""
+    };
+    if url.is_empty() {
+        return false;
+    }
+
     let Some(parent) = dest.parent() else {
         return false;
     };
     let _ = std::fs::create_dir_all(parent);
-    let tmp_crx = parent.join(".widevine_download.crx3");
     let tmp_zip = parent.join(".widevine_download.zip");
-    let url = "https://edgedl.me.gvt1.com/edgedl/release2/chrome_component/acqexsh26ysyu3zxeotqtsp63idq_4.10.3112.0/oimompecagnajdejgnnjijobebaeigek_4.10.3112.0_linux64_ad7kyx4q7wx7xknykmkbonbbmnwq.crx3";
 
-    let status = Command::new("curl")
-        .args(["-fsSL", "--max-time", "25", "-o"])
-        .arg(&tmp_crx)
-        .arg(url)
-        .status();
-    if !status.map(|s| s.success()).unwrap_or(false) {
-        let _ = std::fs::remove_file(&tmp_crx);
-        return false;
-    }
-
-    let Ok(crx_bytes) = std::fs::read(&tmp_crx) else {
-        let _ = std::fs::remove_file(&tmp_crx);
+    let Ok(raw_bytes) = crate::http_pool::http_get_bytes(url, &[], None, 25) else {
         return false;
     };
-    let _ = std::fs::remove_file(&tmp_crx);
 
-    let Some(pk_offset) = crx_bytes.windows(4).position(|w| w == b"PK\x03\x04") else {
+    // Support both Chrome CRX3 packages (strip header up to `PK\x03\x04`) and standard `.zip` archives
+    let Some(pk_offset) = raw_bytes.windows(4).position(|w| w == b"PK\x03\x04") else {
         return false;
     };
-    if std::fs::write(&tmp_zip, &crx_bytes[pk_offset..]).is_err() {
+    if std::fs::write(&tmp_zip, &raw_bytes[pk_offset..]).is_err() {
         let _ = std::fs::remove_file(&tmp_zip);
         return false;
     }
 
-    let py_script = r#"
-import sys, zipfile, os
-zip_path, dest_path = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(zip_path) as zf:
-    for name in zf.namelist():
-        if name.endswith("libwidevinecdm.so"):
-            data = zf.read(name)
-            tmp_out = dest_path + ".tmp"
-            with open(tmp_out, "wb") as f:
-                f.write(data)
-            os.chmod(tmp_out, 0o755)
-            os.replace(tmp_out, dest_path)
-            sys.exit(0)
-sys.exit(1)
-"#;
-    let extracted = Command::new("python3")
-        .arg("-c")
-        .arg(py_script)
+    let target_name = platform_cdm_filename();
+    let tmp_extract_dir = parent.join(".widevine_extract_tmp");
+    let _ = std::fs::remove_dir_all(&tmp_extract_dir);
+    let _ = std::fs::create_dir_all(&tmp_extract_dir);
+
+    // 1. Prefer system `unzip` (no Python dependency required on minimal SteamOS / Steam Frame images)
+    let unzipped = Command::new("unzip")
+        .args(["-q", "-o"])
         .arg(&tmp_zip)
-        .arg(dest)
+        .arg("-d")
+        .arg(&tmp_extract_dir)
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
+
+    if unzipped {
+        if let Some(found) = scan_for_file_named(&tmp_extract_dir, target_name, 4) {
+            stage_cdm_into_userland(&found, dest);
+        }
+    } else {
+        // 2. Fallback to `python3 -m zipfile -e` if `unzip` is not installed
+        let py_unzip = Command::new("python3")
+            .args(["-m", "zipfile", "-e"])
+            .arg(&tmp_zip)
+            .arg(&tmp_extract_dir)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if py_unzip {
+            if let Some(found) = scan_for_file_named(&tmp_extract_dir, target_name, 4) {
+                stage_cdm_into_userland(&found, dest);
+            }
+        }
+    }
+
     let _ = std::fs::remove_file(&tmp_zip);
-    extracted && dest.is_file()
+    let _ = std::fs::remove_dir_all(&tmp_extract_dir);
+    dest.is_file() && is_compatible_cdm_binary(dest)
 }
 
 fn stage_cdm_into_userland(src: &Path, dest: &Path) {

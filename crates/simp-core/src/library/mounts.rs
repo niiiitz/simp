@@ -2,25 +2,58 @@ use simp_protocol::PowerState;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Discovers mounted removable USB / MicroSD drives under `/run/media/$USER/`
-/// and `/run/media/mmcblk0p1` on SteamOS / Bazzite.
+/// Discovers mounted removable USB / MicroSD drives under `/run/media/$USER/`,
+/// `/run/media/mmcblk0p1` (SteamOS / Bazzite / Linux), `/Volumes` (macOS), and `D:\`..`Z:\` (Windows).
 pub fn discover_removable_mounts() -> Vec<(PathBuf, String)> {
     let mut mounts = Vec::new();
 
-    // Check /run/media/$USER/<label>
-    if let Ok(user) = std::env::var("USER") {
-        let user_media = PathBuf::from("/run/media").join(user);
-        collect_subdirs(&user_media, &mut mounts);
+    #[cfg(target_os = "linux")]
+    {
+        // Check /run/media/$USER/<label>
+        if let Ok(user) = std::env::var("USER") {
+            let user_media = PathBuf::from("/run/media").join(user);
+            collect_subdirs(&user_media, &mut mounts);
+        }
+
+        // Also check /run/media/deck/<label> for SteamOS standard user
+        let deck_media = PathBuf::from("/run/media/deck");
+        collect_subdirs(&deck_media, &mut mounts);
+
+        // Check legacy SteamOS MicroSD direct mount
+        let sd_direct = PathBuf::from("/run/media/mmcblk0p1");
+        if sd_direct.is_dir() && !mounts.iter().any(|(p, _)| p == &sd_direct) {
+            mounts.push((sd_direct, "MicroSD Card".to_string()));
+        }
     }
 
-    // Also check /run/media/deck/<label> for SteamOS standard user
-    let deck_media = PathBuf::from("/run/media/deck");
-    collect_subdirs(&deck_media, &mut mounts);
+    #[cfg(target_os = "macos")]
+    {
+        let volumes = Path::new("/Volumes");
+        if let Ok(entries) = fs::read_dir(volumes) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let label = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if label != "Macintosh HD" && label != "Preboot" && label != "Recovery" && !label.is_empty() {
+                        mounts.push((path, label));
+                    }
+                }
+            }
+        }
+    }
 
-    // Check legacy SteamOS MicroSD direct mount
-    let sd_direct = PathBuf::from("/run/media/mmcblk0p1");
-    if sd_direct.is_dir() && !mounts.iter().any(|(p, _)| p == &sd_direct) {
-        mounts.push((sd_direct, "MicroSD Card".to_string()));
+    #[cfg(target_os = "windows")]
+    {
+        for letter in b'D'..=b'Z' {
+            let drive = format!("{}:\\", letter as char);
+            let path = PathBuf::from(&drive);
+            if path.is_dir() {
+                mounts.push((path, format!("Drive {}:", letter as char)));
+            }
+        }
     }
 
     mounts

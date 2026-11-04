@@ -73,6 +73,47 @@ export function useGamepadNavigation({
   const gamepadActionRef = useRef<(action: string) => void>(() => {});
   const lastWebGamepadTsRef = useRef<number>(0);
 
+  // Adaptive Input Modality (`data-simp-input="pointer" | "gamepad"`):
+  // Default to `gamepad` inside SteamUI's `/simp-console` iframe and `pointer` in standalone desktop windows,
+  // then switch dynamically whenever the user moves the mouse vs presses a controller button.
+  useEffect(() => {
+    if (!document.documentElement.dataset.simpInput) {
+      document.documentElement.dataset.simpInput =
+        window.parent !== window ? 'gamepad' : 'pointer';
+    }
+    let lastMouseX: number | null = null;
+    let lastMouseY: number | null = null;
+    const onPointerMove = (e: PointerEvent) => {
+      if (e.pointerType && e.pointerType !== 'mouse') return;
+      if (lastMouseX === null || lastMouseY === null) {
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+        return;
+      }
+      const dist = Math.hypot(e.clientX - lastMouseX, e.clientY - lastMouseY);
+      if (dist > 10) {
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+        if (document.documentElement.dataset.simpInput !== 'pointer') {
+          document.documentElement.dataset.simpInput = 'pointer';
+        }
+      }
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      if (!e.pointerType || e.pointerType === 'mouse') {
+        if (document.documentElement.dataset.simpInput !== 'pointer') {
+          document.documentElement.dataset.simpInput = 'pointer';
+        }
+      }
+    };
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+    };
+  }, []);
+
   // IMPORTANT: Never call `el.focus()` here! Inside SteamUI's `/simp-console` iframe, calling
   // `el.focus()` steals browser focus away from the parent SteamUI `<Focusable>` wrapper,
   // causing SteamUI to play a "bonk" sound on the first D-Pad press and requiring 2 presses per row.
@@ -337,6 +378,9 @@ export function useGamepadNavigation({
       const now = performance.now();
       if (lastActionTs[action] && now - lastActionTs[action] < 70) return;
       lastActionTs[action] = now;
+      if (document.documentElement.dataset.simpInput !== 'gamepad') {
+        document.documentElement.dataset.simpInput = 'gamepad';
+      }
       setIsDimmed(false);
       if (isSleeping) {
         setIsSleeping(false);
