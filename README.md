@@ -18,7 +18,13 @@ If you use a Steam Deck, a living-room Bazzite box, or a Linux desktop, playing 
 
 **SIMP** is a small, fast media player built to fix that. It runs a tiny Rust audio service in the background and gives you a clean, high-contrast console interface that works just as naturally with a gamepad or VR controller as it does with a mouse and keyboard.
 
-*(Screenshots coming soon!)*
+| <a href="docs/screenshots/on_deck.jpg"><img src="docs/screenshots/on_deck.jpg" alt="SIMP on Steam Deck" width="100%" /></a> | <a href="docs/screenshots/spacial_computing_simp.jpg"><img src="docs/screenshots/spacial_computing_simp.jpg" alt="SIMP in SteamVR on Steam Frame" width="100%" /></a> |
+| :---: | :---: |
+| **Steam Deck (Handheld Gamepad Mode)**<br><sub>Controller button hints (`L1`/`R1`/`X`/`Y`/`L2`/`R2`) active</sub> | **Steam Frame (`aarch64` SteamVR Spatial Overlay)**<br><sub>Floating alongside your VR library in passthrough/3D space</sub> |
+| <a href="docs/screenshots/KDE_steammachine.jpg"><img src="docs/screenshots/KDE_steammachine.jpg" alt="SIMP on KDE Plasma Desktop with MPRIS2" width="100%" /></a> | <a href="docs/screenshots/library_queue.jpg"><img src="docs/screenshots/library_queue.jpg" alt="SIMP Library and Cloud Playlists" width="100%" /></a> |
+| **KDE Plasma & Steam Machine**<br><sub>Local/Steam OST browser with native KDE `MPRIS2` tray controls</sub> | **Library & Cloud Playlists**<br><sub>Pinning iCloud Music Library playlists into SIMP</sub> |
+| <a href="docs/screenshots/mouse_mode.png"><img src="docs/screenshots/mouse_mode.png" alt="SIMP Adaptive Mouse Mode" width="100%" /></a> | <a href="docs/screenshots/search_and_pin.png"><img src="docs/screenshots/search_and_pin.png" alt="SIMP Search and Controller OSK" width="100%" /></a> |
+| **Adaptive Pointer / Mouse Mode**<br><sub>Controller glyphs auto-hide when using a mouse or trackpad</sub> | **Catalog Search & Built-in Controller OSK**<br><sub>Full catalog search, album pinning, and on-screen keyboard</sub> |
 
 ---
 
@@ -37,7 +43,7 @@ If you use a Steam Deck, a living-room Bazzite box, or a Linux desktop, playing 
 
 SIMP installs entirely into your home folder (`~/.local/share/simp`) and runs as a `systemd --user` service. It **never** requires disabling `steamos-readonly` or modifying system files.
 
-Grab `simp-steamos-userland-x86_64.tar.gz` from the [latest GitHub Release](https://github.com/niiiitz/simp/releases) and run:
+Grab `simp-steamos-userland-x86_64.tar.gz` (or `simp-steamos-userland-aarch64.tar.gz` on **Steam Frame** / ARM64) from the [latest GitHub Release](https://github.com/niiiitz/simp/releases) and run:
 
 ```bash
 rm -rf /tmp/simp-steamos-userland && tar -xzf simp-steamos-userland-x86_64.tar.gz -C /tmp
