@@ -182,6 +182,18 @@ if [[ -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
 fi
 if [[ "${ARCH}" != "${HOST_ARCH}" ]]; then
   RUST_TARGET="${ARCH}-unknown-linux-gnu"
+  if [[ "${ARCH}" == "aarch64" ]]; then
+    chmod +x "${REPO_ROOT}/packaging/scripts/setup-aarch64-toolchain.sh"
+    TOOLCHAIN_BIN="$("${REPO_ROOT}/packaging/scripts/setup-aarch64-toolchain.sh")"
+    TOOLCHAIN_LIB="${HOME}/.cache/simp-toolchain/lib-aarch64"
+    export PATH="${TOOLCHAIN_BIN}:${PATH}"
+    export CC_aarch64_unknown_linux_gnu="${TOOLCHAIN_BIN}/aarch64-linux-gnu-gcc"
+    export AR_aarch64_unknown_linux_gnu="${TOOLCHAIN_BIN}/aarch64-linux-gnu-ar"
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="${TOOLCHAIN_BIN}/aarch64-linux-gnu-gcc"
+    export PKG_CONFIG_ALLOW_CROSS=1
+    export PKG_CONFIG_PATH_aarch64_unknown_linux_gnu="${TOOLCHAIN_LIB}/pkgconfig"
+    export PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu="${TOOLCHAIN_LIB}/pkgconfig"
+  fi
   "${CARGO_BIN}" build --release -p simp --target "${RUST_TARGET}" --offline
   BUILT_BIN="${REPO_ROOT}/target/${RUST_TARGET}/release/simp"
 else
