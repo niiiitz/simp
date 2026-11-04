@@ -105,6 +105,46 @@ def _run_as_user(cmd: list[str], user: str, home: str, uid: int, gid: int):
     )
 
 
+def _sync_staged_decky_plugin(plugin_dir: str, home: str, uid: int, gid: int) -> bool:
+    """
+    If `simp` self-updater staged a newer Decky plugin bundle into `~/.local/share/simp/decky-staged/`,
+    copy its files into `~/homebrew/plugins/simp-decky/` (with root privileges if running under Decky Loader)
+    and grant `deck:deck` ownership so future updates work seamlessly.
+    """
+    staged_dir = os.path.join(home, ".local", "share", "simp", "decky-staged")
+    staged_dist_index = os.path.join(staged_dir, "dist", "index.js")
+    if not os.path.isfile(staged_dist_index):
+        return False
+
+    current_dist_index = os.path.join(plugin_dir, "dist", "index.js")
+    staged_pkg = os.path.join(staged_dir, "package.json")
+    current_pkg = os.path.join(plugin_dir, "package.json")
+
+    needs_sync = (
+        _sha256_file(staged_dist_index) != _sha256_file(current_dist_index)
+        or _sha256_file(staged_pkg) != _sha256_file(current_pkg)
+    )
+    if not needs_sync:
+        _chown_tree(plugin_dir, uid, gid)
+        return False
+
+    try:
+        os.makedirs(os.path.join(plugin_dir, "dist"), exist_ok=True)
+        for fname in ("plugin.json", "package.json", "main.py"):
+            src_f = os.path.join(staged_dir, fname)
+            if os.path.isfile(src_f):
+                shutil.copy2(src_f, os.path.join(plugin_dir, fname))
+        shutil.copytree(
+            os.path.join(staged_dir, "dist"),
+            os.path.join(plugin_dir, "dist"),
+            dirs_exist_ok=True,
+        )
+        _chown_tree(plugin_dir, uid, gid)
+        return True
+    except Exception:
+        return False
+
+
 def _provision_and_start_userland():
     plugin_dir = os.environ.get("DECKY_PLUGIN_DIR") or os.path.dirname(
         os.path.realpath(__file__)
@@ -120,7 +160,9 @@ def _provision_and_start_userland():
         except Exception:
             pass
 
-    # 1. Ensure user `deck` owns `~/homebrew/plugins/simp-decky` so userland updates work without sudo
+    # 1. Sync any staged Decky plugin bundle from `~/.local/share/simp/decky-staged/`
+    # and ensure user `deck` owns `~/homebrew/plugins/simp-decky` so userland updates work without sudo.
+    _sync_staged_decky_plugin(plugin_dir, home, uid, gid)
     _chown_tree(plugin_dir, uid, gid)
 
     install_root = os.path.join(home, ".local", "share", "simp")
@@ -268,6 +310,18 @@ class Plugin:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _provision_and_start_userland)
         return _is_daemon_listening()
+
+    async def sync_decky_plugin(self) -> dict:
+        def _do_sync():
+            plugin_dir = os.environ.get("DECKY_PLUGIN_DIR") or os.path.dirname(
+                os.path.realpath(__file__)
+            )
+            _user, home, uid, gid = _resolve_target_user()
+            synced = _sync_staged_decky_plugin(plugin_dir, home, uid, gid)
+            return {"ok": True, "synced": synced}
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _do_sync)
 
     async def _unload(self):
         # Audio daemon intentionally stays alive in userland across QAM reloads

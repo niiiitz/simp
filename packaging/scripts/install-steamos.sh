@@ -115,6 +115,21 @@ if [[ -f "${UNINSTALL_SRC}" ]]; then
   install -m 0755 "${UNINSTALL_SRC}" "${BIN_DEST}/uninstall-steamos.sh"
 fi
 ln -sf "${BIN_DEST}/simp" "${LOCAL_BIN}/simp"
+if [[ -w "/usr/local/bin" ]]; then
+  ln -sf "${BIN_DEST}/simp" "/usr/local/bin/simp" >/dev/null 2>&1 || true
+fi
+
+# Ensure ~/.local/bin is in the user's shell PATH so `simp` and `whereis simp` always work
+for rc_file in "${HOME}/.bashrc" "${HOME}/.profile"; do
+  if [[ -f "${rc_file}" ]]; then
+    if ! grep -q '\.local/bin' "${rc_file}" 2>/dev/null; then
+      printf '\n# Added by SIMP installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "${rc_file}"
+      if [[ "${EUID:-$(id -u)}" -eq 0 && "${REAL_USER}" != "root" ]]; then
+        chown "${REAL_UID}:${REAL_GID}" "${rc_file}" >/dev/null 2>&1 || true
+      fi
+    fi
+  fi
+done
 echo "✓ Installed binary:     ${BIN_DEST}/simp"
 
 # 4. Install self-hosted production UI (:18888)

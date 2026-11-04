@@ -78,9 +78,12 @@ if [[ -f "${SERVICE_FILE}" ]]; then
   echo "✓ Removed systemd unit: ${SERVICE_FILE}"
 fi
 
-# 2. Remove binary, UI bundle, and CLI symlink
-rm -rf "${BIN_DEST}" "${UI_DEST}"
+# 2. Remove binary, UI bundle, staged Decky bundle, and CLI symlinks
+rm -rf "${BIN_DEST}" "${UI_DEST}" "${INSTALL_ROOT}/decky-staged"
 rm -f "${LOCAL_BIN_LINK}"
+if [[ -L "/usr/local/bin/simp" && -w "/usr/local/bin" ]]; then
+  rm -f "/usr/local/bin/simp" >/dev/null 2>&1 || true
+fi
 echo "✓ Removed binary & UI:  ${BIN_DEST}, ${UI_DEST}"
 
 # 3. Remove Desktop shortcut & Wayland app_id alias

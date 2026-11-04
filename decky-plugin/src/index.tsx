@@ -14,7 +14,7 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.26';
+const SIMP_VERSION = 'v0.1.0-alpha.27';
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 
 let cachedSteamFocusable: any = null;
@@ -647,6 +647,8 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
   const [reloading, setReloading] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [updateLabel, setUpdateLabel] = useState<string>('⬆️ Update');
+  const [liveVersion, setLiveVersion] = useState<string>(SIMP_VERSION);
+  const [updateAvailableTag, setUpdateAvailableTag] = useState<string | null>(null);
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
   const [authCfg, setAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
@@ -691,6 +693,25 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
         setAuthCfg(cfg);
       })
       .catch(() => {});
+    fetch('http://127.0.0.1:18888/api/update/check')
+      .then((r) => r.json())
+      .then((info) => {
+        if (info?.current_version) {
+          setLiveVersion(`v${String(info.current_version).replace(/^v/, '')}`);
+        }
+        if (info?.update_available && info?.latest_tag) {
+          setUpdateAvailableTag(String(info.latest_tag));
+          setUpdateLabel(`⬆️ ${String(info.latest_tag)}`);
+        } else {
+          setUpdateAvailableTag(null);
+        }
+      })
+      .catch(() => {});
+    try {
+      serverApi?.callPluginMethod?.('sync_decky_plugin', {});
+    } catch {
+      // Ignore if Decky serverApi isn't exposed
+    }
   };
 
   useEffect(() => {
@@ -905,8 +926,20 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
     try {
       const resp = await fetch('http://127.0.0.1:18888/api/update/apply', { method: 'POST' });
       const data = await resp.json();
-      if (data.status === 'ok') {
-        setUpdateLabel(`✅ v${data.installed_version || 'Updated'}`);
+      if (data.ok || data.status === 'ok') {
+        const nextVer = String(data.updated_version || data.installed_version || '').replace(/^v/, '');
+        if (nextVer) {
+          setLiveVersion(`v${nextVer}`);
+        }
+        setUpdateAvailableTag(null);
+        setUpdateLabel(`✅ v${nextVer || 'Updated'}`);
+        try {
+          if (serverApi?.callPluginMethod) {
+            await serverApi.callPluginMethod('sync_decky_plugin', {});
+          }
+        } catch {
+          // Ignore if Decky serverApi isn't exposed
+        }
       } else {
         setUpdateLabel('⚠️ Error');
       }
@@ -1501,7 +1534,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
             color: '#a1a1aa',
           }}
         >
-          ↗ Console ({SIMP_VERSION})
+          ↗ Console ({liveVersion || SIMP_VERSION})
         </Focusable>
         <Focusable
           onActivate={handleSelfUpdate}
@@ -1511,8 +1544,8 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
             minHeight: 40,
             padding: '0 10px',
             fontSize: 11,
-            color: updating ? '#34d399' : '#5bc0de',
-            borderColor: updating ? '#34d399' : '#262630',
+            color: updating ? '#34d399' : updateAvailableTag ? '#34d399' : '#5bc0de',
+            borderColor: updating ? '#34d399' : updateAvailableTag ? '#10b981' : '#262630',
           }}
           title="1-Click Self-Update SIMP Daemon + Decky Plugin from GitHub Releases"
         >

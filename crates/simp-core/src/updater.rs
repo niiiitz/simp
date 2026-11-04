@@ -253,6 +253,14 @@ pub fn apply_self_update(
         let symlink_path = local_bin_dir.join("simp");
         let _ = std::fs::remove_file(&symlink_path);
         let _ = std::os::unix::fs::symlink(&dest_bin, &symlink_path);
+
+        // If `/usr/local/bin` is writable (or `/usr/local/bin/simp` already exists and is replaceable),
+        // update `/usr/local/bin/simp` as well so `whereis simp` and `simp` work in every shell.
+        let usr_local_bin_link = PathBuf::from("/usr/local/bin/simp");
+        if usr_local_bin_link.exists() || Path::new("/usr/local/bin").exists() {
+            let _ = std::fs::remove_file(&usr_local_bin_link);
+            let _ = std::os::unix::fs::symlink(&dest_bin, &usr_local_bin_link);
+        }
     }
 
     // 2. Replace `~/.local/share/simp/ui/`
@@ -261,8 +269,19 @@ pub fn apply_self_update(
         copy_dir_contents(&src_ui, &ui_dest_dir)?;
     }
 
-    // 3. Update `~/homebrew/plugins/simp-decky` if present and writable
+    // 3. Stage Decky plugin into `~/.local/share/simp/decky-staged/` (always writable in userland)
+    // and also copy directly into `~/homebrew/plugins/simp-decky/` if present and writable.
+    // Even if `~/homebrew/plugins/simp-decky/` is owned by `root:root`, Decky Loader's `main.py`
+    // (running as root) automatically syncs `~/.local/share/simp/decky-staged/` into `~/homebrew/plugins/simp-decky/`!
     let mut decky_updated = false;
+    let decky_staged = install_root.join("decky-staged");
+    if src_decky.is_dir() {
+        let _ = std::fs::remove_dir_all(&decky_staged);
+        if copy_dir_contents(&src_decky, &decky_staged).is_ok() {
+            decky_updated = true;
+        }
+    }
+
     let decky_target = home.join("homebrew/plugins/simp-decky");
     if src_decky.is_dir() && decky_target.is_dir() {
         let _ = std::fs::remove_dir_all(decky_target.join("simp-decky"));
