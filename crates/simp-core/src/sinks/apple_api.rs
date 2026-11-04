@@ -928,6 +928,19 @@ pub fn fetch_new_feed(settings: &SimpSettings) -> Result<AppleNewFeedResponse> {
     })
 }
 
+static SHARED_APPLE_DB: std::sync::OnceLock<Option<crate::library::db::LibraryDatabase>> =
+    std::sync::OnceLock::new();
+
+fn shared_library_db() -> Option<&'static crate::library::db::LibraryDatabase> {
+    SHARED_APPLE_DB
+        .get_or_init(|| {
+            let data_dir = dirs::data_local_dir()?;
+            let db_path = data_dir.join("simp").join("library.db");
+            crate::library::db::LibraryDatabase::open(&db_path).ok()
+        })
+        .as_ref()
+}
+
 static RESOLVED_CATALOG_ID_CACHE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>>,
 > = std::sync::OnceLock::new();
@@ -936,12 +949,9 @@ fn catalog_id_cache(
 ) -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>> {
     RESOLVED_CATALOG_ID_CACHE.get_or_init(|| {
         let mut initial = std::collections::HashMap::new();
-        if let Some(data_dir) = dirs::data_local_dir() {
-            let db_path = data_dir.join("simp").join("library.db");
-            if let Ok(db) = crate::library::db::LibraryDatabase::open(&db_path) {
-                if let Ok(persisted) = db.get_all_apple_catalog_mappings() {
-                    initial = persisted;
-                }
+        if let Some(db) = shared_library_db() {
+            if let Ok(persisted) = db.get_all_apple_catalog_mappings() {
+                initial = persisted;
             }
         }
         std::sync::Mutex::new(initial)
@@ -956,11 +966,8 @@ fn save_resolved_catalog_mapping(clean_id: &str, catalog_id: &str, art_url: Opti
             (catalog_id.to_string(), art_url.clone().or(existing_art)),
         );
     }
-    if let Some(data_dir) = dirs::data_local_dir() {
-        let db_path = data_dir.join("simp").join("library.db");
-        if let Ok(db) = crate::library::db::LibraryDatabase::open(&db_path) {
-            let _ = db.upsert_apple_catalog_mapping(clean_id, catalog_id, art_url.as_deref());
-        }
+    if let Some(db) = shared_library_db() {
+        let _ = db.upsert_apple_catalog_mapping(clean_id, catalog_id, art_url.as_deref());
     }
 }
 
@@ -977,15 +984,12 @@ pub fn get_healed_track_art_url(song_uri_or_id: &str) -> Option<String> {
             return Some(art.clone());
         }
     }
-    if let Some(data_dir) = dirs::data_local_dir() {
-        let db_path = data_dir.join("simp").join("library.db");
-        if let Ok(db) = crate::library::db::LibraryDatabase::open(&db_path) {
-            for prefix in ["applemusic:song:", "applemusic:track:"] {
-                let lookup_uri = format!("{prefix}{clean_id}");
-                if let Ok(Some(meta)) = db.get_track_by_uri(&lookup_uri) {
-                    if let Some(art) = meta.art_url.filter(|u| u.contains("mzstatic.com")) {
-                        return Some(art);
-                    }
+    if let Some(db) = shared_library_db() {
+        for prefix in ["applemusic:song:", "applemusic:track:"] {
+            let lookup_uri = format!("{prefix}{clean_id}");
+            if let Ok(Some(meta)) = db.get_track_by_uri(&lookup_uri) {
+                if let Some(art) = meta.art_url.filter(|u| u.contains("mzstatic.com")) {
+                    return Some(art);
                 }
             }
         }
@@ -994,14 +998,11 @@ pub fn get_healed_track_art_url(song_uri_or_id: &str) -> Option<String> {
 }
 
 fn lookup_track_title_artist_in_db(clean_id: &str) -> (Option<String>, Option<String>) {
-    if let Some(data_dir) = dirs::data_local_dir() {
-        let db_path = data_dir.join("simp").join("library.db");
-        if let Ok(db) = crate::library::db::LibraryDatabase::open(&db_path) {
-            for prefix in ["applemusic:song:", "applemusic:track:"] {
-                let lookup_uri = format!("{prefix}{clean_id}");
-                if let Ok(Some(meta)) = db.get_track_by_uri(&lookup_uri) {
-                    return (Some(meta.title), meta.artists.first().cloned());
-                }
+    if let Some(db) = shared_library_db() {
+        for prefix in ["applemusic:song:", "applemusic:track:"] {
+            let lookup_uri = format!("{prefix}{clean_id}");
+            if let Ok(Some(meta)) = db.get_track_by_uri(&lookup_uri) {
+                return (Some(meta.title), meta.artists.first().cloned());
             }
         }
     }
@@ -1083,6 +1084,17 @@ pub fn resolve_replacement_catalog_song_id(
     let (dev_token, user_token) = resolve_tokens(settings)?;
     let storefront = get_storefront(&dev_token, &user_token);
 
+    // Prefer live storefront catalog search (`GET /v1/catalog/{storefront}/search`) first whenever
+    // `title` is known: this resolves directly to the active, licensed storefront `salableAdamId` in
+    // 1 HTTP call instead of hitting `/v1/me/library/songs/i.xxxx/catalog` (which either 404s or
+    // returns delisted 2010 pressing IDs that fail `acquireWebPlaybackLicense` with `status: -1003`).
+    if let Some((resolved, art_url)) =
+        search_storefront_catalog_song_id(&dev_token, &user_token, &storefront, clean_id, title, artist)
+    {
+        save_resolved_catalog_mapping(clean_id, &resolved, art_url);
+        return Ok(Some(resolved));
+    }
+
     if clean_id.starts_with("i.") {
         if let Ok(json) = apple_get_json(
             &format!("/v1/me/library/songs/{}/catalog", urlencode(clean_id)),
@@ -1100,13 +1112,6 @@ pub fn resolve_replacement_catalog_song_id(
                 return Ok(Some(resolved));
             }
         }
-    }
-
-    if let Some((resolved, art_url)) =
-        search_storefront_catalog_song_id(&dev_token, &user_token, &storefront, clean_id, title, artist)
-    {
-        save_resolved_catalog_mapping(clean_id, &resolved, art_url);
-        return Ok(Some(resolved));
     }
 
     Ok(None)
@@ -1174,6 +1179,9 @@ pub fn spawn_queue_catalog_prewarmer(settings: SimpSettings, tracks: Vec<TrackMe
     let _ = std::thread::Builder::new()
         .name("simp-catalog-prewarm".to_string())
         .spawn(move || {
+            // Yield 750ms so the active track's manifest + HLS + Widevine license handshake
+            // gets 100% network & CPU priority before background queue resolution begins.
+            std::thread::sleep(std::time::Duration::from_millis(750));
             for t in uncached {
                 let artist = t.artists.first().map(|s| s.as_str());
                 let _ = resolve_replacement_catalog_song_id(

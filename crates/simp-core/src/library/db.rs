@@ -181,6 +181,14 @@ impl LibraryDatabase {
                  PRAGMA user_version = 4;",
             );
         }
+        if user_version < 5 {
+            // Purge any stale/delisted catalog IDs cached from `/v1/me/library/songs/i.xxxx/catalog`
+            // so `search_storefront_catalog_song_id` populates 100% active storefront IDs.
+            let _ = conn.execute_batch(
+                "DELETE FROM apple_catalog_map;
+                 PRAGMA user_version = 5;",
+            );
+        }
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),

@@ -62,6 +62,15 @@ impl AudioOrchestrator {
                 .is_some()
         };
         apple_sink.is_authenticated = initial_apple_auth;
+        if initial_apple_auth {
+            if let Some(cdm) =
+                crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library()
+            {
+                crate::sinks::apple_native::cdm_host::prewarm_standby_cdm_session(
+                    &cdm.library_path,
+                );
+            }
+        }
 
         let state = Arc::new(Mutex::new(OrchestratorSnapshot {
             active_engine: ActiveEngine::None,

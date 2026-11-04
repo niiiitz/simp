@@ -107,6 +107,29 @@ if [[ ! -f "${INSTALL_ROOT}/lib/libwidevinecdm.so" ]]; then
     cp "${FOUND_CDM}" "${INSTALL_ROOT}/lib/libwidevinecdm.so" >/dev/null 2>&1 || true
     chmod 0755 "${INSTALL_ROOT}/lib/libwidevinecdm.so" >/dev/null 2>&1 || true
     echo "✓ Staged Widevine CDM:  ${INSTALL_ROOT}/lib/libwidevinecdm.so"
+  elif command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    TMP_CRX="${INSTALL_ROOT}/lib/.widevine_dl.crx3"
+    WV_URL="https://edgedl.me.gvt1.com/edgedl/release2/chrome_component/acqexsh26ysyu3zxeotqtsp63idq_4.10.3112.0/oimompecagnajdejgnnjijobebaeigek_4.10.3112.0_linux64_ad7kyx4q7wx7xknykmkbonbbmnwq.crx3"
+    if curl -fsSL --max-time 25 -o "${TMP_CRX}" "${WV_URL}" 2>/dev/null; then
+      python3 - "${TMP_CRX}" "${INSTALL_ROOT}/lib/libwidevinecdm.so" <<'PYEOF' || true
+import sys, zipfile, os, io
+crx_path, dest_path = sys.argv[1], sys.argv[2]
+data = open(crx_path, "rb").read()
+pk_idx = data.find(b"PK\x03\x04")
+if pk_idx >= 0:
+    with zipfile.ZipFile(io.BytesIO(data[pk_idx:])) as zf:
+        for name in zf.namelist():
+            if name.endswith("libwidevinecdm.so"):
+                out = zf.read(name)
+                open(dest_path, "wb").write(out)
+                os.chmod(dest_path, 0o755)
+                break
+PYEOF
+      rm -f "${TMP_CRX}" >/dev/null 2>&1 || true
+      if [[ -f "${INSTALL_ROOT}/lib/libwidevinecdm.so" ]]; then
+        echo "✓ Provisioned Widevine: ${INSTALL_ROOT}/lib/libwidevinecdm.so (4.10.3112.0)"
+      fi
+    fi
   fi
 fi
 
