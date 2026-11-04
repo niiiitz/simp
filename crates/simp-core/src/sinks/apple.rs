@@ -382,6 +382,11 @@ impl crate::sinks::AudioSink for AppleMusicSink {
         self.set_volume(volume as f64);
         self.emit_volume(broadcast_tx, volume as f64);
     }
+
+    fn shutdown_sink(&mut self, broadcast_tx: &broadcast::Sender<PlaybackEvent>) {
+        self.emit_pause(broadcast_tx);
+        Self::kill_headless_widevine_worker();
+    }
 }
 
 /// Signs an Apple MusicKit Developer JWT (`alg: ES256`, P-256 ECDSA + SHA-256)

@@ -6,8 +6,10 @@
 *.p8
 AuthKey_*
 
-# Local Reference Documentation (Private)
+# Local Reference Documentation & Debug / Inspection Scripts (Private — Never Commit)
 reference_documentation/
+debug_scripts/
+*.debug.*
 
 # Rust / Cargo / Tauri
 target/

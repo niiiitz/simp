@@ -58,4 +58,9 @@ pub trait AudioSink {
     fn live_position_ms(&self) -> Option<u32> {
         None
     }
+
+    /// Terminates any background worker processes and releases hardware audio streams on daemon shutdown/restart.
+    fn shutdown_sink(&mut self, broadcast_tx: &broadcast::Sender<PlaybackEvent>) {
+        self.suspend_sink(broadcast_tx);
+    }
 }
