@@ -10,6 +10,7 @@ export interface SimpUpdateStatus {
   latest_version?: string;
   latest_tag?: string;
   update_available?: boolean;
+  target_arch?: string;
   checking?: boolean;
   applying?: boolean;
   error?: string;
@@ -288,7 +289,9 @@ export const PowerModal: React.FC<PowerModalProps> = ({
             <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
               ⬆️ SIMP Software Update{' '}
               {updateStatus.current_version
-                ? `(Installed: v${updateStatus.current_version})`
+                ? `(Installed: v${updateStatus.current_version}${
+                    updateStatus.target_arch ? ` • ${updateStatus.target_arch}` : ''
+                  })`
                 : ''}
             </span>
             <span style={{ fontSize: 11, color: '#9ca3af' }}>

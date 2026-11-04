@@ -10,6 +10,8 @@ AuthKey_*
 reference_documentation/
 debug_scripts/
 *.debug.*
+AGENTS.md
+.agents/
 
 # Rust / Cargo / Tauri
 target/

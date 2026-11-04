@@ -1,0 +1,33 @@
+{
+  "name": "SIMP — Simple Integrated Media Player",
+  "short_name": "SIMP",
+  "description": "Console-first hybrid media player for SteamOS, Steam Deck, Steam Machine & Steam Frame",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    {
+      "src": "/simp-icon-dark.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/simp-icon-dark.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/simp-icon-dark.png",
+      "sizes": "256x256",
+      "type": "image/png"
+    },
+    {
+      "src": "/favicon.png",
+      "sizes": "64x64",
+      "type": "image/png"
+    }
+  ]
+}
+

@@ -145,6 +145,10 @@ if os.path.exists(".env"):
 team_id = env.get("APPLE_TEAM_ID", "")
 key_id = env.get("APPLE_KEY_ID", "")
 key_path = env.get("APPLE_PRIVATE_KEY_PATH", "")
+if (not key_path or not os.path.isfile(key_path)) and key_id:
+    local_candidate = f"AuthKey_{key_id}.p8"
+    if os.path.isfile(local_candidate):
+        key_path = local_candidate
 
 if team_id and key_id and key_path and os.path.isfile(key_path):
     now = int(time.time())

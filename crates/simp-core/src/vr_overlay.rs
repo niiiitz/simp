@@ -54,9 +54,14 @@ pub fn ensure_vrmanifest_installed() -> Option<PathBuf> {
     if icon_path.is_file() {
         let _ = std::fs::copy(&icon_path, &local_openvr_icon);
     }
+    let manifest_icon = if local_openvr_icon.is_file() {
+        &local_openvr_icon
+    } else {
+        &icon_path
+    };
     let manifest_path = openvr_dir.join("org.simp.player.vrmanifest");
 
-    let json_text = build_vrmanifest_json(&bin_path, &icon_path);
+    let json_text = build_vrmanifest_json(&bin_path, manifest_icon);
     let _ = std::fs::write(&manifest_path, json_text);
 
     // Register in SteamVR's `appconfig.json` if present so SteamVR knows about SIMP on startup
@@ -111,7 +116,7 @@ fn ensure_steam_shortcuts_icon_populated(home: &Path, icon_path: &Path) {
                 let grid_dir = cfg_dir.join("grid");
                 let _ = std::fs::create_dir_all(&grid_dir);
                 for appid in appids {
-                    for suffix in ["_icon.png", "p.png", ".png"] {
+                    for suffix in ["_icon.png", "p.png", "_hero.png", "_logo.png", ".png"] {
                         let dest = grid_dir.join(format!("{appid}{suffix}"));
                         if !dest.is_file() {
                             let _ = std::fs::copy(icon_path, &dest);
@@ -163,12 +168,18 @@ pub fn patch_shortcuts_vdf_icon(raw: &[u8], icon_path: &str) -> (Option<Vec<u8>>
                                 };
                                 let val = String::from_utf8_lossy(&raw[val_start..val_start + v_len]);
                                 cur += v_len + 1;
-                                if key == "appname" && val.trim().eq_ignore_ascii_case("simp") {
+                                if key == "appname" && val.trim().to_lowercase().contains("simp") {
                                     is_simp = true;
                                 } else if key == "exe" && (val.contains("/simp") || val.contains("\"simp\"")) {
                                     is_simp = true;
-                                } else if key == "icon" && val.trim().is_empty() {
-                                    empty_icon_span = Some((val_start, val_start + v_len));
+                                } else if key == "icon" {
+                                    let trimmed = val.trim();
+                                    let needs_update = trimmed.is_empty()
+                                        || !trimmed.ends_with(".png")
+                                        || (trimmed != icon_path && !Path::new(trimmed).is_file());
+                                    if needs_update {
+                                        empty_icon_span = Some((val_start, val_start + v_len));
+                                    }
                                 }
                             }
                             0x02 => {

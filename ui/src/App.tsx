@@ -138,12 +138,14 @@ const ConsoleMainApp: React.FC = () => {
           latest_version: data.latest_version,
           latest_tag: data.latest_tag,
           update_available: Boolean(data.update_available),
+          target_arch: data.target_arch,
           checking: false,
         });
       } else {
         setUpdateStatus((prev) => ({
           ...prev,
           current_version: data.current_version || prev.current_version,
+          target_arch: data.target_arch || prev.target_arch,
           checking: false,
           error: data.error || 'Update check failed',
         }));

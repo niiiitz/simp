@@ -181,15 +181,18 @@ async fn update_check_handler() -> impl IntoResponse {
             "update_available": status.update_available,
             "release_url": status.release_url,
             "published_at": status.published_at,
+            "target_arch": status.target_arch,
         })),
         Ok(Err(e)) => Json(serde_json::json!({
             "ok": false,
             "current_version": env!("CARGO_PKG_VERSION"),
+            "target_arch": std::env::consts::ARCH,
             "error": e.to_string(),
         })),
         Err(e) => Json(serde_json::json!({
             "ok": false,
             "current_version": env!("CARGO_PKG_VERSION"),
+            "target_arch": std::env::consts::ARCH,
             "error": e.to_string(),
         })),
     }

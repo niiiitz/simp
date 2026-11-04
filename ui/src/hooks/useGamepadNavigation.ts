@@ -72,6 +72,7 @@ export function useGamepadNavigation({
   const lastBridgeMsgTsRef = useRef<number>(0);
   const gamepadActionRef = useRef<(action: string) => void>(() => {});
   const lastWebGamepadTsRef = useRef<number>(0);
+  const lastGamepadInputTsRef = useRef<number>(0);
 
   // Adaptive Input Modality (`data-simp-input="pointer" | "gamepad"`):
   // Default to `gamepad` inside SteamUI's `/simp-console` iframe and `pointer` in standalone desktop windows,
@@ -85,13 +86,19 @@ export function useGamepadNavigation({
     let lastMouseY: number | null = null;
     const onPointerMove = (e: PointerEvent) => {
       if (e.pointerType && e.pointerType !== 'mouse') return;
+      // Ignore small pointer micro-jitter in SteamVR desktop view for 1.8s after controller input
+      if (performance.now() - lastGamepadInputTsRef.current < 1800) {
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+        return;
+      }
       if (lastMouseX === null || lastMouseY === null) {
         lastMouseX = e.clientX;
         lastMouseY = e.clientY;
         return;
       }
       const dist = Math.hypot(e.clientX - lastMouseX, e.clientY - lastMouseY);
-      if (dist > 10) {
+      if (dist > 55) {
         lastMouseX = e.clientX;
         lastMouseY = e.clientY;
         if (document.documentElement.dataset.simpInput !== 'pointer') {
@@ -378,6 +385,7 @@ export function useGamepadNavigation({
       const now = performance.now();
       if (lastActionTs[action] && now - lastActionTs[action] < 70) return;
       lastActionTs[action] = now;
+      lastGamepadInputTsRef.current = now;
       if (document.documentElement.dataset.simpInput !== 'gamepad') {
         document.documentElement.dataset.simpInput = 'gamepad';
       }
@@ -587,12 +595,14 @@ export function useGamepadNavigation({
       }
     };
 
-    // Native Linux `/dev/input/js*` daemon gamepad fallback for standalone KDE windows
+    // Native Linux `/dev/input/js*` & `/dev/input/event*` daemon gamepad fallback for standalone KDE / SteamVR windows
     const onDaemonGamepad = (e: any) => {
       const action = e?.detail?.action;
       if (!action) return;
       if (window.parent !== window) return;
-      if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+      // Only ignore if the browser tab is hidden in the background; in SteamVR Desktop overlay mode,
+      // visible windows (`visibilityState === 'visible'`) often have `document.hasFocus() === false` when using Gamepad mode!
+      if (document.visibilityState === 'hidden') return;
       const now = performance.now();
       if (now - lastBridgeMsgTsRef.current < 220 || now - lastWebGamepadTsRef.current < 220) {
         return;
