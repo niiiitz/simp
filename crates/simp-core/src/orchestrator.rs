@@ -154,7 +154,7 @@ impl AudioOrchestrator {
                     provided_map.insert(t.uri.clone(), t);
                 }
 
-                let queue: Vec<TrackMetadata> = uris
+                let mut queue: Vec<TrackMetadata> = uris
                     .iter()
                     .map(|u| {
                         provided_map
@@ -165,6 +165,7 @@ impl AudioOrchestrator {
                 if queue.is_empty() {
                     return;
                 }
+                self.heal_and_prewarm_queue(&mut queue);
                 let idx = start_index.min(queue.len() - 1);
                 {
                     let mut st = self.state.lock().unwrap();
@@ -175,8 +176,9 @@ impl AudioOrchestrator {
                 self.transition_to_index(idx);
             }
             AudioCommand::PlayAlbum { album_id, shuffle } => {
-                if let Ok(tracks) = self.db.get_album_tracks(&album_id) {
+                if let Ok(mut tracks) = self.db.get_album_tracks(&album_id) {
                     if !tracks.is_empty() {
+                        self.heal_and_prewarm_queue(&mut tracks);
                         {
                             let mut st = self.state.lock().unwrap();
                             st.queue = tracks;
@@ -189,8 +191,9 @@ impl AudioOrchestrator {
                 }
             }
             AudioCommand::PlayPlaylist { playlist_id, shuffle } => {
-                if let Ok(tracks) = self.db.get_playlist_items(&playlist_id, 5000, 0) {
+                if let Ok(mut tracks) = self.db.get_playlist_items(&playlist_id, 5000, 0) {
                     if !tracks.is_empty() {
+                        self.heal_and_prewarm_queue(&mut tracks);
                         {
                             let mut st = self.state.lock().unwrap();
                             st.queue = tracks;
@@ -771,24 +774,63 @@ impl AudioOrchestrator {
                 }
             }
             PlaybackEvent::ProgressTick { position_ms } => {
-                let mut next_apple_uri: Option<String> = None;
+                let mut next_apple_uris: Vec<String> = Vec::new();
+                let mut healed_track_meta: Option<TrackMetadata> = None;
                 {
                     let mut st = self.state.lock().unwrap();
                     st.position_ms = position_ms;
-                    if position_ms > 0 && st.queue_index + 1 < st.queue.len() {
-                        let candidate = &st.queue[st.queue_index + 1].uri;
-                        if candidate.starts_with("applemusic:") {
-                            next_apple_uri = Some(candidate.clone());
+                    if position_ms > 0 {
+                        for offset in [1usize, 2usize] {
+                            let target_idx = st.queue_index + offset;
+                            if target_idx < st.queue.len() {
+                                let candidate = &st.queue[target_idx].uri;
+                                if candidate.starts_with("applemusic:") {
+                                    next_apple_uris.push(candidate.clone());
+                                }
+                            }
+                        }
+                        let mut healed_url_opt = None;
+                        if let Some(ref mut cur) = st.current_track {
+                            let needs_art_heal = cur
+                                .art_url
+                                .as_deref()
+                                .map(|u| u.is_empty() || u.contains("blobstore.apple.com"))
+                                .unwrap_or(true);
+                            if needs_art_heal && cur.uri.starts_with("applemusic:") {
+                                if let Some(healed_url) =
+                                    crate::sinks::apple_api::get_healed_track_art_url(&cur.uri)
+                                {
+                                    cur.art_url = Some(healed_url.clone());
+                                    healed_url_opt = Some(healed_url);
+                                    healed_track_meta = Some(cur.clone());
+                                }
+                            }
+                        }
+                        if let Some(healed_url) = healed_url_opt {
+                            let q_idx = st.queue_index;
+                            if q_idx < st.queue.len() {
+                                st.queue[q_idx].art_url = Some(healed_url);
+                            }
                         }
                     }
                 }
                 if position_ms > 0 {
                     self.consecutive_failures = 0;
-                    if let Some(next_uri) = next_apple_uri {
+                    if !next_apple_uris.is_empty() {
                         let cfg = self.settings.lock().unwrap().clone();
-                        crate::sinks::apple_native::source::prefetch_apple_music_track(
-                            cfg, next_uri,
-                        );
+                        for next_uri in next_apple_uris {
+                            crate::sinks::apple_native::source::prefetch_apple_music_track(
+                                cfg.clone(),
+                                next_uri,
+                            );
+                        }
+                    }
+                    if let Some(meta) = healed_track_meta {
+                        update_mpris_metadata(&mut self.mpris_controls, &meta);
+                        let _ = self.broadcast_tx.send(PlaybackEvent::TrackChanged {
+                            metadata: meta,
+                            position_ms,
+                        });
                     }
                 }
                 let _ = self.broadcast_tx.send(PlaybackEvent::ProgressTick { position_ms });
@@ -820,7 +862,39 @@ impl AudioOrchestrator {
                 return;
             }
             st.queue_index = index;
-            st.queue[index].clone()
+            let mut t = st.queue[index].clone();
+            let needs_art_heal = t
+                .art_url
+                .as_deref()
+                .map(|u| u.is_empty() || u.contains("blobstore.apple.com"))
+                .unwrap_or(true);
+            if needs_art_heal && t.uri.starts_with("applemusic:") {
+                if let Some(healed) = crate::sinks::apple_api::get_healed_track_art_url(&t.uri) {
+                    t.art_url = Some(healed.clone());
+                    st.queue[index].art_url = Some(healed);
+                } else {
+                    let album_key = t.album.trim().to_lowercase();
+                    if !album_key.is_empty() {
+                        if let Some(sibling_art) = st.queue.iter().find_map(|sib| {
+                            if sib.album.trim().to_lowercase() == album_key {
+                                sib.art_url.as_ref().and_then(|u| {
+                                    if u.starts_with("http") && !u.contains("blobstore.apple.com") {
+                                        Some(u.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            } else {
+                                None
+                            }
+                        }) {
+                            t.art_url = Some(sibling_art.clone());
+                            st.queue[index].art_url = Some(sibling_art);
+                        }
+                    }
+                }
+            }
+            t
         };
 
         let target_engine = if self.apple_sink.supports_uri(&track.uri) {
@@ -1019,6 +1093,45 @@ impl AudioOrchestrator {
         }
     }
 
+    /// Heals any missing or expiring `blobstore.apple.com` artwork URLs in `queue` using
+    /// cached catalog artwork or sibling tracks of the same album, and spawns a background
+    /// pre-warmer for any `applemusic:song:i.xxxx` tracks in the queue.
+    fn heal_and_prewarm_queue(&self, queue: &mut [TrackMetadata]) {
+        let mut album_art_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for t in queue.iter() {
+            if let Some(ref art) = t.art_url {
+                if art.starts_with("http") && !art.contains("blobstore.apple.com") {
+                    let key = t.album.trim().to_lowercase();
+                    if !key.is_empty() {
+                        album_art_map.entry(key).or_insert_with(|| art.clone());
+                    }
+                }
+            }
+        }
+
+        for t in queue.iter_mut() {
+            let needs_heal = t
+                .art_url
+                .as_deref()
+                .map(|u| u.is_empty() || u.contains("blobstore.apple.com"))
+                .unwrap_or(true);
+            if needs_heal && t.uri.starts_with("applemusic:") {
+                if let Some(healed) = crate::sinks::apple_api::get_healed_track_art_url(&t.uri) {
+                    t.art_url = Some(healed);
+                } else {
+                    let key = t.album.trim().to_lowercase();
+                    if let Some(sibling_art) = album_art_map.get(&key) {
+                        t.art_url = Some(sibling_art.clone());
+                    }
+                }
+            }
+        }
+
+        let cfg = self.settings.lock().unwrap().clone();
+        crate::sinks::apple_api::spawn_queue_catalog_prewarmer(cfg, queue.to_vec());
+    }
+
     /// Restores the last active queue, current track, and paused playback position from
     /// `~/.local/share/simp/session_state.vdf` when `simp --daemon` starts up.
     fn restore_session_from_vdf(&mut self) {
@@ -1036,10 +1149,11 @@ impl AudioOrchestrator {
             return;
         }
 
-        let queue: Vec<TrackMetadata> = uris
+        let mut queue: Vec<TrackMetadata> = uris
             .iter()
             .map(|u| self.resolve_track_from_uri(u))
             .collect();
+        self.heal_and_prewarm_queue(&mut queue);
         let idx = session.queue_index.min(queue.len().saturating_sub(1));
         let current_track = queue.get(idx).cloned();
 

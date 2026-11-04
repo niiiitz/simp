@@ -1487,6 +1487,8 @@ impl WidevineCdmSession {
     }
 }
 
+static CACHED_APPLE_SERVER_CERT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
 type CdmThreadJob = Box<dyn FnOnce(&mut Option<(u64, WidevineCdmSession)>) + Send + 'static>;
 
 static DEDICATED_CDM_WORKER_TX: std::sync::OnceLock<std::sync::mpsc::Sender<CdmThreadJob>> =
@@ -1550,16 +1552,22 @@ pub fn negotiate_apple_license_for_epoch(
         .unwrap_or_else(|| BASE64_STD.encode(pssh_bytes));
 
     // Step 1 (on `"simp-widevine-cdm"`, < 0.5ms): Drop any previous track's session, open a fresh
-    // `WidevineCdmSession` for `epoch`, and generate the initial challenge.
+    // `WidevineCdmSession` for `epoch`, pre-warm `SetServerCertificate` if cached (so the CDM skips
+    // the 2-byte `[0x08, 0x04]` cert request and emits the full license challenge in 1 round-trip!),
+    // and generate the initial challenge.
     let lib_path_buf = lib_path.to_path_buf();
     let pssh_vec = pssh_bytes.to_vec();
     let first_challenge = run_on_cdm_worker(move |slot| {
         *slot = None;
         let mut session = WidevineCdmSession::open(&lib_path_buf)?;
+        if let Some(cert) = CACHED_APPLE_SERVER_CERT.get() {
+            let _ = session.set_server_certificate(cert);
+        }
         let challenge = session.generate_license_challenge(&pssh_vec)?;
         *slot = Some((epoch, session));
         Ok(challenge)
     })?;
+    let was_service_cert_request = first_challenge.len() <= 8;
 
     if active_epoch.load(Ordering::SeqCst) != epoch {
         return Err(anyhow!("Track superseded before license request #1"));
@@ -1580,6 +1588,7 @@ pub fn negotiate_apple_license_for_epoch(
     }
 
     // Step 3 (on `"simp-widevine-cdm"`, < 0.5ms): Apply `first_response` via `UpdateSession`
+    let first_resp_for_cert = first_response.clone();
     let second_challenge = run_on_cdm_worker(move |slot| {
         let Some((cur_epoch, ref mut session)) = slot else {
             return Err(anyhow!("Widevine CDM session missing for epoch {epoch}"));
@@ -1593,8 +1602,12 @@ pub fn negotiate_apple_license_for_epoch(
     })?;
 
     // Step 4: If `first_challenge` was a 2-byte Privacy Mode Service Certificate Request (`[0x08, 0x04]`),
-    // exchange the resulting full license challenge via HTTP POST and apply the CKC on `"simp-widevine-cdm"`.
+    // cache the Server Certificate for future `SetServerCertificate` pre-warming, then exchange the
+    // resulting full license challenge via HTTP POST and apply the CKC on `"simp-widevine-cdm"`.
     if !second_challenge.is_empty() {
+        if was_service_cert_request {
+            let _ = CACHED_APPLE_SERVER_CERT.set(first_resp_for_cert);
+        }
         if active_epoch.load(Ordering::SeqCst) != epoch {
             return Err(anyhow!("Track superseded before license request #2"));
         }

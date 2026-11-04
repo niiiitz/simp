@@ -72,7 +72,12 @@ export function mapAppleItemToTrack(item: any): TrackMetadata | null {
   const durationMs = Math.round(
     Number(attrs.durationInMillis || item.durationInMillis || item.playbackDuration || 0)
   );
-  const rawArt = attrs.artwork?.url || item.artwork?.url || item.artworkURL || null;
+  const relCatalogArt = item.relationships?.catalog?.data?.[0]?.attributes?.artwork?.url;
+  const attrArt = attrs.artwork?.url || item.artwork?.url || item.artworkURL || null;
+  const rawArt =
+    attrArt && String(attrArt).includes('blobstore.apple.com') && relCatalogArt
+      ? relCatalogArt
+      : attrArt || relCatalogArt || null;
   const artUrl = formatAppleArtUrl(rawArt, 400);
 
   return {

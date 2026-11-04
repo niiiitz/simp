@@ -151,10 +151,19 @@ pub fn map_apple_item_to_track(item: &Value) -> Option<TrackMetadata> {
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
 
-    let raw_art = attrs
+    let rel_catalog_art = item
+        .pointer("/relationships/catalog/data/0/attributes/artwork/url")
+        .and_then(|v| v.as_str());
+    let attr_art = attrs
         .pointer("/artwork/url")
         .or_else(|| item.pointer("/artwork/url"))
         .and_then(|v| v.as_str());
+    let raw_art = match (attr_art, rel_catalog_art) {
+        (Some(a), Some(c)) if a.contains("blobstore.apple.com") => Some(c),
+        (Some(a), _) => Some(a),
+        (None, Some(c)) => Some(c),
+        (None, None) => None,
+    };
     let art_url = format_apple_art_url(raw_art, 400);
 
     let track_number = attrs
@@ -920,11 +929,68 @@ pub fn fetch_new_feed(settings: &SimpSettings) -> Result<AppleNewFeedResponse> {
 }
 
 static RESOLVED_CATALOG_ID_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, String>>,
+    std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>>,
 > = std::sync::OnceLock::new();
 
-fn catalog_id_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
-    RESOLVED_CATALOG_ID_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+fn catalog_id_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>> {
+    RESOLVED_CATALOG_ID_CACHE.get_or_init(|| {
+        let mut initial = std::collections::HashMap::new();
+        if let Some(data_dir) = dirs::data_local_dir() {
+            let db_path = data_dir.join("simp").join("library.db");
+            if let Ok(db) = crate::library::db::LibraryDatabase::open(&db_path) {
+                if let Ok(persisted) = db.get_all_apple_catalog_mappings() {
+                    initial = persisted;
+                }
+            }
+        }
+        std::sync::Mutex::new(initial)
+    })
+}
+
+fn save_resolved_catalog_mapping(clean_id: &str, catalog_id: &str, art_url: Option<String>) {
+    if let Ok(mut guard) = catalog_id_cache().lock() {
+        let existing_art = guard.get(clean_id).and_then(|(_, a)| a.clone());
+        guard.insert(
+            clean_id.to_string(),
+            (catalog_id.to_string(), art_url.clone().or(existing_art)),
+        );
+    }
+    if let Some(data_dir) = dirs::data_local_dir() {
+        let db_path = data_dir.join("simp").join("library.db");
+        if let Ok(db) = crate::library::db::LibraryDatabase::open(&db_path) {
+            let _ = db.upsert_apple_catalog_mapping(clean_id, catalog_id, art_url.as_deref());
+        }
+    }
+}
+
+/// Returns a healed permanent `mzstatic.com` catalog artwork URL for `song_uri_or_id` if known.
+pub fn get_healed_track_art_url(song_uri_or_id: &str) -> Option<String> {
+    let clean_id = song_uri_or_id
+        .strip_prefix("applemusic:song:")
+        .or_else(|| song_uri_or_id.strip_prefix("applemusic:track:"))
+        .or_else(|| song_uri_or_id.strip_prefix("applemusic:"))
+        .unwrap_or(song_uri_or_id)
+        .trim();
+    if let Ok(guard) = catalog_id_cache().lock() {
+        if let Some((_, Some(art))) = guard.get(clean_id) {
+            return Some(art.clone());
+        }
+    }
+    if let Some(data_dir) = dirs::data_local_dir() {
+        let db_path = data_dir.join("simp").join("library.db");
+        if let Ok(db) = crate::library::db::LibraryDatabase::open(&db_path) {
+            for prefix in ["applemusic:song:", "applemusic:track:"] {
+                let lookup_uri = format!("{prefix}{clean_id}");
+                if let Ok(Some(meta)) = db.get_track_by_uri(&lookup_uri) {
+                    if let Some(art) = meta.art_url.filter(|u| u.contains("mzstatic.com")) {
+                        return Some(art);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn lookup_track_title_artist_in_db(clean_id: &str) -> (Option<String>, Option<String>) {
@@ -949,7 +1015,7 @@ fn search_storefront_catalog_song_id(
     clean_id: &str,
     title: Option<&str>,
     artist: Option<&str>,
-) -> Option<String> {
+) -> Option<(String, Option<String>)> {
     let t = title.filter(|s| !s.trim().is_empty() && *s != "Unknown Track")?;
     let a = artist.unwrap_or("").trim();
     let term = format!("{t} {a}").trim().to_string();
@@ -980,15 +1046,21 @@ fn search_storefront_catalog_song_id(
         .or_else(|| candidates.first())?;
 
     let id = chosen.get("id")?.as_str()?;
+    let art_url = format_apple_art_url(
+        chosen
+            .pointer("/attributes/artwork/url")
+            .and_then(|v| v.as_str()),
+        400,
+    );
     if id != clean_id {
-        Some(id.to_string())
+        Some((id.to_string(), art_url))
     } else {
         None
     }
 }
 
 /// Resolves a re-linked or tombstoned playlist track ID (`i.xxxx` library song ID or stale catalog ID)
-/// to its active storefront catalog song ID in native Rust, with an in-memory session cache.
+/// to its active storefront catalog song ID in native Rust, with persistent SQLite + in-memory caching.
 pub fn resolve_replacement_catalog_song_id(
     settings: &SimpSettings,
     raw_id: &str,
@@ -1003,8 +1075,8 @@ pub fn resolve_replacement_catalog_song_id(
         .trim();
 
     if let Ok(guard) = catalog_id_cache().lock() {
-        if let Some(cached) = guard.get(clean_id) {
-            return Ok(Some(cached.clone()));
+        if let Some((cached_id, _)) = guard.get(clean_id) {
+            return Ok(Some(cached_id.clone()));
         }
     }
 
@@ -1019,20 +1091,21 @@ pub fn resolve_replacement_catalog_song_id(
         ) {
             if let Some(cat_id) = json.pointer("/data/0/id").and_then(|v| v.as_str()) {
                 let resolved = cat_id.to_string();
-                if let Ok(mut guard) = catalog_id_cache().lock() {
-                    guard.insert(clean_id.to_string(), resolved.clone());
-                }
+                let art_url = format_apple_art_url(
+                    json.pointer("/data/0/attributes/artwork/url")
+                        .and_then(|v| v.as_str()),
+                    400,
+                );
+                save_resolved_catalog_mapping(clean_id, &resolved, art_url);
                 return Ok(Some(resolved));
             }
         }
     }
 
-    if let Some(resolved) =
+    if let Some((resolved, art_url)) =
         search_storefront_catalog_song_id(&dev_token, &user_token, &storefront, clean_id, title, artist)
     {
-        if let Ok(mut guard) = catalog_id_cache().lock() {
-            guard.insert(clean_id.to_string(), resolved.clone());
-        }
+        save_resolved_catalog_mapping(clean_id, &resolved, art_url);
         return Ok(Some(resolved));
     }
 
@@ -1057,7 +1130,7 @@ pub fn force_resolve_catalog_song_by_search(
     }
     let (dev_token, user_token) = resolve_tokens(settings)?;
     let storefront = get_storefront(&dev_token, &user_token);
-    if let Some(resolved) = search_storefront_catalog_song_id(
+    if let Some((resolved, art_url)) = search_storefront_catalog_song_id(
         &dev_token,
         &user_token,
         &storefront,
@@ -1065,12 +1138,52 @@ pub fn force_resolve_catalog_song_by_search(
         title_opt.as_deref(),
         artist_opt.as_deref(),
     ) {
-        if let Ok(mut guard) = catalog_id_cache().lock() {
-            guard.insert(clean_id.to_string(), resolved.clone());
-        }
+        save_resolved_catalog_mapping(clean_id, &resolved, art_url);
         return Ok(Some(resolved));
     }
     Ok(None)
+}
+
+/// Pre-resolves uncached `applemusic:song:i.xxxx` library tracks in the active queue in the background
+/// and persists their catalog IDs + permanent `mzstatic.com` artwork into SQLite (`apple_catalog_map`).
+pub fn spawn_queue_catalog_prewarmer(settings: SimpSettings, tracks: Vec<TrackMetadata>) {
+    let uncached: Vec<TrackMetadata> = tracks
+        .into_iter()
+        .filter(|t| {
+            let clean = t
+                .uri
+                .strip_prefix("applemusic:song:")
+                .or_else(|| t.uri.strip_prefix("applemusic:track:"))
+                .unwrap_or(&t.uri)
+                .trim();
+            if !clean.starts_with("i.") {
+                return false;
+            }
+            if let Ok(guard) = catalog_id_cache().lock() {
+                !guard.contains_key(clean)
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if uncached.is_empty() {
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("simp-catalog-prewarm".to_string())
+        .spawn(move || {
+            for t in uncached {
+                let artist = t.artists.first().map(|s| s.as_str());
+                let _ = resolve_replacement_catalog_song_id(
+                    &settings,
+                    &t.uri,
+                    Some(&t.title),
+                    artist,
+                );
+            }
+        });
 }
 
 fn has_widevine_ctrp_asset(json: &Value) -> bool {
@@ -1104,7 +1217,7 @@ pub fn fetch_web_playback_manifest(
     let mut active_id = if let Ok(guard) = catalog_id_cache().lock() {
         guard
             .get(clean_id)
-            .cloned()
+            .map(|(id, _)| id.clone())
             .unwrap_or_else(|| clean_id.to_string())
     } else {
         clean_id.to_string()
@@ -1145,7 +1258,7 @@ pub fn fetch_web_playback_manifest(
         let (title_opt, artist_opt) =
             db_meta_cache.unwrap_or_else(|| lookup_track_title_artist_in_db(clean_id));
         let storefront = get_storefront(&dev_token, &user_token);
-        if let Some(replacement_id) = search_storefront_catalog_song_id(
+        if let Some((replacement_id, art_url)) = search_storefront_catalog_song_id(
             &dev_token,
             &user_token,
             &storefront,
@@ -1154,9 +1267,7 @@ pub fn fetch_web_playback_manifest(
             artist_opt.as_deref(),
         ) {
             if replacement_id != active_id {
-                if let Ok(mut guard) = catalog_id_cache().lock() {
-                    guard.insert(clean_id.to_string(), replacement_id.clone());
-                }
+                save_resolved_catalog_mapping(clean_id, &replacement_id, art_url);
                 active_id = replacement_id;
                 json = apple_post_json(
                     "https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback",
@@ -1287,5 +1398,46 @@ mod tests {
         assert_eq!(track.artists, vec!["Dev Lemons".to_string()]);
         assert_eq!(track.album, "SURFACE TENSION");
         assert_eq!(track.duration_ms, 172000);
+    }
+
+    #[test]
+    fn test_map_apple_item_heals_expiring_blobstore_artwork_with_catalog_artwork() {
+        let raw_item = serde_json::json!({
+            "id": "i.KNRzN5Qh3b7lQ",
+            "type": "library-songs",
+            "attributes": {
+                "name": "The Grid",
+                "artistName": "Daft Punk",
+                "albumName": "TRON: Legacy",
+                "durationInMillis": 96000,
+                "trackNumber": 2,
+                "artwork": {
+                    "url": "https://store-037.blobstore.apple.com/itms6-assets-massilia-037001/Purple113/v4/1b/1f/dc/image?X-Amz-Expires=86400"
+                }
+            },
+            "relationships": {
+                "catalog": {
+                    "data": [
+                        {
+                            "id": "1440617977",
+                            "type": "songs",
+                            "attributes": {
+                                "artwork": {
+                                    "url": "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/38/4b/5c/mzi.cfikjxuv.jpg/{w}x{h}bb.jpg"
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+
+        let track = map_apple_item_to_track(&raw_item).expect("should map track");
+        assert_eq!(track.uri, "applemusic:song:1440617977");
+        assert_eq!(
+            track.art_url.as_deref(),
+            Some("https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/38/4b/5c/mzi.cfikjxuv.jpg/400x400bb.jpg"),
+            "Must replace 24-hour expiring blobstore.apple.com URL with permanent mzstatic.com catalog artwork"
+        );
     }
 }

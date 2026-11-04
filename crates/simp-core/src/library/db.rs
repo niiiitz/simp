@@ -94,8 +94,67 @@ impl LibraryDatabase {
                 art_cache_path  TEXT,
                 fetched_at      INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS apple_catalog_map (
+                raw_id          TEXT PRIMARY KEY,
+                catalog_id      TEXT NOT NULL,
+                art_url         TEXT,
+                updated_at      INTEGER NOT NULL
+            );
             ",
         )?;
+
+        // Self-heal temporary 24-hour iCloud Music Library `blobstore.apple.com` presigned artwork URLs
+        // whenever another track from the same album already has a permanent `mzstatic.com` catalog URL!
+        let _ = conn.execute_batch(
+            "
+            UPDATE tracks
+            SET art_url = (
+                SELECT m.art_url FROM apple_catalog_map m
+                WHERE ('applemusic:song:' || m.raw_id = tracks.uri OR 'applemusic:track:' || m.raw_id = tracks.uri)
+                  AND m.art_url LIKE '%mzstatic.com%'
+                LIMIT 1
+            )
+            WHERE (art_url IS NULL OR art_url = '' OR art_url LIKE '%blobstore.apple.com%')
+              AND EXISTS (
+                SELECT 1 FROM apple_catalog_map m
+                WHERE ('applemusic:song:' || m.raw_id = tracks.uri OR 'applemusic:track:' || m.raw_id = tracks.uri)
+                  AND m.art_url LIKE '%mzstatic.com%'
+              );
+
+            UPDATE tracks
+            SET art_url = (
+                SELECT t2.art_url FROM tracks t2
+                WHERE t2.album_title = tracks.album_title
+                  AND t2.album_title != ''
+                  AND t2.art_url LIKE '%mzstatic.com%'
+                LIMIT 1
+            )
+            WHERE (art_url IS NULL OR art_url = '' OR art_url LIKE '%blobstore.apple.com%')
+              AND EXISTS (
+                SELECT 1 FROM tracks t2
+                WHERE t2.album_title = tracks.album_title
+                  AND t2.album_title != ''
+                  AND t2.art_url LIKE '%mzstatic.com%'
+              );
+
+            UPDATE playlists
+            SET cover_art_url = (
+                SELECT t.art_url FROM playlist_items pi
+                JOIN tracks t ON t.uri = pi.track_uri
+                WHERE pi.playlist_id = playlists.id
+                  AND t.art_url LIKE '%mzstatic.com%'
+                ORDER BY pi.position ASC LIMIT 1
+            )
+            WHERE (cover_art_url IS NULL OR cover_art_url = '' OR cover_art_url LIKE '%blobstore.apple.com%')
+              AND EXISTS (
+                SELECT 1 FROM playlist_items pi
+                JOIN tracks t ON t.uri = pi.track_uri
+                WHERE pi.playlist_id = playlists.id
+                  AND t.art_url LIKE '%mzstatic.com%'
+              );
+            ",
+        );
 
         let user_version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -774,6 +833,57 @@ impl LibraryDatabase {
         conn.execute("DELETE FROM albums", [])?;
         conn.execute("DELETE FROM storage_mounts", [])?;
         conn.execute("DELETE FROM cd_cache", [])?;
+        conn.execute("DELETE FROM apple_catalog_map", [])?;
+        Ok(())
+    }
+
+    pub fn get_all_apple_catalog_mappings(
+        &self,
+    ) -> Result<HashMap<String, (String, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT raw_id, catalog_id, art_url FROM apple_catalog_map")?;
+        let rows = stmt.query_map([], |row| {
+            let raw_id: String = row.get(0)?;
+            let catalog_id: String = row.get(1)?;
+            let art_url: Option<String> = row.get(2)?;
+            Ok((raw_id, (catalog_id, art_url)))
+        })?;
+        let mut map = HashMap::new();
+        for r in rows.flatten() {
+            map.insert(r.0, r.1);
+        }
+        Ok(map)
+    }
+
+    pub fn upsert_apple_catalog_mapping(
+        &self,
+        raw_id: &str,
+        catalog_id: &str,
+        art_url: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO apple_catalog_map (raw_id, catalog_id, art_url, updated_at)
+             VALUES (?1, ?2, ?3, strftime('%s', 'now'))
+             ON CONFLICT(raw_id) DO UPDATE SET
+               catalog_id = excluded.catalog_id,
+               art_url = COALESCE(excluded.art_url, apple_catalog_map.art_url),
+               updated_at = strftime('%s', 'now')",
+            params![raw_id, catalog_id, art_url],
+        )?;
+
+        if let Some(perm_art) = art_url.filter(|u| u.contains("mzstatic.com")) {
+            let song_uri = format!("applemusic:song:{raw_id}");
+            let track_uri = format!("applemusic:track:{raw_id}");
+            let _ = conn.execute(
+                "UPDATE tracks
+                 SET art_url = ?1
+                 WHERE (uri = ?2 OR uri = ?3)
+                   AND (art_url IS NULL OR art_url = '' OR art_url LIKE '%blobstore.apple.com%')",
+                params![perm_art, song_uri, track_uri],
+            );
+        }
         Ok(())
     }
 
