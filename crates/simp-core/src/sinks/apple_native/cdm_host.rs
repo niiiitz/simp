@@ -939,6 +939,32 @@ type CreateCdmInstanceFn = unsafe extern "C" fn(
     *mut c_void,
 ) -> *mut c_void;
 
+struct LoadedCdmModule {
+    dl_handle: *mut c_void,
+    create_fn: CreateCdmInstanceFn,
+    deinit_fn: Option<DeinitializeCdmModuleFn>,
+}
+
+unsafe impl Send for LoadedCdmModule {}
+unsafe impl Sync for LoadedCdmModule {}
+
+static LOADED_CDM_MODULE: std::sync::OnceLock<std::sync::Mutex<Option<LoadedCdmModule>>> =
+    std::sync::OnceLock::new();
+
+fn cdm_trace_enabled() -> bool {
+    std::env::var("SIMP_CDM_TRACE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+macro_rules! cdm_step_log {
+    ($($arg:tt)*) => {
+        if cdm_trace_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 /// Active Native Rust Widevine CDM Session hosting `libwidevinecdm.so` directly via FFI.
 pub struct WidevineCdmSession {
     #[cfg(unix)]
@@ -951,8 +977,8 @@ pub struct WidevineCdmSession {
 unsafe impl Send for WidevineCdmSession {}
 
 impl WidevineCdmSession {
-    /// Dynamically loads `libwidevinecdm.so`, instantiates `ContentDecryptionModule_10` (or `_11`),
-    /// and initializes the CDM session.
+    /// Dynamically loads `libwidevinecdm.so` (initializing the module strictly once per process),
+    /// instantiates `ContentDecryptionModule_10` (or `_11`), and initializes the CDM session.
     pub fn open(lib_path: &Path) -> Result<Self> {
         #[cfg(not(unix))]
         {
@@ -962,83 +988,100 @@ impl WidevineCdmSession {
 
         #[cfg(unix)]
         unsafe {
-            let c_path = CString::new(
-                lib_path
-                    .to_str()
-                    .ok_or_else(|| anyhow!("Invalid UTF-8 path for libwidevinecdm.so"))?,
-            )?;
-            eprintln!("[CDM-STEP] 1/5 dlopen({})...", lib_path.display());
-            let dl_handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
-            if dl_handle.is_null() {
-                let err_ptr = libc::dlerror();
-                let err_msg = if !err_ptr.is_null() {
-                    CStr::from_ptr(err_ptr).to_string_lossy().to_string()
-                } else {
-                    "unknown dlopen error".to_string()
-                };
-                return Err(anyhow!(
-                    "Failed to dlopen {}: {}",
-                    lib_path.display(),
-                    err_msg
-                ));
-            }
+            let module_mutex = LOADED_CDM_MODULE.get_or_init(|| std::sync::Mutex::new(None));
+            let mut module_guard = module_mutex
+                .lock()
+                .map_err(|_| anyhow!("Poisoned CDM module lock"))?;
 
-            if let Ok(ver_cs) = CString::new("GetCdmVersion") {
-                let ver_sym = libc::dlsym(dl_handle, ver_cs.as_ptr());
-                if !ver_sym.is_null() {
-                    let ver_fn: extern "C" fn() -> *const c_char = std::mem::transmute(ver_sym);
-                    let p = ver_fn();
-                    if !p.is_null() {
-                        eprintln!(
-                            "[CDM-STEP] GetCdmVersion() = {}",
-                            CStr::from_ptr(p).to_string_lossy()
-                        );
-                    }
-                }
-            }
-
-            // 0. Call VerifyCdmHost_0 if exported (some Widevine builds check that it was called prior to Initialize)
-            if let Ok(verify_cs) = CString::new("VerifyCdmHost_0") {
-                let verify_sym = libc::dlsym(dl_handle, verify_cs.as_ptr());
-                if !verify_sym.is_null() {
-                    eprintln!("[CDM-STEP] 2/5 VerifyCdmHost_0...");
-                    let verify_fn: VerifyCdmHost0Fn = std::mem::transmute(verify_sym);
-                    let ok = verify_fn(std::ptr::null(), 0);
-                    eprintln!("[CDM-STEP] VerifyCdmHost_0 returned {ok}");
-                }
-            }
-
-            // 1. Call InitializeCdmModule_4 (or InitializeCdmModule) if exported
-            for init_sym in ["InitializeCdmModule_4", "InitializeCdmModule"] {
-                if let Ok(cs) = CString::new(init_sym) {
-                    let sym = libc::dlsym(dl_handle, cs.as_ptr());
-                    if !sym.is_null() {
-                        eprintln!("[CDM-STEP] 3/5 {init_sym}()...");
-                        let init_fn: InitializeCdmModuleFn = std::mem::transmute(sym);
-                        init_fn();
-                        break;
-                    }
-                }
-            }
-
-            let deinit_cs = CString::new("DeinitializeCdmModule").unwrap();
-            let deinit_sym = libc::dlsym(dl_handle, deinit_cs.as_ptr());
-            let deinit_fn: Option<DeinitializeCdmModuleFn> = if !deinit_sym.is_null() {
-                Some(std::mem::transmute(deinit_sym))
+            let (dl_handle, create_fn, deinit_fn) = if let Some(ref m) = *module_guard {
+                (m.dl_handle, m.create_fn, m.deinit_fn)
             } else {
-                None
-            };
+                let c_path = CString::new(
+                    lib_path
+                        .to_str()
+                        .ok_or_else(|| anyhow!("Invalid UTF-8 path for libwidevinecdm.so"))?,
+                )?;
+                cdm_step_log!("[CDM-STEP] 1/5 dlopen({})...", lib_path.display());
+                let dl_handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+                if dl_handle.is_null() {
+                    let err_ptr = libc::dlerror();
+                    let err_msg = if !err_ptr.is_null() {
+                        CStr::from_ptr(err_ptr).to_string_lossy().to_string()
+                    } else {
+                        "unknown dlopen error".to_string()
+                    };
+                    return Err(anyhow!(
+                        "Failed to dlopen {}: {}",
+                        lib_path.display(),
+                        err_msg
+                    ));
+                }
 
-            let create_cs = CString::new("CreateCdmInstance").unwrap();
-            let create_sym = libc::dlsym(dl_handle, create_cs.as_ptr());
-            if create_sym.is_null() {
-                libc::dlclose(dl_handle);
-                return Err(anyhow!(
-                    "CreateCdmInstance symbol not found in {}",
-                    lib_path.display()
-                ));
-            }
-            let create_fn: CreateCdmInstanceFn = std::mem::transmute(create_sym);
+                if let Ok(ver_cs) = CString::new("GetCdmVersion") {
+                    let ver_sym = libc::dlsym(dl_handle, ver_cs.as_ptr());
+                    if !ver_sym.is_null() {
+                        let ver_fn: extern "C" fn() -> *const c_char =
+                            std::mem::transmute(ver_sym);
+                        let p = ver_fn();
+                        if !p.is_null() {
+                            cdm_step_log!(
+                                "[CDM-STEP] GetCdmVersion() = {}",
+                                CStr::from_ptr(p).to_string_lossy()
+                            );
+                        }
+                    }
+                }
+
+                // 0. Call VerifyCdmHost_0 if exported (some Widevine builds check that it was called prior to Initialize)
+                if let Ok(verify_cs) = CString::new("VerifyCdmHost_0") {
+                    let verify_sym = libc::dlsym(dl_handle, verify_cs.as_ptr());
+                    if !verify_sym.is_null() {
+                        cdm_step_log!("[CDM-STEP] 2/5 VerifyCdmHost_0...");
+                        let verify_fn: VerifyCdmHost0Fn = std::mem::transmute(verify_sym);
+                        let ok = verify_fn(std::ptr::null(), 0);
+                        cdm_step_log!("[CDM-STEP] VerifyCdmHost_0 returned {ok}");
+                    }
+                }
+
+                // 1. Call InitializeCdmModule_4 (or InitializeCdmModule) strictly once per process
+                for init_sym in ["InitializeCdmModule_4", "InitializeCdmModule"] {
+                    if let Ok(cs) = CString::new(init_sym) {
+                        let sym = libc::dlsym(dl_handle, cs.as_ptr());
+                        if !sym.is_null() {
+                            cdm_step_log!("[CDM-STEP] 3/5 {init_sym}()...");
+                            let init_fn: InitializeCdmModuleFn = std::mem::transmute(sym);
+                            init_fn();
+                            break;
+                        }
+                    }
+                }
+
+                let deinit_cs = CString::new("DeinitializeCdmModule").unwrap();
+                let deinit_sym = libc::dlsym(dl_handle, deinit_cs.as_ptr());
+                let deinit_fn: Option<DeinitializeCdmModuleFn> = if !deinit_sym.is_null() {
+                    Some(std::mem::transmute(deinit_sym))
+                } else {
+                    None
+                };
+
+                let create_cs = CString::new("CreateCdmInstance").unwrap();
+                let create_sym = libc::dlsym(dl_handle, create_cs.as_ptr());
+                if create_sym.is_null() {
+                    return Err(anyhow!(
+                        "CreateCdmInstance symbol not found in {}",
+                        lib_path.display()
+                    ));
+                }
+                let create_fn: CreateCdmInstanceFn = std::mem::transmute(create_sym);
+
+                *module_guard = Some(LoadedCdmModule {
+                    dl_handle,
+                    create_fn,
+                    deinit_fn,
+                });
+                (dl_handle, create_fn, deinit_fn)
+            };
+            drop(module_guard);
 
             let mut host = Box::new(CdmHostState {
                 vtable: &CDM_HOST_VTABLE,
@@ -1056,7 +1099,7 @@ impl WidevineCdmSession {
             let key_system = b"com.widevine.alpha\0";
             let mut cdm_ptr: *mut c_void = std::ptr::null_mut();
             for ver in [10, 11] {
-                eprintln!("[CDM-STEP] 4/5 CreateCdmInstance(version={ver})...");
+                cdm_step_log!("[CDM-STEP] 4/5 CreateCdmInstance(version={ver})...");
                 cdm_ptr = create_fn(
                     ver,
                     key_system.as_ptr() as *const c_char,
@@ -1065,13 +1108,12 @@ impl WidevineCdmSession {
                     host_ptr as *mut c_void,
                 );
                 if !cdm_ptr.is_null() {
-                    eprintln!("[CDM-STEP] CreateCdmInstance(version={ver}) succeeded: {cdm_ptr:?}");
+                    cdm_step_log!("[CDM-STEP] CreateCdmInstance(version={ver}) succeeded: {cdm_ptr:?}");
                     break;
                 }
             }
 
             if cdm_ptr.is_null() {
-                libc::dlclose(dl_handle);
                 return Err(anyhow!(
                     "CreateCdmInstance(10/11, \"com.widevine.alpha\") returned null"
                 ));
@@ -1079,7 +1121,7 @@ impl WidevineCdmSession {
 
             host.cdm_ptr = cdm_ptr;
             let vtable_ptr = *(cdm_ptr as *const *const CdmInstanceVtable);
-            eprintln!("[CDM-STEP] 5/5 cdm->Initialize(false, false, false)...");
+            cdm_step_log!("[CDM-STEP] 5/5 cdm->Initialize(false, false, false)...");
             ((*vtable_ptr).initialize)(cdm_ptr, false, false, false);
             let mut session = Self {
                 dl_handle,
@@ -1088,9 +1130,10 @@ impl WidevineCdmSession {
                 host,
             };
             session.pump_pending_timers();
-            eprintln!(
+            cdm_step_log!(
                 "[CDM-STEP] cdm->Initialize done (host.initialized={}, trace={:?})",
-                session.host.initialized, session.host.trace_log
+                session.host.initialized,
+                session.host.trace_log
             );
 
             Ok(session)
@@ -1142,7 +1185,7 @@ impl WidevineCdmSession {
         self.host.latest_challenge.clear();
         self.host.last_rejection = None;
 
-        eprintln!(
+        cdm_step_log!(
             "[CDM-STEP] 6/8 CreateSessionAndGenerateRequest(pssh_len={})...",
             pssh_box.len()
         );
@@ -1159,7 +1202,7 @@ impl WidevineCdmSession {
             );
         }
         self.pump_pending_timers();
-        eprintln!(
+        cdm_step_log!(
             "[CDM-STEP] CreateSessionAndGenerateRequest done (sid={}, challenge_len={}, trace={:?})",
             self.host.session_id,
             self.host.latest_challenge.len(),
@@ -1183,7 +1226,7 @@ impl WidevineCdmSession {
     pub fn update_session_with_license(&mut self, license_bytes: &[u8]) -> Result<()> {
         self.host.last_rejection = None;
         let sid_bytes = self.host.session_id.as_bytes();
-        eprintln!(
+        cdm_step_log!(
             "[CDM-STEP] 7/8 UpdateSession(sid={}, license_len={})...",
             self.host.session_id,
             license_bytes.len()
@@ -1200,7 +1243,7 @@ impl WidevineCdmSession {
             );
         }
         self.pump_pending_timers();
-        eprintln!(
+        cdm_step_log!(
             "[CDM-STEP] UpdateSession done (usable_keys={}, challenge_len={}, trace={:?})",
             self.host.usable_keys_count,
             self.host.latest_challenge.len(),
@@ -1320,7 +1363,7 @@ impl WidevineCdmSession {
         let mut sample_cursor = 0usize;
         let mut decrypted_samples = 0usize;
 
-        eprintln!(
+        cdm_step_log!(
             "[CDM-STEP] 8/8 Decrypting {} samples in mdat ({} bytes)...",
             moof_info.sample_sizes.len(),
             mdat_slice.len()
@@ -1353,7 +1396,7 @@ impl WidevineCdmSession {
             decrypted_samples += 1;
         }
 
-        eprintln!("[CDM-STEP] Decrypted {decrypted_samples} samples successfully!");
+        cdm_step_log!("[CDM-STEP] Decrypted {decrypted_samples} samples successfully!");
         Ok(decrypted_samples)
     }
 
@@ -1415,6 +1458,15 @@ impl Drop for WidevineCdmSession {
         unsafe {
             if !self.cdm_ptr.is_null() {
                 let vtable_ptr = *(self.cdm_ptr as *const *const CdmInstanceVtable);
+                if !self.host.session_id.is_empty() {
+                    let sid_bytes = self.host.session_id.as_bytes();
+                    ((*vtable_ptr).close_session)(
+                        self.cdm_ptr,
+                        99,
+                        sid_bytes.as_ptr() as *const c_char,
+                        sid_bytes.len() as u32,
+                    );
+                }
                 ((*vtable_ptr).destroy)(self.cdm_ptr);
                 self.cdm_ptr = std::ptr::null_mut();
             }

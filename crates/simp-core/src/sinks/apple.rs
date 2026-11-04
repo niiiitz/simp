@@ -17,8 +17,8 @@ fn worker_slot() -> &'static Mutex<Option<Child>> {
 }
 
 /// Returns true when Zero-Browser Native Rust Widevine CDM (`libwidevinecdm.so` FFI) mode is enabled.
-/// Enabled automatically when `SIMP_NATIVE_APPLE_CDM=1` or `~/.config/simp/enable-native-cdm` exists,
-/// and falls back seamlessly to the browser worker if `libwidevinecdm.so` is unavailable.
+/// Enabled by default on Unix whenever `libwidevinecdm.so` is available (unless `SIMP_NATIVE_APPLE_CDM=0`
+/// or `~/.config/simp/disable-native-cdm` is set), falling back seamlessly to the browser worker if needed.
 pub fn is_native_apple_cdm_preferred() -> bool {
     if let Ok(val) = std::env::var("SIMP_NATIVE_APPLE_CDM") {
         let v = val.trim().to_lowercase();
@@ -30,11 +30,11 @@ pub fn is_native_apple_cdm_preferred() -> bool {
         }
     }
     if let Some(cfg_dir) = dirs::config_dir() {
-        if cfg_dir.join("simp/enable-native-cdm").exists() {
-            return true;
+        if cfg_dir.join("simp/disable-native-cdm").exists() {
+            return false;
         }
     }
-    false
+    true
 }
 
 /// Pillar 4: Apple Music Sink Facade, Native Rust Widevine Host & ES256 Developer Token Signer.
@@ -75,6 +75,28 @@ impl AppleMusicSink {
         if let Ok(mut guard) = self.native_engine.lock() {
             if let Some(ref mut eng) = *guard {
                 eng.set_volume(self.volume);
+            }
+        }
+    }
+
+    pub fn prime_restored_session(&mut self, uri: String, position_ms: u32) {
+        if !uri.starts_with("applemusic:station:")
+            && is_native_apple_cdm_preferred()
+            && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some()
+        {
+            if let Ok(mut guard) = self.native_engine.lock() {
+                let eng = guard.get_or_insert_with(LocalAudioEngine::new);
+                eng.set_volume(self.volume);
+                eng.prime_restored_session(uri, position_ms);
+                self.using_native_engine = true;
+            }
+        }
+    }
+
+    pub fn check_idle_suspend(&mut self) {
+        if let Ok(mut guard) = self.native_engine.lock() {
+            if let Some(ref mut eng) = *guard {
+                eng.check_idle_suspend();
             }
         }
     }
@@ -198,6 +220,7 @@ impl AppleMusicSink {
         if is_native_apple_cdm_preferred()
             && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some()
         {
+            Self::kill_headless_widevine_worker();
             return true;
         }
         if Self::is_headless_worker_active() {
@@ -382,7 +405,8 @@ impl crate::sinks::AudioSink for AppleMusicSink {
         internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
         broadcast_tx: &broadcast::Sender<PlaybackEvent>,
     ) -> Result<()> {
-        if is_native_apple_cdm_preferred()
+        if !uri.starts_with("applemusic:station:")
+            && is_native_apple_cdm_preferred()
             && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some()
         {
             if let Ok(mut guard) = self.native_engine.lock() {

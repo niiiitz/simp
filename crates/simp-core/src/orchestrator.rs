@@ -112,6 +112,7 @@ impl AudioOrchestrator {
                 }
                 _ = idle_check_interval.tick() => {
                     self.local_engine.check_idle_suspend();
+                    self.apple_sink.check_idle_suspend();
                     if self.state.lock().unwrap().is_playing {
                         self.persist_session_to_vdf();
                     }
@@ -1019,6 +1020,9 @@ impl AudioOrchestrator {
 
         if engine == ActiveEngine::Local {
             self.local_engine
+                .prime_restored_session(track.uri.clone(), clamped_pos);
+        } else if engine == ActiveEngine::AppleMusic {
+            self.apple_sink
                 .prime_restored_session(track.uri.clone(), clamped_pos);
         }
 
