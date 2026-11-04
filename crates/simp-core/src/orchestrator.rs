@@ -2,14 +2,13 @@ use crate::library::db::LibraryDatabase;
 use crate::library::indexer::scan_all_storage;
 use crate::library::mounts::read_power_state;
 use crate::library::vdf::{load_session_state, save_session_state};
-use crate::mpris::{initialize_mpris, update_mpris_metadata, update_mpris_playback};
+use crate::mpris::{initialize_mpris, update_mpris_metadata, update_mpris_playback, MprisHandle};
 use crate::sinks::apple::AppleMusicSink;
 use crate::sinks::local::LocalAudioEngine;
 use simp_protocol::{
     ActiveEngine, AudioCommand, PlaybackEvent, RepeatMode, ServerEnvelope, SessionState,
     SimpSettings, TrackMetadata,
 };
-use souvlaki::MediaControls;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -35,7 +34,7 @@ pub struct AudioOrchestrator {
     pub state: Arc<Mutex<OrchestratorSnapshot>>,
     local_engine: LocalAudioEngine,
     apple_sink: AppleMusicSink,
-    mpris_controls: Option<MediaControls>,
+    mpris_controls: Option<MprisHandle>,
     transition_epoch: u64,
     consecutive_failures: u32,
     internal_event_tx: mpsc::UnboundedSender<PlaybackEvent>,
@@ -64,8 +63,6 @@ impl AudioOrchestrator {
         };
         apple_sink.is_authenticated = initial_apple_auth;
 
-        let mpris_controls = initialize_mpris(cmd_tx);
-
         let state = Arc::new(Mutex::new(OrchestratorSnapshot {
             active_engine: ActiveEngine::None,
             is_playing: false,
@@ -78,6 +75,8 @@ impl AudioOrchestrator {
             queue_index: 0,
             apple_authenticated: initial_apple_auth,
         }));
+
+        let mpris_controls = initialize_mpris(state.clone(), cmd_tx);
 
         let mut orchestrator = Self {
             db,

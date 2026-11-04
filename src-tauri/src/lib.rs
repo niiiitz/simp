@@ -53,15 +53,14 @@ pub fn run_ui() {
         return;
     }
 
-    // If an `org.simp.player` desktop window is already open on X11/KDE, raise/activate it first
-    if Command::new("wmctrl")
+    // Ensure DISPLAY / WAYLAND_DISPLAY are populated even if invoked from a background D-Bus/systemd context
+    let mut wmctrl = Command::new("wmctrl");
+    wmctrl
         .args(["-xa", "org.simp.player"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
+        .stderr(Stdio::null());
+    simp_core::mpris::apply_desktop_display_env(&mut wmctrl);
+    if wmctrl.status().map(|s| s.success()).unwrap_or(false) {
         return;
     }
 
@@ -78,6 +77,8 @@ pub fn run_ui() {
     let user_data_arg = format!("--user-data-dir={window_profile_dir}");
 
     // 1. Try native Chromium/Chrome/Edge/Brave in chromeless 1280x800 app mode
+    // Pass `--ozone-platform=x11` so `--class=org.simp.player` sets X11 `WM_CLASS="org.simp.player"`
+    // (preventing KWin Wayland's generic yellow "W" icon and allowing `wmctrl -xa org.simp.player` to raise it).
     let native_browsers = [
         "chromium",
         "chromium-browser",
@@ -89,19 +90,20 @@ pub fn run_ui() {
     ];
 
     for bin in native_browsers {
-        if let Ok(mut child) = Command::new(bin)
-            .arg(format!("--app={ui_url}"))
+        let mut cmd = Command::new(bin);
+        cmd.arg(format!("--app={ui_url}"))
             .arg("--window-size=1280,800")
             .arg("--class=org.simp.player")
+            .arg("--ozone-platform=x11")
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-features=HardwareMediaKeyHandling,MediaSessionService")
             .arg(&user_data_arg)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
+            .stderr(Stdio::null());
+        simp_core::mpris::apply_desktop_display_env(&mut cmd);
+        if let Ok(mut child) = cmd.spawn() {
             let _ = child.wait();
             return;
         }
@@ -127,23 +129,24 @@ pub fn run_ui() {
             .map(|s| s.success())
             .unwrap_or(false)
         {
-            if let Ok(mut child) = Command::new("flatpak")
-                .arg("run")
+            let mut cmd = Command::new("flatpak");
+            cmd.arg("run")
                 .arg("--filesystem=xdg-data/simp:create")
                 .arg("--device=all")
                 .arg(app_id)
                 .arg(format!("--app={ui_url}"))
                 .arg("--window-size=1280,800")
                 .arg("--class=org.simp.player")
+                .arg("--ozone-platform=x11")
                 .arg("--no-first-run")
                 .arg("--no-default-browser-check")
                 .arg("--disable-features=HardwareMediaKeyHandling,MediaSessionService")
                 .arg(&user_data_arg)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
+                .stderr(Stdio::null());
+            simp_core::mpris::apply_desktop_display_env(&mut cmd);
+            if let Ok(mut child) = cmd.spawn() {
                 let _ = child.wait();
                 return;
             }

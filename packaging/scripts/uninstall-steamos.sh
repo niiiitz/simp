@@ -49,7 +49,8 @@ rm -rf "${BIN_DEST}" "${UI_DEST}"
 rm -f "${LOCAL_BIN_LINK}"
 echo "✓ Removed binary & UI:  ${BIN_DEST}, ${UI_DEST}"
 
-# 3. Remove Desktop shortcut
+# 3. Remove Desktop shortcut & Wayland app_id alias
+rm -f "${HOME}/.local/share/applications/chrome-127.0.0.1__-Default.desktop"
 if [[ -f "${DESKTOP_FILE}" ]]; then
   rm -f "${DESKTOP_FILE}"
   if command -v update-desktop-database >/dev/null 2>&1; then

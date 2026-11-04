@@ -20,6 +20,15 @@ pub fn spawn_system_tray(
     state: Arc<Mutex<OrchestratorSnapshot>>,
     cmd_tx: mpsc::UnboundedSender<AudioCommand>,
 ) {
+    // By default, SIMP unifies on KDE Plasma's native MPRIS2 Media Player widget (`org.mpris.MediaPlayer2.simp`,
+    // which exposes `DesktopEntry = "org.simp.player"`, `Raise`, `Quit`, `Shuffle`, `LoopStatus`, and `Volume`)
+    // so there is only 1 system tray icon instead of duplicate MPRIS + custom SNI icons.
+    // Set `SIMP_ENABLE_LEGACY_TRAY=1` to also spawn the standalone StatusNotifierItem tray icon.
+    if std::env::var("SIMP_ENABLE_LEGACY_TRAY").ok().as_deref() != Some("1") {
+        let _ = (state, cmd_tx);
+        return;
+    }
+
     #[cfg(target_os = "linux")]
     {
         let _ = std::thread::Builder::new()
@@ -44,7 +53,6 @@ mod linux_sni {
     use dbus::Message;
     use dbus_crossroads::{Crossroads, IfaceBuilder};
     use std::collections::HashMap;
-    use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     struct TrayContext {
@@ -54,13 +62,7 @@ mod linux_sni {
     }
 
     fn launch_simp_window() {
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = Command::new(exe)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-        }
+        crate::mpris::launch_simp_desktop_window();
     }
 
     fn build_tooltip(state: &Arc<Mutex<OrchestratorSnapshot>>) -> (String, Vec<(i32, i32, Vec<u8>)>, String, String) {

@@ -97,6 +97,21 @@ sed \
   -e "s|__SIMP_ICON__|${UI_DEST}/simp-icon-dark.png|g" \
   "${DESKTOP_SRC}" > "${DESKTOP_DEST}"
 chmod 0755 "${DESKTOP_DEST}"
+
+# Also create a hidden Wayland app_id mapping (`chrome-127.0.0.1__-Default.desktop`) so KWin Wayland
+# always resolves Chromium `--app=http://127.0.0.1:18888` windows to the SIMP icon (never the generic yellow "W").
+WAYLAND_ALIAS_DEST="${APPLICATIONS_DIR}/chrome-127.0.0.1__-Default.desktop"
+cat > "${WAYLAND_ALIAS_DEST}" <<EOF
+[Desktop Entry]
+Type=Application
+Name=SIMP
+Exec=${BIN_DEST}/simp
+Icon=${UI_DEST}/simp-icon-dark.png
+NoDisplay=true
+StartupWMClass=chrome-127.0.0.1__-Default
+EOF
+chmod 0644 "${WAYLAND_ALIAS_DEST}"
+
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "${APPLICATIONS_DIR}" >/dev/null 2>&1 || true
 fi
