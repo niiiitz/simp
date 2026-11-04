@@ -285,6 +285,13 @@ pub fn apply_self_update(
         copy_dir_contents(&src_ui, &ui_dest_dir)?;
     }
 
+    // 2b. Copy any bundled support libraries in `lib/` (e.g. `libnspr4.so` on aarch64)
+    let src_lib = extracted_root.join("lib");
+    if src_lib.is_dir() {
+        let lib_dest_dir = install_root.join("lib");
+        let _ = copy_dir_contents(&src_lib, &lib_dest_dir);
+    }
+
     // 3. Stage Decky plugin into `~/.local/share/simp/decky-staged/` (always writable in userland)
     // and also copy directly into `~/homebrew/plugins/simp-decky/` if present and writable.
     // Even if `~/homebrew/plugins/simp-decky/` is owned by `root:root`, Decky Loader's `main.py`

@@ -123,8 +123,8 @@ fn default_widevine_url_x86_64_linux() -> String {
     "https://edgedl.me.gvt1.com/edgedl/release2/chrome_component/acqexsh26ysyu3zxeotqtsp63idq_4.10.3112.0/oimompecagnajdejgnnjijobebaeigek_4.10.3112.0_linux64_ad7kyx4q7wx7xknykmkbonbbmnwq.crx3".to_string()
 }
 
-fn default_widevine_url_aarch64_linux() -> String {
-    "https://dl.google.com/widevine-cdm/4.10.2710.0-linux-arm64.zip".to_string()
+pub fn default_widevine_url_aarch64_linux() -> String {
+    "https://archive.raspberrypi.com/debian/pool/main/w/widevine/libwidevinecdm0_4.10.2662.3+1_arm64.deb".to_string()
 }
 
 fn default_github_releases_api_url() -> String {

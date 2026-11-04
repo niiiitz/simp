@@ -82,21 +82,31 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
         .join("simp")
         .join("lib")
         .join(cdm_file);
-    if simp_lib.is_file() && is_compatible_cdm_binary(&simp_lib) {
-        return Some(DiscoveredWidevineCdm {
-            library_path: simp_lib,
-            source_label: "simp-userland".to_string(),
-            cdm_version: None,
-        });
+    if simp_lib.is_file() {
+        if is_compatible_cdm_binary(&simp_lib) {
+            return Some(DiscoveredWidevineCdm {
+                library_path: simp_lib,
+                source_label: "simp-userland".to_string(),
+                cdm_version: None,
+            });
+        } else {
+            let _ = std::fs::remove_file(&simp_lib);
+        }
     }
-    // Also check ~/.local/share/simp/lib on macOS/Linux in case staged there
-    let legacy_simp_lib = home.join(".local/share/simp/lib").join(cdm_file);
-    if legacy_simp_lib.is_file() && is_compatible_cdm_binary(&legacy_simp_lib) {
-        return Some(DiscoveredWidevineCdm {
-            library_path: legacy_simp_lib,
-            source_label: "simp-userland".to_string(),
-            cdm_version: None,
-        });
+    // Also check ~/.local/share/simp/lib and ~/.local/share/simp/cdm on macOS/Linux in case staged there
+    for sub in ["lib", "cdm"] {
+        let legacy_simp_lib = home.join(".local/share/simp").join(sub).join(cdm_file);
+        if legacy_simp_lib.is_file() {
+            if is_compatible_cdm_binary(&legacy_simp_lib) {
+                return Some(DiscoveredWidevineCdm {
+                    library_path: legacy_simp_lib,
+                    source_label: "simp-userland".to_string(),
+                    cdm_version: None,
+                });
+            } else {
+                let _ = std::fs::remove_file(&legacy_simp_lib);
+            }
+        }
     }
 
     // 2. Firefox profiles (Flatpak, Native Linux, macOS, Windows)
@@ -266,20 +276,62 @@ fn is_compatible_cdm_binary(path: &Path) -> bool {
     true
 }
 
-static AUTO_PROVISION_ATTEMPTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static LAST_PROVISION_ATTEMPT_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Pure-Rust parser for Debian `.deb` (`!<arch>\n`) archives.
+/// Slices out the `data.tar.*` payload (`data.tar.xz`, `data.tar.zst`, `data.tar.gz`) without needing `dpkg-deb` or `ar`.
+pub fn extract_deb_data_tar(deb_bytes: &[u8]) -> Option<(&str, &[u8])> {
+    if !deb_bytes.starts_with(b"!<arch>\n") {
+        return None;
+    }
+    let mut offset = 8usize;
+    while offset + 60 <= deb_bytes.len() {
+        let name = std::str::from_utf8(&deb_bytes[offset..offset + 16])
+            .ok()?
+            .trim()
+            .trim_end_matches('/');
+        let size_str = std::str::from_utf8(&deb_bytes[offset + 48..offset + 58])
+            .ok()?
+            .trim();
+        let size: usize = size_str.parse().ok()?;
+        let data_start = offset + 60;
+        let data_end = data_start.checked_add(size)?;
+        if data_end > deb_bytes.len() {
+            return None;
+        }
+        if name.starts_with("data.tar") {
+            return Some((name, &deb_bytes[data_start..data_end]));
+        }
+        offset = data_end + (size % 2);
+    }
+    None
+}
 
 fn auto_provision_widevine_cdm(dest: &Path, prov: &simp_protocol::ProvisioningSettings) -> bool {
     if dest.is_file() && is_compatible_cdm_binary(dest) {
         return true;
     }
-    if AUTO_PROVISION_ATTEMPTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let prev_secs = LAST_PROVISION_ATTEMPT_SECS.load(std::sync::atomic::Ordering::SeqCst);
+    if prev_secs > 0 && now_secs.saturating_sub(prev_secs) < 15 {
         return dest.is_file() && is_compatible_cdm_binary(dest);
     }
+    LAST_PROVISION_ATTEMPT_SECS.store(now_secs, std::sync::atomic::Ordering::SeqCst);
+
+    let default_aarch64_url = simp_protocol::default_widevine_url_aarch64_linux();
     let url = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         prov.widevine_cdm_url_x86_64_linux.trim()
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        prov.widevine_cdm_url_aarch64_linux.trim()
+        let configured = prov.widevine_cdm_url_aarch64_linux.trim();
+        if configured.is_empty() || configured.contains("4.10.2710.0-linux-arm64.zip") {
+            default_aarch64_url.as_str()
+        } else {
+            configured
+        }
     } else {
         ""
     };
@@ -291,76 +343,112 @@ fn auto_provision_widevine_cdm(dest: &Path, prov: &simp_protocol::ProvisioningSe
         return false;
     };
     let _ = std::fs::create_dir_all(parent);
-    let tmp_zip = parent.join(".widevine_download.zip");
-
-    let Ok(raw_bytes) = crate::http_pool::http_get_bytes(url, &[], None, 25) else {
-        return false;
-    };
-
-    // Support both Chrome CRX3 packages (strip header up to `PK\x03\x04`) and standard `.zip` archives
-    let Some(pk_offset) = raw_bytes.windows(4).position(|w| w == b"PK\x03\x04") else {
-        return false;
-    };
-    if std::fs::write(&tmp_zip, &raw_bytes[pk_offset..]).is_err() {
-        let _ = std::fs::remove_file(&tmp_zip);
-        return false;
-    }
-
     let target_name = platform_cdm_filename();
     let tmp_extract_dir = parent.join(".widevine_extract_tmp");
     let _ = std::fs::remove_dir_all(&tmp_extract_dir);
     let _ = std::fs::create_dir_all(&tmp_extract_dir);
 
-    // 1. Prefer system `unzip` (no Python dependency required on minimal SteamOS / Steam Frame images)
-    let unzipped = Command::new("unzip")
-        .args(["-q", "-o"])
-        .arg(&tmp_zip)
-        .arg("-d")
-        .arg(&tmp_extract_dir)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    tracing::info!(
+        "Auto-provisioning native Widevine CDM ({}) from {url}...",
+        std::env::consts::ARCH
+    );
 
-    if unzipped {
-        if let Some(found) = scan_for_file_named(&tmp_extract_dir, target_name, 4) {
-            stage_cdm_into_userland(&found, dest);
+    let Ok(raw_bytes) = crate::http_pool::http_get_bytes(url, &[], None, 35) else {
+        tracing::warn!("Failed to download Widevine CDM package from {url}");
+        let _ = std::fs::remove_dir_all(&tmp_extract_dir);
+        return false;
+    };
+
+    // Case 1: Debian `.deb` archive (`!<arch>\n`, e.g. `libwidevinecdm0_*_arm64.deb`)
+    if let Some((tar_name, tar_bytes)) = extract_deb_data_tar(&raw_bytes) {
+        let tmp_tar = parent.join(format!(".widevine_{tar_name}"));
+        if std::fs::write(&tmp_tar, tar_bytes).is_ok() {
+            let extracted = Command::new("tar")
+                .args(["-xf"])
+                .arg(&tmp_tar)
+                .arg("-C")
+                .arg(&tmp_extract_dir)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+                || Command::new("bsdtar")
+                    .args(["-xf"])
+                    .arg(&tmp_tar)
+                    .arg("-C")
+                    .arg(&tmp_extract_dir)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+            let _ = std::fs::remove_file(&tmp_tar);
+            if extracted {
+                if let Some(found) = scan_for_file_named(&tmp_extract_dir, target_name, 7) {
+                    stage_cdm_into_userland(&found, dest);
+                }
+            }
         }
-    } else {
-        // 2. Fallback to `python3 -m zipfile -e` if `unzip` is not installed
-        let py_unzip = Command::new("python3")
-            .args(["-m", "zipfile", "-e"])
-            .arg(&tmp_zip)
-            .arg(&tmp_extract_dir)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if py_unzip {
-            if let Some(found) = scan_for_file_named(&tmp_extract_dir, target_name, 4) {
-                stage_cdm_into_userland(&found, dest);
+    } else if let Some(pk_offset) = raw_bytes.windows(4).position(|w| w == b"PK\x03\x04") {
+        // Case 2: Chrome CRX3 package (strip header up to `PK\x03\x04`) or standard `.zip` archive
+        let tmp_zip = parent.join(".widevine_download.zip");
+        if std::fs::write(&tmp_zip, &raw_bytes[pk_offset..]).is_ok() {
+            let unzipped = Command::new("unzip")
+                .args(["-q", "-o"])
+                .arg(&tmp_zip)
+                .arg("-d")
+                .arg(&tmp_extract_dir)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+                || Command::new("bsdtar")
+                    .args(["-xf"])
+                    .arg(&tmp_zip)
+                    .arg("-C")
+                    .arg(&tmp_extract_dir)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+                || Command::new("python3")
+                    .args(["-m", "zipfile", "-e"])
+                    .arg(&tmp_zip)
+                    .arg(&tmp_extract_dir)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+            let _ = std::fs::remove_file(&tmp_zip);
+            if unzipped {
+                if let Some(found) = scan_for_file_named(&tmp_extract_dir, target_name, 7) {
+                    stage_cdm_into_userland(&found, dest);
+                }
             }
         }
     }
 
-    let _ = std::fs::remove_file(&tmp_zip);
     let _ = std::fs::remove_dir_all(&tmp_extract_dir);
-    dest.is_file() && is_compatible_cdm_binary(dest)
+    let ok = dest.is_file() && is_compatible_cdm_binary(dest);
+    if ok {
+        tracing::info!(
+            "Successfully provisioned native Widevine CDM at {}",
+            dest.display()
+        );
+    }
+    ok
 }
 
 fn stage_cdm_into_userland(src: &Path, dest: &Path) {
-    if dest.is_file() {
+    if dest.is_file() && is_compatible_cdm_binary(dest) {
         return;
     }
     if let Some(parent) = dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if std::fs::copy(src, dest).is_ok() {
+    let resolved_src = std::fs::canonicalize(src).unwrap_or_else(|_| src.to_path_buf());
+    if std::fs::copy(&resolved_src, dest).is_ok() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755));
         }
         // Also copy companion `.sig` or `manifest.json` files if present alongside `libwidevinecdm.so`
-        if let (Some(src_dir), Some(dest_dir)) = (src.parent(), dest.parent()) {
+        if let (Some(src_dir), Some(dest_dir)) = (resolved_src.parent(), dest.parent()) {
             for companion in ["libwidevinecdm.so.sig", "manifest.json"] {
                 let s = src_dir.join(companion);
                 if s.is_file() {
@@ -379,7 +467,9 @@ fn scan_for_file_named(root: &Path, target_name: &str, max_depth: usize) -> Opti
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() {
-            if path.file_name().and_then(|n| n.to_str()) == Some(target_name) {
+            if path.file_name().and_then(|n| n.to_str()) == Some(target_name)
+                && is_compatible_cdm_binary(&path)
+            {
                 return Some(path);
             }
         } else if path.is_dir() {
@@ -391,10 +481,40 @@ fn scan_for_file_named(root: &Path, target_name: &str, max_depth: usize) -> Opti
     None
 }
 
+/// Ensures `libnspr4.so` is loaded into the process namespace before `dlopen`ing `libwidevinecdm.so`.
+/// On `aarch64` Linux, `libwidevinecdm.so` has `DT_NEEDED: [libnspr4.so]` even though it imports zero
+/// symbols from `libnspr4.so`; loading SIMP's bundled fallback `~/.local/share/simp/lib/libnspr4.so`
+/// with `RTLD_GLOBAL` satisfies `glibc` `dlopen` on minimal OS images that lack system `nspr`.
+#[cfg(unix)]
+unsafe fn ensure_nspr4_loaded_for_cdm() {
+    let sys_h = libc::dlopen(c"libnspr4.so".as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL);
+    if !sys_h.is_null() {
+        return;
+    }
+    if let Some(home) = dirs::home_dir() {
+        for cand in [
+            home.join(".local/share/simp/lib/libnspr4.so"),
+            PathBuf::from("/usr/lib/libnspr4.so"),
+            PathBuf::from("/usr/lib64/libnspr4.so"),
+            PathBuf::from("/usr/lib/aarch64-linux-gnu/libnspr4.so"),
+        ] {
+            if cand.is_file() {
+                if let Ok(cs) = CString::new(cand.to_string_lossy().as_bytes()) {
+                    let h = libc::dlopen(cs.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+                    if !h.is_null() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Queries `GetCdmVersion()` from a `libwidevinecdm.so` shared library via `dlopen`/`dlsym`.
 pub fn query_cdm_version(lib_path: &Path) -> Option<String> {
     #[cfg(unix)]
     unsafe {
+        ensure_nspr4_loaded_for_cdm();
         let c_path = CString::new(lib_path.to_str()?).ok()?;
         let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
         if handle.is_null() {
@@ -1198,6 +1318,7 @@ impl WidevineCdmSession {
             let (dl_handle, create_fn, deinit_fn) = if let Some(ref m) = *module_guard {
                 (m.dl_handle, m.create_fn, m.deinit_fn)
             } else {
+                ensure_nspr4_loaded_for_cdm();
                 let c_path = CString::new(
                     lib_path
                         .to_str()
@@ -1212,6 +1333,11 @@ impl WidevineCdmSession {
                     } else {
                         "unknown dlopen error".to_string()
                     };
+                    tracing::error!(
+                        "Failed to dlopen Widevine CDM at {}: {}",
+                        lib_path.display(),
+                        err_msg
+                    );
                     return Err(anyhow!(
                         "Failed to dlopen {}: {}",
                         lib_path.display(),
@@ -2007,5 +2133,22 @@ mod tests {
             assert_eq!(((*blk_vtbl).timestamp)(&block), 42_000);
             assert_eq!(((*blk_vtbl).decrypted_buffer)(&mut block), buf_ptr);
         }
+    }
+
+    #[test]
+    fn test_extract_deb_data_tar_parser() {
+        let mut deb = Vec::new();
+        deb.extend_from_slice(b"!<arch>\n");
+        // Member 1: debian-binary (4 bytes: "2.0\n")
+        deb.extend_from_slice(
+            b"debian-binary   1700000000  0     0     100644  4         `\n2.0\n",
+        );
+        // Member 2: data.tar.xz (5 bytes: "HELLO", padded by 1 byte)
+        deb.extend_from_slice(
+            b"data.tar.xz     1700000000  0     0     100644  5         `\nHELLO\n",
+        );
+        let (name, payload) = extract_deb_data_tar(&deb).expect("extract data.tar.xz");
+        assert_eq!(name, "data.tar.xz");
+        assert_eq!(payload, b"HELLO");
     }
 }

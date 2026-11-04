@@ -23,7 +23,21 @@ pub fn library_db_path() -> PathBuf {
 pub fn load_or_create_settings() -> SimpSettings {
     let path = settings_vdf_path();
     if let Ok(text) = fs::read_to_string(&path) {
-        if let Ok(parsed) = keyvalues_serde::from_str::<SimpSettings>(&text) {
+        if let Ok(mut parsed) = keyvalues_serde::from_str::<SimpSettings>(&text) {
+            if parsed
+                .provisioning
+                .widevine_cdm_url_aarch64_linux
+                .trim()
+                .is_empty()
+                || parsed
+                    .provisioning
+                    .widevine_cdm_url_aarch64_linux
+                    .contains("4.10.2710.0-linux-arm64.zip")
+            {
+                parsed.provisioning.widevine_cdm_url_aarch64_linux =
+                    simp_protocol::default_widevine_url_aarch64_linux();
+                let _ = save_settings(&parsed);
+            }
             return parsed;
         }
     }

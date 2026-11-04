@@ -60,13 +60,16 @@ impl LocalAudioEngine {
     fn ensure_stream(&mut self) -> Result<()> {
         if self._stream.is_none() || self.sink.is_none() {
             ensure_wslg_alsa_pulse_bridge();
-            let (stream, handle) =
-                OutputStream::try_default().context("Failed to open PipeWire/ALSA OutputStream")?;
+            let (stream, handle) = OutputStream::try_default().map_err(|e| {
+                tracing::error!("Failed to open PipeWire/ALSA OutputStream: {e}");
+                anyhow!("Failed to open PipeWire/ALSA OutputStream: {e}")
+            })?;
             let sink = Sink::try_new(&handle).context("Failed to create rodio Sink")?;
             sink.set_volume(self.volume);
             self._stream = Some(stream);
             self.stream_handle = Some(handle);
             self.sink = Some(Arc::new(sink));
+            tracing::info!("Opened native PipeWire/ALSA audio OutputStream");
         }
         Ok(())
     }
@@ -405,9 +408,35 @@ fn spawn_rodio_monitor(
     })
 }
 
-/// When running inside WSL2 with WSLg (`/mnt/wslg/PulseServer`), routes ALSA's `default` PCM
-/// to WSLg's PulseAudio bridge so `rodio` / `cpal` plays directly through the Windows soundcard.
+/// Ensures PipeWire / PulseAudio / WSLg runtime environment variables are populated before opening ALSA.
 fn ensure_wslg_alsa_pulse_bridge() {
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc::getuid() };
+        let run_user = format!("/run/user/{uid}");
+        if Path::new(&run_user).is_dir() {
+            if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+                unsafe {
+                    std::env::set_var("XDG_RUNTIME_DIR", &run_user);
+                }
+            }
+            if std::env::var_os("PIPEWIRE_RUNTIME_DIR").is_none()
+                && Path::new(&format!("{run_user}/pipewire-0")).exists()
+            {
+                unsafe {
+                    std::env::set_var("PIPEWIRE_RUNTIME_DIR", &run_user);
+                }
+            }
+            if std::env::var_os("PULSE_SERVER").is_none()
+                && Path::new(&format!("{run_user}/pulse/native")).exists()
+            {
+                unsafe {
+                    std::env::set_var("PULSE_SERVER", format!("unix:{run_user}/pulse/native"));
+                }
+            }
+        }
+    }
+
     let wslg_pulse = Path::new("/mnt/wslg/PulseServer");
     if !wslg_pulse.exists() {
         return;

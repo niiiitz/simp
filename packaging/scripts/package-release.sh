@@ -127,6 +127,9 @@ else
 fi
 
 echo "3/4 Building release Rust binary (simp for ${ARCH})..."
+if [[ -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" && -s "/tmp/.simp_embedded_jwt" ]]; then
+  export SIMP_EMBEDDED_APPLE_DEV_TOKEN="$(cat /tmp/.simp_embedded_jwt)"
+fi
 if [[ -f "${REPO_ROOT}/.env" && -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
   EMBEDDED_JWT="$(python3 - <<'PY' || true
 import base64, json, os, subprocess, time
@@ -205,12 +208,16 @@ echo "4/4 Assembling Decky-free dist/simp-steamos-userland/..."
 rm -rf "${OUT_DIR}"
 mkdir -p \
   "${OUT_DIR}/bin" \
+  "${OUT_DIR}/lib" \
   "${OUT_DIR}/ui" \
   "${OUT_DIR}/systemd" \
   "${OUT_DIR}/desktop" \
   "${OUT_DIR}/openvr"
 
 cp "${BUILT_BIN}" "${OUT_DIR}/bin/simp"
+if [[ "${ARCH}" == "aarch64" && -f "${HOME}/.cache/simp-toolchain/lib-aarch64/libnspr4.so" ]]; then
+  cp "${HOME}/.cache/simp-toolchain/lib-aarch64/libnspr4.so" "${OUT_DIR}/lib/libnspr4.so"
+fi
 cp -r "${REPO_ROOT}/ui/dist/"* "${OUT_DIR}/ui/"
 cp "${REPO_ROOT}/packaging/systemd/simp.service" "${OUT_DIR}/systemd/simp.service"
 cp "${REPO_ROOT}/packaging/desktop/org.simp.player.desktop" "${OUT_DIR}/desktop/org.simp.player.desktop"

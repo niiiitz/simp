@@ -434,6 +434,20 @@ mod linux_mpris {
         let default_icon_uri = resolve_default_icon_uri();
 
         loop {
+            let uid = unsafe { libc::getuid() };
+            let bus_sock = format!("/run/user/{uid}/bus");
+            if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none()
+                && Path::new(&bus_sock).exists()
+            {
+                unsafe {
+                    std::env::set_var("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
+                    std::env::set_var(
+                        "DBUS_SESSION_BUS_ADDRESS",
+                        format!("unix:path={bus_sock}"),
+                    );
+                }
+            }
+
             let conn = match Connection::new_session() {
                 Ok(c) => c,
                 Err(_) => {
@@ -450,6 +464,7 @@ mod linux_mpris {
                     continue;
                 }
             }
+            tracing::info!("MPRIS2 D-Bus service registered as {bus_name}");
 
             let mut cr = Crossroads::new();
             let root_token = register_mpris_root(&mut cr);

@@ -81,8 +81,9 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
       if (isDraggingRef.current) {
         currentMs = dragPreviewMsRef.current;
         lastRenderedMsRef.current = currentMs;
-      } else if (isPlayingRef.current) {
-        const rawMs = anchorPosRef.current + (performance.now() - anchorPerfRef.current);
+      } else if (isPlayingRef.current && anchorPosRef.current > 0) {
+        const elapsedSinceTick = Math.min(performance.now() - anchorPerfRef.current, 1500);
+        const rawMs = anchorPosRef.current + elapsedSinceTick;
         // Monotonic forward guard during active playback
         currentMs = Math.max(lastRenderedMsRef.current, rawMs);
         lastRenderedMsRef.current = currentMs;

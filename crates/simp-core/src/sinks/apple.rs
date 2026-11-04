@@ -405,26 +405,39 @@ impl crate::sinks::AudioSink for AppleMusicSink {
         internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
         broadcast_tx: &broadcast::Sender<PlaybackEvent>,
     ) -> Result<()> {
-        if !uri.starts_with("applemusic:station:")
-            && is_native_apple_cdm_preferred()
-            && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some()
-        {
-            if let Ok(mut guard) = self.native_engine.lock() {
-                let eng = guard.get_or_insert_with(LocalAudioEngine::new);
-                eng.set_volume(self.volume);
-                match eng.load_and_play(uri, start_pos_ms, epoch, internal_event_tx.clone()) {
-                    Ok(()) => {
-                        self.using_native_engine = true;
-                        Self::kill_headless_widevine_worker();
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Native Widevine CDM playback failed ({e}); falling back to browser worker"
-                        );
-                        self.using_native_engine = false;
+        if !uri.starts_with("applemusic:station:") && is_native_apple_cdm_preferred() {
+            if let Some(cdm_info) =
+                crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library()
+            {
+                tracing::info!(
+                    "AppleMusicSink: starting Native Rust Widevine CDM + PipeWire playback for {} (cdm={} [{}])",
+                    uri,
+                    cdm_info.library_path.display(),
+                    cdm_info.source_label
+                );
+                if let Ok(mut guard) = self.native_engine.lock() {
+                    let eng = guard.get_or_insert_with(LocalAudioEngine::new);
+                    eng.set_volume(self.volume);
+                    match eng.load_and_play(uri, start_pos_ms, epoch, internal_event_tx.clone()) {
+                        Ok(()) => {
+                            self.using_native_engine = true;
+                            Self::kill_headless_widevine_worker();
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Native Widevine CDM playback failed ({e}); falling back to browser worker"
+                            );
+                            self.using_native_engine = false;
+                        }
                     }
                 }
+            } else {
+                tracing::warn!(
+                    "AppleMusicSink: no compatible native Widevine CDM library found for arch={}; falling back to browser MusicKit worker",
+                    std::env::consts::ARCH
+                );
+                self.using_native_engine = false;
             }
         } else {
             self.using_native_engine = false;
@@ -833,151 +846,59 @@ fn spawn_headless_widevine_browser() -> Option<Child> {
         .status();
     std::thread::sleep(std::time::Duration::from_millis(120));
 
-    // IMPORTANT: Firefox `--headless` MUST be prioritized #1 on Linux/SteamOS!
-    // Why: Firefox's `cubeb` audio backend connects directly to PulseAudio/PipeWire even in `--headless`
-    // mode, whereas Chromium/Chrome `--headless=new` enables `switches::kMuteAudio` / `NullAudioSink`
-    // in headless mode (which advances `<audio>` `currentTime` and moves the scrubber while outputting silence!).
-    for require_cdm in [true, false] {
-        // 1. Flatpak Firefox (`org.mozilla.firefox` — pre-installed on SteamOS with Widevine CDM + real PipeWire output)
-        let flatpak_ff_root = home.join(".var/app/org.mozilla.firefox/.mozilla/firefox");
-        if Command::new("flatpak")
-            .args(["info", "org.mozilla.firefox"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            if let Some(profile_dir) =
-                prepare_firefox_widevine_profile(&flatpak_ff_root, require_cdm)
-            {
-                let mut cmd = Command::new("flatpak");
-                cmd.args([
-                    "run",
-                    "--socket=pulseaudio",
-                    "--filesystem=xdg-run/pipewire-0",
-                    "org.mozilla.firefox",
-                    "--headless",
-                    "--no-remote",
-                    "--profile",
-                ])
-                .arg(&profile_dir)
-                .arg(worker_url)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-                apply_pipewire_env(&mut cmd);
-                if let Ok(child) = cmd.spawn() {
-                    return Some(child);
-                }
-            }
-        }
+    // IMPORTANT: Only spawn Firefox `--headless` when it actually has a provisioned `gmp-widevinecdm`
+    // directory (`require_cdm = true`). Never spawn Chromium `--headless=new` (which hardcodes `NullAudioSink`
+    // and advances `<audio>` `currentTime` silently while muting any open foreground browser window!).
+    let require_cdm = true;
 
-        // 2. Native Firefox (`firefox`)
-        let native_ff_root = home.join(".mozilla/firefox");
-        if let Some(profile_dir) = prepare_firefox_widevine_profile(&native_ff_root, require_cdm) {
-            let mut cmd = Command::new("firefox");
-            cmd.args(["--headless", "--no-remote", "--profile"])
-                .arg(&profile_dir)
-                .arg(worker_url)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+    // 1. Flatpak Firefox (`org.mozilla.firefox` — pre-installed on SteamOS with Widevine CDM + real PipeWire output)
+    let flatpak_ff_root = home.join(".var/app/org.mozilla.firefox/.mozilla/firefox");
+    if Command::new("flatpak")
+        .args(["info", "org.mozilla.firefox"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        if let Some(profile_dir) =
+            prepare_firefox_widevine_profile(&flatpak_ff_root, require_cdm)
+        {
+            let mut cmd = Command::new("flatpak");
+            cmd.args([
+                "run",
+                "--socket=pulseaudio",
+                "--filesystem=xdg-run/pipewire-0",
+                "org.mozilla.firefox",
+                "--headless",
+                "--no-remote",
+                "--profile",
+            ])
+            .arg(&profile_dir)
+            .arg(worker_url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
             apply_pipewire_env(&mut cmd);
             if let Ok(child) = cmd.spawn() {
                 return Some(child);
             }
         }
+    }
 
-        // 3. Flatpak Chromium-family browsers (`--headless=new` fallback only if Firefox is not installed)
-        for (app_id, rel_cfg) in [
-            ("com.google.Chrome", ".var/app/com.google.Chrome/config/google-chrome"),
-            ("com.brave.Browser", ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"),
-            ("com.microsoft.Edge", ".var/app/com.microsoft.Edge/config/microsoft-edge"),
-            ("org.chromium.Chromium", ".var/app/org.chromium.Chromium/config/chromium"),
-        ] {
-            let cfg_root = home.join(rel_cfg);
-            let has_cdm = cfg_root.join("WidevineCdm").is_dir()
-                || cfg_root.join("simp-widevine-worker/WidevineCdm").is_dir();
-            if require_cdm && !has_cdm {
-                continue;
-            }
-            if Command::new("flatpak")
-                .args(["info", app_id])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-            {
-                let worker_dir = cfg_root.join("simp-widevine-worker");
-                let _ = std::fs::create_dir_all(&worker_dir);
-                clean_stale_profile_locks(&worker_dir);
-                let _ = std::fs::File::create(worker_dir.join("First Run"));
-                if cfg_root.join("WidevineCdm").is_dir() && !worker_dir.join("WidevineCdm").is_dir()
-                {
-                    copy_dir_recursive(&cfg_root.join("WidevineCdm"), &worker_dir.join("WidevineCdm"));
-                }
-                let mut cmd = Command::new("flatpak");
-                cmd.args([
-                    "run",
-                    "--socket=pulseaudio",
-                    "--filesystem=xdg-run/pipewire-0",
-                    app_id,
-                    "--headless=new",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--alsa-output-device=default",
-                    "--disable-features=HardwareMediaKeyHandling,MediaSessionService,AudioServiceOutOfProcess",
-                    "--autoplay-policy=no-user-gesture-required",
-                    "--enable-audio-service",
-                    &format!("--user-data-dir={}", worker_dir.display()),
-                    worker_url,
-                ])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-                apply_pipewire_env(&mut cmd);
-                if let Ok(child) = cmd.spawn() {
-                    return Some(child);
-                }
-            }
-        }
-
-        // 4. Native Chromium-family browsers (`--headless=new` fallback only if Firefox is not installed)
-        if !require_cdm {
-            let native_worker_dir = home.join(".local/share/simp/simp-widevine-worker-chromium");
-            let _ = std::fs::create_dir_all(&native_worker_dir);
-            clean_stale_profile_locks(&native_worker_dir);
-            let _ = std::fs::File::create(native_worker_dir.join("First Run"));
-            for bin in [
-                "google-chrome-stable",
-                "google-chrome",
-                "brave-browser",
-                "microsoft-edge-stable",
-                "chromium",
-                "chromium-browser",
-            ] {
-                let mut cmd = Command::new(bin);
-                cmd.args([
-                    "--headless=new",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--alsa-output-device=default",
-                    "--disable-features=HardwareMediaKeyHandling,MediaSessionService,AudioServiceOutOfProcess",
-                    "--autoplay-policy=no-user-gesture-required",
-                    "--enable-audio-service",
-                    &format!("--user-data-dir={}", native_worker_dir.display()),
-                    worker_url,
-                ])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-                apply_pipewire_env(&mut cmd);
-                if let Ok(child) = cmd.spawn() {
-                    return Some(child);
-                }
-            }
+    // 2. Native Firefox (`firefox`)
+    let native_ff_root = home.join(".mozilla/firefox");
+    if let Some(profile_dir) = prepare_firefox_widevine_profile(&native_ff_root, require_cdm) {
+        let mut cmd = Command::new("firefox");
+        cmd.args(["--headless", "--no-remote", "--profile"])
+            .arg(&profile_dir)
+            .arg(worker_url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        apply_pipewire_env(&mut cmd);
+        if let Ok(child) = cmd.spawn() {
+            return Some(child);
         }
     }
 

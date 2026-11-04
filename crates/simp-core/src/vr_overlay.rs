@@ -50,6 +50,10 @@ pub fn ensure_vrmanifest_installed() -> Option<PathBuf> {
         }
     };
     let icon_path = install_root.join("ui/simp-icon-dark.png");
+    let local_openvr_icon = openvr_dir.join("simp-icon-dark.png");
+    if icon_path.is_file() {
+        let _ = std::fs::copy(&icon_path, &local_openvr_icon);
+    }
     let manifest_path = openvr_dir.join("org.simp.player.vrmanifest");
 
     let json_text = build_vrmanifest_json(&bin_path, &icon_path);
@@ -68,7 +72,178 @@ pub fn ensure_vrmanifest_installed() -> Option<PathBuf> {
         }
     }
 
+    // Also populate missing Non-Steam shortcut icons (`shortcuts.vdf` + `grid/<appid>_icon.png`)
+    // so the SteamVR Quick Launch Bar and Game Mode Library never show a blank icon slot.
+    if icon_path.is_file() {
+        ensure_steam_shortcuts_icon_populated(&home, &icon_path);
+    }
+
     Some(manifest_path)
+}
+
+/// Scans Steam `userdata/*/config/shortcuts.vdf` and populates the SIMP icon path + `grid/` artwork
+/// whenever a Non-Steam shortcut for SIMP was added with a blank `icon` field.
+fn ensure_steam_shortcuts_icon_populated(home: &Path, icon_path: &Path) {
+    let icon_str = icon_path.to_string_lossy();
+    for steam_root in [
+        home.join(".local/share/Steam"),
+        home.join(".steam/steam"),
+        home.join(".steam/root"),
+    ] {
+        let userdata_dir = steam_root.join("userdata");
+        let Ok(entries) = std::fs::read_dir(&userdata_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let cfg_dir = entry.path().join("config");
+            let shortcuts_path = cfg_dir.join("shortcuts.vdf");
+            if !shortcuts_path.is_file() {
+                continue;
+            }
+            let Ok(raw) = std::fs::read(&shortcuts_path) else {
+                continue;
+            };
+            let (patched_opt, appids) = patch_shortcuts_vdf_icon(&raw, &icon_str);
+            if let Some(patched) = patched_opt {
+                let _ = std::fs::write(&shortcuts_path, patched);
+            }
+            if !appids.is_empty() {
+                let grid_dir = cfg_dir.join("grid");
+                let _ = std::fs::create_dir_all(&grid_dir);
+                for appid in appids {
+                    for suffix in ["_icon.png", "p.png", ".png"] {
+                        let dest = grid_dir.join(format!("{appid}{suffix}"));
+                        if !dest.is_file() {
+                            let _ = std::fs::copy(icon_path, &dest);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parses binary `shortcuts.vdf` bytes, locates any shortcut whose `AppName` is `"SIMP"` (or `Exe` contains `/simp`),
+/// extracts its `appid` (for `grid/<appid>_icon.png`), and fills in `\x01icon\x00<icon_path>\x00` if empty.
+pub fn patch_shortcuts_vdf_icon(raw: &[u8], icon_path: &str) -> (Option<Vec<u8>>, Vec<u32>) {
+    let mut matched_appids = Vec::new();
+    let mut replacements: Vec<(usize, usize)> = Vec::new();
+
+    // Walk top-level shortcut entries inside `\x00shortcuts\x00`
+    let mut i = 0usize;
+    while i < raw.len() {
+        // Look for `\x02appid\x00` (case-insensitive `appid`) or scan each shortcut block
+        if raw[i] == 0x00 && i + 2 < raw.len() {
+            // Possible block start `\x00<index>\x00`
+            if let Some(end_key) = raw[i + 1..].iter().position(|&b| b == 0) {
+                let key_bytes = &raw[i + 1..i + 1 + end_key];
+                if !key_bytes.is_empty() && key_bytes.iter().all(|b| b.is_ascii_digit()) {
+                    let mut cur = i + 1 + end_key + 1;
+                    let mut appid: u32 = 0;
+                    let mut is_simp = false;
+                    let mut empty_icon_span: Option<(usize, usize)> = None;
+
+                    while cur < raw.len() {
+                        let tag = raw[cur];
+                        cur += 1;
+                        if tag == 0x08 {
+                            break;
+                        }
+                        let Some(k_len) = raw[cur..].iter().position(|&b| b == 0) else {
+                            break;
+                        };
+                        let key = String::from_utf8_lossy(&raw[cur..cur + k_len]).to_lowercase();
+                        cur += k_len + 1;
+
+                        match tag {
+                            0x01 => {
+                                let val_start = cur;
+                                let Some(v_len) = raw[cur..].iter().position(|&b| b == 0) else {
+                                    break;
+                                };
+                                let val = String::from_utf8_lossy(&raw[val_start..val_start + v_len]);
+                                cur += v_len + 1;
+                                if key == "appname" && val.trim().eq_ignore_ascii_case("simp") {
+                                    is_simp = true;
+                                } else if key == "exe" && (val.contains("/simp") || val.contains("\"simp\"")) {
+                                    is_simp = true;
+                                } else if key == "icon" && val.trim().is_empty() {
+                                    empty_icon_span = Some((val_start, val_start + v_len));
+                                }
+                            }
+                            0x02 => {
+                                if cur + 4 > raw.len() {
+                                    break;
+                                }
+                                if key == "appid" {
+                                    appid = u32::from_le_bytes([
+                                        raw[cur],
+                                        raw[cur + 1],
+                                        raw[cur + 2],
+                                        raw[cur + 3],
+                                    ]);
+                                }
+                                cur += 4;
+                            }
+                            0x00 => {
+                                // Skip nested map (e.g., `tags`) until matching `0x08`
+                                let mut depth = 1usize;
+                                while cur < raw.len() && depth > 0 {
+                                    let t = raw[cur];
+                                    cur += 1;
+                                    if t == 0x08 {
+                                        depth -= 1;
+                                    } else {
+                                        let Some(kl) = raw[cur..].iter().position(|&b| b == 0) else {
+                                            break;
+                                        };
+                                        cur += kl + 1;
+                                        if t == 0x00 {
+                                            depth += 1;
+                                        } else if t == 0x01 {
+                                            let Some(vl) = raw[cur..].iter().position(|&b| b == 0) else {
+                                                break;
+                                            };
+                                            cur += vl + 1;
+                                        } else if t == 0x02 {
+                                            cur = (cur + 4).min(raw.len());
+                                        }
+                                    }
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+
+                    if is_simp {
+                        if appid != 0 {
+                            matched_appids.push(appid);
+                        }
+                        if let Some(span) = empty_icon_span {
+                            replacements.push(span);
+                        }
+                    }
+                    i = cur;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    if replacements.is_empty() {
+        return (None, matched_appids);
+    }
+
+    let mut out = Vec::with_capacity(raw.len() + replacements.len() * icon_path.len());
+    let mut last = 0usize;
+    for (start, end) in replacements {
+        out.extend_from_slice(&raw[last..start]);
+        out.extend_from_slice(icon_path.as_bytes());
+        last = end;
+    }
+    out.extend_from_slice(&raw[last..]);
+    (Some(out), matched_appids)
 }
 
 /// Non-destructively adds `manifest_path` to `manifest_paths` array in SteamVR's `appconfig.json`.
@@ -360,5 +535,24 @@ mod tests {
             Some("/home/deck/.local/share/simp/openvr/org.simp.player.vrmanifest")
         );
         let _ = std::fs::remove_file(&tmp_cfg);
+    }
+
+    #[test]
+    fn test_patch_shortcuts_vdf_icon() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"\x00shortcuts\x00\x000\x00");
+        raw.extend_from_slice(b"\x02appid\x00\x78\x56\x34\x12");
+        raw.extend_from_slice(b"\x01AppName\x00SIMP\x00");
+        raw.extend_from_slice(b"\x01Exe\x00\"/home/deck/.local/share/simp/bin/simp\"\x00");
+        raw.extend_from_slice(b"\x01icon\x00\x00");
+        raw.extend_from_slice(b"\x08\x08\x08");
+
+        let icon_target = "/home/deck/.local/share/simp/ui/simp-icon-dark.png";
+        let (patched, appids) = patch_shortcuts_vdf_icon(&raw, icon_target);
+        assert_eq!(appids, vec![0x12345678]);
+        let patched_bytes = patched.expect("should patch empty icon");
+        assert!(patched_bytes
+            .windows(icon_target.len())
+            .any(|w| w == icon_target.as_bytes()));
     }
 }

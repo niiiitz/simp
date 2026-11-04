@@ -95,6 +95,9 @@ fi
 
 # 1. Create userland directories
 mkdir -p "${BIN_DEST}" "${UI_DEST}" "${INSTALL_ROOT}/lib" "${LOCAL_BIN}" "${SYSTEMD_USER_DIR}" "${APPLICATIONS_DIR}"
+if [[ -d "${SCRIPT_DIR}/lib" ]]; then
+  cp -f "${SCRIPT_DIR}/lib/"* "${INSTALL_ROOT}/lib/" >/dev/null 2>&1 || true
+fi
 
 # 1b. Auto-discover and stage libwidevinecdm.so into ~/.local/share/simp/lib/ if present on system
 if [[ ! -f "${INSTALL_ROOT}/lib/libwidevinecdm.so" ]]; then
@@ -131,6 +134,28 @@ PYEOF
       if [[ -f "${INSTALL_ROOT}/lib/libwidevinecdm.so" ]]; then
         echo "✓ Provisioned Widevine: ${INSTALL_ROOT}/lib/libwidevinecdm.so (4.10.3112.0)"
       fi
+    fi
+  elif [[ "$(uname -m)" == "aarch64" ]] && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+    TMP_DEB="${INSTALL_ROOT}/lib/.widevine_arm64.deb"
+    TMP_EXT="${INSTALL_ROOT}/lib/.widevine_ext"
+    WV_ARM_URL="https://archive.raspberrypi.com/debian/pool/main/w/widevine/libwidevinecdm0_4.10.2662.3+1_arm64.deb"
+    if curl -fsSL --max-time 35 -o "${TMP_DEB}" "${WV_ARM_URL}" 2>/dev/null; then
+      rm -rf "${TMP_EXT}" && mkdir -p "${TMP_EXT}"
+      if command -v bsdtar >/dev/null 2>&1; then
+        bsdtar -xf "${TMP_DEB}" -C "${TMP_EXT}" 2>/dev/null || true
+      elif command -v ar >/dev/null 2>&1; then
+        (cd "${TMP_EXT}" && ar x "${TMP_DEB}") 2>/dev/null || true
+      fi
+      if [[ -f "${TMP_EXT}/data.tar.xz" ]]; then
+        tar -xf "${TMP_EXT}/data.tar.xz" -C "${TMP_EXT}" 2>/dev/null || true
+        ARM_SO="$(find "${TMP_EXT}" -name "libwidevinecdm.so" -type f 2>/dev/null | head -n 1 || true)"
+        if [[ -n "${ARM_SO}" && -f "${ARM_SO}" ]]; then
+          cp -L "${ARM_SO}" "${INSTALL_ROOT}/lib/libwidevinecdm.so" >/dev/null 2>&1 || true
+          chmod 0755 "${INSTALL_ROOT}/lib/libwidevinecdm.so" >/dev/null 2>&1 || true
+          echo "✓ Provisioned Widevine: ${INSTALL_ROOT}/lib/libwidevinecdm.so (ARM64 4.10.2662.3)"
+        fi
+      fi
+      rm -rf "${TMP_DEB}" "${TMP_EXT}" >/dev/null 2>&1 || true
     fi
   fi
 fi
@@ -215,6 +240,9 @@ echo "✓ Installed launcher:   ${DESKTOP_DEST}"
 # 5b. Install OpenVR / SteamVR Application Manifest (`org.simp.player.vrmanifest`) for Steam Frame & VR
 OPENVR_DEST_DIR="${INSTALL_ROOT}/openvr"
 mkdir -p "${OPENVR_DEST_DIR}"
+if [[ -f "${UI_DEST}/simp-icon-dark.png" ]]; then
+  cp "${UI_DEST}/simp-icon-dark.png" "${OPENVR_DEST_DIR}/simp-icon-dark.png"
+fi
 if [[ -f "${VRMANIFEST_SRC}" ]]; then
   sed \
     -e "s|__SIMP_BIN__|${BIN_DEST}/simp|g" \
