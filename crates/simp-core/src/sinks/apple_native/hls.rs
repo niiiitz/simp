@@ -33,6 +33,8 @@ pub struct AppleHlsMediaPlaylist {
     pub init_byte_range: Option<HlsByteRange>,
     /// Encryption method reported in `#EXT-X-KEY` (e.g., `SAMPLE-AES-CTR` or `ISO-23001-7`).
     pub encryption_method: Option<String>,
+    /// Verbatim `URI` attribute from `#EXT-X-KEY` (e.g. `"data:;base64,..."`), passed verbatim to `acquireWebPlaybackLicense`.
+    pub key_uri: Option<String>,
     /// Raw Widevine `pssh` box (or init data payload) decoded from `data:text/plain;base64,...`.
     pub widevine_pssh_b64: Option<String>,
     pub widevine_pssh_bytes: Vec<u8>,
@@ -111,20 +113,30 @@ fn parse_byte_range_spec(spec: &str, prev_end: u64) -> Option<HlsByteRange> {
     }
 }
 
-/// Ensures raw Widevine init data is wrapped in a complete ISO-BMFF `pssh` box (`[size][pssh][0x00000000][system_id][data_len][data]`)
-/// if Apple's `#EXT-X-KEY` URI only base64-encoded the inner Widevine protobuf payload.
+/// Ensures raw Widevine init data is wrapped in a complete ISO-BMFF `pssh` box (`[size][pssh][0x00000000][system_id][data_len][data]`).
+/// If `raw_bytes` is a bare 16-byte Key ID (`METHOD=ISO-23001-7,URI="data:;base64,<16-byte-kid>"`),
+/// encodes it as a `WidevineCencHeader` protobuf (`[0x08, 0x01, 0x12, 0x10, <kid>, 0x1a, 0x00, 0x32, 0x00]`) first!
 pub fn ensure_full_widevine_pssh_box(raw_bytes: &[u8]) -> Vec<u8> {
     if raw_bytes.len() >= 12 && &raw_bytes[4..8] == b"pssh" {
         return raw_bytes.to_vec();
     }
-    let total_len = (32 + raw_bytes.len()) as u32;
+    let payload: Vec<u8> = if raw_bytes.len() == 16 {
+        let mut proto = Vec::with_capacity(22);
+        proto.extend_from_slice(&[0x08, 0x01, 0x12, 0x10]);
+        proto.extend_from_slice(raw_bytes);
+        proto.extend_from_slice(&[0x1a, 0x00, 0x32, 0x00]);
+        proto
+    } else {
+        raw_bytes.to_vec()
+    };
+    let total_len = (32 + payload.len()) as u32;
     let mut box_bytes = Vec::with_capacity(total_len as usize);
     box_bytes.extend_from_slice(&total_len.to_be_bytes());
     box_bytes.extend_from_slice(b"pssh");
     box_bytes.extend_from_slice(&0u32.to_be_bytes()); // version 0, flags 0
     box_bytes.extend_from_slice(&WIDEVINE_SYSTEM_ID);
-    box_bytes.extend_from_slice(&(raw_bytes.len() as u32).to_be_bytes());
-    box_bytes.extend_from_slice(raw_bytes);
+    box_bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    box_bytes.extend_from_slice(&payload);
     box_bytes
 }
 
@@ -172,6 +184,7 @@ pub fn parse_apple_media_m3u8(playlist_url: &str, m3u8_text: &str) -> Result<App
     let mut init_segment_url: Option<String> = None;
     let mut init_byte_range: Option<HlsByteRange> = None;
     let mut encryption_method: Option<String> = None;
+    let mut key_uri: Option<String> = None;
     let mut widevine_pssh_b64: Option<String> = None;
     let mut widevine_pssh_bytes: Vec<u8> = Vec::new();
     let mut segments: Vec<HlsMediaSegment> = Vec::new();
@@ -212,14 +225,17 @@ pub fn parse_apple_media_m3u8(playlist_url: &str, m3u8_text: &str) -> Result<App
                 }
             }
             if !method.is_empty() && method != "NONE" {
-                encryption_method = Some(method);
+                encryption_method = Some(method.clone());
             }
-            // Match Widevine UUID (`edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`) or default data URI key
-            let is_widevine = keyformat.contains("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
-                || (keyformat.is_empty() && uri.starts_with("data:"));
+            // Match Widevine UUID (`edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`) or ISO-23001-7 CENC data URI key
+            let is_widevine = (keyformat.contains("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
+                || method == "ISO-23001-7"
+                || (keyformat.is_empty() && uri.starts_with("data:")))
+                && !uri.starts_with("skd://");
             if is_widevine {
-                if let Some(idx) = uri.find(";base64,") {
-                    let b64 = uri[idx + 8..].trim();
+                key_uri = Some(uri.clone());
+                if let Some((_, b64_part)) = uri.rsplit_once(',') {
+                    let b64 = b64_part.trim();
                     if let Ok(decoded) = BASE64_STD.decode(b64) {
                         let full_pssh = ensure_full_widevine_pssh_box(&decoded);
                         widevine_pssh_b64 = Some(BASE64_STD.encode(&full_pssh));
@@ -256,6 +272,7 @@ pub fn parse_apple_media_m3u8(playlist_url: &str, m3u8_text: &str) -> Result<App
         init_segment_url,
         init_byte_range,
         encryption_method,
+        key_uri,
         widevine_pssh_b64,
         widevine_pssh_bytes,
         segments,

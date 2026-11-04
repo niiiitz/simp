@@ -216,7 +216,7 @@ pub fn post_apple_widevine_license_request(
     dev_token: &str,
     user_token: &str,
     song_id: &str,
-    widevine_pssh_b64: &str,
+    key_uri_or_pssh_b64: &str,
     challenge_bytes: &[u8],
 ) -> Result<Vec<u8>> {
     let challenge_b64 = BASE64_STD.encode(challenge_bytes);
@@ -227,10 +227,16 @@ pub fn post_apple_widevine_license_request(
         .unwrap_or(song_id)
         .trim();
 
+    let uri_field = if key_uri_or_pssh_b64.starts_with("data:") {
+        key_uri_or_pssh_b64.to_string()
+    } else {
+        format!("data:;base64,{key_uri_or_pssh_b64}")
+    };
+
     let payload = serde_json::json!({
         "challenge": challenge_b64,
         "key-system": "com.widevine.alpha",
-        "uri": format!("data:text/plain;base64,{widevine_pssh_b64}"),
+        "uri": uri_field,
         "adamId": clean_id,
         "isLibrary": clean_id.starts_with("i."),
         "user-initiated": true,
@@ -238,9 +244,11 @@ pub fn post_apple_widevine_license_request(
 
     let body_str = serde_json::to_string(&payload)?;
     let curl_cfg = format!(
-        "url = \"{}\"\nrequest = \"POST\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Music-User-Token: {}\"\nheader = \"Content-Type: application/json\"\nheader = \"Origin: https://music.apple.com\"\nheader = \"Referer: https://music.apple.com/\"\ndata = \"{}\"\n",
+        "url = \"{}\"\nrequest = \"POST\"\nheader = \"User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\"\nheader = \"Authorization: Bearer {}\"\nheader = \"x-apple-music-user-token: {}\"\nheader = \"media-user-token: {}\"\nheader = \"Music-User-Token: {}\"\nheader = \"Content-Type: application/json\"\nheader = \"Origin: https://music.apple.com\"\nheader = \"Referer: https://music.apple.com/\"\ndata = \"{}\"\n",
         license_server_url.replace('"', "\\\""),
         dev_token.trim(),
+        user_token.trim(),
+        user_token.trim(),
         user_token.trim(),
         body_str.replace('\\', "\\\\").replace('"', "\\\"")
     );
@@ -1363,9 +1371,10 @@ impl WidevineCdmSession {
         playlist: &AppleHlsMediaPlaylist,
         pssh_bytes: &[u8],
     ) -> Result<()> {
-        let pssh_b64 = playlist
-            .widevine_pssh_b64
+        let key_uri_or_b64 = playlist
+            .key_uri
             .clone()
+            .or_else(|| playlist.widevine_pssh_b64.clone())
             .unwrap_or_else(|| BASE64_STD.encode(pssh_bytes));
 
         let first_challenge = self.generate_license_challenge(pssh_bytes)?;
@@ -1374,7 +1383,7 @@ impl WidevineCdmSession {
             dev_token,
             user_token,
             song_id,
-            &pssh_b64,
+            &key_uri_or_b64,
             &first_challenge,
         )?;
 
@@ -1390,7 +1399,7 @@ impl WidevineCdmSession {
                 dev_token,
                 user_token,
                 song_id,
-                &pssh_b64,
+                &key_uri_or_b64,
                 &second_challenge,
             )?;
             self.update_session_with_license(&ckc_license)?;
