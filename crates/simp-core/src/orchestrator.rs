@@ -804,9 +804,13 @@ impl AudioOrchestrator {
             }
         }
 
-        // If the track URI is a library song (`applemusic:song:i.xxxx`), pre-resolve its canonical
-        // catalog ID in Rust so re-linked cloud playlist tracks play without round-trip delay.
-        if track.uri.starts_with("applemusic:song:i.") {
+        // If the track URI is a library song (`applemusic:song:i.xxxx`) and we are using the browser
+        // worker fallback, pre-resolve its canonical catalog ID. (In Native Rust Widevine CDM mode,
+        // `fetch_web_playback_manifest` resolves `i.xxxx` asynchronously on the background stream thread
+        // so `transition_to_index` never blocks the orchestrator loop!)
+        let using_native_cdm = crate::sinks::apple::is_native_apple_cdm_preferred()
+            && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some();
+        if !using_native_cdm && track.uri.starts_with("applemusic:song:i.") {
             let cfg = self.settings.lock().unwrap().clone();
             let artist = track.artists.first().map(|s| s.as_str());
             if let Ok(Some(cat_id)) =

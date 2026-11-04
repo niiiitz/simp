@@ -1004,22 +1004,73 @@ pub fn fetch_web_playback_manifest(
         .unwrap_or(song_id)
         .trim();
 
-    let payload = if clean_id.starts_with("i.") {
-        serde_json::json!({ "universalLibraryId": clean_id })
-    } else {
-        serde_json::json!({ "salableAdamId": clean_id })
+    let mut active_id = clean_id.to_string();
+    if active_id.starts_with("i.") {
+        if let Ok(Some(cat_id)) = resolve_replacement_catalog_song_id(settings, &active_id, None, None) {
+            active_id = cat_id;
+        }
+    }
+
+    let make_payload = |id: &str| {
+        if id.starts_with("i.") {
+            serde_json::json!({ "universalLibraryId": id })
+        } else {
+            serde_json::json!({ "salableAdamId": id })
+        }
     };
 
-    let json = apple_post_json(
+    let mut json = apple_post_json(
         "https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback",
         &dev_token,
         &user_token,
-        &payload,
+        &make_payload(&active_id),
     )?;
+
+    if json.pointer("/songList/0").is_none() {
+        // Fallback: check SQLite library.db for track title/artist and resolve replacement catalog song ID
+        let mut title_opt: Option<String> = None;
+        let mut artist_opt: Option<String> = None;
+        if let Some(data_dir) = dirs::data_local_dir() {
+            let db_path = data_dir.join("simp").join("library.db");
+            if let Ok(db) = crate::library::db::LibraryDatabase::open(&db_path) {
+                let lookup_uri = format!("applemusic:song:{clean_id}");
+                if let Ok(Some(meta)) = db.get_track_by_uri(&lookup_uri) {
+                    title_opt = Some(meta.title);
+                    artist_opt = meta.artists.first().cloned();
+                }
+            }
+        }
+        if let Ok(Some(replacement_id)) = resolve_replacement_catalog_song_id(
+            settings,
+            clean_id,
+            title_opt.as_deref(),
+            artist_opt.as_deref(),
+        ) {
+            if replacement_id != active_id {
+                active_id = replacement_id;
+                json = apple_post_json(
+                    "https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback",
+                    &dev_token,
+                    &user_token,
+                    &make_payload(&active_id),
+                )?;
+            }
+        }
+    }
 
     let song_obj = json
         .pointer("/songList/0")
         .ok_or_else(|| anyhow!("No songList entry returned by Apple webPlayback endpoint (raw response: {json})"))?;
+
+    let canonical_song_id = song_obj
+        .get("songId")
+        .and_then(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        })
+        .unwrap_or_else(|| active_id.clone());
 
     let key_server_url = song_obj
         .get("hls-key-server-url")
@@ -1076,7 +1127,7 @@ pub fn fetch_web_playback_manifest(
         .to_string();
 
     Ok(AppleWebPlaybackAsset {
-        song_id: clean_id.to_string(),
+        song_id: canonical_song_id,
         flavor,
         hls_playlist_url,
         key_server_url,

@@ -7,7 +7,10 @@ use rodio::{
 use simp_protocol::PlaybackEvent;
 use std::fs::File;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 use symphonia::{
     core::{
@@ -34,6 +37,8 @@ pub struct LocalAudioEngine {
     current_uri: Option<String>,
     volume: f32,
     tracker: Arc<Mutex<LocalTimeTracker>>,
+    active_epoch: Arc<AtomicU64>,
+    user_paused: Arc<AtomicBool>,
     monitor_handle: Option<JoinHandle<()>>,
 }
 
@@ -46,6 +51,8 @@ impl LocalAudioEngine {
             current_uri: None,
             volume: 0.80,
             tracker: Arc::new(Mutex::new(LocalTimeTracker::new())),
+            active_epoch: Arc::new(AtomicU64::new(0)),
+            user_paused: Arc::new(AtomicBool::new(false)),
             monitor_handle: None,
         }
     }
@@ -67,6 +74,7 @@ impl LocalAudioEngine {
     /// Releases the PipeWire OutputStream handle (used during sleep or after 60s paused
     /// so the Steam Deck audio DSP can enter deep sleep with 0.00% CPU usage).
     pub fn release_pipewire_stream(&mut self) {
+        self.active_epoch.fetch_add(1, Ordering::SeqCst);
         self.abort_monitor();
         self.tracker.lock().unwrap().pause();
         if let Some(sink) = self.sink.take() {
@@ -89,21 +97,30 @@ impl LocalAudioEngine {
         epoch: u64,
         event_tx: mpsc::UnboundedSender<PlaybackEvent>,
     ) -> Result<()> {
+        self.active_epoch.store(epoch, Ordering::SeqCst);
+        self.user_paused.store(false, Ordering::SeqCst);
         self.abort_monitor();
         self.ensure_stream()?;
 
         let sink = self.sink.as_ref().unwrap();
         sink.stop();
 
+        let is_apple_progressive = uri.starts_with("applemusic:");
         if uri.starts_with("cdda://") {
             let source = crate::sinks::cdda::CddaTrackSource::open_uri(uri)
                 .with_context(|| format!("Failed to open Audio CD track: {uri}"))?;
             sink.append(source);
-        } else if uri.starts_with("applemusic:") {
+        } else if is_apple_progressive {
             let settings = load_local_settings_vdf();
             let source =
-                crate::sinks::apple_native::source::load_native_apple_music_rodio_source(
-                    &settings, uri, None,
+                crate::sinks::apple_native::source::spawn_progressive_apple_music_rodio_source(
+                    settings,
+                    uri.to_string(),
+                    start_pos_ms,
+                    epoch,
+                    self.active_epoch.clone(),
+                    self.tracker.clone(),
+                    self.user_paused.clone(),
                 )
                 .with_context(|| format!("Failed to load native Apple Music stream: {uri}"))?;
             sink.append(source);
@@ -126,11 +143,15 @@ impl LocalAudioEngine {
             let mut tracker = self.tracker.lock().unwrap();
             tracker.reset();
             if start_pos_ms > 0 {
-                let target = Duration::from_millis(start_pos_ms as u64);
-                let _ = sink.try_seek(target);
+                if !is_apple_progressive {
+                    let target = Duration::from_millis(start_pos_ms as u64);
+                    let _ = sink.try_seek(target);
+                }
                 tracker.seek(start_pos_ms);
             }
-            tracker.play();
+            if !is_apple_progressive {
+                tracker.play();
+            }
         }
 
         sink.play();
@@ -151,6 +172,7 @@ impl LocalAudioEngine {
         epoch: u64,
         event_tx: mpsc::UnboundedSender<PlaybackEvent>,
     ) -> Result<()> {
+        self.user_paused.store(false, Ordering::SeqCst);
         // If PipeWire stream was idle-suspended while paused, transparently reload at saved position
         if self.sink.is_none() {
             if let Some(uri) = self.current_uri.clone() {
@@ -166,6 +188,7 @@ impl LocalAudioEngine {
     }
 
     pub fn pause(&mut self) {
+        self.user_paused.store(true, Ordering::SeqCst);
         self.tracker.lock().unwrap().pause();
         if let Some(sink) = &self.sink {
             sink.pause();

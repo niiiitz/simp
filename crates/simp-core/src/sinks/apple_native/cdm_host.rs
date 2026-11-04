@@ -972,6 +972,8 @@ pub struct WidevineCdmSession {
     cdm_ptr: *mut c_void,
     deinit_fn: Option<DeinitializeCdmModuleFn>,
     host: Box<CdmHostState>,
+    next_promise_id: u32,
+    active_sessions: Vec<String>,
 }
 
 unsafe impl Send for WidevineCdmSession {}
@@ -1128,6 +1130,8 @@ impl WidevineCdmSession {
                 cdm_ptr,
                 deinit_fn,
                 host,
+                next_promise_id: 10,
+                active_sessions: Vec::new(),
             };
             session.pump_pending_timers();
             cdm_step_log!(
@@ -1138,6 +1142,12 @@ impl WidevineCdmSession {
 
             Ok(session)
         }
+    }
+
+    fn alloc_promise_id(&mut self) -> u32 {
+        let id = self.next_promise_id;
+        self.next_promise_id = self.next_promise_id.wrapping_add(1).max(1);
+        id
     }
 
     /// Pumps any deferred short timers scheduled by the CDM via `Host::SetTimer`.
@@ -1163,11 +1173,12 @@ impl WidevineCdmSession {
         if cert_bytes.is_empty() {
             return Ok(());
         }
+        let pid = self.alloc_promise_id();
         unsafe {
             let vtable_ptr = *(self.cdm_ptr as *const *const CdmInstanceVtable);
             ((*vtable_ptr).set_server_certificate)(
                 self.cdm_ptr,
-                1,
+                pid,
                 cert_bytes.as_ptr(),
                 cert_bytes.len() as u32,
             );
@@ -1182,8 +1193,26 @@ impl WidevineCdmSession {
     /// Calls `CreateSessionAndGenerateRequest(kTemporary, kCenc, pssh_box)` and returns the
     /// generated Widevine license request challenge bytes.
     pub fn generate_license_challenge(&mut self, pssh_box: &[u8]) -> Result<Vec<u8>> {
+        // Evict oldest sessions when more than 3 accumulate on the persistent CDM instance
+        while self.active_sessions.len() >= 3 {
+            let old_sid = self.active_sessions.remove(0);
+            let close_pid = self.alloc_promise_id();
+            unsafe {
+                let vtable_ptr = *(self.cdm_ptr as *const *const CdmInstanceVtable);
+                let sid_bytes = old_sid.as_bytes();
+                ((*vtable_ptr).close_session)(
+                    self.cdm_ptr,
+                    close_pid,
+                    sid_bytes.as_ptr() as *const c_char,
+                    sid_bytes.len() as u32,
+                );
+            }
+            self.pump_pending_timers();
+        }
+
         self.host.latest_challenge.clear();
         self.host.last_rejection = None;
+        let pid = self.alloc_promise_id();
 
         cdm_step_log!(
             "[CDM-STEP] 6/8 CreateSessionAndGenerateRequest(pssh_len={})...",
@@ -1191,10 +1220,10 @@ impl WidevineCdmSession {
         );
         unsafe {
             let vtable_ptr = *(self.cdm_ptr as *const *const CdmInstanceVtable);
-            // promise_id = 2, session_type = 0 (kTemporary), init_data_type = 0 (kCenc)
+            // session_type = 0 (kTemporary), init_data_type = 0 (kCenc)
             ((*vtable_ptr).create_session_and_generate_request)(
                 self.cdm_ptr,
-                2,
+                pid,
                 0,
                 0,
                 pssh_box.as_ptr(),
@@ -1202,6 +1231,11 @@ impl WidevineCdmSession {
             );
         }
         self.pump_pending_timers();
+        if !self.host.session_id.is_empty()
+            && !self.active_sessions.contains(&self.host.session_id)
+        {
+            self.active_sessions.push(self.host.session_id.clone());
+        }
         cdm_step_log!(
             "[CDM-STEP] CreateSessionAndGenerateRequest done (sid={}, challenge_len={}, trace={:?})",
             self.host.session_id,
@@ -1225,6 +1259,7 @@ impl WidevineCdmSession {
     /// Calls `UpdateSession` with the CKC license returned by Apple's `acquireWebPlaybackLicense` endpoint.
     pub fn update_session_with_license(&mut self, license_bytes: &[u8]) -> Result<()> {
         self.host.last_rejection = None;
+        let pid = self.alloc_promise_id();
         let sid_bytes = self.host.session_id.as_bytes();
         cdm_step_log!(
             "[CDM-STEP] 7/8 UpdateSession(sid={}, license_len={})...",
@@ -1235,7 +1270,7 @@ impl WidevineCdmSession {
             let vtable_ptr = *(self.cdm_ptr as *const *const CdmInstanceVtable);
             ((*vtable_ptr).update_session)(
                 self.cdm_ptr,
-                3,
+                pid,
                 sid_bytes.as_ptr() as *const c_char,
                 sid_bytes.len() as u32,
                 license_bytes.as_ptr(),
@@ -1421,14 +1456,31 @@ impl WidevineCdmSession {
             .unwrap_or_else(|| BASE64_STD.encode(pssh_bytes));
 
         let first_challenge = self.generate_license_challenge(pssh_bytes)?;
-        let first_response = post_apple_widevine_license_request(
-            license_server_url,
-            dev_token,
-            user_token,
-            song_id,
-            &key_uri_or_b64,
-            &first_challenge,
-        )?;
+        let first_response = if first_challenge.len() <= 8 {
+            if let Some(cached_cert) = CACHED_APPLE_WIDEVINE_CERT.get() {
+                cached_cert.clone()
+            } else {
+                let cert = post_apple_widevine_license_request(
+                    license_server_url,
+                    dev_token,
+                    user_token,
+                    song_id,
+                    &key_uri_or_b64,
+                    &first_challenge,
+                )?;
+                let _ = CACHED_APPLE_WIDEVINE_CERT.set(cert.clone());
+                cert
+            }
+        } else {
+            post_apple_widevine_license_request(
+                license_server_url,
+                dev_token,
+                user_token,
+                song_id,
+                &key_uri_or_b64,
+                &first_challenge,
+            )?
+        };
 
         self.host.latest_challenge.clear();
         self.update_session_with_license(&first_response)?;
@@ -1450,6 +1502,57 @@ impl WidevineCdmSession {
 
         Ok(())
     }
+}
+
+static CACHED_APPLE_WIDEVINE_CERT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+type CdmThreadJob = Box<dyn FnOnce(&mut Option<WidevineCdmSession>) + Send + 'static>;
+
+static DEDICATED_CDM_WORKER_TX: std::sync::OnceLock<std::sync::mpsc::Sender<CdmThreadJob>> =
+    std::sync::OnceLock::new();
+
+/// Executes a closure against a single persistent `WidevineCdmSession` pinned to a dedicated OS thread
+/// (`"simp-widevine-cdm"`), satisfying Chromium's `base::ThreadChecker` single-thread affinity inside
+/// `libwidevinecdm.so` and avoiding `cdm->Destroy()` teardown between tracks.
+pub fn with_persistent_cdm_session<F, R>(lib_path: &Path, f: F) -> Result<R>
+where
+    F: FnOnce(&mut WidevineCdmSession) -> Result<R> + Send + 'static,
+    R: Send + 'static,
+{
+    let tx = DEDICATED_CDM_WORKER_TX.get_or_init(|| {
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<CdmThreadJob>();
+        std::thread::Builder::new()
+            .name("simp-widevine-cdm".to_string())
+            .spawn(move || {
+                let mut persistent_session: Option<WidevineCdmSession> = None;
+                while let Ok(job) = job_rx.recv() {
+                    job(&mut persistent_session);
+                }
+            })
+            .expect("Failed to spawn dedicated simp-widevine-cdm worker thread");
+        job_tx
+    });
+
+    let lib_path_buf = lib_path.to_path_buf();
+    let (res_tx, res_rx) = std::sync::mpsc::sync_channel::<Result<R>>(1);
+    tx.send(Box::new(move |slot: &mut Option<WidevineCdmSession>| {
+        if slot.is_none() {
+            match WidevineCdmSession::open(&lib_path_buf) {
+                Ok(s) => *slot = Some(s),
+                Err(e) => {
+                    let _ = res_tx.send(Err(e));
+                    return;
+                }
+            }
+        }
+        let res = f(slot.as_mut().unwrap());
+        let _ = res_tx.send(res);
+    }))
+    .map_err(|_| anyhow!("Dedicated Widevine CDM worker thread terminated unexpectedly"))?;
+
+    res_rx
+        .recv()
+        .map_err(|_| anyhow!("Dedicated Widevine CDM worker thread dropped response channel"))?
 }
 
 impl Drop for WidevineCdmSession {
