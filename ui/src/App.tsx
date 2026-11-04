@@ -18,6 +18,7 @@ import {
   AppleMusicDriver,
   AppleRadioStationSummary,
   authorizeAppleMusic,
+  disconnectAppleMusicCleanSlate,
   fetchAppleCloudPlaylists,
   fetchAppleNewFeed,
   fetchApplePlaylistTracks,
@@ -130,6 +131,75 @@ const ConsoleMainApp: React.FC = () => {
     }, 2600);
   }, []);
 
+  const [updateStatus, setUpdateStatus] = useState<{
+    current_version?: string;
+    latest_version?: string;
+    latest_tag?: string;
+    update_available?: boolean;
+    checking?: boolean;
+    applying?: boolean;
+    error?: string;
+  }>({});
+
+  const checkSimpUpdates = useCallback(async (_silent = false) => {
+    setUpdateStatus((prev) => ({ ...prev, checking: true, error: undefined }));
+    try {
+      const resp = await fetch('/api/update/check');
+      const data = await resp.json();
+      if (data.ok) {
+        setUpdateStatus({
+          current_version: data.current_version,
+          latest_version: data.latest_version,
+          latest_tag: data.latest_tag,
+          update_available: Boolean(data.update_available),
+          checking: false,
+        });
+      } else {
+        setUpdateStatus((prev) => ({
+          ...prev,
+          current_version: data.current_version || prev.current_version,
+          checking: false,
+          error: data.error || 'Update check failed',
+        }));
+      }
+    } catch (e: any) {
+      setUpdateStatus((prev) => ({
+        ...prev,
+        checking: false,
+        error: e?.message || 'Could not reach daemon',
+      }));
+    }
+  }, []);
+
+  const applySimpUpdate = useCallback(async () => {
+    setUpdateStatus((prev) => ({ ...prev, applying: true, error: undefined }));
+    showToast('Downloading & installing latest SIMP release from GitHub...');
+    try {
+      const resp = await fetch('/api/update/apply', { method: 'POST' });
+      const data = await resp.json();
+      if (data.ok) {
+        showToast(`${data.message} — restarting SIMP...`);
+        window.setTimeout(() => {
+          window.location.reload();
+        }, 2000);
+      } else {
+        setUpdateStatus((prev) => ({
+          ...prev,
+          applying: false,
+          error: data.error || 'Self-update failed',
+        }));
+        showToast(`Update failed: ${data.error || 'Unknown error'}`);
+      }
+    } catch (e: any) {
+      setUpdateStatus((prev) => ({
+        ...prev,
+        applying: false,
+        error: e?.message || 'Update request failed',
+      }));
+      showToast('Update failed — check network connection');
+    }
+  }, [showToast]);
+
   const dismissConsole = useCallback(() => {
     if (window.parent && window.parent !== window) {
       window.parent.postMessage({ type: 'SIMP_EXIT_CONSOLE' }, '*');
@@ -202,8 +272,10 @@ const ConsoleMainApp: React.FC = () => {
     }
     if (!powerModalOpen) {
       setConfirmHardReset(false);
+    } else {
+      checkSimpUpdates(true);
     }
-  }, [view, sourceModalOpen, powerModalOpen, snap?.mounts, refreshLibraryData]);
+  }, [view, sourceModalOpen, powerModalOpen, snap?.mounts, refreshLibraryData, checkSimpUpdates]);
 
   // 3. Load tracks for whichever Album, Playlist, Storage Mount, or Apple Cloud item is selected in the Browser
   useEffect(() => {
@@ -5217,9 +5289,12 @@ const ConsoleMainApp: React.FC = () => {
                         ☁️ Cloud Hub
                       </button>
                       <button
-                        onClick={() => {
-                          defaultSimpClient.disconnectAppleMusic();
-                          showToast('Disconnected Apple Music');
+                        onClick={async () => {
+                          await disconnectAppleMusicCleanSlate(showToast);
+                          const updated = await defaultSimpClient
+                            .getAppleMusicAuthConfig()
+                            .catch(() => null);
+                          if (updated) setAppleAuthCfg(updated);
                         }}
                         style={{
                           minHeight: 36,
@@ -5233,7 +5308,7 @@ const ConsoleMainApp: React.FC = () => {
                           cursor: 'pointer',
                         }}
                       >
-                        Disconnect
+                        Disconnect & Wipe Auth
                       </button>
                     </>
                   )}
@@ -5553,6 +5628,87 @@ const ConsoleMainApp: React.FC = () => {
                   }}
                 >
                   +10%
+                </button>
+              </div>
+            </div>
+
+            {/* 1c. 1-Click GitHub Release Self-Updater */}
+            <div
+              style={{
+                padding: '10px 14px',
+                borderRadius: 12,
+                background: '#0d131a',
+                border: updateStatus.update_available
+                  ? '1px solid #2aa3c4'
+                  : '1px solid #222230',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
+                flexWrap: 'wrap',
+              }}
+            >
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
+                  ⬆️ SIMP Software Update{' '}
+                  {updateStatus.current_version
+                    ? `(Installed: v${updateStatus.current_version})`
+                    : ''}
+                </span>
+                <span style={{ fontSize: 11, color: '#9ca3af' }}>
+                  {updateStatus.applying
+                    ? 'Downloading & installing release bundle (Daemon + UI + Decky QAM)...'
+                    : updateStatus.checking
+                    ? 'Checking GitHub Releases...'
+                    : updateStatus.error
+                    ? `⚠️ ${updateStatus.error}`
+                    : updateStatus.update_available
+                    ? `🟢 New release ${updateStatus.latest_tag} is ready to install!`
+                    : updateStatus.latest_tag
+                    ? `Up to date with GitHub (${updateStatus.latest_tag}) — click Reinstall to force-sync`
+                    : 'Check GitHub Releases to update Daemon, UI & Decky QAM in 1 click'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  disabled={Boolean(updateStatus.checking || updateStatus.applying)}
+                  onClick={() => checkSimpUpdates(false)}
+                  style={{
+                    minHeight: 38,
+                    padding: '0 12px',
+                    borderRadius: 8,
+                    background: '#141824',
+                    border: '1px solid #2e364f',
+                    color: '#d4d4dc',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {updateStatus.checking ? 'Checking...' : '🔍 Check'}
+                </button>
+                <button
+                  disabled={Boolean(updateStatus.applying)}
+                  onClick={applySimpUpdate}
+                  style={{
+                    minHeight: 38,
+                    padding: '0 14px',
+                    borderRadius: 8,
+                    background: updateStatus.update_available ? '#0f2936' : '#181824',
+                    border: updateStatus.update_available
+                      ? '1px solid #2aa3c4'
+                      : '1px solid #323246',
+                    color: updateStatus.update_available ? '#67e8f9' : '#e4e4ec',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {updateStatus.applying
+                    ? '⏳ Updating...'
+                    : updateStatus.update_available
+                    ? `⬆️ Update to ${updateStatus.latest_tag}`
+                    : `🔄 Reinstall ${updateStatus.latest_tag || 'Latest'}`}
                 </button>
               </div>
             </div>

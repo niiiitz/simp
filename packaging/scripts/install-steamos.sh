@@ -131,6 +131,13 @@ fi
 # 7. Optional Decky Loader plugin installation (if ~/homebrew/plugins exists)
 if [[ -d "${DECKY_PLUGINS_DIR}" ]]; then
   DECKY_TARGET="${DECKY_PLUGINS_DIR}/simp-decky"
+  if [[ ! -w "${DECKY_PLUGINS_DIR}" ]] && [[ ! -w "${DECKY_TARGET}" ]]; then
+    echo "ℹ Granting user ownership on ${DECKY_TARGET} so future updates require zero sudo..."
+    sudo mkdir -p "${DECKY_TARGET}" >/dev/null 2>&1 || true
+    sudo rm -rf "${DECKY_TARGET}/simp-decky" >/dev/null 2>&1 || true
+    sudo chown -R "$(id -u):$(id -g)" "${DECKY_TARGET}" >/dev/null 2>&1 || true
+  fi
+
   if [[ -w "${DECKY_PLUGINS_DIR}" ]] || [[ -w "${DECKY_TARGET}" ]]; then
     rm -rf "${DECKY_TARGET}/simp-decky" "${DECKY_TARGET}/bin" "${DECKY_TARGET}/ui"
     mkdir -p "${DECKY_TARGET}/dist"
@@ -151,6 +158,7 @@ echo "============================================================"
 echo "✅ SIMP Installed!"
 echo "   • Console UI:   http://127.0.0.1:18888"
 echo "   • Launch App:   simp (or 'SIMP' in Application Launcher / Add to Steam)"
+echo "   • Self-Update:  simp update (or click '🔄 Update SIMP' inside the SIMP Power/Settings menu)"
 echo "   • Uninstall:    ~/.local/share/simp/bin/uninstall-steamos.sh (or packaging/scripts/uninstall-steamos.sh)"
 echo "============================================================"
 

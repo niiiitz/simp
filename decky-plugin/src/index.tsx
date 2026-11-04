@@ -14,7 +14,7 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.22';
+const SIMP_VERSION = 'v0.1.0-alpha.23';
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 
 let cachedSteamFocusable: any = null;
@@ -645,6 +645,8 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
   const [snap, setSnap] = useState<SimpStateSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateLabel, setUpdateLabel] = useState<string>('⬆️ Update');
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
   const [authCfg, setAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
@@ -894,6 +896,30 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       refreshCatalogs();
       setReloading(false);
     }, 950);
+  };
+
+  const handleSelfUpdate = async () => {
+    if (updating) return;
+    setUpdating(true);
+    setUpdateLabel('⏳ Updating...');
+    try {
+      const resp = await fetch('http://127.0.0.1:18888/api/update/apply', { method: 'POST' });
+      const data = await resp.json();
+      if (data.status === 'ok') {
+        setUpdateLabel(`✅ v${data.installed_version || 'Updated'}`);
+      } else {
+        setUpdateLabel('⚠️ Error');
+      }
+    } catch {
+      setUpdateLabel('🔄 Restarting...');
+    } finally {
+      window.setTimeout(() => {
+        defaultSimpClient.connect();
+        refreshCatalogs();
+        setUpdating(false);
+        setUpdateLabel('⬆️ Update');
+      }, 3000);
+    }
   };
 
   const toggleDrawerTab = (tab: 'albums' | 'playlists' | 'pair') => {
@@ -1463,19 +1489,34 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
         </Focusable>
       )}
 
-      {/* Open Full SIMP Console + Reload Row */}
-      <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 6 }}>
+      {/* Open Full SIMP Console + Update + Reload Row */}
+      <Focusable flowChildren="horizontal" style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 6 }}>
         <Focusable
           onActivate={() => openFullSimpConsole(() => setInlineConsoleOpen(true))}
           onClick={() => openFullSimpConsole(() => setInlineConsoleOpen(true))}
           style={{
             ...btnStyle,
             minHeight: 40,
-            fontSize: 12,
+            fontSize: 11,
             color: '#a1a1aa',
           }}
         >
-          ↗ Open Full SIMP Console ({SIMP_VERSION})
+          ↗ Console ({SIMP_VERSION})
+        </Focusable>
+        <Focusable
+          onActivate={handleSelfUpdate}
+          onClick={handleSelfUpdate}
+          style={{
+            ...btnStyle,
+            minHeight: 40,
+            padding: '0 10px',
+            fontSize: 11,
+            color: updating ? '#34d399' : '#5bc0de',
+            borderColor: updating ? '#34d399' : '#262630',
+          }}
+          title="1-Click Self-Update SIMP Daemon + Decky Plugin from GitHub Releases"
+        >
+          {updateLabel}
         </Focusable>
         <Focusable
           onActivate={handleReloadDaemon}
@@ -1483,14 +1524,14 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
           style={{
             ...btnStyle,
             minHeight: 40,
-            padding: '0 12px',
-            fontSize: 12,
+            padding: '0 10px',
+            fontSize: 11,
             color: reloading ? '#5bc0de' : '#a1a1aa',
             borderColor: reloading ? '#2aa3c4' : '#262630',
           }}
           title="Restart SIMP Background Daemon & Widevine Worker"
         >
-          {reloading ? '⏳' : '🔄 Restart BG'}
+          {reloading ? '⏳' : '🔄 BG'}
         </Focusable>
       </Focusable>
       </div>

@@ -478,6 +478,14 @@ impl AudioOrchestrator {
                 }
                 self.apple_sink.is_authenticated = false;
                 self.state.lock().unwrap().apple_authenticated = false;
+                // Broadcast `unauthorize` to any connected UI window so it clears MusicKit session & localStorage
+                let _ = self.broadcast_tx.send(PlaybackEvent::AppleSinkCommand {
+                    action: "unauthorize".to_string(),
+                    uri: None,
+                    position_ms: None,
+                    volume: None,
+                });
+                AppleMusicSink::purge_worker_auth_storage();
                 let _ = self
                     .db
                     .remove_streaming_source("apple_music", "apple_remote");
@@ -640,7 +648,13 @@ impl AudioOrchestrator {
                 tracing::info!("Performing Factory Reset (de-auth, clear DB, reset settings)...");
                 self.pause_active_engine();
                 self.local_engine.release_pipewire_stream();
-                AppleMusicSink::kill_headless_widevine_worker();
+                let _ = self.broadcast_tx.send(PlaybackEvent::AppleSinkCommand {
+                    action: "unauthorize".to_string(),
+                    uri: None,
+                    position_ms: None,
+                    volume: None,
+                });
+                AppleMusicSink::purge_worker_auth_storage();
                 {
                     let mut cfg = self.settings.lock().unwrap();
                     *cfg = SimpSettings::default();

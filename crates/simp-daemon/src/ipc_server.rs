@@ -4,7 +4,7 @@ use axum::{
         State,
     },
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -99,6 +99,8 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
 
     let mut app = Router::new()
         .route("/health", get(health_handler))
+        .route("/api/update/check", get(update_check_handler))
+        .route("/api/update/apply", post(update_apply_handler))
         .route("/ws", get(ws_handler))
         .nest_service("/art", ServeDir::new(art_cache_dir));
 
@@ -150,10 +152,60 @@ async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
         "service": "simp-daemon",
+        "version": env!("CARGO_PKG_VERSION"),
         "pid": std::process::id(),
         "ui_served": ui_dir.is_some(),
         "ui_dir": ui_dir,
     }))
+}
+
+async fn update_check_handler() -> impl IntoResponse {
+    let res = tokio::task::spawn_blocking(simp_core::updater::check_for_updates).await;
+    match res {
+        Ok(Ok(status)) => Json(serde_json::json!({
+            "ok": true,
+            "current_version": status.current_version,
+            "latest_version": status.latest_version,
+            "latest_tag": status.latest_tag,
+            "update_available": status.update_available,
+            "release_url": status.release_url,
+            "published_at": status.published_at,
+        })),
+        Ok(Err(e)) => Json(serde_json::json!({
+            "ok": false,
+            "current_version": env!("CARGO_PKG_VERSION"),
+            "error": e.to_string(),
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "current_version": env!("CARGO_PKG_VERSION"),
+            "error": e.to_string(),
+        })),
+    }
+}
+
+async fn update_apply_handler() -> impl IntoResponse {
+    let res = tokio::task::spawn_blocking(|| {
+        simp_core::updater::apply_self_update(None, true, true)
+    })
+    .await;
+    match res {
+        Ok(Ok(applied)) => Json(serde_json::json!({
+            "ok": true,
+            "previous_version": applied.previous_version,
+            "updated_version": applied.updated_version,
+            "decky_updated": applied.decky_updated,
+            "message": applied.message,
+        })),
+        Ok(Err(e)) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+        })),
+    }
 }
 
 async fn ws_handler(

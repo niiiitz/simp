@@ -104,6 +104,60 @@ impl AppleMusicSink {
             .status();
     }
 
+    /// Terminates the headless Widevine worker and wipes cached Apple Music / MusicKit auth storage
+    /// (`webappsstore.sqlite`, `cookies.sqlite`, `Local Storage`, `Session Storage`, `IndexedDB`, `Cookies`)
+    /// across worker and window profiles while preserving `WidevineCdm` / `gmp-widevinecdm` binaries.
+    pub fn purge_worker_auth_storage() {
+        Self::kill_headless_widevine_worker();
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+
+        // 1. Clean Firefox worker profiles (preserving `gmp-widevinecdm` and `user.js`)
+        for ff_worker in [
+            home.join(".var/app/org.mozilla.firefox/.mozilla/firefox/simp-widevine-worker"),
+            home.join(".mozilla/firefox/simp-widevine-worker"),
+        ] {
+            if ff_worker.is_dir() {
+                clean_stale_profile_locks(&ff_worker);
+                for file_name in [
+                    "webappsstore.sqlite",
+                    "webappsstore.sqlite-wal",
+                    "webappsstore.sqlite-shm",
+                    "cookies.sqlite",
+                    "cookies.sqlite-wal",
+                    "cookies.sqlite-shm",
+                ] {
+                    let _ = std::fs::remove_file(ff_worker.join(file_name));
+                }
+                let _ = std::fs::remove_dir_all(ff_worker.join("storage"));
+            }
+        }
+
+        // 2. Clean Chromium/Chrome worker & window profiles (preserving `WidevineCdm` and `First Run`)
+        for chr_worker in [
+            home.join(".local/share/simp/window-profile"),
+            home.join(".local/share/simp/simp-widevine-worker-chromium"),
+            home.join(".var/app/com.google.Chrome/config/google-chrome/simp-widevine-worker"),
+            home.join(".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/simp-widevine-worker"),
+            home.join(".var/app/com.microsoft.Edge/config/microsoft-edge/simp-widevine-worker"),
+            home.join(".var/app/org.chromium.Chromium/config/chromium/simp-widevine-worker"),
+        ] {
+            if chr_worker.is_dir() {
+                clean_stale_profile_locks(&chr_worker);
+                let default_dir = chr_worker.join("Default");
+                if default_dir.is_dir() {
+                    for sub in ["Local Storage", "Session Storage", "IndexedDB", "Service Worker"] {
+                        let _ = std::fs::remove_dir_all(default_dir.join(sub));
+                    }
+                    for f in ["Cookies", "Cookies-journal"] {
+                        let _ = std::fs::remove_file(default_dir.join(f));
+                    }
+                }
+            }
+        }
+    }
+
     /// Ensures a headless Widevine CDM browser worker (`http://127.0.0.1:18888/?worker=apple`)
     /// is running in the background on Linux / SteamOS (Gamescope + Desktop Mode) so full-length
     /// DRM-protected Apple Music tracks stream via PipeWire even when `steamwebhelper` lacks Widevine.

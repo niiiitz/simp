@@ -13,6 +13,46 @@ fn main() {
         return;
     }
 
+    // Mode 0: Self-Updater (`simp update` / `simp --update` / `simp self-update`)
+    if args
+        .iter()
+        .any(|arg| arg == "update" || arg == "--update" || arg == "self-update")
+    {
+        println!(
+            "Checking GitHub Releases for SIMP updates (current: v{})...",
+            env!("CARGO_PKG_VERSION")
+        );
+        match simp_core::updater::check_for_updates() {
+            Ok(status) => {
+                if status.update_available {
+                    println!(
+                        "⬆️  New release available: {} (current: v{})",
+                        status.latest_tag, status.current_version
+                    );
+                } else {
+                    println!(
+                        "ℹ️  Reinstalling latest release {} (current: v{})...",
+                        status.latest_tag, status.current_version
+                    );
+                }
+                match simp_core::updater::apply_self_update(Some(&status.latest_tag), true, true) {
+                    Ok(res) => {
+                        println!("✅ {}", res.message);
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Update failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to check for updates: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Mode 1: Headless systemd Daemon (`simp --daemon`)
     // Runs on a tight 2-thread Tokio runtime without initializing GTK or WebKitGTK.
     if args.iter().any(|arg| arg == "--daemon" || arg == "-d") {

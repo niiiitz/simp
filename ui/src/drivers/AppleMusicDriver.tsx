@@ -60,8 +60,11 @@ export function mapAppleItemToTrack(item: any): TrackMetadata | null {
   if (!item) return null;
   const attrs = item.attributes || item;
   const playParams = attrs.playParams || item.playParams || {};
-  // Prefer catalogId so MusicKit can stream full catalog or library items and resolve full albums reliably
-  const trackId = playParams.catalogId || playParams.id || item.id || attrs.id;
+  // Prefer the live catalog relationship ID (from `?include=catalog`) first in case a library playlist
+  // track's original `playParams.catalogId` was re-uploaded/re-linked by the distributor, then fall back
+  // to `playParams.catalogId`, `playParams.id`, or `item.id`.
+  const relCatalogId = item.relationships?.catalog?.data?.[0]?.id;
+  const trackId = relCatalogId || playParams.catalogId || playParams.id || item.id || attrs.id;
   if (!trackId) return null;
 
   const title = attrs.name || attrs.title || item.title || 'Unknown Track';
@@ -241,6 +244,42 @@ export async function authorizeAppleMusic(
 }
 
 /**
+ * Clean-slate Apple Music deauthorization: revokes the browser's MusicKit session (`mk.unauthorize()`),
+ * purges cached MusicKit/Apple keys from `localStorage`/`sessionStorage`, and instructs `simp --daemon`
+ * to clear `settings.vdf` and wipe all headless worker auth stores.
+ */
+export async function disconnectAppleMusicCleanSlate(
+  onToast?: (msg: string) => void
+): Promise<void> {
+  try {
+    const mk = window.MusicKit?.getInstance?.();
+    if (mk) {
+      await mk.stop?.().catch(() => {});
+      await mk.unauthorize?.().catch(() => {});
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    for (const store of [window.localStorage, window.sessionStorage]) {
+      if (!store) continue;
+      const toRemove: string[] = [];
+      for (let i = 0; i < store.length; i++) {
+        const k = store.key(i);
+        if (k && /musickit|music\.apple|apple_music|amp-/i.test(k)) {
+          toRemove.push(k);
+        }
+      }
+      for (const k of toRemove) store.removeItem(k);
+    }
+  } catch {
+    // ignore
+  }
+  defaultSimpClient.disconnectAppleMusic();
+  onToast?.('Disconnected Apple Music & wiped cached auth tokens');
+}
+
+/**
  * Fetches the user's Cloud Playlists on-demand (headers only) without auto-dumping them into SQLite.
  * Users can preview any playlist or click "📌 Pin to SIMP" to add it to SIMP's sidebar & Decky QAM.
  */
@@ -285,7 +324,7 @@ export async function fetchApplePlaylistTracks(
         )}/tracks?limit=100`
       : `https://api.music.apple.com/v1/me/library/playlists/${encodeURIComponent(
           cleanId
-        )}/tracks?limit=100`;
+        )}/tracks?include=catalog&limit=100`;
 
   const tracks: TrackMetadata[] = [];
   for (let page = 0; page < 5 && nextUrl; page++) {
@@ -879,8 +918,74 @@ export const AppleMusicDriver: React.FC = () => {
       })
       .catch(() => {});
 
+    const resolveReplacementCatalogSongId = async (rawId: string): Promise<string | null> => {
+      try {
+        const { headers, storefront } = await getAppleAuthHeaders();
+        // 1. If it's a library track ID (`i.xxxx`), ask Apple's `/catalog` relationship endpoint first
+        if (rawId.startsWith('i.')) {
+          const relResp = await fetch(
+            `https://api.music.apple.com/v1/me/library/songs/${encodeURIComponent(rawId)}/catalog`,
+            { headers }
+          );
+          if (relResp.ok) {
+            const relJson = await relResp.json();
+            const catId = relJson?.data?.[0]?.id;
+            if (catId) return String(catId);
+          }
+        }
+        // 2. Fallback: if a playlist's `playParams.catalogId` was tombstoned/re-uploaded by the label,
+        // search the storefront catalog by the track's title + artist from the current queue snapshot.
+        const snap = defaultSimpClient.getState();
+        const cur = snap?.current_track;
+        if (cur && cur.title && cur.title !== 'Unknown Track') {
+          const artist = cur.artists?.[0] || '';
+          const term = `${cur.title} ${artist}`.trim();
+          const searchResp = await fetch(
+            `https://api.music.apple.com/v1/catalog/${storefront}/search?term=${encodeURIComponent(
+              term
+            )}&types=songs&limit=5`,
+            { headers }
+          );
+          if (searchResp.ok) {
+            const searchJson = await searchResp.json();
+            const candidates: any[] = searchJson?.results?.songs?.data || [];
+            const titleLower = cur.title.toLowerCase();
+            const artistLower = artist.toLowerCase();
+            const exact =
+              candidates.find((c) => {
+                const n = String(c?.attributes?.name || '').toLowerCase();
+                const a = String(c?.attributes?.artistName || '').toLowerCase();
+                return n === titleLower && (!artistLower || a.includes(artistLower));
+              }) || candidates[0];
+            if (exact?.id && String(exact.id) !== rawId) {
+              console.info(
+                `[SIMP AppleMusicDriver] Resolved re-linked catalogId ${exact.id} for stale playlist track ${rawId} ("${cur.title}")`
+              );
+              return String(exact.id);
+            }
+          }
+        }
+      } catch {
+        // ignore fallback lookup errors
+      }
+      return null;
+    };
+
     const unsubSink = defaultSimpClient.subscribeAppleSink(async (cmd) => {
       try {
+        if (cmd.action === 'unauthorize') {
+          try {
+            if (mkRef.current) {
+              await mkRef.current.stop?.().catch(() => {});
+              await mkRef.current.unauthorize?.().catch(() => {});
+              mkRef.current = null;
+            }
+          } catch {
+            // ignore
+          }
+          return;
+        }
+
         const mk = await ensureInstance(true);
         if (!mk) return;
 
@@ -928,18 +1033,21 @@ export const AppleMusicDriver: React.FC = () => {
               break;
             }
 
-            const rawId = cmd.uri
+            let rawId = cmd.uri
               .replace(/^applemusic:(song|track):/, '')
               .replace(/^applemusic:/, '');
 
-            try {
-              await mk.setQueue({
-                song: rawId,
-                startPlaying: true,
-              });
+            if (rawId.startsWith('i.')) {
+              const resolved = await resolveReplacementCatalogSongId(rawId);
+              if (resolved) rawId = resolved;
+            }
+
+            const attemptQueueAndWait = async (songId: string) => {
+              const queueArg = songId.startsWith('i.')
+                ? { librarySong: songId, startPlaying: true }
+                : { song: songId, startPlaying: true };
+              await mk.setQueue(queueArg);
               if (mySeq !== loadSeqRef.current) return;
-              // Allow initial Widevine EME license handshake (`loading` / `waiting` states) to settle
-              // before issuing a second `mk.play()` call that could abort the first track's stream.
               for (let attempt = 0; attempt < 10; attempt++) {
                 if (mySeq !== loadSeqRef.current) return;
                 if (mk.playbackState === States?.playing) break;
@@ -957,11 +1065,32 @@ export const AppleMusicDriver: React.FC = () => {
               if (mk.playbackState !== States?.playing) {
                 await mk.play();
               }
+            };
+
+            try {
+              await attemptQueueAndWait(rawId);
+              // If the track was tombstoned/re-uploaded in a library playlist (so `nowPlayingItem` is missing
+              // or playback failed to enter `playing`/`loading`), resolve the live replacement catalog song ID!
+              if (
+                mySeq === loadSeqRef.current &&
+                mk.playbackState !== States?.playing &&
+                mk.playbackState !== States?.loading &&
+                mk.playbackState !== States?.waiting
+              ) {
+                const replacementId = await resolveReplacementCatalogSongId(rawId);
+                if (replacementId && mySeq === loadSeqRef.current) {
+                  await mk.stop().catch(() => {});
+                  await attemptQueueAndWait(replacementId);
+                }
+              }
             } catch (firstErr) {
-              console.warn('[SIMP AppleMusicDriver] First setQueue/play attempt failed, retrying cleanly:', firstErr);
+              console.warn('[SIMP AppleMusicDriver] First setQueue/play attempt failed, checking catalog fallback:', firstErr);
+              if (mySeq !== loadSeqRef.current) return;
+              const replacementId = await resolveReplacementCatalogSongId(rawId);
+              const retryId = replacementId || rawId;
               if (mySeq !== loadSeqRef.current) return;
               await mk.stop().catch(() => {});
-              await mk.setQueue({ song: rawId, startPlaying: false });
+              await mk.setQueue({ song: retryId, startPlaying: false });
               if (mySeq !== loadSeqRef.current) return;
               await mk.play();
             }

@@ -82,7 +82,7 @@ export interface AppleMusicAuthConfig {
 }
 
 export interface AppleSinkCommandPayload {
-  action: 'load_and_play' | 'play' | 'pause' | 'seek' | 'set_volume';
+  action: 'load_and_play' | 'play' | 'pause' | 'seek' | 'set_volume' | 'unauthorize';
   uri?: string | null;
   position_ms?: number | null;
   volume?: number | null;
