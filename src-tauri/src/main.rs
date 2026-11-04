@@ -53,6 +53,34 @@ fn main() {
         return;
     }
 
+    // Mode 0c: Isolated Subprocess Worker for `libwidevinecdm.so` FFI Test (`simp --cdm-worker-test <song_id>`)
+    if let Some(pos) = args.iter().position(|arg| arg == "--cdm-worker-test") {
+        let song_id = args
+            .get(pos + 1)
+            .map(|s| s.as_str())
+            .unwrap_or("6777766099");
+        let settings = simp_daemon::config::load_or_create_settings();
+        match simp_core::sinks::apple_native::source::load_native_apple_music_rodio_source(
+            &settings,
+            song_id,
+            Some(1),
+        ) {
+            Ok(src) => {
+                println!(
+                    "OK: Decrypted & decoded segment #0 ({} Hz, {} ch, {:.2}s PCM)",
+                    src.pcm_sample_rate(),
+                    src.pcm_channels(),
+                    src.pcm_duration_secs()
+                );
+            }
+            Err(e) => {
+                eprintln!("ERR: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Mode 0b: Native Apple Music HLS + fMP4 + Widevine CDM Diagnostic Probe (`simp probe-apple [song_id]`)
     if let Some(pos) = args
         .iter()

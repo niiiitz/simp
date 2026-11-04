@@ -5,7 +5,7 @@
 
   **A controller-first, OLED-safe, hybrid local/cloud audio player, primarily targeted for SteamOS, Bazzite, and `gamescope` consoles.**
 
-  [![Status: v0.1.0-alpha.28](https://img.shields.io/badge/status-v0.1.0--alpha.28-ff6a00?style=flat-square)](#)
+  [![Status: v0.1.0-alpha.29](https://img.shields.io/badge/status-v0.1.0--alpha.29-ff6a00?style=flat-square)](#)
   [![Target: SteamOS / gamescope](https://img.shields.io/badge/target-SteamOS%20%7C%20Deck%20OLED%20%7C%20Steam%20Machine-000000?style=flat-square)](#)
   [![Daemon: Rust + Tokio + Rodio](https://img.shields.io/badge/daemon-Rust%20%2B%20Tokio%20%2B%20Rodio-dea584?style=flat-square)](#)
   [![Frontend: React + Decky QAM + MusicKit v3](https://img.shields.io/badge/UI-React%20%2B%20Decky%20QAM%20%2B%20MusicKit%20v3-2aa3c4?style=flat-square)](#)

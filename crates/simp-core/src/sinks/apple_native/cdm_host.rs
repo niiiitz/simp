@@ -31,11 +31,10 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
     if let Ok(env_path) = std::env::var("SIMP_WIDEVINE_CDM_PATH") {
         let p = PathBuf::from(env_path.trim());
         if p.is_file() {
-            let cdm_version = query_cdm_version(&p);
             return Some(DiscoveredWidevineCdm {
                 library_path: p,
                 source_label: "env-override".to_string(),
-                cdm_version,
+                cdm_version: None,
             });
         }
     }
@@ -45,11 +44,10 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
     // 1. Explicit SIMP userland library folder
     let simp_lib = home.join(".local/share/simp/lib/libwidevinecdm.so");
     if simp_lib.is_file() {
-        let cdm_version = query_cdm_version(&simp_lib);
         return Some(DiscoveredWidevineCdm {
             library_path: simp_lib,
             source_label: "simp-userland".to_string(),
-            cdm_version,
+            cdm_version: None,
         });
     }
 
@@ -64,11 +62,10 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
         if let Some(found) = scan_for_file_named(&ff_root, "libwidevinecdm.so", 4) {
             stage_cdm_into_userland(&found, &simp_lib);
             let active_path = if simp_lib.is_file() { simp_lib } else { found };
-            let cdm_version = query_cdm_version(&active_path);
             return Some(DiscoveredWidevineCdm {
                 library_path: active_path,
                 source_label: label.to_string(),
-                cdm_version,
+                cdm_version: None,
             });
         }
     }
@@ -103,11 +100,10 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
         if let Some(found) = scan_for_file_named(&chr_root, "libwidevinecdm.so", 5) {
             stage_cdm_into_userland(&found, &simp_lib);
             let active_path = if simp_lib.is_file() { simp_lib } else { found };
-            let cdm_version = query_cdm_version(&active_path);
             return Some(DiscoveredWidevineCdm {
                 library_path: active_path,
                 source_label: label.to_string(),
-                cdm_version,
+                cdm_version: None,
             });
         }
     }
@@ -124,11 +120,10 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
             } else {
                 p.to_path_buf()
             };
-            let cdm_version = query_cdm_version(&active_path);
             return Some(DiscoveredWidevineCdm {
                 library_path: active_path,
                 source_label: "system-chromium".to_string(),
-                cdm_version,
+                cdm_version: None,
             });
         }
     }
@@ -148,6 +143,15 @@ fn stage_cdm_into_userland(src: &Path, dest: &Path) {
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755));
+        }
+        // Also copy companion `.sig` or `manifest.json` files if present alongside `libwidevinecdm.so`
+        if let (Some(src_dir), Some(dest_dir)) = (src.parent(), dest.parent()) {
+            for companion in ["libwidevinecdm.so.sig", "manifest.json"] {
+                let s = src_dir.join(companion);
+                if s.is_file() {
+                    let _ = std::fs::copy(&s, dest_dir.join(companion));
+                }
+            }
         }
     }
 }
@@ -494,6 +498,77 @@ impl Drop for CdmDecryptedBlockImpl {
     }
 }
 
+// --- `cdm::FileIO` & `cdm::FileIOClient` C++ VTables ---
+
+#[repr(C)]
+struct CdmFileIoClientVtable {
+    on_open_complete: unsafe extern "C" fn(*mut c_void, u32),
+    on_read_complete: unsafe extern "C" fn(*mut c_void, u32, *const u8, u32),
+    on_write_complete: unsafe extern "C" fn(*mut c_void, u32),
+}
+
+#[repr(C)]
+struct CdmFileIoVtable {
+    open: unsafe extern "C" fn(*mut CdmFileIoImpl, *const c_char, u32),
+    read: unsafe extern "C" fn(*mut CdmFileIoImpl),
+    write: unsafe extern "C" fn(*mut CdmFileIoImpl, *const u8, u32),
+    close: unsafe extern "C" fn(*mut CdmFileIoImpl),
+}
+
+#[repr(C)]
+pub struct CdmFileIoImpl {
+    vtable: *const CdmFileIoVtable,
+    client_ptr: *mut c_void,
+}
+
+unsafe extern "C" fn file_io_open(
+    this: *mut CdmFileIoImpl,
+    _file_name: *const c_char,
+    _file_name_size: u32,
+) {
+    let client = (*this).client_ptr;
+    if !client.is_null() {
+        let client_vtbl = *(client as *const *const CdmFileIoClientVtable);
+        // kSuccess = 0
+        ((*client_vtbl).on_open_complete)(client, 0);
+    }
+}
+
+unsafe extern "C" fn file_io_read(this: *mut CdmFileIoImpl) {
+    let client = (*this).client_ptr;
+    if !client.is_null() {
+        let client_vtbl = *(client as *const *const CdmFileIoClientVtable);
+        // kSuccess = 0, 0 bytes (empty file)
+        ((*client_vtbl).on_read_complete)(client, 0, std::ptr::null(), 0);
+    }
+}
+
+unsafe extern "C" fn file_io_write(
+    this: *mut CdmFileIoImpl,
+    _data: *const u8,
+    _data_size: u32,
+) {
+    let client = (*this).client_ptr;
+    if !client.is_null() {
+        let client_vtbl = *(client as *const *const CdmFileIoClientVtable);
+        // kSuccess = 0
+        ((*client_vtbl).on_write_complete)(client, 0);
+    }
+}
+
+unsafe extern "C" fn file_io_close(this: *mut CdmFileIoImpl) {
+    if !this.is_null() {
+        drop(Box::from_raw(this));
+    }
+}
+
+static CDM_FILE_IO_VTABLE: CdmFileIoVtable = CdmFileIoVtable {
+    open: file_io_open,
+    read: file_io_read,
+    write: file_io_write,
+    close: file_io_close,
+};
+
 // --- `cdm::Host_10` / `cdm::Host_11` C++ VTable & Instance ---
 
 #[repr(C)]
@@ -536,11 +611,13 @@ struct CdmHostVtable {
 #[repr(C)]
 pub struct CdmHostState {
     vtable: *const CdmHostVtable,
+    pub cdm_ptr: *mut c_void,
     pub initialized: bool,
     pub session_id: String,
     pub latest_challenge: Vec<u8>,
     pub usable_keys_count: usize,
     pub last_rejection: Option<String>,
+    pub trace_log: Vec<String>,
 }
 
 unsafe extern "C" fn host_allocate(_this: *mut CdmHostState, capacity: u32) -> *mut CdmBufferImpl {
@@ -669,16 +746,38 @@ unsafe extern "C" fn host_on_deferred_init_done(
 }
 
 unsafe extern "C" fn host_create_file_io(
-    _this: *mut CdmHostState,
-    _client: *mut c_void,
+    this: *mut CdmHostState,
+    client: *mut c_void,
 ) -> *mut c_void {
-    std::ptr::null_mut()
+    let this_ref = &mut *this;
+    this_ref
+        .trace_log
+        .push(format!("Host::CreateFileIO(client={client:?})"));
+    let fio = Box::new(CdmFileIoImpl {
+        vtable: &CDM_FILE_IO_VTABLE,
+        client_ptr: client,
+    });
+    Box::into_raw(fio) as *mut c_void
 }
 
-unsafe extern "C" fn host_request_storage_id(_this: *mut CdmHostState, _version: u32) {}
+unsafe extern "C" fn host_request_storage_id(this: *mut CdmHostState, version: u32) {
+    let this_ref = &mut *this;
+    this_ref
+        .trace_log
+        .push(format!("Host::RequestStorageId(version={version})"));
+    if !this_ref.cdm_ptr.is_null() {
+        let vtable_ptr = *(this_ref.cdm_ptr as *const *const CdmInstanceVtable);
+        let dummy_id = [0x53u8; 32];
+        ((*vtable_ptr).on_storage_id)(this_ref.cdm_ptr, version, dummy_id.as_ptr(), 32);
+    }
+}
 
 unsafe extern "C" fn host_on_initialized(this: *mut CdmHostState, success: bool) {
-    (*this).initialized = success;
+    let this_ref = &mut *this;
+    this_ref
+        .trace_log
+        .push(format!("Host::OnInitialized(success={success})"));
+    this_ref.initialized = success;
 }
 
 unsafe extern "C" fn host_report_metrics(
@@ -758,6 +857,15 @@ struct CdmInstanceVtable {
     destroy: unsafe extern "C" fn(*mut c_void),
 }
 
+#[repr(C)]
+struct CdmHostFile {
+    file_path: *const c_char,
+    file: c_int,
+    sig_file_path: *const c_char,
+    sig_file: c_int,
+}
+
+type VerifyCdmHost0Fn = unsafe extern "C" fn(*const CdmHostFile, u32) -> bool;
 type InitializeCdmModuleFn = unsafe extern "C" fn();
 type DeinitializeCdmModuleFn = unsafe extern "C" fn();
 type GetCdmHostFn = extern "C" fn(c_int, *mut c_void) -> *mut c_void;
@@ -797,6 +905,7 @@ impl WidevineCdmSession {
                     .to_str()
                     .ok_or_else(|| anyhow!("Invalid UTF-8 path for libwidevinecdm.so"))?,
             )?;
+            eprintln!("[CDM-STEP] 1/5 dlopen({})...", lib_path.display());
             let dl_handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
             if dl_handle.is_null() {
                 let err_ptr = libc::dlerror();
@@ -812,11 +921,37 @@ impl WidevineCdmSession {
                 ));
             }
 
+            if let Ok(ver_cs) = CString::new("GetCdmVersion") {
+                let ver_sym = libc::dlsym(dl_handle, ver_cs.as_ptr());
+                if !ver_sym.is_null() {
+                    let ver_fn: extern "C" fn() -> *const c_char = std::mem::transmute(ver_sym);
+                    let p = ver_fn();
+                    if !p.is_null() {
+                        eprintln!(
+                            "[CDM-STEP] GetCdmVersion() = {}",
+                            CStr::from_ptr(p).to_string_lossy()
+                        );
+                    }
+                }
+            }
+
+            // 0. Call VerifyCdmHost_0 if exported (some Widevine builds check that it was called prior to Initialize)
+            if let Ok(verify_cs) = CString::new("VerifyCdmHost_0") {
+                let verify_sym = libc::dlsym(dl_handle, verify_cs.as_ptr());
+                if !verify_sym.is_null() {
+                    eprintln!("[CDM-STEP] 2/5 VerifyCdmHost_0...");
+                    let verify_fn: VerifyCdmHost0Fn = std::mem::transmute(verify_sym);
+                    let ok = verify_fn(std::ptr::null(), 0);
+                    eprintln!("[CDM-STEP] VerifyCdmHost_0 returned {ok}");
+                }
+            }
+
             // 1. Call InitializeCdmModule_4 (or InitializeCdmModule) if exported
             for init_sym in ["InitializeCdmModule_4", "InitializeCdmModule"] {
                 if let Ok(cs) = CString::new(init_sym) {
                     let sym = libc::dlsym(dl_handle, cs.as_ptr());
                     if !sym.is_null() {
+                        eprintln!("[CDM-STEP] 3/5 {init_sym}()...");
                         let init_fn: InitializeCdmModuleFn = std::mem::transmute(sym);
                         init_fn();
                         break;
@@ -845,17 +980,20 @@ impl WidevineCdmSession {
 
             let mut host = Box::new(CdmHostState {
                 vtable: &CDM_HOST_VTABLE,
+                cdm_ptr: std::ptr::null_mut(),
                 initialized: false,
                 session_id: String::new(),
                 latest_challenge: Vec::new(),
                 usable_keys_count: 0,
                 last_rejection: None,
+                trace_log: Vec::new(),
             });
             let host_ptr: *mut CdmHostState = &mut *host;
 
             let key_system = b"com.widevine.alpha\0";
             let mut cdm_ptr: *mut c_void = std::ptr::null_mut();
             for ver in [10, 11] {
+                eprintln!("[CDM-STEP] 4/5 CreateCdmInstance(version={ver})...");
                 cdm_ptr = create_fn(
                     ver,
                     key_system.as_ptr() as *const c_char,
@@ -864,6 +1002,7 @@ impl WidevineCdmSession {
                     host_ptr as *mut c_void,
                 );
                 if !cdm_ptr.is_null() {
+                    eprintln!("[CDM-STEP] CreateCdmInstance(version={ver}) succeeded: {cdm_ptr:?}");
                     break;
                 }
             }
@@ -875,11 +1014,14 @@ impl WidevineCdmSession {
                 ));
             }
 
+            host.cdm_ptr = cdm_ptr;
             let vtable_ptr = *(cdm_ptr as *const *const CdmInstanceVtable);
+            eprintln!("[CDM-STEP] 5/5 cdm->Initialize(false, false, false)...");
             ((*vtable_ptr).initialize)(cdm_ptr, false, false, false);
-
-            // Feed an empty storage ID so CDMs waiting on `RequestStorageId` during init complete immediately
-            ((*vtable_ptr).on_storage_id)(cdm_ptr, 1, std::ptr::null(), 0);
+            eprintln!(
+                "[CDM-STEP] cdm->Initialize done (host.initialized={}, trace={:?})",
+                host.initialized, host.trace_log
+            );
 
             Ok(Self {
                 dl_handle,

@@ -81,16 +81,11 @@ pub fn probe_apple_native_pipeline(
     let total_duration_secs: f64 = playlist.segments.iter().map(|s| s.duration_secs).sum();
     let discovered_cdm = discover_widevine_cdm_library();
     let cdm_session_test = if let Some(ref cdm_info) = discovered_cdm {
-        match load_native_apple_music_rodio_source(settings, song_id, Some(1)) {
-            Ok(src) => Some(format!(
-                "OK: Decrypted & decoded segment #0 via {} ({} Hz, {} ch, {:.2}s PCM)",
-                cdm_info.source_label,
-                src.sample_rate(),
-                src.channels(),
-                src.total_duration().unwrap_or_default().as_secs_f64()
-            )),
-            Err(e) => Some(format!("ERR: {e}")),
-        }
+        Some(run_isolated_cdm_probe_subprocess(
+            &cdm_info.library_path,
+            &cdm_info.source_label,
+            &song_id,
+        ))
     } else {
         None
     };
@@ -222,6 +217,19 @@ impl DecryptedFmp4RodioSource {
             sample_rate,
         })
     }
+
+    pub fn pcm_sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn pcm_channels(&self) -> u16 {
+        self.channels
+    }
+
+    pub fn pcm_duration_secs(&self) -> f64 {
+        let frames = self.samples.len() / (self.channels.max(1) as usize);
+        frames as f64 / (self.sample_rate.max(1) as f64)
+    }
 }
 
 impl Iterator for DecryptedFmp4RodioSource {
@@ -336,4 +344,39 @@ pub fn load_native_apple_music_rodio_source(
         &decrypted_segments,
     )
 }
+
+/// Runs the `libwidevinecdm.so` FFI handshake in an isolated child process (`simp --cdm-worker-test <song_id>`)
+/// so that if a closed-source `libwidevinecdm.so` triggers `SIGILL` or `SIGSEGV` due to VMP host checks,
+/// the parent `simp` / `simp --daemon` process never crashes and captures the exact step where it stopped!
+pub fn run_isolated_cdm_probe_subprocess(
+    lib_path: & std::path::Path,
+    source_label: &str,
+    song_id: &str,
+) -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return "ERR: Could not determine current_exe for isolated CDM worker".to_string();
+    };
+    let out = std::process::Command::new(exe)
+        .arg("--cdm-worker-test")
+        .arg(song_id)
+        .env("SIMP_WIDEVINE_CDM_PATH", lib_path)
+        .output();
+
+    match out {
+        Ok(res) => {
+            let stdout = String::from_utf8_lossy(&res.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&res.stderr).trim().to_string();
+            if res.status.success() {
+                stdout
+            } else {
+                format!(
+                    "ERR (source={source_label}, exit={:?}): stdout=[{stdout}] stderr=[{stderr}]",
+                    res.status.code()
+                )
+            }
+        }
+        Err(e) => format!("ERR spawning isolated CDM worker: {e}"),
+    }
+}
+
 
