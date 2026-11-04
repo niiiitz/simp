@@ -109,6 +109,7 @@ impl AppleMusicSink {
     /// across worker and window profiles while preserving `WidevineCdm` / `gmp-widevinecdm` binaries.
     pub fn purge_worker_auth_storage() {
         Self::kill_headless_widevine_worker();
+        crate::sinks::apple_api::clear_cached_storefront();
         let Some(home) = dirs::home_dir() else {
             return;
         };
@@ -324,6 +325,62 @@ impl AppleMusicSink {
         })?;
 
         sign_es256_developer_jwt(&creds.team_id, &creds.key_id, &pem, 86400 * 90)
+    }
+}
+
+impl crate::sinks::AudioSink for AppleMusicSink {
+    fn engine_kind(&self) -> simp_protocol::ActiveEngine {
+        simp_protocol::ActiveEngine::AppleMusic
+    }
+
+    fn supports_uri(&self, uri: &str) -> bool {
+        uri.starts_with("applemusic:")
+    }
+
+    fn load_and_play_track(
+        &mut self,
+        uri: &str,
+        start_pos_ms: u32,
+        _epoch: u64,
+        _internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
+        broadcast_tx: &broadcast::Sender<PlaybackEvent>,
+    ) -> Result<()> {
+        self.emit_load_and_play(broadcast_tx, uri, start_pos_ms);
+        Ok(())
+    }
+
+    fn resume_playback(
+        &mut self,
+        _epoch: u64,
+        _internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
+        broadcast_tx: &broadcast::Sender<PlaybackEvent>,
+    ) -> Result<()> {
+        self.emit_play(broadcast_tx);
+        Ok(())
+    }
+
+    fn pause_playback(&mut self, broadcast_tx: &broadcast::Sender<PlaybackEvent>) {
+        self.emit_pause(broadcast_tx);
+    }
+
+    fn suspend_sink(&mut self, broadcast_tx: &broadcast::Sender<PlaybackEvent>) {
+        self.emit_pause(broadcast_tx);
+    }
+
+    fn seek_playback(
+        &mut self,
+        position_ms: u32,
+        _epoch: u64,
+        _internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
+        broadcast_tx: &broadcast::Sender<PlaybackEvent>,
+    ) -> Result<()> {
+        self.emit_seek(broadcast_tx, position_ms);
+        Ok(())
+    }
+
+    fn sync_volume(&mut self, volume: f32, broadcast_tx: &broadcast::Sender<PlaybackEvent>) {
+        self.set_volume(volume as f64);
+        self.emit_volume(broadcast_tx, volume as f64);
     }
 }
 

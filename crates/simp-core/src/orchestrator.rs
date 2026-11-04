@@ -5,12 +5,12 @@ use crate::library::vdf::{load_session_state, save_session_state};
 use crate::mpris::{initialize_mpris, update_mpris_metadata, update_mpris_playback, MprisHandle};
 use crate::sinks::apple::AppleMusicSink;
 use crate::sinks::local::LocalAudioEngine;
+use crate::sinks::AudioSink;
 use simp_protocol::{
     ActiveEngine, AudioCommand, PlaybackEvent, RepeatMode, ServerEnvelope, SessionState,
     SimpSettings, TrackMetadata,
 };
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -205,14 +205,20 @@ impl AudioOrchestrator {
                 let engine = self.state.lock().unwrap().active_engine;
                 match engine {
                     ActiveEngine::Local => {
-                        let _ = self
-                            .local_engine
-                            .play(self.transition_epoch, self.internal_event_tx.clone());
-                        let pos = self.local_engine.get_position_ms();
+                        let _ = self.local_engine.resume_playback(
+                            self.transition_epoch,
+                            &self.internal_event_tx,
+                            &self.broadcast_tx,
+                        );
+                        let pos = self.get_live_position_ms();
                         self.set_playing_state(true, pos);
                     }
                     ActiveEngine::AppleMusic => {
-                        self.apple_sink.emit_play(&self.broadcast_tx);
+                        let _ = self.apple_sink.resume_playback(
+                            self.transition_epoch,
+                            &self.internal_event_tx,
+                            &self.broadcast_tx,
+                        );
                         let pos = self.state.lock().unwrap().position_ms;
                         self.set_playing_state(true, pos);
                     }
@@ -269,14 +275,24 @@ impl AudioOrchestrator {
                 } else {
                     position_ms
                 };
-                if engine == ActiveEngine::Local {
-                    let _ = self.local_engine.seek(
-                        clamped_pos,
-                        self.transition_epoch,
-                        self.internal_event_tx.clone(),
-                    );
-                } else if engine == ActiveEngine::AppleMusic {
-                    self.apple_sink.emit_seek(&self.broadcast_tx, clamped_pos);
+                match engine {
+                    ActiveEngine::Local => {
+                        let _ = self.local_engine.seek_playback(
+                            clamped_pos,
+                            self.transition_epoch,
+                            &self.internal_event_tx,
+                            &self.broadcast_tx,
+                        );
+                    }
+                    ActiveEngine::AppleMusic => {
+                        let _ = self.apple_sink.seek_playback(
+                            clamped_pos,
+                            self.transition_epoch,
+                            &self.internal_event_tx,
+                            &self.broadcast_tx,
+                        );
+                    }
+                    ActiveEngine::None => {}
                 }
                 let is_playing = self.state.lock().unwrap().is_playing;
                 self.state.lock().unwrap().position_ms = clamped_pos;
@@ -293,10 +309,11 @@ impl AudioOrchestrator {
             }
             AudioCommand::SetVolume { volume } => {
                 let clamped = volume.clamp(0.0, 1.0);
-                // Simultaneous bidirectional volume normalization across all sinks
-                self.local_engine.set_volume(clamped);
-                self.apple_sink.set_volume(clamped);
-                self.apple_sink.emit_volume(&self.broadcast_tx, clamped);
+                // Simultaneous bidirectional volume normalization across all AudioSink implementations
+                self.local_engine
+                    .sync_volume(clamped as f32, &self.broadcast_tx);
+                self.apple_sink
+                    .sync_volume(clamped as f32, &self.broadcast_tx);
                 self.state.lock().unwrap().volume = clamped;
                 self.settings.lock().unwrap().audio.master_volume = clamped;
                 let _ = self
@@ -732,8 +749,8 @@ impl AudioOrchestrator {
     fn pause_active_engine(&mut self) {
         let engine = self.state.lock().unwrap().active_engine;
         match engine {
-            ActiveEngine::Local => self.local_engine.pause(),
-            ActiveEngine::AppleMusic => self.apple_sink.emit_pause(&self.broadcast_tx),
+            ActiveEngine::Local => self.local_engine.pause_playback(&self.broadcast_tx),
+            ActiveEngine::AppleMusic => self.apple_sink.pause_playback(&self.broadcast_tx),
             ActiveEngine::None => {}
         }
         let pos = self.get_live_position_ms();
@@ -746,7 +763,7 @@ impl AudioOrchestrator {
         self.transition_epoch = self.transition_epoch.wrapping_add(1);
         let epoch = self.transition_epoch;
 
-        let track = {
+        let mut track = {
             let mut st = self.state.lock().unwrap();
             if index >= st.queue.len() {
                 return;
@@ -755,54 +772,68 @@ impl AudioOrchestrator {
             st.queue[index].clone()
         };
 
-        let target_engine = if track.uri.starts_with("applemusic:") {
-            ActiveEngine::AppleMusic
+        let target_engine = if self.apple_sink.supports_uri(&track.uri) {
+            self.apple_sink.engine_kind()
         } else {
-            ActiveEngine::Local
+            self.local_engine.engine_kind()
         };
 
-        // 2. Hard-pause outgoing engine if switching engines
+        // 2. Suspend outgoing sink if switching engines
         let prev_engine = self.state.lock().unwrap().active_engine;
         if prev_engine != target_engine {
             match prev_engine {
-                ActiveEngine::Local => self.local_engine.release_pipewire_stream(),
-                ActiveEngine::AppleMusic => self.apple_sink.emit_pause(&self.broadcast_tx),
+                ActiveEngine::Local => self.local_engine.suspend_sink(&self.broadcast_tx),
+                ActiveEngine::AppleMusic => self.apple_sink.suspend_sink(&self.broadcast_tx),
                 ActiveEngine::None => {}
             }
         }
 
-        // 3. Dispatch to target engine with Anti-Runaway-Skip Circuit Breaker
-        match target_engine {
-            ActiveEngine::Local => {
-                if !track.uri.starts_with("cdda://") {
-                    let file_path = track.uri.strip_prefix("file://").unwrap_or(&track.uri);
-                    if !Path::new(file_path).exists() {
-                        self.handle_track_load_failure("Offline/unplugged storage mount");
-                        return;
+        // 3. Dispatch to target AudioSink with Anti-Runaway-Skip Circuit Breaker
+        let load_res = match target_engine {
+            ActiveEngine::Local => self.local_engine.load_and_play_track(
+                &track.uri,
+                0,
+                epoch,
+                &self.internal_event_tx,
+                &self.broadcast_tx,
+            ),
+            ActiveEngine::AppleMusic => {
+                // If the track URI is a library song (`applemusic:song:i.xxxx`), pre-resolve its canonical
+                // catalog ID in Rust so re-linked cloud playlist tracks play without round-trip delay.
+                if track.uri.starts_with("applemusic:song:i.") {
+                    let cfg = self.settings.lock().unwrap().clone();
+                    let artist = track.artists.first().map(|s| s.as_str());
+                    if let Ok(Some(cat_id)) =
+                        crate::sinks::apple_api::resolve_replacement_catalog_song_id(
+                            &cfg,
+                            &track.uri,
+                            Some(&track.title),
+                            artist,
+                        )
+                    {
+                        track.uri = format!("applemusic:song:{cat_id}");
                     }
                 }
-                match self.local_engine.load_and_play(
+                self.apple_sink.load_and_play_track(
                     &track.uri,
                     0,
                     epoch,
-                    self.internal_event_tx.clone(),
-                ) {
-                    Ok(()) => {
-                        self.consecutive_failures = 0;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to load local track {}: {e}", track.uri);
-                        self.handle_track_load_failure(&e.to_string());
-                        return;
-                    }
-                }
+                    &self.internal_event_tx,
+                    &self.broadcast_tx,
+                )
             }
-            ActiveEngine::AppleMusic => {
-                self.apple_sink
-                    .emit_load_and_play(&self.broadcast_tx, &track.uri, 0);
+            ActiveEngine::None => Ok(()),
+        };
+
+        match load_res {
+            Ok(()) => {
                 self.consecutive_failures = 0;
             }
-            ActiveEngine::None => {}
+            Err(e) => {
+                tracing::warn!("AudioSink failed to load track {}: {e}", track.uri);
+                self.handle_track_load_failure(&e.to_string());
+                return;
+            }
         }
 
         // 4. Update state, MPRIS2, and broadcast TrackChanged

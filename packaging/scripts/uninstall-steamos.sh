@@ -13,6 +13,40 @@ if [[ "${1:-}" == "--purge" ]]; then
   PURGE=1
 fi
 
+# If invoked via `sudo`, resolve the real non-root desktop user (`SUDO_USER` or `deck`)
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+  REAL_USER="${SUDO_USER:-}"
+  if [[ -z "${REAL_USER}" || "${REAL_USER}" == "root" ]]; then
+    if id "deck" >/dev/null 2>&1; then
+      REAL_USER="deck"
+    fi
+  fi
+  if [[ -n "${REAL_USER}" && "${REAL_USER}" != "root" ]]; then
+    REAL_UID="$(id -u "${REAL_USER}")"
+    REAL_HOME="$(getent passwd "${REAL_USER}" 2>/dev/null | cut -d: -f6 || echo "/home/${REAL_USER}")"
+    export HOME="${REAL_HOME:-/home/${REAL_USER}}"
+    export XDG_RUNTIME_DIR="/run/user/${REAL_UID}"
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${REAL_UID}/bus"
+  else
+    REAL_USER="$(whoami)"
+    REAL_UID="$(id -u)"
+  fi
+else
+  REAL_USER="$(whoami)"
+  REAL_UID="$(id -u)"
+fi
+
+run_user_systemctl() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 && "${REAL_USER}" != "root" ]]; then
+    sudo -u "${REAL_USER}" \
+      XDG_RUNTIME_DIR="/run/user/${REAL_UID}" \
+      DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${REAL_UID}/bus" \
+      systemctl --user "$@"
+  else
+    systemctl --user "$@"
+  fi
+}
+
 INSTALL_ROOT="${HOME}/.local/share/simp"
 BIN_DEST="${INSTALL_ROOT}/bin"
 UI_DEST="${INSTALL_ROOT}/ui"
@@ -27,8 +61,8 @@ echo "============================================================"
 
 # 1. Stop and disable systemd user service
 if command -v systemctl >/dev/null 2>&1; then
-  systemctl --user stop simp.service >/dev/null 2>&1 || true
-  systemctl --user disable simp.service >/dev/null 2>&1 || true
+  run_user_systemctl stop simp.service >/dev/null 2>&1 || true
+  run_user_systemctl disable simp.service >/dev/null 2>&1 || true
 fi
 
 # Also terminate any manually-spawned simp --daemon process or orphaned headless Widevine worker
@@ -39,7 +73,7 @@ pkill -f "18888/?worker=apple" >/dev/null 2>&1 || true
 if [[ -f "${SERVICE_FILE}" ]]; then
   rm -f "${SERVICE_FILE}"
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    run_user_systemctl daemon-reload >/dev/null 2>&1 || true
   fi
   echo "✓ Removed systemd unit: ${SERVICE_FILE}"
 fi

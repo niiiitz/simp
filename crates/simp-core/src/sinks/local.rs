@@ -265,6 +265,72 @@ impl LocalAudioEngine {
     }
 }
 
+impl crate::sinks::AudioSink for LocalAudioEngine {
+    fn engine_kind(&self) -> simp_protocol::ActiveEngine {
+        simp_protocol::ActiveEngine::Local
+    }
+
+    fn supports_uri(&self, uri: &str) -> bool {
+        !uri.starts_with("applemusic:")
+    }
+
+    fn load_and_play_track(
+        &mut self,
+        uri: &str,
+        start_pos_ms: u32,
+        epoch: u64,
+        internal_event_tx: &mpsc::UnboundedSender<PlaybackEvent>,
+        _broadcast_tx: &tokio::sync::broadcast::Sender<PlaybackEvent>,
+    ) -> Result<()> {
+        if !uri.starts_with("cdda://") {
+            let file_path = uri.strip_prefix("file://").unwrap_or(uri);
+            if !Path::new(file_path).exists() {
+                return Err(anyhow!("Offline/unplugged storage mount"));
+            }
+        }
+        self.load_and_play(uri, start_pos_ms, epoch, internal_event_tx.clone())
+    }
+
+    fn resume_playback(
+        &mut self,
+        epoch: u64,
+        internal_event_tx: &mpsc::UnboundedSender<PlaybackEvent>,
+        _broadcast_tx: &tokio::sync::broadcast::Sender<PlaybackEvent>,
+    ) -> Result<()> {
+        self.play(epoch, internal_event_tx.clone())
+    }
+
+    fn pause_playback(&mut self, _broadcast_tx: &tokio::sync::broadcast::Sender<PlaybackEvent>) {
+        self.pause();
+    }
+
+    fn suspend_sink(&mut self, _broadcast_tx: &tokio::sync::broadcast::Sender<PlaybackEvent>) {
+        self.release_pipewire_stream();
+    }
+
+    fn seek_playback(
+        &mut self,
+        position_ms: u32,
+        epoch: u64,
+        internal_event_tx: &mpsc::UnboundedSender<PlaybackEvent>,
+        _broadcast_tx: &tokio::sync::broadcast::Sender<PlaybackEvent>,
+    ) -> Result<()> {
+        self.seek(position_ms, epoch, internal_event_tx.clone())
+    }
+
+    fn sync_volume(
+        &mut self,
+        volume: f32,
+        _broadcast_tx: &tokio::sync::broadcast::Sender<PlaybackEvent>,
+    ) {
+        self.set_volume(volume as f64);
+    }
+
+    fn live_position_ms(&self) -> Option<u32> {
+        Some(self.get_position_ms())
+    }
+}
+
 fn spawn_rodio_monitor(
     sink: Arc<Sink>,
     tracker: Arc<Mutex<LocalTimeTracker>>,

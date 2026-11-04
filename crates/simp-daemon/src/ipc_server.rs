@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
     response::IntoResponse,
     routing::{get, post},
@@ -101,6 +101,14 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/health", get(health_handler))
         .route("/api/update/check", get(update_check_handler))
         .route("/api/update/apply", post(update_apply_handler))
+        .route("/api/apple/playlists", get(apple_playlists_handler))
+        .route("/api/apple/playlist-tracks", get(apple_playlist_tracks_handler))
+        .route("/api/apple/full-album", get(apple_full_album_handler))
+        .route("/api/apple/radio", get(apple_radio_handler))
+        .route("/api/apple/new", get(apple_new_handler))
+        .route("/api/apple/search", get(apple_search_handler))
+        .route("/api/apple/resolve-track", get(apple_resolve_track_handler))
+        .route("/api/apple/web-playback", get(apple_web_playback_handler))
         .route("/ws", get(ws_handler))
         .nest_service("/art", ServeDir::new(art_cache_dir));
 
@@ -186,25 +194,170 @@ async fn update_check_handler() -> impl IntoResponse {
 
 async fn update_apply_handler() -> impl IntoResponse {
     let res = tokio::task::spawn_blocking(|| {
-        simp_core::updater::apply_self_update(None, true, true)
+        simp_core::updater::apply_self_update(None, true, false)
     })
     .await;
     match res {
-        Ok(Ok(applied)) => Json(serde_json::json!({
-            "ok": true,
-            "previous_version": applied.previous_version,
-            "updated_version": applied.updated_version,
-            "decky_updated": applied.decky_updated,
-            "message": applied.message,
-        })),
+        Ok(Ok(applied)) => {
+            // Schedule the daemon restart 450ms after returning the HTTP 200 OK response
+            simp_core::updater::spawn_delayed_daemon_restart();
+            Json(serde_json::json!({
+                "ok": true,
+                "status": "ok",
+                "previous_version": applied.previous_version,
+                "updated_version": applied.updated_version,
+                "installed_version": applied.updated_version,
+                "decky_updated": applied.decky_updated,
+                "message": applied.message,
+            }))
+        }
         Ok(Err(e)) => Json(serde_json::json!({
             "ok": false,
+            "status": "error",
             "error": e.to_string(),
         })),
         Err(e) => Json(serde_json::json!({
             "ok": false,
+            "status": "error",
             "error": e.to_string(),
         })),
+    }
+}
+
+async fn apple_playlists_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::fetch_cloud_playlists(&cfg)
+    })
+    .await;
+    match res {
+        Ok(Ok(playlists)) => Json(serde_json::json!({ "ok": true, "data": playlists })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_playlist_tracks_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let kind = params.get("kind").cloned();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::fetch_playlist_tracks(&cfg, &id, kind.as_deref())
+    })
+    .await;
+    match res {
+        Ok(Ok(tracks)) => Json(serde_json::json!({ "ok": true, "data": tracks })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_full_album_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let album_id = params.get("album_id").cloned();
+    let song_uri = params.get("song_uri").cloned();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::fetch_full_album(
+            &cfg,
+            album_id.as_deref(),
+            song_uri.as_deref(),
+        )
+    })
+    .await;
+    match res {
+        Ok(Ok(bundle)) => Json(serde_json::json!({ "ok": true, "data": bundle })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_radio_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::fetch_radio_and_for_you(&cfg)
+    })
+    .await;
+    match res {
+        Ok(Ok(feed)) => Json(serde_json::json!({ "ok": true, "data": feed })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_new_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::fetch_new_feed(&cfg)
+    })
+    .await;
+    match res {
+        Ok(Ok(feed)) => Json(serde_json::json!({ "ok": true, "data": feed })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_search_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let term = params.get("term").or_else(|| params.get("q")).cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::search_catalog(&cfg, &term)
+    })
+    .await;
+    match res {
+        Ok(Ok(results)) => Json(serde_json::json!({ "ok": true, "data": results })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_resolve_track_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let title = params.get("title").cloned();
+    let artist = params.get("artist").cloned();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::resolve_replacement_catalog_song_id(
+            &cfg,
+            &id,
+            title.as_deref(),
+            artist.as_deref(),
+        )
+    })
+    .await;
+    match res {
+        Ok(Ok(catalog_id)) => Json(serde_json::json!({ "ok": true, "catalog_id": catalog_id })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_web_playback_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::fetch_web_playback_manifest(&cfg, &id)
+    })
+    .await;
+    match res {
+        Ok(Ok(asset)) => Json(serde_json::json!({ "ok": true, "data": asset })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
 }
 

@@ -280,10 +280,19 @@ export async function disconnectAppleMusicCleanSlate(
 }
 
 /**
- * Fetches the user's Cloud Playlists on-demand (headers only) without auto-dumping them into SQLite.
- * Users can preview any playlist or click "📌 Pin to SIMP" to add it to SIMP's sidebar & Decky QAM.
+ * Fetches the user's Cloud Playlists on-demand via the native Rust daemon (`/api/apple/playlists`),
+ * falling back to direct browser fetch if needed.
  */
 export async function fetchAppleCloudPlaylists(): Promise<AppleCloudPlaylistSummary[]> {
+  try {
+    const r = await fetch('http://127.0.0.1:18888/api/apple/playlists');
+    if (r.ok) {
+      const j = await r.json();
+      if (j.ok && Array.isArray(j.data)) return j.data;
+    }
+  } catch {
+    // Fallback to browser fetch
+  }
   const { headers } = await getAppleAuthHeaders();
   let nextUrl: string | null = 'https://api.music.apple.com/v1/me/library/playlists?limit=100';
   const items: AppleCloudPlaylistSummary[] = [];
@@ -309,12 +318,25 @@ export async function fetchAppleCloudPlaylists(): Promise<AppleCloudPlaylistSumm
 }
 
 /**
- * Fetches the full tracklist for a specific Apple Music Playlist (either `p.xxxx` library or `pl.xxxx` catalog).
+ * Fetches the full tracklist for a specific Apple Music Playlist via the native Rust daemon (`/api/apple/playlist-tracks`).
  */
 export async function fetchApplePlaylistTracks(
   playlistId: string,
   kind: 'library' | 'catalog' = playlistId.startsWith('pl.') ? 'catalog' : 'library'
 ): Promise<TrackMetadata[]> {
+  try {
+    const r = await fetch(
+      `http://127.0.0.1:18888/api/apple/playlist-tracks?id=${encodeURIComponent(
+        playlistId
+      )}&kind=${encodeURIComponent(kind)}`
+    );
+    if (r.ok) {
+      const j = await r.json();
+      if (j.ok && Array.isArray(j.data)) return j.data;
+    }
+  } catch {
+    // Fallback to browser fetch
+  }
   const { headers, storefront } = await getAppleAuthHeaders();
   const cleanId = playlistId.replace(/^applemusic:playlist:/, '');
   let nextUrl: string | null =
@@ -381,6 +403,20 @@ export async function fetchFullAppleAlbum(params: {
   albumId?: string | null;
   songUri?: string | null;
 }): Promise<{ album: AppleCloudAlbumSummary; tracks: TrackMetadata[] }> {
+  try {
+    const qs = new URLSearchParams();
+    if (params.albumId) qs.set('album_id', params.albumId);
+    if (params.songUri) qs.set('song_uri', params.songUri);
+    const r = await fetch(`http://127.0.0.1:18888/api/apple/full-album?${qs.toString()}`);
+    if (r.ok) {
+      const j = await r.json();
+      if (j.ok && j.data?.album && Array.isArray(j.data?.tracks)) {
+        return j.data;
+      }
+    }
+  } catch {
+    // Fallback to browser fetch
+  }
   const { headers, storefront } = await getAppleAuthHeaders();
 
   let catalogAlbumId: string | null = null;
@@ -510,6 +546,15 @@ export async function fetchAppleRadioAndForYou(): Promise<{
   playlists: AppleCloudPlaylistSummary[];
   albums: AppleCloudAlbumSummary[];
 }> {
+  try {
+    const r = await fetch('http://127.0.0.1:18888/api/apple/radio');
+    if (r.ok) {
+      const j = await r.json();
+      if (j.ok && j.data) return j.data;
+    }
+  } catch {
+    // Fallback to browser fetch
+  }
   const { headers, storefront } = await getAppleAuthHeaders();
 
   const stations: AppleRadioStationSummary[] = [];
@@ -608,6 +653,15 @@ export async function fetchAppleNewFeed(): Promise<{
   playlists: AppleCloudPlaylistSummary[];
   songs: TrackMetadata[];
 }> {
+  try {
+    const r = await fetch('http://127.0.0.1:18888/api/apple/new');
+    if (r.ok) {
+      const j = await r.json();
+      if (j.ok && j.data) return j.data;
+    }
+  } catch {
+    // Fallback to browser fetch
+  }
   const { headers, storefront } = await getAppleAuthHeaders();
   const albums: AppleCloudAlbumSummary[] = [];
   const playlists: AppleCloudPlaylistSummary[] = [];
@@ -694,6 +748,17 @@ export async function searchAppleMusicCatalog(
   const cleaned = term.trim();
   if (!cleaned) {
     return { songs: [], albums: [], playlists: [], stations: [] };
+  }
+  try {
+    const r = await fetch(
+      `http://127.0.0.1:18888/api/apple/search?term=${encodeURIComponent(cleaned)}`
+    );
+    if (r.ok) {
+      const j = await r.json();
+      if (j.ok && j.data) return j.data;
+    }
+  } catch {
+    // Fallback to browser fetch
   }
   const { headers, storefront } = await getAppleAuthHeaders();
   const url = `https://api.music.apple.com/v1/catalog/${storefront}/search?term=${encodeURIComponent(
@@ -919,6 +984,22 @@ export const AppleMusicDriver: React.FC = () => {
       .catch(() => {});
 
     const resolveReplacementCatalogSongId = async (rawId: string): Promise<string | null> => {
+      const snap = defaultSimpClient.getState();
+      const cur = snap?.current_track;
+      try {
+        const qs = new URLSearchParams({ id: rawId });
+        if (cur?.title) qs.set('title', cur.title);
+        if (cur?.artists?.[0]) qs.set('artist', cur.artists[0]);
+        const r = await fetch(`http://127.0.0.1:18888/api/apple/resolve-track?${qs.toString()}`);
+        if (r.ok) {
+          const j = await r.json();
+          if (j.ok && j.catalog_id) {
+            return String(j.catalog_id);
+          }
+        }
+      } catch {
+        // Fallback to browser lookup below
+      }
       try {
         const { headers, storefront } = await getAppleAuthHeaders();
         // 1. If it's a library track ID (`i.xxxx`), ask Apple's `/catalog` relationship endpoint first
@@ -935,8 +1016,6 @@ export const AppleMusicDriver: React.FC = () => {
         }
         // 2. Fallback: if a playlist's `playParams.catalogId` was tombstoned/re-uploaded by the label,
         // search the storefront catalog by the track's title + artist from the current queue snapshot.
-        const snap = defaultSimpClient.getState();
-        const cur = snap?.current_track;
         if (cur && cur.title && cur.title !== 'Unknown Track') {
           const artist = cur.artists?.[0] || '';
           const term = `${cur.title} ${artist}`.trim();

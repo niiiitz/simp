@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -114,10 +114,36 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
         if path.is_dir() {
             copy_dir_contents(&path, &dest_path)?;
         } else {
+            // Unlink destination first: on POSIX/Linux, if a file was previously created by `sudo` (root:root)
+            // inside a user-owned directory, overwriting in-place fails with EACCES, whereas unlinking first succeeds!
+            let _ = std::fs::remove_file(&dest_path);
             std::fs::copy(&path, &dest_path)?;
         }
     }
     Ok(())
+}
+
+/// Spawns a detached background shell that waits 450ms (allowing the HTTP 200 OK response to flush
+/// to the UI / Decky QAM client) and then cleanly restarts `simp.service` (or the daemon process).
+pub fn spawn_delayed_daemon_restart() {
+    let _ = Command::new("sh")
+        .arg("-c")
+        .arg(
+            "sleep 0.45 && \
+             pkill -f 'simp-widevine-worker' 2>/dev/null || true; \
+             pkill -f '18888/?worker=apple' 2>/dev/null || true; \
+             if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active simp.service >/dev/null 2>&1; then \
+               systemctl --user restart simp.service; \
+             else \
+               pkill -f 'simp --daemon' 2>/dev/null || true; \
+               sleep 0.2; \
+               nohup \"$HOME/.local/share/simp/bin/simp\" --daemon >/dev/null 2>&1 & \
+             fi",
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 /// Downloads the latest `simp-steamos-userland-x86_64.tar.gz` release bundle from GitHub,
@@ -193,13 +219,33 @@ pub fn apply_self_update(
     // so replacing the currently-running binary never triggers `ETXTBSY` ("Text file busy").
     let dest_bin = bin_dest_dir.join("simp");
     let dest_bin_new = bin_dest_dir.join("simp.new");
-    std::fs::copy(&src_bin, &dest_bin_new)?;
+    let _ = std::fs::remove_file(&dest_bin_new);
+    std::fs::copy(&src_bin, &dest_bin_new).with_context(|| {
+        format!(
+            "Failed to write {} (if previously installed with sudo, run: sudo chown -R $USER:$USER ~/.local/share/simp)",
+            dest_bin_new.display()
+        )
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dest_bin_new, std::fs::Permissions::from_mode(0o755));
     }
     std::fs::rename(&dest_bin_new, &dest_bin)?;
+
+    // Also update `uninstall-steamos.sh` in `~/.local/share/simp/bin/` if present in the bundle
+    let src_uninstall = extracted_root.join("uninstall-steamos.sh");
+    if src_uninstall.is_file() {
+        let dest_uninstall = bin_dest_dir.join("uninstall-steamos.sh");
+        let _ = std::fs::remove_file(&dest_uninstall);
+        if std::fs::copy(&src_uninstall, &dest_uninstall).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dest_uninstall, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
 
     // Ensure `~/.local/bin/simp` symlink points to `~/.local/share/simp/bin/simp`
     #[cfg(unix)]
@@ -229,24 +275,7 @@ pub fn apply_self_update(
 
     // 4. Schedule background daemon restart (after a 450ms delay so HTTP response returns first)
     if restart_daemon_after {
-        let _ = Command::new("sh")
-            .arg("-c")
-            .arg(
-                "sleep 0.45 && \
-                 pkill -f 'simp-widevine-worker' 2>/dev/null || true; \
-                 pkill -f '18888/?worker=apple' 2>/dev/null || true; \
-                 if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active simp.service >/dev/null 2>&1; then \
-                   systemctl --user restart simp.service; \
-                 else \
-                   pkill -f 'simp --daemon' 2>/dev/null || true; \
-                   sleep 0.2; \
-                   nohup \"$HOME/.local/share/simp/bin/simp\" --daemon >/dev/null 2>&1 & \
-                 fi",
-            )
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        spawn_delayed_daemon_restart();
     }
 
     let msg = if decky_updated {

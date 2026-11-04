@@ -9,6 +9,45 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# If invoked via `sudo`, resolve the real non-root desktop user (`SUDO_USER` or `deck`)
+# so files in `~/.local/share/simp`, `~/.config/simp`, and `~/homebrew/plugins/simp-decky`
+# are NEVER left owned by `root:root` (which would block future 1-click userland self-updates).
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+  REAL_USER="${SUDO_USER:-}"
+  if [[ -z "${REAL_USER}" || "${REAL_USER}" == "root" ]]; then
+    if id "deck" >/dev/null 2>&1; then
+      REAL_USER="deck"
+    fi
+  fi
+  if [[ -n "${REAL_USER}" && "${REAL_USER}" != "root" ]]; then
+    REAL_UID="$(id -u "${REAL_USER}")"
+    REAL_GID="$(id -g "${REAL_USER}")"
+    REAL_HOME="$(getent passwd "${REAL_USER}" 2>/dev/null | cut -d: -f6 || echo "/home/${REAL_USER}")"
+    export HOME="${REAL_HOME:-/home/${REAL_USER}}"
+    export XDG_RUNTIME_DIR="/run/user/${REAL_UID}"
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${REAL_UID}/bus"
+  else
+    REAL_USER="$(whoami)"
+    REAL_UID="$(id -u)"
+    REAL_GID="$(id -g)"
+  fi
+else
+  REAL_USER="$(whoami)"
+  REAL_UID="$(id -u)"
+  REAL_GID="$(id -g)"
+fi
+
+run_user_systemctl() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 && "${REAL_USER}" != "root" ]]; then
+    sudo -u "${REAL_USER}" \
+      XDG_RUNTIME_DIR="/run/user/${REAL_UID}" \
+      DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${REAL_UID}/bus" \
+      systemctl --user "$@"
+  else
+    systemctl --user "$@"
+  fi
+}
+
 # Detect whether we are running from a packaged release bundle or the git repo
 if [[ -f "${SCRIPT_DIR}/bin/simp" ]]; then
   BUNDLE_ROOT="${SCRIPT_DIR}"
@@ -57,7 +96,7 @@ mkdir -p "${BIN_DEST}" "${UI_DEST}" "${LOCAL_BIN}" "${SYSTEMD_USER_DIR}" "${APPL
 
 # 2. Stop running service, standalone daemon, and any orphaned Widevine worker before replacing binary
 if command -v systemctl >/dev/null 2>&1; then
-  systemctl --user stop simp.service >/dev/null 2>&1 || true
+  run_user_systemctl stop simp.service >/dev/null 2>&1 || true
 fi
 pkill -f "simp --daemon" >/dev/null 2>&1 || true
 pkill -f "simp-widevine-worker" >/dev/null 2>&1 || true
@@ -119,10 +158,20 @@ echo "✓ Installed launcher:   ${DESKTOP_DEST}"
 
 # 6. Install and start systemd user service
 cp "${SERVICE_SRC}" "${SYSTEMD_USER_DIR}/simp.service"
-if command -v systemctl >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; then
-  systemctl --user daemon-reload
-  systemctl --user enable simp.service --now
-  systemctl --user restart simp.service
+
+# Ensure all userland directories and files belong to REAL_USER (even if script was run with `sudo`)
+if [[ "${EUID:-$(id -u)}" -eq 0 && "${REAL_USER}" != "root" ]]; then
+  chown -R "${REAL_UID}:${REAL_GID}" "${INSTALL_ROOT}" "${SYSTEMD_USER_DIR}" "${APPLICATIONS_DIR}" "${HOME}/.local/share/icons" >/dev/null 2>&1 || true
+  chown -h "${REAL_UID}:${REAL_GID}" "${LOCAL_BIN}/simp" >/dev/null 2>&1 || true
+  if [[ -d "${HOME}/.config/simp" ]]; then
+    chown -R "${REAL_UID}:${REAL_GID}" "${HOME}/.config/simp" >/dev/null 2>&1 || true
+  fi
+fi
+
+if command -v systemctl >/dev/null 2>&1 && run_user_systemctl status >/dev/null 2>&1; then
+  run_user_systemctl daemon-reload
+  run_user_systemctl enable simp.service --now
+  run_user_systemctl restart simp.service
   echo "✓ Enabled & started:    systemd user unit (simp.service)"
 else
   echo "ℹ systemd user bus not active in this shell; launch with: simp --daemon"
@@ -131,11 +180,11 @@ fi
 # 7. Optional Decky Loader plugin installation (if ~/homebrew/plugins exists)
 if [[ -d "${DECKY_PLUGINS_DIR}" ]]; then
   DECKY_TARGET="${DECKY_PLUGINS_DIR}/simp-decky"
-  if [[ ! -w "${DECKY_PLUGINS_DIR}" ]] && [[ ! -w "${DECKY_TARGET}" ]]; then
-    echo "ℹ Granting user ownership on ${DECKY_TARGET} so future updates require zero sudo..."
-    sudo mkdir -p "${DECKY_TARGET}" >/dev/null 2>&1 || true
-    sudo rm -rf "${DECKY_TARGET}/simp-decky" >/dev/null 2>&1 || true
-    sudo chown -R "$(id -u):$(id -g)" "${DECKY_TARGET}" >/dev/null 2>&1 || true
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]] || { [[ ! -w "${DECKY_PLUGINS_DIR}" ]] && [[ ! -w "${DECKY_TARGET}" ]]; }; then
+    echo "ℹ Granting ${REAL_USER} ownership on ${DECKY_TARGET} so future 1-click updates require zero sudo..."
+    sudo mkdir -p "${DECKY_TARGET}" >/dev/null 2>&1 || mkdir -p "${DECKY_TARGET}" >/dev/null 2>&1 || true
+    sudo rm -rf "${DECKY_TARGET}/simp-decky" >/dev/null 2>&1 || rm -rf "${DECKY_TARGET}/simp-decky" >/dev/null 2>&1 || true
+    sudo chown -R "${REAL_UID}:${REAL_GID}" "${DECKY_TARGET}" >/dev/null 2>&1 || chown -R "${REAL_UID}:${REAL_GID}" "${DECKY_TARGET}" >/dev/null 2>&1 || true
   fi
 
   if [[ -w "${DECKY_PLUGINS_DIR}" ]] || [[ -w "${DECKY_TARGET}" ]]; then
@@ -146,6 +195,9 @@ if [[ -d "${DECKY_PLUGINS_DIR}" ]]; then
     cp "${DECKY_SRC}/main.py" "${DECKY_TARGET}/"
     if [[ -f "${DECKY_SRC}/dist/index.js" ]]; then
       cp "${DECKY_SRC}/dist/"* "${DECKY_TARGET}/dist/"
+    fi
+    if [[ "${EUID:-$(id -u)}" -eq 0 && "${REAL_USER}" != "root" ]]; then
+      chown -R "${REAL_UID}:${REAL_GID}" "${DECKY_TARGET}" >/dev/null 2>&1 || true
     fi
     echo "✓ Installed Decky QAM:  ${DECKY_TARGET}"
   else
