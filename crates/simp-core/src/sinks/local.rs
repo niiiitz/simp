@@ -243,11 +243,17 @@ impl LocalAudioEngine {
             } else if uri.starts_with("applemusic:") {
                 let settings = load_local_settings_vdf();
                 let source =
-                    crate::sinks::apple_native::source::load_native_apple_music_rodio_source(
-                        &settings, &uri, None,
+                    crate::sinks::apple_native::source::spawn_progressive_apple_music_rodio_source(
+                        settings,
+                        uri.to_string(),
+                        None,
+                        position_ms,
+                        epoch,
+                        self.active_epoch.clone(),
+                        self.tracker.clone(),
+                        self.user_paused.clone(),
                     )?;
-                let skipped = source.skip_duration(target);
-                sink.append(skipped);
+                sink.append(source);
             } else {
                 let file_path_str = uri.strip_prefix("file://").unwrap_or(&uri);
                 let path = Path::new(file_path_str);

@@ -461,7 +461,13 @@ impl AudioOrchestrator {
                 self.apple_sink.is_authenticated = is_auth;
                 self.state.lock().unwrap().apple_authenticated = is_auth;
                 if is_auth {
-                    AppleMusicSink::ensure_headless_widevine_worker();
+                    if let Some(cdm) =
+                        crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library()
+                    {
+                        crate::sinks::apple_native::cdm_host::prewarm_standby_cdm_session(
+                            &cdm.library_path,
+                        );
+                    }
                 }
                 let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
                 let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
@@ -912,13 +918,21 @@ impl AudioOrchestrator {
             self.local_engine.engine_kind()
         };
 
-        // 2. Suspend outgoing sink if switching engines
+        // 2. Suspend outgoing sink if switching engines (unless both Local and AppleMusic
+        // are running on Native Rust PipeWire (`using_native_cdm`), in which case keeping
+        // the stream warm avoids PipeWire stream teardown/re-open overhead!)
+        let using_native_cdm = crate::sinks::apple::is_native_apple_cdm_preferred()
+            && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some();
         let prev_engine = self.state.lock().unwrap().active_engine;
         if prev_engine != target_engine {
             if let Some((prev_sink, _internal_tx, broadcast_tx, _epoch)) =
                 self.sink_and_channels_mut(prev_engine)
             {
-                prev_sink.suspend_sink(broadcast_tx);
+                if using_native_cdm {
+                    prev_sink.pause_playback(broadcast_tx);
+                } else {
+                    prev_sink.suspend_sink(broadcast_tx);
+                }
             }
         }
 
@@ -926,8 +940,6 @@ impl AudioOrchestrator {
         // worker fallback, pre-resolve its canonical catalog ID. (In Native Rust Widevine CDM mode,
         // `fetch_web_playback_manifest` resolves `i.xxxx` asynchronously on the background stream thread
         // so `transition_to_index` never blocks the orchestrator loop!)
-        let using_native_cdm = crate::sinks::apple::is_native_apple_cdm_preferred()
-            && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some();
         if !using_native_cdm && track.uri.starts_with("applemusic:song:i.") {
             let cfg = self.settings.lock().unwrap().clone();
             let artist = track.artists.first().map(|s| s.as_str());

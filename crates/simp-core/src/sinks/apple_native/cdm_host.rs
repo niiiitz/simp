@@ -7,9 +7,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Describes the location and ABI capabilities of a discovered `libwidevinecdm.so` binary on Linux/SteamOS.
@@ -320,39 +319,24 @@ pub fn post_apple_widevine_license_request(
         "user-initiated": true,
     });
 
-    let body_str = serde_json::to_string(&payload)?;
-    let curl_cfg = format!(
-        "url = \"{}\"\nrequest = \"POST\"\nheader = \"User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\"\nheader = \"Authorization: Bearer {}\"\nheader = \"x-apple-music-user-token: {}\"\nheader = \"media-user-token: {}\"\nheader = \"Music-User-Token: {}\"\nheader = \"Content-Type: application/json\"\nheader = \"Origin: https://music.apple.com\"\nheader = \"Referer: https://music.apple.com/\"\ndata = \"{}\"\n",
-        license_server_url.replace('"', "\\\""),
-        dev_token.trim(),
-        user_token.trim(),
-        user_token.trim(),
-        user_token.trim(),
-        body_str.replace('\\', "\\\\").replace('"', "\\\"")
-    );
+    let body_bytes = serde_json::to_vec(&payload)?;
+    let auth_header = format!("Bearer {}", dev_token.trim());
+    let headers = [
+        ("Authorization", auth_header.as_str()),
+        ("x-apple-music-user-token", user_token.trim()),
+        ("media-user-token", user_token.trim()),
+        ("Music-User-Token", user_token.trim()),
+        ("Content-Type", "application/json"),
+        ("Origin", "https://music.apple.com"),
+        ("Referer", "https://music.apple.com/"),
+    ];
 
-    let mut child = Command::new("curl")
-        .args(["-fsSL", "--max-time", "15", "--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to invoke curl for Apple Widevine license exchange")?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(curl_cfg.as_bytes());
-    }
-
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "Apple Widevine license POST failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
+    let resp_bytes =
+        crate::http_pool::http_post_bytes(license_server_url, &headers, &body_bytes, 15)
+            .context("Apple Widevine license POST failed")?;
 
     let resp_json: Value =
-        serde_json::from_slice(&out.stdout).context("Invalid JSON from Apple license server")?;
+        serde_json::from_slice(&resp_bytes).context("Invalid JSON from Apple license server")?;
     let license_b64 = resp_json
         .get("license")
         .and_then(|v| v.as_str())

@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STD, Engine as _};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 
 /// Widevine UUID in ISO-BMFF `pssh` boxes (`edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`).
 pub const WIDEVINE_SYSTEM_ID: [u8; 16] = [
@@ -279,28 +278,17 @@ pub fn parse_apple_media_m3u8(playlist_url: &str, m3u8_text: &str) -> Result<App
     })
 }
 
-/// Fetches raw bytes (with optional HTTP `Range: bytes=start-end`) from an Apple CDN URL.
+/// Fetches raw bytes (with optional HTTP `Range: bytes=start-end`) from an Apple CDN URL
+/// using the persistent in-process `http_pool` (`libcurl.so.4` HTTP/2 connection pool).
 pub fn fetch_hls_bytes(url: &str, byte_range: Option<HlsByteRange>) -> Result<Vec<u8>> {
-    let mut cmd = Command::new("curl");
-    cmd.args(["-fsSL", "--max-time", "20"]);
-    if let Some(br) = byte_range {
+    let range_tuple = byte_range.and_then(|br| {
         if br.length > 0 {
-            let end = br.offset + br.length - 1;
-            cmd.args(["-H", &format!("Range: bytes={}-{}", br.offset, end)]);
+            Some((br.offset, br.offset + br.length - 1))
+        } else {
+            None
         }
-    }
-    cmd.arg(url);
-    let out = cmd
-        .output()
-        .with_context(|| format!("Failed to invoke curl for {url}"))?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "HTTP GET failed for {}: {}",
-            url,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(out.stdout)
+    });
+    crate::http_pool::http_get_bytes(url, &[], range_tuple, 20)
 }
 
 /// Downloads and parses an Apple Music HLS playlist URL (automatically following a Master Playlist

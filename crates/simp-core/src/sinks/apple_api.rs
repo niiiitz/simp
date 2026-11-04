@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use simp_protocol::{SimpSettings, TrackMetadata};
 use std::collections::HashSet;
-use std::io::Write;
-use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 static CACHED_STOREFRONT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -201,8 +199,9 @@ fn resolve_tokens(settings: &SimpSettings) -> Result<(String, String)> {
     Ok((dev_token, user_token))
 }
 
-/// Executes an authenticated `GET` request against `api.music.apple.com` using `curl --config -`
-/// so neither the Developer JWT nor the `Music-User-Token` is exposed in `/proc/<pid>/cmdline`.
+/// Executes an authenticated `GET` request against `api.music.apple.com` using the in-process
+/// `http_pool` (`libcurl.so.4` HTTP/2 connection pool, with `curl --config -` fallback)
+/// so TLS/HTTP2 connections are reused across calls and tokens never appear in `/proc/<pid>/cmdline`.
 fn apple_get_json(url: &str, dev_token: &str, user_token: &str) -> Result<Value> {
     let full_url = if url.starts_with("https://") {
         url.to_string()
@@ -212,64 +211,37 @@ fn apple_get_json(url: &str, dev_token: &str, user_token: &str) -> Result<Value>
         format!("https://api.music.apple.com/{url}")
     };
 
-    let curl_cfg = format!(
-        "url = \"{}\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Music-User-Token: {}\"\nheader = \"Origin: https://music.apple.com\"\nheader = \"Referer: https://music.apple.com/\"\n",
-        full_url.replace('"', "\\\""),
-        dev_token.trim(),
-        user_token.trim()
-    );
+    let auth_header = format!("Bearer {}", dev_token.trim());
+    let headers = [
+        ("Authorization", auth_header.as_str()),
+        ("Music-User-Token", user_token.trim()),
+        ("Origin", "https://music.apple.com"),
+        ("Referer", "https://music.apple.com/"),
+    ];
 
-    let mut child = Command::new("curl")
-        .args(["-fsSL", "--max-time", "12", "--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to spawn curl for Apple Music API request")?;
+    let bytes = crate::http_pool::http_get_bytes(&full_url, &headers, None, 12)
+        .with_context(|| format!("Apple Music API GET failed ({full_url})"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(curl_cfg.as_bytes());
-    }
-
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(anyhow!("Apple Music API GET failed ({}): {}", full_url, err.trim()));
-    }
-
-    serde_json::from_slice(&out.stdout).context("Invalid JSON from Apple Music API")
+    serde_json::from_slice(&bytes).context("Invalid JSON from Apple Music API")
 }
 
-/// Executes an authenticated `POST` request with JSON body against Apple Music endpoints.
+/// Executes an authenticated `POST` request with JSON body against Apple Music endpoints
+/// using the in-process `http_pool` (`libcurl.so.4` HTTP/2 connection pool).
 fn apple_post_json(url: &str, dev_token: &str, user_token: &str, body: &Value) -> Result<Value> {
-    let body_str = serde_json::to_string(body)?;
-    let curl_cfg = format!(
-        "url = \"{}\"\nrequest = \"POST\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Music-User-Token: {}\"\nheader = \"Content-Type: application/json\"\nheader = \"Origin: https://music.apple.com\"\nheader = \"Referer: https://music.apple.com/\"\ndata = \"{}\"\n",
-        url.replace('"', "\\\""),
-        dev_token.trim(),
-        user_token.trim(),
-        body_str.replace('\\', "\\\\").replace('"', "\\\"")
-    );
+    let body_bytes = serde_json::to_vec(body)?;
+    let auth_header = format!("Bearer {}", dev_token.trim());
+    let headers = [
+        ("Authorization", auth_header.as_str()),
+        ("Music-User-Token", user_token.trim()),
+        ("Content-Type", "application/json"),
+        ("Origin", "https://music.apple.com"),
+        ("Referer", "https://music.apple.com/"),
+    ];
 
-    let mut child = Command::new("curl")
-        .args(["-fsSL", "--max-time", "15", "--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to spawn curl for Apple Music POST request")?;
+    let bytes = crate::http_pool::http_post_bytes(url, &headers, &body_bytes, 15)
+        .with_context(|| format!("Apple Music API POST failed ({url})"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(curl_cfg.as_bytes());
-    }
-
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(anyhow!("Apple Music API POST failed ({}): {}", url, err.trim()));
-    }
-
-    serde_json::from_slice(&out.stdout).context("Invalid JSON from Apple Music POST")
+    serde_json::from_slice(&bytes).context("Invalid JSON from Apple Music POST")
 }
 
 pub fn get_storefront(dev_token: &str, user_token: &str) -> String {

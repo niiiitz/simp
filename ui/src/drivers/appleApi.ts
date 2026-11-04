@@ -59,9 +59,6 @@ export function mapAppleItemToTrack(item: any): TrackMetadata | null {
   if (!item) return null;
   const attrs = item.attributes || item;
   const playParams = attrs.playParams || item.playParams || {};
-  // Prefer the live catalog relationship ID (from `?include=catalog`) first in case a library playlist
-  // track's original `playParams.catalogId` was re-uploaded/re-linked by the distributor, then fall back
-  // to `playParams.catalogId`, `playParams.id`, or `item.id`.
   const relCatalogId = item.relationships?.catalog?.data?.[0]?.id;
   const trackId = relCatalogId || playParams.catalogId || playParams.id || item.id || attrs.id;
   if (!trackId) return null;
@@ -283,42 +280,20 @@ export async function disconnectAppleMusicCleanSlate(
   onToast?.('Disconnected Apple Music & wiped cached auth tokens');
 }
 
+async function fetchAppleDaemonJson<T>(endpoint: string): Promise<T> {
+  const r = await fetch(`http://127.0.0.1:18888${endpoint}`);
+  const j = await r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` }));
+  if (!r.ok || !j.ok) {
+    throw new Error(j.error || `Apple Music daemon request failed (${endpoint})`);
+  }
+  return j.data as T;
+}
+
 /**
- * Fetches the user's Cloud Playlists on-demand via the native Rust daemon (`/api/apple/playlists`),
- * falling back to direct browser fetch if needed.
+ * Fetches the user's Cloud Playlists via the native Rust daemon (`/api/apple/playlists`).
  */
 export async function fetchAppleCloudPlaylists(): Promise<AppleCloudPlaylistSummary[]> {
-  try {
-    const r = await fetch('http://127.0.0.1:18888/api/apple/playlists');
-    if (r.ok) {
-      const j = await r.json();
-      if (j.ok && Array.isArray(j.data)) return j.data;
-    }
-  } catch {
-    // Fallback to browser fetch
-  }
-  const { headers } = await getAppleAuthHeaders();
-  let nextUrl: string | null = 'https://api.music.apple.com/v1/me/library/playlists?limit=100';
-  const items: AppleCloudPlaylistSummary[] = [];
-
-  for (let page = 0; page < 3 && nextUrl; page++) {
-    const resp = await fetch(nextUrl, { headers });
-    if (!resp.ok) break;
-    const json = await resp.json();
-    for (const pl of json.data || []) {
-      const attrs = pl.attributes || {};
-      items.push({
-        id: pl.id,
-        name: attrs.name || 'Apple Playlist',
-        description: attrs.description?.standard || 'iCloud Music Library Playlist',
-        art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
-        kind: pl.id.startsWith('pl.') ? 'catalog' : 'library',
-      });
-    }
-    nextUrl = json.next ? `https://api.music.apple.com${json.next}` : null;
-  }
-
-  return items;
+  return fetchAppleDaemonJson<AppleCloudPlaylistSummary[]>('/api/apple/playlists');
 }
 
 /**
@@ -328,42 +303,9 @@ export async function fetchApplePlaylistTracks(
   playlistId: string,
   kind: 'library' | 'catalog' = playlistId.startsWith('pl.') ? 'catalog' : 'library'
 ): Promise<TrackMetadata[]> {
-  try {
-    const r = await fetch(
-      `http://127.0.0.1:18888/api/apple/playlist-tracks?id=${encodeURIComponent(
-        playlistId
-      )}&kind=${encodeURIComponent(kind)}`
-    );
-    if (r.ok) {
-      const j = await r.json();
-      if (j.ok && Array.isArray(j.data)) return j.data;
-    }
-  } catch {
-    // Fallback to browser fetch
-  }
-  const { headers, storefront } = await getAppleAuthHeaders();
-  const cleanId = playlistId.replace(/^applemusic:playlist:/, '');
-  let nextUrl: string | null =
-    kind === 'catalog' || cleanId.startsWith('pl.')
-      ? `https://api.music.apple.com/v1/catalog/${storefront}/playlists/${encodeURIComponent(
-          cleanId
-        )}/tracks?limit=100`
-      : `https://api.music.apple.com/v1/me/library/playlists/${encodeURIComponent(
-          cleanId
-        )}/tracks?include=catalog&limit=100`;
-
-  const tracks: TrackMetadata[] = [];
-  for (let page = 0; page < 5 && nextUrl; page++) {
-    const resp = await fetch(nextUrl, { headers });
-    if (!resp.ok) break;
-    const json = await resp.json();
-    const mapped: TrackMetadata[] = (json.data || [])
-      .map(mapAppleItemToTrack)
-      .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
-    tracks.push(...mapped);
-    nextUrl = json.next ? `https://api.music.apple.com${json.next}` : null;
-  }
-  return tracks;
+  return fetchAppleDaemonJson<TrackMetadata[]>(
+    `/api/apple/playlist-tracks?id=${encodeURIComponent(playlistId)}&kind=${encodeURIComponent(kind)}`
+  );
 }
 
 /**
@@ -403,112 +345,12 @@ export async function fetchFullAppleAlbum(params: {
   albumId?: string | null;
   songUri?: string | null;
 }): Promise<{ album: AppleCloudAlbumSummary; tracks: TrackMetadata[] }> {
-  try {
-    const qs = new URLSearchParams();
-    if (params.albumId) qs.set('album_id', params.albumId);
-    if (params.songUri) qs.set('song_uri', params.songUri);
-    const r = await fetch(`http://127.0.0.1:18888/api/apple/full-album?${qs.toString()}`);
-    if (r.ok) {
-      const j = await r.json();
-      if (j.ok && j.data?.album && Array.isArray(j.data?.tracks)) {
-        return j.data;
-      }
-    }
-  } catch {
-    // Fallback to browser fetch
-  }
-  const { headers, storefront } = await getAppleAuthHeaders();
-
-  let catalogAlbumId: string | null = null;
-
-  if (params.albumId) {
-    const cleanAlb = params.albumId.replace(/^applemusic:album:/, '');
-    if (cleanAlb.startsWith('l.')) {
-      const catResp = await fetch(
-        `https://api.music.apple.com/v1/me/library/albums/${encodeURIComponent(cleanAlb)}/catalog`,
-        { headers }
-      );
-      if (catResp.ok) {
-        const catJson = await catResp.json();
-        catalogAlbumId = catJson?.data?.[0]?.id || null;
-      }
-    } else {
-      catalogAlbumId = cleanAlb;
-    }
-  }
-
-  if (!catalogAlbumId && params.songUri) {
-    const rawSongId = params.songUri
-      .replace(/^applemusic:(song|track):/, '')
-      .replace(/^applemusic:/, '');
-
-    if (rawSongId.startsWith('i.')) {
-      const libSongResp = await fetch(
-        `https://api.music.apple.com/v1/me/library/songs/${encodeURIComponent(
-          rawSongId
-        )}/catalog?include=albums`,
-        { headers }
-      );
-      if (libSongResp.ok) {
-        const libSongJson = await libSongResp.json();
-        const catSong = libSongJson?.data?.[0];
-        catalogAlbumId = catSong?.relationships?.albums?.data?.[0]?.id || null;
-      }
-    } else {
-      const songResp = await fetch(
-        `https://api.music.apple.com/v1/catalog/${storefront}/songs/${encodeURIComponent(
-          rawSongId
-        )}?include=albums`,
-        { headers }
-      );
-      if (songResp.ok) {
-        const songJson = await songResp.json();
-        catalogAlbumId =
-          songJson?.data?.[0]?.relationships?.albums?.data?.[0]?.id || null;
-      }
-    }
-  }
-
-  if (!catalogAlbumId) {
-    throw new Error('Could not resolve full catalog album on Apple Music');
-  }
-
-  const albResp = await fetch(
-    `https://api.music.apple.com/v1/catalog/${storefront}/albums/${encodeURIComponent(
-      catalogAlbumId
-    )}?include=tracks`,
-    { headers }
+  const qs = new URLSearchParams();
+  if (params.albumId) qs.set('album_id', params.albumId);
+  if (params.songUri) qs.set('song_uri', params.songUri);
+  return fetchAppleDaemonJson<{ album: AppleCloudAlbumSummary; tracks: TrackMetadata[] }>(
+    `/api/apple/full-album?${qs.toString()}`
   );
-  if (!albResp.ok) {
-    throw new Error('Failed to load catalog album from Apple Music');
-  }
-  const albJson = await albResp.json();
-  const albData = albJson?.data?.[0];
-  if (!albData) {
-    throw new Error('Catalog album not found');
-  }
-
-  const attrs = albData.attributes || {};
-  const relTracks = albData.relationships?.tracks?.data || [];
-  const tracks: TrackMetadata[] = relTracks
-    .map(mapAppleItemToTrack)
-    .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
-
-  const releaseYear = attrs.releaseDate
-    ? Number(String(attrs.releaseDate).slice(0, 4)) || null
-    : null;
-
-  const summary: AppleCloudAlbumSummary = {
-    id: String(albData.id),
-    title: attrs.name || 'Apple Music Album',
-    artist: attrs.artistName || 'Unknown Artist',
-    art_url: formatAppleArtUrl(attrs.artwork?.url, 400) || tracks[0]?.art_url || null,
-    track_count: tracks.length || Number(attrs.trackCount || 0),
-    release_year: releaseYear,
-    kind: 'catalog',
-  };
-
-  return { album: summary, tracks };
 }
 
 /**
@@ -546,99 +388,11 @@ export async function fetchAppleRadioAndForYou(): Promise<{
   playlists: AppleCloudPlaylistSummary[];
   albums: AppleCloudAlbumSummary[];
 }> {
-  try {
-    const r = await fetch('http://127.0.0.1:18888/api/apple/radio');
-    if (r.ok) {
-      const j = await r.json();
-      if (j.ok && j.data) return j.data;
-    }
-  } catch {
-    // Fallback to browser fetch
-  }
-  const { headers, storefront } = await getAppleAuthHeaders();
-
-  const stations: AppleRadioStationSummary[] = [];
-  const playlists: AppleCloudPlaylistSummary[] = [];
-  const albums: AppleCloudAlbumSummary[] = [];
-  const seenStationIds = new Set<string>();
-  const seenPlaylistIds = new Set<string>();
-  const seenAlbumIds = new Set<string>();
-
-  const pushStation = (st: any, fallbackSub = 'Apple Music Radio') => {
-    if (!st?.id || seenStationIds.has(st.id)) return;
-    seenStationIds.add(st.id);
-    const attrs = st.attributes || {};
-    stations.push({
-      id: st.id,
-      name: attrs.name || 'Radio Station',
-      subtitle: attrs.editorialNotes?.short || fallbackSub,
-      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
-    });
-  };
-
-  const pushItem = (item: any, groupTitle = '') => {
-    if (!item?.id) return;
-    const type = item.type;
-    const attrs = item.attributes || {};
-    if (type === 'stations') {
-      pushStation(item, groupTitle || 'Personal Station');
-    } else if (type === 'playlists' || type === 'library-playlists') {
-      if (seenPlaylistIds.has(item.id)) return;
-      seenPlaylistIds.add(item.id);
-      playlists.push({
-        id: item.id,
-        name: attrs.name || 'Mix',
-        description: attrs.curatorName || groupTitle || 'Made For You',
-        art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
-        kind: item.id.startsWith('pl.') ? 'catalog' : 'library',
-      });
-    } else if (type === 'albums' || type === 'library-albums') {
-      if (seenAlbumIds.has(item.id)) return;
-      seenAlbumIds.add(item.id);
-      albums.push({
-        id: item.id,
-        title: attrs.name || 'Album',
-        artist: attrs.artistName || 'Apple Music',
-        art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
-        track_count: Number(attrs.trackCount || 0),
-        release_year: attrs.releaseDate ? Number(String(attrs.releaseDate).slice(0, 4)) || null : null,
-        kind: item.id.startsWith('l.') ? 'library' : 'catalog',
-      });
-    }
-  };
-
-  await Promise.allSettled([
-    fetch('https://api.music.apple.com/v1/me/recent/radio-stations?limit=12', { headers })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((json) => {
-        for (const st of json?.data || []) pushStation(st, 'Recent Radio Station');
-      }),
-    fetch('https://api.music.apple.com/v1/me/history/heavy-rotation?limit=15', { headers })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((json) => {
-        for (const item of json?.data || []) pushItem(item, 'Heavy Rotation');
-      }),
-    fetch('https://api.music.apple.com/v1/me/recommendations?limit=10', { headers })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((json) => {
-        for (const rec of json?.data || []) {
-          const title = rec.attributes?.title?.stringForDisplay || 'For You';
-          for (const item of rec.relationships?.contents?.data || []) {
-            pushItem(item, title);
-          }
-        }
-      }),
-    fetch(
-      `https://api.music.apple.com/v1/catalog/${storefront}/stations?filter[featured]=apple-music-live-radio`,
-      { headers }
-    )
-      .then((r) => (r.ok ? r.json() : null))
-      .then((json) => {
-        for (const st of json?.data || []) pushStation(st, 'Live Global Radio');
-      }),
-  ]);
-
-  return { stations, playlists, albums };
+  return fetchAppleDaemonJson<{
+    stations: AppleRadioStationSummary[];
+    playlists: AppleCloudPlaylistSummary[];
+    albums: AppleCloudAlbumSummary[];
+  }>('/api/apple/radio');
 }
 
 /**
@@ -649,90 +403,11 @@ export async function fetchAppleNewFeed(): Promise<{
   playlists: AppleCloudPlaylistSummary[];
   songs: TrackMetadata[];
 }> {
-  try {
-    const r = await fetch('http://127.0.0.1:18888/api/apple/new');
-    if (r.ok) {
-      const j = await r.json();
-      if (j.ok && j.data) return j.data;
-    }
-  } catch {
-    // Fallback to browser fetch
-  }
-  const { headers, storefront } = await getAppleAuthHeaders();
-  const albums: AppleCloudAlbumSummary[] = [];
-  const playlists: AppleCloudPlaylistSummary[] = [];
-  const songs: TrackMetadata[] = [];
-  const seenAlbumIds = new Set<string>();
-  const seenPlaylistIds = new Set<string>();
-  const seenSongUris = new Set<string>();
-
-  const pushAlbum = (alb: any) => {
-    if (!alb?.id || seenAlbumIds.has(String(alb.id))) return;
-    seenAlbumIds.add(String(alb.id));
-    const attrs = alb.attributes || {};
-    albums.push({
-      id: String(alb.id),
-      title: attrs.name || 'New Album',
-      artist: attrs.artistName || 'Apple Music',
-      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
-      track_count: Number(attrs.trackCount || 0),
-      release_year: attrs.releaseDate ? Number(String(attrs.releaseDate).slice(0, 4)) || null : null,
-      kind: 'catalog',
-    });
-  };
-
-  const pushPlaylist = (pl: any) => {
-    if (!pl?.id || seenPlaylistIds.has(String(pl.id))) return;
-    seenPlaylistIds.add(String(pl.id));
-    const attrs = pl.attributes || {};
-    playlists.push({
-      id: String(pl.id),
-      name: attrs.name || 'Featured Playlist',
-      description: attrs.curatorName || attrs.editorialNotes?.short || 'Apple Music New & Featured',
-      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
-      kind: 'catalog',
-    });
-  };
-
-  await Promise.allSettled([
-    fetch(
-      `https://api.music.apple.com/v1/catalog/${storefront}/charts?types=albums,playlists,songs&limit=15`,
-      { headers }
-    )
-      .then((r) => (r.ok ? r.json() : null))
-      .then((json) => {
-        const res = json?.results || {};
-        for (const chart of res.albums || []) {
-          for (const alb of chart.data || []) pushAlbum(alb);
-        }
-        for (const chart of res.playlists || []) {
-          for (const pl of chart.data || []) pushPlaylist(pl);
-        }
-        for (const chart of res.songs || []) {
-          for (const item of chart.data || []) {
-            const tr = mapAppleItemToTrack(item);
-            if (tr && !seenSongUris.has(tr.uri)) {
-              seenSongUris.add(tr.uri);
-              songs.push(tr);
-            }
-          }
-        }
-      }),
-    fetch(
-      `https://api.music.apple.com/v1/catalog/${storefront}/search?term=${encodeURIComponent(
-        'New Music Daily'
-      )}&types=playlists,albums&limit=10`,
-      { headers }
-    )
-      .then((r) => (r.ok ? r.json() : null))
-      .then((json) => {
-        const res = json?.results || {};
-        for (const pl of res.playlists?.data || []) pushPlaylist(pl);
-        for (const alb of res.albums?.data || []) pushAlbum(alb);
-      }),
-  ]);
-
-  return { albums, playlists, songs };
+  return fetchAppleDaemonJson<{
+    albums: AppleCloudAlbumSummary[];
+    playlists: AppleCloudPlaylistSummary[];
+    songs: TrackMetadata[];
+  }>('/api/apple/new');
 }
 
 /**
@@ -745,68 +420,9 @@ export async function searchAppleMusicCatalog(
   if (!cleaned) {
     return { songs: [], albums: [], playlists: [], stations: [] };
   }
-  try {
-    const r = await fetch(
-      `http://127.0.0.1:18888/api/apple/search?term=${encodeURIComponent(cleaned)}`
-    );
-    if (r.ok) {
-      const j = await r.json();
-      if (j.ok && j.data) return j.data;
-    }
-  } catch {
-    // Fallback to browser fetch
-  }
-  const { headers, storefront } = await getAppleAuthHeaders();
-  const url = `https://api.music.apple.com/v1/catalog/${storefront}/search?term=${encodeURIComponent(
-    cleaned
-  )}&types=songs,albums,playlists,stations&limit=15`;
-
-  const resp = await fetch(url, { headers });
-  if (!resp.ok) {
-    throw new Error('Apple Music catalog search failed');
-  }
-  const json = await resp.json();
-  const results = json?.results || {};
-
-  const songs: TrackMetadata[] = (results.songs?.data || [])
-    .map(mapAppleItemToTrack)
-    .filter((t: TrackMetadata | null): t is TrackMetadata => t !== null);
-
-  const albums: AppleCloudAlbumSummary[] = (results.albums?.data || []).map((alb: any) => {
-    const attrs = alb.attributes || {};
-    return {
-      id: String(alb.id),
-      title: attrs.name || 'Album',
-      artist: attrs.artistName || 'Unknown Artist',
-      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
-      track_count: Number(attrs.trackCount || 0),
-      release_year: attrs.releaseDate ? Number(String(attrs.releaseDate).slice(0, 4)) || null : null,
-      kind: 'catalog' as const,
-    };
-  });
-
-  const playlists: AppleCloudPlaylistSummary[] = (results.playlists?.data || []).map((pl: any) => {
-    const attrs = pl.attributes || {};
-    return {
-      id: String(pl.id),
-      name: attrs.name || 'Playlist',
-      description: attrs.curatorName || 'Apple Music Playlist',
-      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
-      kind: 'catalog' as const,
-    };
-  });
-
-  const stations: AppleRadioStationSummary[] = (results.stations?.data || []).map((st: any) => {
-    const attrs = st.attributes || {};
-    return {
-      id: String(st.id),
-      name: attrs.name || 'Station',
-      subtitle: attrs.editorialNotes?.short || 'Apple Music Radio',
-      art_url: formatAppleArtUrl(attrs.artwork?.url, 300),
-    };
-  });
-
-  return { songs, albums, playlists, stations };
+  return fetchAppleDaemonJson<AppleCatalogSearchResults>(
+    `/api/apple/search?term=${encodeURIComponent(cleaned)}`
+  );
 }
 
 /**
@@ -859,52 +475,7 @@ export async function resolveReplacementCatalogSongId(rawId: string): Promise<st
       }
     }
   } catch {
-    // Fallback to browser lookup below
-  }
-  try {
-    const { headers, storefront } = await getAppleAuthHeaders();
-    if (rawId.startsWith('i.')) {
-      const relResp = await fetch(
-        `https://api.music.apple.com/v1/me/library/songs/${encodeURIComponent(rawId)}/catalog`,
-        { headers }
-      );
-      if (relResp.ok) {
-        const relJson = await relResp.json();
-        const catId = relJson?.data?.[0]?.id;
-        if (catId) return String(catId);
-      }
-    }
-    if (cur && cur.title && cur.title !== 'Unknown Track') {
-      const artist = cur.artists?.[0] || '';
-      const term = `${cur.title} ${artist}`.trim();
-      const searchResp = await fetch(
-        `https://api.music.apple.com/v1/catalog/${storefront}/search?term=${encodeURIComponent(
-          term
-        )}&types=songs&limit=5`,
-        { headers }
-      );
-      if (searchResp.ok) {
-        const searchJson = await searchResp.json();
-        const candidates: any[] = searchJson?.results?.songs?.data || [];
-        const titleLower = cur.title.toLowerCase();
-        const artistLower = artist.toLowerCase();
-        const exact =
-          candidates.find((c) => {
-            const n = String(c?.attributes?.name || '').toLowerCase();
-            const a = String(c?.attributes?.artistName || '').toLowerCase();
-            return n === titleLower && (!artistLower || a.includes(artistLower));
-          }) || candidates[0];
-        if (exact?.id && String(exact.id) !== rawId) {
-          console.info(
-            `[SIMP AppleMusicDriver] Resolved re-linked catalogId ${exact.id} for stale playlist track ${rawId} ("${cur.title}")`
-          );
-          return String(exact.id);
-        }
-      }
-    }
-  } catch {
-    // ignore fallback lookup errors
+    // ignore
   }
   return null;
 }
-
