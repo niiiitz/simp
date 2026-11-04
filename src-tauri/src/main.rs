@@ -53,6 +53,42 @@ fn main() {
         return;
     }
 
+    // Mode 0b: Native Apple Music HLS + fMP4 + Widevine CDM Diagnostic Probe (`simp probe-apple [song_id]`)
+    if let Some(pos) = args
+        .iter()
+        .position(|arg| arg == "probe-apple" || arg == "--probe-apple")
+    {
+        let settings = simp_daemon::config::load_or_create_settings();
+        let song_id = if let Some(arg_id) = args.get(pos + 1).filter(|s| !s.starts_with('-')) {
+            arg_id.clone()
+        } else if let Ok(res) =
+            simp_core::sinks::apple_api::search_catalog(&settings, "Dev Lemons Broke Your Cover")
+        {
+            res.songs
+                .first()
+                .map(|s| s.uri.clone())
+                .unwrap_or_else(|| "1440857781".to_string())
+        } else {
+            "1440857781".to_string()
+        };
+        println!("🔍 Probing Native Rust Apple Music HLS + fMP4 Pipeline for song_id={song_id}...");
+        match simp_core::sinks::apple_native::source::probe_apple_native_pipeline(
+            &settings, &song_id,
+        ) {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
+            }
+            Err(e) => {
+                eprintln!("❌ Native pipeline probe failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Mode 1: Headless systemd Daemon (`simp --daemon`)
     // Runs on a tight 2-thread Tokio runtime without initializing GTK or WebKitGTK.
     if args.iter().any(|arg| arg == "--daemon" || arg == "-d") {

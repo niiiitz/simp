@@ -92,7 +92,23 @@ if [[ ! -f "${UI_SRC}/index.html" ]]; then
 fi
 
 # 1. Create userland directories
-mkdir -p "${BIN_DEST}" "${UI_DEST}" "${LOCAL_BIN}" "${SYSTEMD_USER_DIR}" "${APPLICATIONS_DIR}"
+mkdir -p "${BIN_DEST}" "${UI_DEST}" "${INSTALL_ROOT}/lib" "${LOCAL_BIN}" "${SYSTEMD_USER_DIR}" "${APPLICATIONS_DIR}"
+
+# 1b. Auto-discover and stage libwidevinecdm.so into ~/.local/share/simp/lib/ if present on system
+if [[ ! -f "${INSTALL_ROOT}/lib/libwidevinecdm.so" ]]; then
+  FOUND_CDM="$(find "${HOME}/.var/app/org.mozilla.firefox/.mozilla/firefox" \
+                    "${HOME}/.mozilla/firefox" \
+                    "${HOME}/.var/app/com.google.Chrome/config/google-chrome/WidevineCdm" \
+                    "${HOME}/.config/google-chrome/WidevineCdm" \
+                    /opt/google/chrome/WidevineCdm \
+                    /usr/lib/chromium \
+                    -name "libwidevinecdm.so" -type f 2>/dev/null | head -n 1 || true)"
+  if [[ -n "${FOUND_CDM}" && -f "${FOUND_CDM}" ]]; then
+    cp "${FOUND_CDM}" "${INSTALL_ROOT}/lib/libwidevinecdm.so" >/dev/null 2>&1 || true
+    chmod 0755 "${INSTALL_ROOT}/lib/libwidevinecdm.so" >/dev/null 2>&1 || true
+    echo "✓ Staged Widevine CDM:  ${INSTALL_ROOT}/lib/libwidevinecdm.so"
+  fi
+fi
 
 # 2. Stop running service, standalone daemon, and any orphaned Widevine worker before replacing binary
 if command -v systemctl >/dev/null 2>&1; then

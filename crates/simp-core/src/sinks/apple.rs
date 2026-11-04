@@ -1,3 +1,4 @@
+use crate::sinks::local::LocalAudioEngine;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use simp_protocol::{PlaybackEvent, SimpSettings};
@@ -5,7 +6,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
@@ -15,14 +16,38 @@ fn worker_slot() -> &'static Mutex<Option<Child>> {
     HEADLESS_WIDEVINE_WORKER.get_or_init(|| Mutex::new(None))
 }
 
-/// Pillar 4: Apple Music Virtual Sink Facade & ES256 Developer Token Signer.
-/// Translates `AudioOrchestrator` transport commands into `PlaybackEvent::AppleSinkCommand`
-/// messages for `<AppleMusicDriver />` (`MusicKit JS` v3) and signs Apple Music Developer
-/// Tokens (`alg: ES256`) on demand from `.p8` private keys.
+/// Returns true when Zero-Browser Native Rust Widevine CDM (`libwidevinecdm.so` FFI) mode is enabled.
+/// Enabled automatically when `SIMP_NATIVE_APPLE_CDM=1` or `~/.config/simp/enable-native-cdm` exists,
+/// and falls back seamlessly to the browser worker if `libwidevinecdm.so` is unavailable.
+pub fn is_native_apple_cdm_preferred() -> bool {
+    if let Ok(val) = std::env::var("SIMP_NATIVE_APPLE_CDM") {
+        let v = val.trim().to_lowercase();
+        if v == "0" || v == "false" || v == "off" {
+            return false;
+        }
+        if v == "1" || v == "true" || v == "on" {
+            return true;
+        }
+    }
+    if let Some(cfg_dir) = dirs::config_dir() {
+        if cfg_dir.join("simp/enable-native-cdm").exists() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Pillar 4: Apple Music Sink Facade, Native Rust Widevine Host & ES256 Developer Token Signer.
+/// Supports both:
+/// 1. **Zero-Browser Native Rust Widevine Mode**: Decrypts `28:ctrp256` HLS fMP4 segments in memory via
+///    `libwidevinecdm.so` FFI and plays them through a native `LocalAudioEngine` (`Symphonia + Rodio`).
+/// 2. **Browser Worker Fallback (`?worker=apple`)**: Emits `PlaybackEvent::AppleSinkCommand` to `<AppleMusicDriver />`.
 #[derive(Clone, Default)]
 pub struct AppleMusicSink {
     pub volume: f64,
     pub is_authenticated: bool,
+    pub native_engine: Arc<Mutex<Option<LocalAudioEngine>>>,
+    pub using_native_engine: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -40,11 +65,18 @@ impl AppleMusicSink {
         Self {
             volume: 0.80,
             is_authenticated: false,
+            native_engine: Arc::new(Mutex::new(None)),
+            using_native_engine: false,
         }
     }
 
     pub fn set_volume(&mut self, normalized_vol: f64) {
         self.volume = normalized_vol.clamp(0.0, 1.0);
+        if let Ok(mut guard) = self.native_engine.lock() {
+            if let Some(ref mut eng) = *guard {
+                eng.set_volume(self.volume);
+            }
+        }
     }
 
     pub fn emit_load_and_play(
@@ -163,6 +195,11 @@ impl AppleMusicSink {
     /// is running in the background on Linux / SteamOS (Gamescope + Desktop Mode) so full-length
     /// DRM-protected Apple Music tracks stream via PipeWire even when `steamwebhelper` lacks Widevine.
     pub fn ensure_headless_widevine_worker() -> bool {
+        if is_native_apple_cdm_preferred()
+            && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some()
+        {
+            return true;
+        }
         if Self::is_headless_worker_active() {
             return true;
         }
@@ -341,39 +378,89 @@ impl crate::sinks::AudioSink for AppleMusicSink {
         &mut self,
         uri: &str,
         start_pos_ms: u32,
-        _epoch: u64,
-        _internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
+        epoch: u64,
+        internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
         broadcast_tx: &broadcast::Sender<PlaybackEvent>,
     ) -> Result<()> {
+        if is_native_apple_cdm_preferred()
+            && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some()
+        {
+            if let Ok(mut guard) = self.native_engine.lock() {
+                let eng = guard.get_or_insert_with(LocalAudioEngine::new);
+                eng.set_volume(self.volume);
+                match eng.load_and_play(uri, start_pos_ms, epoch, internal_event_tx.clone()) {
+                    Ok(()) => {
+                        self.using_native_engine = true;
+                        Self::kill_headless_widevine_worker();
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Native Widevine CDM playback failed ({e}); falling back to browser worker"
+                        );
+                        self.using_native_engine = false;
+                    }
+                }
+            }
+        } else {
+            self.using_native_engine = false;
+        }
+
         self.emit_load_and_play(broadcast_tx, uri, start_pos_ms);
         Ok(())
     }
 
     fn resume_playback(
         &mut self,
-        _epoch: u64,
-        _internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
+        epoch: u64,
+        internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
         broadcast_tx: &broadcast::Sender<PlaybackEvent>,
     ) -> Result<()> {
+        if self.using_native_engine {
+            if let Ok(mut guard) = self.native_engine.lock() {
+                if let Some(ref mut eng) = *guard {
+                    return eng.play(epoch, internal_event_tx.clone());
+                }
+            }
+        }
         self.emit_play(broadcast_tx);
         Ok(())
     }
 
     fn pause_playback(&mut self, broadcast_tx: &broadcast::Sender<PlaybackEvent>) {
+        if self.using_native_engine {
+            if let Ok(mut guard) = self.native_engine.lock() {
+                if let Some(ref mut eng) = *guard {
+                    eng.pause();
+                }
+            }
+        }
         self.emit_pause(broadcast_tx);
     }
 
     fn suspend_sink(&mut self, broadcast_tx: &broadcast::Sender<PlaybackEvent>) {
+        if let Ok(mut guard) = self.native_engine.lock() {
+            if let Some(ref mut eng) = *guard {
+                eng.release_pipewire_stream();
+            }
+        }
         self.emit_pause(broadcast_tx);
     }
 
     fn seek_playback(
         &mut self,
         position_ms: u32,
-        _epoch: u64,
-        _internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
+        epoch: u64,
+        internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
         broadcast_tx: &broadcast::Sender<PlaybackEvent>,
     ) -> Result<()> {
+        if self.using_native_engine {
+            if let Ok(mut guard) = self.native_engine.lock() {
+                if let Some(ref mut eng) = *guard {
+                    return eng.seek(position_ms, epoch, internal_event_tx.clone());
+                }
+            }
+        }
         self.emit_seek(broadcast_tx, position_ms);
         Ok(())
     }
@@ -383,7 +470,23 @@ impl crate::sinks::AudioSink for AppleMusicSink {
         self.emit_volume(broadcast_tx, volume as f64);
     }
 
+    fn live_position_ms(&self) -> Option<u32> {
+        if self.using_native_engine {
+            if let Ok(guard) = self.native_engine.lock() {
+                if let Some(ref eng) = *guard {
+                    return Some(eng.get_position_ms());
+                }
+            }
+        }
+        None
+    }
+
     fn shutdown_sink(&mut self, broadcast_tx: &broadcast::Sender<PlaybackEvent>) {
+        if let Ok(mut guard) = self.native_engine.lock() {
+            if let Some(ref mut eng) = *guard {
+                eng.release_pipewire_stream();
+            }
+        }
         self.emit_pause(broadcast_tx);
         Self::kill_headless_widevine_worker();
     }

@@ -99,6 +99,14 @@ impl LocalAudioEngine {
             let source = crate::sinks::cdda::CddaTrackSource::open_uri(uri)
                 .with_context(|| format!("Failed to open Audio CD track: {uri}"))?;
             sink.append(source);
+        } else if uri.starts_with("applemusic:") {
+            let settings = load_local_settings_vdf();
+            let source =
+                crate::sinks::apple_native::source::load_native_apple_music_rodio_source(
+                    &settings, uri, None,
+                )
+                .with_context(|| format!("Failed to load native Apple Music stream: {uri}"))?;
+            sink.append(source);
         } else {
             let file_path_str = uri.strip_prefix("file://").unwrap_or(uri);
             let path = Path::new(file_path_str);
@@ -208,6 +216,14 @@ impl LocalAudioEngine {
                 let mut source = crate::sinks::cdda::CddaTrackSource::open_uri(&uri)?;
                 let _ = source.try_seek(target);
                 sink.append(source);
+            } else if uri.starts_with("applemusic:") {
+                let settings = load_local_settings_vdf();
+                let source =
+                    crate::sinks::apple_native::source::load_native_apple_music_rodio_source(
+                        &settings, &uri, None,
+                    )?;
+                let skipped = source.skip_duration(target);
+                sink.append(skipped);
             } else {
                 let file_path_str = uri.strip_prefix("file://").unwrap_or(&uri);
                 let path = Path::new(file_path_str);
@@ -586,5 +602,19 @@ impl Source for SymphoniaFileSource {
         Ok(())
     }
 }
+
+fn load_local_settings_vdf() -> simp_protocol::SimpSettings {
+    let path = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("simp")
+        .join("settings.vdf");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(parsed) = keyvalues_serde::from_str::<simp_protocol::SimpSettings>(&text) {
+            return parsed;
+        }
+    }
+    simp_protocol::SimpSettings::default()
+}
+
 
 

@@ -1019,7 +1019,7 @@ pub fn fetch_web_playback_manifest(
 
     let song_obj = json
         .pointer("/songList/0")
-        .ok_or_else(|| anyhow!("No songList entry returned by Apple webPlayback endpoint"))?;
+        .ok_or_else(|| anyhow!("No songList entry returned by Apple webPlayback endpoint (raw response: {json})"))?;
 
     let key_server_url = song_obj
         .get("hls-key-server-url")
@@ -1035,14 +1035,31 @@ pub fn fetch_web_playback_manifest(
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow!("No HLS assets in webPlayback response"))?;
 
-    // Prefer 256kbps AAC-LC (`28:ctrp256`) or first available streamable asset
+    // Prefer 256kbps Widevine CTR (`28:ctrp256`) or 64kbps Widevine CTR (`28:ctrp64`)
+    // ahead of FairPlay-only (`30:cbcp256`) assets so `#EXT-X-KEY` includes the Widevine PSSH!
     let chosen = assets
         .iter()
         .find(|a| {
             a.get("flavor")
                 .and_then(|v| v.as_str())
-                .map(|f| f.contains("256"))
+                .map(|f| f == "28:ctrp256" || f.contains("ctrp256"))
                 .unwrap_or(false)
+        })
+        .or_else(|| {
+            assets.iter().find(|a| {
+                a.get("flavor")
+                    .and_then(|v| v.as_str())
+                    .map(|f| f.contains("ctrp"))
+                    .unwrap_or(false)
+            })
+        })
+        .or_else(|| {
+            assets.iter().find(|a| {
+                a.get("flavor")
+                    .and_then(|v| v.as_str())
+                    .map(|f| f.contains("256"))
+                    .unwrap_or(false)
+            })
         })
         .or_else(|| assets.first())
         .ok_or_else(|| anyhow!("Empty assets list in webPlayback response"))?;

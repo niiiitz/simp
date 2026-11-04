@@ -1,5 +1,6 @@
 pub mod apple;
 pub mod apple_api;
+pub mod apple_native;
 pub mod cdda;
 pub mod local;
 

@@ -109,6 +109,7 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/apple/search", get(apple_search_handler))
         .route("/api/apple/resolve-track", get(apple_resolve_track_handler))
         .route("/api/apple/web-playback", get(apple_web_playback_handler))
+        .route("/api/apple/native-probe", get(apple_native_probe_handler))
         .route("/ws", get(ws_handler))
         .nest_service("/art", ServeDir::new(art_cache_dir));
 
@@ -148,6 +149,8 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
     if initial_apple_auth {
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            // Stage libwidevinecdm.so into ~/.local/share/simp/lib/ if present on disk
+            let _ = simp_core::sinks::apple_native::cdm_host::discover_widevine_cdm_library();
             simp_core::sinks::apple::AppleMusicSink::ensure_headless_widevine_worker();
         });
     }
@@ -356,6 +359,23 @@ async fn apple_web_playback_handler(
     .await;
     match res {
         Ok(Ok(asset)) => Json(serde_json::json!({ "ok": true, "data": asset })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_native_probe_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_native::source::probe_apple_native_pipeline(&cfg, &id)
+    })
+    .await;
+    match res {
+        Ok(Ok(report)) => Json(serde_json::json!({ "ok": true, "data": report })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
