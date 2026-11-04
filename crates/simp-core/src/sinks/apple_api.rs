@@ -919,22 +919,97 @@ pub fn fetch_new_feed(settings: &SimpSettings) -> Result<AppleNewFeedResponse> {
     })
 }
 
+static RESOLVED_CATALOG_ID_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::OnceLock::new();
+
+fn catalog_id_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    RESOLVED_CATALOG_ID_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn lookup_track_title_artist_in_db(clean_id: &str) -> (Option<String>, Option<String>) {
+    if let Some(data_dir) = dirs::data_local_dir() {
+        let db_path = data_dir.join("simp").join("library.db");
+        if let Ok(db) = crate::library::db::LibraryDatabase::open(&db_path) {
+            for prefix in ["applemusic:song:", "applemusic:track:"] {
+                let lookup_uri = format!("{prefix}{clean_id}");
+                if let Ok(Some(meta)) = db.get_track_by_uri(&lookup_uri) {
+                    return (Some(meta.title), meta.artists.first().cloned());
+                }
+            }
+        }
+    }
+    (None, None)
+}
+
+fn search_storefront_catalog_song_id(
+    dev_token: &str,
+    user_token: &str,
+    storefront: &str,
+    clean_id: &str,
+    title: Option<&str>,
+    artist: Option<&str>,
+) -> Option<String> {
+    let t = title.filter(|s| !s.trim().is_empty() && *s != "Unknown Track")?;
+    let a = artist.unwrap_or("").trim();
+    let term = format!("{t} {a}").trim().to_string();
+    let url = format!(
+        "/v1/catalog/{}/search?term={}&types=songs&limit=5",
+        storefront,
+        urlencode(&term)
+    );
+    let json = apple_get_json(&url, dev_token, user_token).ok()?;
+    let candidates = json.pointer("/results/songs/data")?.as_array()?;
+    let t_lower = t.to_lowercase();
+    let a_lower = a.to_lowercase();
+    let chosen = candidates
+        .iter()
+        .find(|c| {
+            let n = c
+                .pointer("/attributes/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let ar = c
+                .pointer("/attributes/artistName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            n == t_lower && (a_lower.is_empty() || ar.contains(&a_lower))
+        })
+        .or_else(|| candidates.first())?;
+
+    let id = chosen.get("id")?.as_str()?;
+    if id != clean_id {
+        Some(id.to_string())
+    } else {
+        None
+    }
+}
+
 /// Resolves a re-linked or tombstoned playlist track ID (`i.xxxx` library song ID or stale catalog ID)
-/// to its active storefront catalog song ID in native Rust.
+/// to its active storefront catalog song ID in native Rust, with an in-memory session cache.
 pub fn resolve_replacement_catalog_song_id(
     settings: &SimpSettings,
     raw_id: &str,
     title: Option<&str>,
     artist: Option<&str>,
 ) -> Result<Option<String>> {
-    let (dev_token, user_token) = resolve_tokens(settings)?;
-    let storefront = get_storefront(&dev_token, &user_token);
     let clean_id = raw_id
         .strip_prefix("applemusic:song:")
         .or_else(|| raw_id.strip_prefix("applemusic:track:"))
         .or_else(|| raw_id.strip_prefix("applemusic:"))
         .unwrap_or(raw_id)
         .trim();
+
+    if let Ok(guard) = catalog_id_cache().lock() {
+        if let Some(cached) = guard.get(clean_id) {
+            return Ok(Some(cached.clone()));
+        }
+    }
+
+    let (dev_token, user_token) = resolve_tokens(settings)?;
+    let storefront = get_storefront(&dev_token, &user_token);
 
     if clean_id.starts_with("i.") {
         if let Ok(json) = apple_get_json(
@@ -943,51 +1018,73 @@ pub fn resolve_replacement_catalog_song_id(
             &user_token,
         ) {
             if let Some(cat_id) = json.pointer("/data/0/id").and_then(|v| v.as_str()) {
-                return Ok(Some(cat_id.to_string()));
+                let resolved = cat_id.to_string();
+                if let Ok(mut guard) = catalog_id_cache().lock() {
+                    guard.insert(clean_id.to_string(), resolved.clone());
+                }
+                return Ok(Some(resolved));
             }
         }
     }
 
-    if let Some(t) = title.filter(|s| !s.trim().is_empty() && *s != "Unknown Track") {
-        let a = artist.unwrap_or("").trim();
-        let term = format!("{t} {a}").trim().to_string();
-        let url = format!(
-            "/v1/catalog/{}/search?term={}&types=songs&limit=5",
-            storefront,
-            urlencode(&term)
-        );
-        if let Ok(json) = apple_get_json(&url, &dev_token, &user_token) {
-            if let Some(candidates) = json.pointer("/results/songs/data").and_then(|v| v.as_array())
-            {
-                let t_lower = t.to_lowercase();
-                let a_lower = a.to_lowercase();
-                let chosen = candidates
-                    .iter()
-                    .find(|c| {
-                        let n = c
-                            .pointer("/attributes/name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_lowercase();
-                        let ar = c
-                            .pointer("/attributes/artistName")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_lowercase();
-                        n == t_lower && (a_lower.is_empty() || ar.contains(&a_lower))
-                    })
-                    .or_else(|| candidates.first());
-
-                if let Some(id) = chosen.and_then(|c| c.get("id")).and_then(|v| v.as_str()) {
-                    if id != clean_id {
-                        return Ok(Some(id.to_string()));
-                    }
-                }
-            }
+    if let Some(resolved) =
+        search_storefront_catalog_song_id(&dev_token, &user_token, &storefront, clean_id, title, artist)
+    {
+        if let Ok(mut guard) = catalog_id_cache().lock() {
+            guard.insert(clean_id.to_string(), resolved.clone());
         }
+        return Ok(Some(resolved));
     }
 
     Ok(None)
+}
+
+/// Forces a storefront catalog search by `title + artist` from `library.db` when a library song's
+/// linked catalog ID fails `acquireWebPlaybackLicense` (e.g. `status: -1003` delisted pressing).
+pub fn force_resolve_catalog_song_by_search(
+    settings: &SimpSettings,
+    song_uri_or_id: &str,
+) -> Result<Option<String>> {
+    let clean_id = song_uri_or_id
+        .strip_prefix("applemusic:song:")
+        .or_else(|| song_uri_or_id.strip_prefix("applemusic:track:"))
+        .or_else(|| song_uri_or_id.strip_prefix("applemusic:"))
+        .unwrap_or(song_uri_or_id)
+        .trim();
+    let (title_opt, artist_opt) = lookup_track_title_artist_in_db(clean_id);
+    if title_opt.is_none() {
+        return Ok(None);
+    }
+    let (dev_token, user_token) = resolve_tokens(settings)?;
+    let storefront = get_storefront(&dev_token, &user_token);
+    if let Some(resolved) = search_storefront_catalog_song_id(
+        &dev_token,
+        &user_token,
+        &storefront,
+        clean_id,
+        title_opt.as_deref(),
+        artist_opt.as_deref(),
+    ) {
+        if let Ok(mut guard) = catalog_id_cache().lock() {
+            guard.insert(clean_id.to_string(), resolved.clone());
+        }
+        return Ok(Some(resolved));
+    }
+    Ok(None)
+}
+
+fn has_widevine_ctrp_asset(json: &Value) -> bool {
+    json.pointer("/songList/0/assets")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter().any(|a| {
+                a.get("flavor")
+                    .and_then(|v| v.as_str())
+                    .map(|f| f.contains("ctrp"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Stage C Browserless Foundation: Queries Apple's `webPlayback` endpoint directly from Rust
@@ -1004,9 +1101,27 @@ pub fn fetch_web_playback_manifest(
         .unwrap_or(song_id)
         .trim();
 
-    let mut active_id = clean_id.to_string();
+    let mut active_id = if let Ok(guard) = catalog_id_cache().lock() {
+        guard
+            .get(clean_id)
+            .cloned()
+            .unwrap_or_else(|| clean_id.to_string())
+    } else {
+        clean_id.to_string()
+    };
+
+    // Always pass `title` and `artist` from `library.db` when resolving `i.xxxx` library tracks
+    // so re-linked pinned playlists (e.g. "Tron Legacy" OST) resolve to their active catalog `salableAdamId`!
+    let mut db_meta_cache: Option<(Option<String>, Option<String>)> = None;
     if active_id.starts_with("i.") {
-        if let Ok(Some(cat_id)) = resolve_replacement_catalog_song_id(settings, &active_id, None, None) {
+        let (t_opt, a_opt) = lookup_track_title_artist_in_db(clean_id);
+        db_meta_cache = Some((t_opt.clone(), a_opt.clone()));
+        if let Ok(Some(cat_id)) = resolve_replacement_catalog_song_id(
+            settings,
+            &active_id,
+            t_opt.as_deref(),
+            a_opt.as_deref(),
+        ) {
             active_id = cat_id;
         }
     }
@@ -1026,27 +1141,22 @@ pub fn fetch_web_playback_manifest(
         &make_payload(&active_id),
     )?;
 
-    if json.pointer("/songList/0").is_none() {
-        // Fallback: check SQLite library.db for track title/artist and resolve replacement catalog song ID
-        let mut title_opt: Option<String> = None;
-        let mut artist_opt: Option<String> = None;
-        if let Some(data_dir) = dirs::data_local_dir() {
-            let db_path = data_dir.join("simp").join("library.db");
-            if let Ok(db) = crate::library::db::LibraryDatabase::open(&db_path) {
-                let lookup_uri = format!("applemusic:song:{clean_id}");
-                if let Ok(Some(meta)) = db.get_track_by_uri(&lookup_uri) {
-                    title_opt = Some(meta.title);
-                    artist_opt = meta.artists.first().cloned();
-                }
-            }
-        }
-        if let Ok(Some(replacement_id)) = resolve_replacement_catalog_song_id(
-            settings,
-            clean_id,
+    if json.pointer("/songList/0").is_none() || !has_widevine_ctrp_asset(&json) {
+        let (title_opt, artist_opt) =
+            db_meta_cache.unwrap_or_else(|| lookup_track_title_artist_in_db(clean_id));
+        let storefront = get_storefront(&dev_token, &user_token);
+        if let Some(replacement_id) = search_storefront_catalog_song_id(
+            &dev_token,
+            &user_token,
+            &storefront,
+            &active_id,
             title_opt.as_deref(),
             artist_opt.as_deref(),
         ) {
             if replacement_id != active_id {
+                if let Ok(mut guard) = catalog_id_cache().lock() {
+                    guard.insert(clean_id.to_string(), replacement_id.clone());
+                }
                 active_id = replacement_id;
                 json = apple_post_json(
                     "https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback",

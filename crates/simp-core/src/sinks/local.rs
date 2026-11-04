@@ -116,6 +116,7 @@ impl LocalAudioEngine {
                 crate::sinks::apple_native::source::spawn_progressive_apple_music_rodio_source(
                     settings,
                     uri.to_string(),
+                    None,
                     start_pos_ms,
                     epoch,
                     self.active_epoch.clone(),

@@ -751,11 +751,46 @@ impl AudioOrchestrator {
             PlaybackEvent::EndOfTrack { epoch } => {
                 // Race condition guard: ignore stale EndOfTrack from a previous epoch!
                 if epoch == self.transition_epoch {
-                    self.advance_queue(false);
+                    let is_apple_track = self
+                        .state
+                        .lock()
+                        .unwrap()
+                        .current_track
+                        .as_ref()
+                        .map(|t| t.uri.starts_with("applemusic:"))
+                        .unwrap_or(false);
+                    let live_pos = self.get_live_position_ms();
+                    if is_apple_track && live_pos == 0 {
+                        // Background Apple Music stream aborted before playing any audio;
+                        // route through the 3-failure circuit breaker so we don't runaway-skip!
+                        self.handle_track_load_failure("Apple Music stream failed to start");
+                    } else {
+                        self.consecutive_failures = 0;
+                        self.advance_queue(false);
+                    }
                 }
             }
             PlaybackEvent::ProgressTick { position_ms } => {
-                self.state.lock().unwrap().position_ms = position_ms;
+                let mut next_apple_uri: Option<String> = None;
+                {
+                    let mut st = self.state.lock().unwrap();
+                    st.position_ms = position_ms;
+                    if position_ms > 0 && st.queue_index + 1 < st.queue.len() {
+                        let candidate = &st.queue[st.queue_index + 1].uri;
+                        if candidate.starts_with("applemusic:") {
+                            next_apple_uri = Some(candidate.clone());
+                        }
+                    }
+                }
+                if position_ms > 0 {
+                    self.consecutive_failures = 0;
+                    if let Some(next_uri) = next_apple_uri {
+                        let cfg = self.settings.lock().unwrap().clone();
+                        crate::sinks::apple_native::source::prefetch_apple_music_track(
+                            cfg, next_uri,
+                        );
+                    }
+                }
                 let _ = self.broadcast_tx.send(PlaybackEvent::ProgressTick { position_ms });
             }
             other => {
@@ -836,7 +871,9 @@ impl AudioOrchestrator {
 
         match load_res {
             Ok(()) => {
-                self.consecutive_failures = 0;
+                if !track.uri.starts_with("applemusic:") {
+                    self.consecutive_failures = 0;
+                }
             }
             Err(e) => {
                 tracing::warn!("AudioSink failed to load track {}: {e}", track.uri);

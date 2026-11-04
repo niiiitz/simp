@@ -1,8 +1,11 @@
 use crate::sinks::apple::AppleMusicSink;
-use crate::sinks::apple_api::fetch_web_playback_manifest;
+use crate::sinks::apple_api::{
+    fetch_web_playback_manifest, force_resolve_catalog_song_by_search, AppleWebPlaybackAsset,
+};
 use crate::sinks::apple_native::{
     cdm_host::{
-        discover_widevine_cdm_library, with_persistent_cdm_session, DiscoveredWidevineCdm,
+        decrypt_segments_for_epoch, discover_widevine_cdm_library,
+        negotiate_apple_license_for_epoch, with_persistent_cdm_session, DiscoveredWidevineCdm,
     },
     hls::{
         fetch_and_parse_apple_hls, fetch_hls_bytes, AppleHlsMediaPlaylist, HlsByteRange,
@@ -18,12 +21,13 @@ use anyhow::{anyhow, Context, Result};
 use rodio::{source::SeekError as RodioSeekError, Source};
 use serde::{Deserialize, Serialize};
 use simp_protocol::SimpSettings;
+use std::collections::VecDeque;
 use std::io::Cursor;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use symphonia::{
     core::{
         audio::SampleBuffer,
@@ -132,6 +136,8 @@ pub struct StreamingPcmState {
 /// progressive lock-free-chunked `rodio::Source`.
 pub struct DecryptedFmp4RodioSource {
     state: Arc<Mutex<StreamingPcmState>>,
+    epoch: u64,
+    active_epoch: Option<Arc<AtomicU64>>,
     local_chunk: Vec<f32>,
     local_chunk_start: usize,
     cursor: usize,
@@ -142,13 +148,20 @@ pub struct DecryptedFmp4RodioSource {
 impl DecryptedFmp4RodioSource {
     /// Creates an immediately-appendable progressive `DecryptedFmp4RodioSource` (44,100 Hz stereo)
     /// whose `StreamingPcmState` is populated asynchronously by the background Widevine worker.
-    pub fn new_progressive(state: Arc<Mutex<StreamingPcmState>>, initial_pos_ms: u32) -> Self {
+    pub fn new_progressive(
+        state: Arc<Mutex<StreamingPcmState>>,
+        initial_pos_ms: u32,
+        epoch: u64,
+        active_epoch: Arc<AtomicU64>,
+    ) -> Self {
         let sample_rate = 44_100u32;
         let channels = 2u16;
         let initial_frame = ((initial_pos_ms as f64 / 1000.0) * (sample_rate as f64)).round() as usize;
         let initial_cursor = initial_frame * (channels as usize);
         Self {
             state,
+            epoch,
+            active_epoch: Some(active_epoch),
             local_chunk: Vec::with_capacity(16_384),
             local_chunk_start: 0,
             cursor: initial_cursor,
@@ -173,6 +186,8 @@ impl DecryptedFmp4RodioSource {
                 is_complete: true,
                 aborted: false,
             })),
+            epoch: 0,
+            active_epoch: None,
             local_chunk: Vec::with_capacity(16_384),
             local_chunk_start: 0,
             cursor: 0,
@@ -206,6 +221,8 @@ impl DecryptedFmp4RodioSource {
                 is_complete: true,
                 aborted: false,
             })),
+            epoch: 0,
+            active_epoch: None,
             local_chunk: Vec::with_capacity(16_384),
             local_chunk_start: 0,
             cursor: 0,
@@ -323,6 +340,13 @@ impl Iterator for DecryptedFmp4RodioSource {
             return Some(s);
         }
 
+        // Immediate epoch-invalidation check when refilling chunk or yielding silence
+        if let Some(ref ae) = self.active_epoch {
+            if ae.load(Ordering::Relaxed) != self.epoch {
+                return None;
+            }
+        }
+
         // Slow path: refill 16,384 samples (~185ms of stereo audio) from StreamingPcmState
         if let Ok(guard) = self.state.lock() {
             if guard.aborted {
@@ -402,6 +426,79 @@ pub fn fetch_hls_init_and_tenc(
     Ok((init_bytes, tenc))
 }
 
+/// Coalesces the `#EXT-X-MAP` initialization segment (`0..1006`) and the initial media segments
+/// (`segments[..initial_count]`) into a SINGLE HTTP Range request whenever they share the same `.mp4` URL,
+/// eliminating an entire TLS + `curl` round-trip during initial track startup!
+pub fn fetch_hls_init_and_initial_segments(
+    playlist: &AppleHlsMediaPlaylist,
+    initial_count: usize,
+) -> Result<((Vec<u8>, TrackEncryptionInfo), Vec<Vec<u8>>)> {
+    let target_segments = &playlist.segments[..initial_count.min(playlist.segments.len())];
+    if let (Some(init_url), Some(init_br)) =
+        (playlist.init_segment_url.as_deref(), playlist.init_byte_range)
+    {
+        if !target_segments.is_empty()
+            && target_segments
+                .iter()
+                .all(|s| s.url == init_url && s.byte_range.map(|b| b.length > 0).unwrap_or(false))
+        {
+            let min_offset = init_br.offset.min(
+                target_segments
+                    .iter()
+                    .filter_map(|s| s.byte_range.map(|b| b.offset))
+                    .min()
+                    .unwrap_or(init_br.offset),
+            );
+            let max_end = (init_br.offset + init_br.length).max(
+                target_segments
+                    .iter()
+                    .filter_map(|s| s.byte_range.map(|b| b.offset + b.length))
+                    .max()
+                    .unwrap_or(0),
+            );
+            if max_end > min_offset && (max_end - min_offset) <= 16 * 1024 * 1024 {
+                if let Ok(bulk) = fetch_hls_bytes(
+                    init_url,
+                    Some(HlsByteRange {
+                        offset: min_offset,
+                        length: max_end - min_offset,
+                    }),
+                ) {
+                    if bulk.len() as u64 == max_end - min_offset {
+                        let i_start = (init_br.offset - min_offset) as usize;
+                        let i_end = i_start + (init_br.length as usize);
+                        if i_end <= bulk.len() {
+                            let init_bytes = bulk[i_start..i_end].to_vec();
+                            let tenc = parse_init_segment_tenc(&init_bytes).unwrap_or_default();
+                            let mut segs = Vec::with_capacity(target_segments.len());
+                            let mut all_ok = true;
+                            for seg in target_segments {
+                                if let Some(br) = seg.byte_range {
+                                    let s_start = (br.offset - min_offset) as usize;
+                                    let s_end = s_start + (br.length as usize);
+                                    if s_end <= bulk.len() {
+                                        segs.push(bulk[s_start..s_end].to_vec());
+                                    } else {
+                                        all_ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if all_ok {
+                                return Ok(((init_bytes, tenc), segs));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let init_and_tenc = fetch_hls_init_and_tenc(playlist)?;
+    let segs = download_hls_segment_slice(target_segments)?;
+    Ok((init_and_tenc, segs))
+}
+
 /// Downloads a slice of `HlsMediaSegment`s, coalescing contiguous byte-range segments that share
 /// the same `.mp4` URL into a single HTTP Range request to minimize TLS/curl round-trips.
 pub fn download_hls_segment_slice(target_segments: &[HlsMediaSegment]) -> Result<Vec<Vec<u8>>> {
@@ -464,16 +561,131 @@ pub fn download_hls_segment_slice(target_segments: &[HlsMediaSegment]) -> Result
     Ok(out)
 }
 
+#[derive(Clone)]
+struct PrefetchedAppleTrack {
+    clean_uri_key: String,
+    manifest: AppleWebPlaybackAsset,
+    playlist: AppleHlsMediaPlaylist,
+    init_bytes: Vec<u8>,
+    tenc: TrackEncryptionInfo,
+    first_segment: Vec<u8>,
+    fetched_at: Instant,
+}
+
+static PREFETCHED_TRACK_CACHE: OnceLock<Mutex<VecDeque<PrefetchedAppleTrack>>> = OnceLock::new();
+static PREFETCH_IN_FLIGHT: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+fn prefetched_track_cache() -> &'static Mutex<VecDeque<PrefetchedAppleTrack>> {
+    PREFETCHED_TRACK_CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(6)))
+}
+
+fn prefetch_in_flight() -> &'static Mutex<std::collections::HashSet<String>> {
+    PREFETCH_IN_FLIGHT.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+fn clean_apple_uri_key(uri: &str) -> String {
+    uri.strip_prefix("applemusic:song:")
+        .or_else(|| uri.strip_prefix("applemusic:track:"))
+        .or_else(|| uri.strip_prefix("applemusic:"))
+        .unwrap_or(uri)
+        .trim()
+        .to_string()
+}
+
+fn take_prefetched_track(song_uri: &str) -> Option<PrefetchedAppleTrack> {
+    let key = clean_apple_uri_key(song_uri);
+    let mut guard = prefetched_track_cache().lock().ok()?;
+    guard.retain(|entry| entry.fetched_at.elapsed() < Duration::from_secs(600));
+    let pos = guard
+        .iter()
+        .position(|e| e.clean_uri_key == key || e.manifest.song_id == key)?;
+    guard.remove(pos)
+}
+
+/// Prefetches the `webPlayback` manifest, `.m3u8` media playlist, `EXT-X-MAP` init segment, and
+/// segment #0 (~10s of encrypted audio, ~165 KB) for an upcoming Apple Music track in the background
+/// so pressing Next or auto-advancing starts audio in ~0.4s without waiting for manifest/HLS downloads.
+pub fn prefetch_apple_music_track(settings: SimpSettings, song_uri: String) {
+    if !song_uri.starts_with("applemusic:") {
+        return;
+    }
+    let key = clean_apple_uri_key(&song_uri);
+    if let Ok(guard) = prefetched_track_cache().lock() {
+        if guard.iter().any(|e| {
+            (e.clean_uri_key == key || e.manifest.song_id == key)
+                && e.fetched_at.elapsed() < Duration::from_secs(600)
+        }) {
+            return;
+        }
+    }
+    if let Ok(mut in_flight) = prefetch_in_flight().lock() {
+        if !in_flight.insert(key.clone()) {
+            return;
+        }
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("simp-apple-prefetch".to_string())
+        .spawn(move || {
+            struct InFlightGuard(String);
+            impl Drop for InFlightGuard {
+                fn drop(&mut self) {
+                    if let Ok(mut set) = prefetch_in_flight().lock() {
+                        set.remove(&self.0);
+                    }
+                }
+            }
+            let _guard = InFlightGuard(key.clone());
+
+            let Ok(manifest) = fetch_web_playback_manifest(&settings, &song_uri) else {
+                return;
+            };
+            let Ok(playlist) = fetch_and_parse_apple_hls(&manifest.hls_playlist_url) else {
+                return;
+            };
+            if playlist.segments.is_empty() {
+                return;
+            }
+            let Ok(((init_bytes, tenc), mut segs)) =
+                fetch_hls_init_and_initial_segments(&playlist, 1)
+            else {
+                return;
+            };
+            let Some(first_segment) = segs.pop() else {
+                return;
+            };
+            if let Ok(mut guard) = prefetched_track_cache().lock() {
+                guard.retain(|e| {
+                    e.clean_uri_key != key
+                        && e.fetched_at.elapsed() < Duration::from_secs(600)
+                });
+                while guard.len() >= 5 {
+                    guard.pop_front();
+                }
+                guard.push_back(PrefetchedAppleTrack {
+                    clean_uri_key: key,
+                    manifest,
+                    playlist,
+                    init_bytes,
+                    tenc,
+                    first_segment,
+                    fetched_at: Instant::now(),
+                });
+            }
+        });
+}
+
 /// Non-blocking progressive Apple Music stream loader for `LocalAudioEngine`:
 /// Returns a `DecryptedFmp4RodioSource` in < 0.1ms and spawns a background worker that:
-/// 1. Negotiates the Widevine CKC license on the persistent `"simp-widevine-cdm"` thread
-///    **in parallel** with downloading the init segment + first 2 media segments (~20s of audio)
-/// 2. Starts audio playback as soon as the first 2 segments are decrypted & decoded (~0.6-0.8s)
-/// 3. Streams & decrypts the remaining segments in batches in the background, aborting immediately
-///    if `active_epoch` advances (e.g. when the user presses Next/Previous).
+/// 1. Uses prefetched manifest/HLS/segment #0 when available (0ms network download!) or coalesces
+///    `init_segment + segments[0]` (~165 KB = 10s of audio) into a single HTTP Range request
+///    **in parallel** with negotiating the Widevine CKC license
+/// 2. Starts audio playback as soon as segment #0 is decrypted & decoded
+/// 3. Prefetches the next track in the queue in the background while streaming the remaining segments
 pub fn spawn_progressive_apple_music_rodio_source(
     settings: SimpSettings,
     song_uri: String,
+    next_track_uri: Option<String>,
     start_pos_ms: u32,
     epoch: u64,
     active_epoch: Arc<AtomicU64>,
@@ -497,7 +709,12 @@ pub fn spawn_progressive_apple_music_rodio_source(
         is_complete: false,
         aborted: false,
     }));
-    let source = DecryptedFmp4RodioSource::new_progressive(state.clone(), start_pos_ms);
+    let source = DecryptedFmp4RodioSource::new_progressive(
+        state.clone(),
+        start_pos_ms,
+        epoch,
+        active_epoch.clone(),
+    );
 
     let mark_aborted = |st: &Arc<Mutex<StreamingPcmState>>| {
         if let Ok(mut g) = st.lock() {
@@ -514,47 +731,59 @@ pub fn spawn_progressive_apple_music_rodio_source(
                 return;
             }
 
-            let manifest = match fetch_web_playback_manifest(&settings, &song_uri) {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!("Apple webPlayback manifest failed for {song_uri}: {e}");
-                    mark_aborted(&state);
-                    return;
-                }
+            // Check if this track was already prefetched while the previous track was playing!
+            let prefetched = if start_pos_ms == 0 {
+                take_prefetched_track(&song_uri)
+            } else {
+                None
             };
+
+            let (manifest, mut playlist, mut preloaded_init_and_seg0) =
+                if let Some(pf) = prefetched {
+                    (
+                        pf.manifest,
+                        pf.playlist,
+                        Some(((pf.init_bytes, pf.tenc), vec![pf.first_segment])),
+                    )
+                } else {
+                    let m = match fetch_web_playback_manifest(&settings, &song_uri) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::warn!("Apple webPlayback manifest failed for {song_uri}: {e}");
+                            mark_aborted(&state);
+                            return;
+                        }
+                    };
+                    if active_epoch.load(Ordering::SeqCst) != epoch {
+                        mark_aborted(&state);
+                        return;
+                    }
+                    let p = match fetch_and_parse_apple_hls(&m.hls_playlist_url) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!("Apple HLS playlist fetch failed for {song_uri}: {e}");
+                            mark_aborted(&state);
+                            return;
+                        }
+                    };
+                    (m, p, None)
+                };
+
             if active_epoch.load(Ordering::SeqCst) != epoch {
                 mark_aborted(&state);
                 return;
-            }
-
-            let playlist = match fetch_and_parse_apple_hls(&manifest.hls_playlist_url) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!("Apple HLS playlist fetch failed for {song_uri}: {e}");
-                    mark_aborted(&state);
-                    return;
-                }
-            };
-            if active_epoch.load(Ordering::SeqCst) != epoch {
-                mark_aborted(&state);
-                return;
-            }
-
-            let total_dur_secs: f64 = playlist.segments.iter().map(|s| s.duration_secs).sum();
-            if let Ok(mut g) = state.lock() {
-                g.total_expected_samples = ((total_dur_secs * 44_100.0).round() as usize) * 2;
             }
 
             // Calculate how many segments are needed before starting audio playback:
-            // Default to first 2 segments (~20s of audio, ~350 KB) so playback begins in < 0.8s!
-            let mut initial_count = 2usize.min(playlist.segments.len());
+            // Default to 1 segment (~10s of audio, ~165 KB coalesced with init_segment in 1 request!)
+            let mut initial_count = 1usize.min(playlist.segments.len());
             if start_pos_ms > 0 {
-                let target_sec = (start_pos_ms as f64 / 1000.0) + 8.0;
+                let target_sec = (start_pos_ms as f64 / 1000.0) + 6.0;
                 let mut accum = 0.0;
                 for (i, seg) in playlist.segments.iter().enumerate() {
                     accum += seg.duration_secs.max(5.0);
                     if accum >= target_sec {
-                        initial_count = (i + 1).max(2).min(playlist.segments.len());
+                        initial_count = (i + 1).max(1).min(playlist.segments.len());
                         break;
                     }
                 }
@@ -568,15 +797,19 @@ pub fn spawn_progressive_apple_music_rodio_source(
                         .to_string()
                 });
 
-            // Run Widevine license negotiation concurrently with downloading init + initial segments!
+            // Run Widevine license negotiation concurrently with downloading init + initial segment!
             let has_inline_pssh = !playlist.widevine_pssh_bytes.is_empty();
             let (dl_res, lic_res) = std::thread::scope(|s| {
                 let playlist_ref = &playlist;
-                let dl_handle = s.spawn(move || -> Result<((Vec<u8>, TrackEncryptionInfo), Vec<Vec<u8>>)> {
-                    let init_and_tenc = fetch_hls_init_and_tenc(playlist_ref)?;
-                    let segs = download_hls_segment_slice(&playlist_ref.segments[..initial_count])?;
-                    Ok((init_and_tenc, segs))
-                });
+                let preloaded = preloaded_init_and_seg0.take();
+                let dl_handle =
+                    s.spawn(move || -> Result<((Vec<u8>, TrackEncryptionInfo), Vec<Vec<u8>>)> {
+                        if let Some(pre) = preloaded {
+                            Ok(pre)
+                        } else {
+                            fetch_hls_init_and_initial_segments(playlist_ref, initial_count)
+                        }
+                    });
 
                 let lic_handle = if has_inline_pssh {
                     let lib_path = cdm_lib.library_path.clone();
@@ -586,17 +819,19 @@ pub fn spawn_progressive_apple_music_rodio_source(
                     let s_id = manifest.song_id.clone();
                     let pl_clone = playlist.clone();
                     let pssh_clone = playlist.widevine_pssh_bytes.clone();
+                    let ae_clone = active_epoch.clone();
                     Some(s.spawn(move || -> Result<()> {
-                        with_persistent_cdm_session(&lib_path, move |cdm| {
-                            cdm.negotiate_apple_license(
-                                &lic_url,
-                                &d_tok,
-                                &u_tok,
-                                &s_id,
-                                &pl_clone,
-                                &pssh_clone,
-                            )
-                        })
+                        negotiate_apple_license_for_epoch(
+                            &lib_path,
+                            epoch,
+                            &ae_clone,
+                            &lic_url,
+                            &d_tok,
+                            &u_tok,
+                            &s_id,
+                            &pl_clone,
+                            &pssh_clone,
+                        )
                     }))
                 } else {
                     None
@@ -621,7 +856,7 @@ pub fn spawn_progressive_apple_music_rodio_source(
                 return;
             }
 
-            let ((init_bytes, tenc), mut initial_segs) = match dl_res {
+            let (mut init_and_tenc, mut initial_segs) = match dl_res {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!("Initial segment download failed for {song_uri}: {e}");
@@ -630,56 +865,105 @@ pub fn spawn_progressive_apple_music_rodio_source(
                 }
             };
 
+            let mut license_ok = false;
             if let Some(lic_r) = lic_res {
-                if let Err(e) = lic_r {
-                    tracing::warn!("Widevine license negotiation failed for {song_uri}: {e}");
-                    mark_aborted(&state);
-                    return;
+                match lic_r {
+                    Ok(()) => license_ok = true,
+                    Err(e) => {
+                        tracing::warn!("Widevine license attempt #1 failed for {song_uri}: {e}");
+                    }
                 }
-            } else {
-                let Some(pssh_bytes) = find_widevine_pssh_in_mp4(&init_bytes) else {
-                    tracing::warn!("No Widevine PSSH found for {song_uri}");
-                    mark_aborted(&state);
-                    return;
-                };
-                let lib_path = cdm_lib.library_path.clone();
-                let lic_url = license_url.clone();
-                let d_tok = dev_token.clone();
-                let u_tok = user_token.clone();
-                let s_id = manifest.song_id.clone();
-                let pl_clone = playlist.clone();
-                if let Err(e) = with_persistent_cdm_session(&lib_path, move |cdm| {
-                    cdm.negotiate_apple_license(&lic_url, &d_tok, &u_tok, &s_id, &pl_clone, &pssh_bytes)
-                }) {
-                    tracing::warn!("Widevine license negotiation failed for {song_uri}: {e}");
-                    mark_aborted(&state);
-                    return;
+            } else if let Some(pssh_bytes) = find_widevine_pssh_in_mp4(&init_and_tenc.0) {
+                match negotiate_apple_license_for_epoch(
+                    &cdm_lib.library_path,
+                    epoch,
+                    &active_epoch,
+                    &license_url,
+                    &dev_token,
+                    &user_token,
+                    &manifest.song_id,
+                    &playlist,
+                    &pssh_bytes,
+                ) {
+                    Ok(()) => license_ok = true,
+                    Err(e) => {
+                        tracing::warn!("Widevine license attempt #1 failed for {song_uri}: {e}");
+                    }
                 }
             }
 
-            if active_epoch.load(Ordering::SeqCst) != epoch {
+            // Self-healing fallback: if a library song's linked catalog ID was delisted (`status: -1003`),
+            // resolve the active storefront pressing by `title + artist` from `library.db` and retry!
+            if !license_ok && active_epoch.load(Ordering::SeqCst) == epoch {
+                if let Ok(Some(replacement_id)) =
+                    force_resolve_catalog_song_by_search(&settings, &song_uri)
+                {
+                    if replacement_id != manifest.song_id {
+                        let retry_uri = format!("applemusic:song:{replacement_id}");
+                        if let Ok(m2) = fetch_web_playback_manifest(&settings, &retry_uri) {
+                            if let Ok(p2) = fetch_and_parse_apple_hls(&m2.hls_playlist_url) {
+                                initial_count = initial_count.min(p2.segments.len());
+                                if let Ok((it2, segs2)) =
+                                    fetch_hls_init_and_initial_segments(&p2, initial_count)
+                                {
+                                    let pssh2 = if !p2.widevine_pssh_bytes.is_empty() {
+                                        Some(p2.widevine_pssh_bytes.clone())
+                                    } else {
+                                        find_widevine_pssh_in_mp4(&it2.0)
+                                    };
+                                    if let Some(pssh_bytes) = pssh2 {
+                                        let lic_url2 =
+                                            m2.key_server_url.clone().unwrap_or_else(|| {
+                                                license_url.clone()
+                                            });
+                                        if negotiate_apple_license_for_epoch(
+                                            &cdm_lib.library_path,
+                                            epoch,
+                                            &active_epoch,
+                                            &lic_url2,
+                                            &dev_token,
+                                            &user_token,
+                                            &m2.song_id,
+                                            &p2,
+                                            &pssh_bytes,
+                                        )
+                                        .is_ok()
+                                        {
+                                            playlist = p2;
+                                            init_and_tenc = it2;
+                                            initial_segs = segs2;
+                                            license_ok = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !license_ok || active_epoch.load(Ordering::SeqCst) != epoch {
                 mark_aborted(&state);
                 return;
             }
 
-            // Decrypt initial segments on the dedicated CDM thread
-            let tenc_clone = tenc.clone();
-            let decrypted_initial = match with_persistent_cdm_session(
-                &cdm_lib.library_path,
-                move |cdm| {
-                    for seg in &mut initial_segs {
-                        cdm.decrypt_fmp4_media_segment_in_place(seg, &tenc_clone)?;
+            let total_dur_secs: f64 = playlist.segments.iter().map(|s| s.duration_secs).sum();
+            if let Ok(mut g) = state.lock() {
+                g.total_expected_samples = ((total_dur_secs * 44_100.0).round() as usize) * 2;
+            }
+
+            let (init_bytes, tenc) = init_and_tenc;
+
+            // Decrypt initial segments on the dedicated CDM thread for `epoch`
+            let decrypted_initial =
+                match decrypt_segments_for_epoch(epoch, initial_segs, tenc.clone()) {
+                    Ok(segs) => segs,
+                    Err(e) => {
+                        tracing::warn!("Failed to decrypt initial segments for {song_uri}: {e}");
+                        mark_aborted(&state);
+                        return;
                     }
-                    Ok(initial_segs)
-                },
-            ) {
-                Ok(segs) => segs,
-                Err(e) => {
-                    tracing::warn!("Failed to decrypt initial segments for {song_uri}: {e}");
-                    mark_aborted(&state);
-                    return;
-                }
-            };
+                };
 
             let clear_init = rewrite_init_segment_enca_to_clear(&init_bytes);
             let mut all_decrypted_segs = Vec::with_capacity(playlist.segments.len());
@@ -713,23 +997,27 @@ pub fn spawn_progressive_apple_music_rodio_source(
                         tr.play();
                     }
                 }
+                // Trigger background prefetch for the next track in the queue now that audio is playing!
+                if let Some(next_uri) = next_track_uri {
+                    prefetch_apple_music_track(settings.clone(), next_uri);
+                }
             }
 
             if is_already_complete {
                 return;
             }
 
-            // Phase 2: Stream & decrypt remaining segments in batches of 5 (~50s of audio per batch)
+            // Phase 2: Stream & decrypt remaining segments in batches (first batch = 3 segments for quick cushion, then 5)
             let mut idx = initial_count;
-            let batch_size = 5usize;
             while idx < playlist.segments.len() {
                 if active_epoch.load(Ordering::SeqCst) != epoch {
                     mark_aborted(&state);
                     return;
                 }
 
-                let end_idx = (idx + batch_size).min(playlist.segments.len());
-                let mut batch_segs =
+                let step = if idx == initial_count { 3usize } else { 5usize };
+                let end_idx = (idx + step).min(playlist.segments.len());
+                let batch_segs =
                     match download_hls_segment_slice(&playlist.segments[idx..end_idx]) {
                         Ok(s) => s,
                         Err(e) => {
@@ -745,16 +1033,7 @@ pub fn spawn_progressive_apple_music_rodio_source(
                     return;
                 }
 
-                let tenc_batch = tenc.clone();
-                let dec_batch = match with_persistent_cdm_session(
-                    &cdm_lib.library_path,
-                    move |cdm| {
-                        for seg in &mut batch_segs {
-                            cdm.decrypt_fmp4_media_segment_in_place(seg, &tenc_batch)?;
-                        }
-                        Ok(batch_segs)
-                    },
-                ) {
+                let dec_batch = match decrypt_segments_for_epoch(epoch, batch_segs, tenc.clone()) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::warn!("Background segment batch decrypt failed: {e}");

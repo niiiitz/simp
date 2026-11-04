@@ -1456,31 +1456,14 @@ impl WidevineCdmSession {
             .unwrap_or_else(|| BASE64_STD.encode(pssh_bytes));
 
         let first_challenge = self.generate_license_challenge(pssh_bytes)?;
-        let first_response = if first_challenge.len() <= 8 {
-            if let Some(cached_cert) = CACHED_APPLE_WIDEVINE_CERT.get() {
-                cached_cert.clone()
-            } else {
-                let cert = post_apple_widevine_license_request(
-                    license_server_url,
-                    dev_token,
-                    user_token,
-                    song_id,
-                    &key_uri_or_b64,
-                    &first_challenge,
-                )?;
-                let _ = CACHED_APPLE_WIDEVINE_CERT.set(cert.clone());
-                cert
-            }
-        } else {
-            post_apple_widevine_license_request(
-                license_server_url,
-                dev_token,
-                user_token,
-                song_id,
-                &key_uri_or_b64,
-                &first_challenge,
-            )?
-        };
+        let first_response = post_apple_widevine_license_request(
+            license_server_url,
+            dev_token,
+            user_token,
+            song_id,
+            &key_uri_or_b64,
+            &first_challenge,
+        )?;
 
         self.host.latest_challenge.clear();
         self.update_session_with_license(&first_response)?;
@@ -1504,19 +1487,14 @@ impl WidevineCdmSession {
     }
 }
 
-static CACHED_APPLE_WIDEVINE_CERT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-
-type CdmThreadJob = Box<dyn FnOnce(&mut Option<WidevineCdmSession>) + Send + 'static>;
+type CdmThreadJob = Box<dyn FnOnce(&mut Option<(u64, WidevineCdmSession)>) + Send + 'static>;
 
 static DEDICATED_CDM_WORKER_TX: std::sync::OnceLock<std::sync::mpsc::Sender<CdmThreadJob>> =
     std::sync::OnceLock::new();
 
-/// Executes a closure against a single persistent `WidevineCdmSession` pinned to a dedicated OS thread
-/// (`"simp-widevine-cdm"`), satisfying Chromium's `base::ThreadChecker` single-thread affinity inside
-/// `libwidevinecdm.so` and avoiding `cdm->Destroy()` teardown between tracks.
-pub fn with_persistent_cdm_session<F, R>(lib_path: &Path, f: F) -> Result<R>
+fn run_on_cdm_worker<F, R>(f: F) -> Result<R>
 where
-    F: FnOnce(&mut WidevineCdmSession) -> Result<R> + Send + 'static,
+    F: FnOnce(&mut Option<(u64, WidevineCdmSession)>) -> Result<R> + Send + 'static,
     R: Send + 'static,
 {
     let tx = DEDICATED_CDM_WORKER_TX.get_or_init(|| {
@@ -1524,7 +1502,7 @@ where
         std::thread::Builder::new()
             .name("simp-widevine-cdm".to_string())
             .spawn(move || {
-                let mut persistent_session: Option<WidevineCdmSession> = None;
+                let mut persistent_session: Option<(u64, WidevineCdmSession)> = None;
                 while let Ok(job) = job_rx.recv() {
                     job(&mut persistent_session);
                 }
@@ -1533,19 +1511,9 @@ where
         job_tx
     });
 
-    let lib_path_buf = lib_path.to_path_buf();
     let (res_tx, res_rx) = std::sync::mpsc::sync_channel::<Result<R>>(1);
-    tx.send(Box::new(move |slot: &mut Option<WidevineCdmSession>| {
-        if slot.is_none() {
-            match WidevineCdmSession::open(&lib_path_buf) {
-                Ok(s) => *slot = Some(s),
-                Err(e) => {
-                    let _ = res_tx.send(Err(e));
-                    return;
-                }
-            }
-        }
-        let res = f(slot.as_mut().unwrap());
+    tx.send(Box::new(move |slot: &mut Option<(u64, WidevineCdmSession)>| {
+        let res = f(slot);
         let _ = res_tx.send(res);
     }))
     .map_err(|_| anyhow!("Dedicated Widevine CDM worker thread terminated unexpectedly"))?;
@@ -1553,6 +1521,143 @@ where
     res_rx
         .recv()
         .map_err(|_| anyhow!("Dedicated Widevine CDM worker thread dropped response channel"))?
+}
+
+/// Opens a fresh `WidevineCdmSession` on the dedicated `"simp-widevine-cdm"` OS thread for `epoch`,
+/// performs the Apple Music Widevine license handshake without blocking the CDM worker thread during
+/// network HTTP calls, and aborts immediately if `active_epoch` advances.
+pub fn negotiate_apple_license_for_epoch(
+    lib_path: &Path,
+    epoch: u64,
+    active_epoch: & std::sync::atomic::AtomicU64,
+    license_server_url: &str,
+    dev_token: &str,
+    user_token: &str,
+    song_id: &str,
+    playlist: &AppleHlsMediaPlaylist,
+    pssh_bytes: &[u8],
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
+
+    if active_epoch.load(Ordering::SeqCst) != epoch {
+        return Err(anyhow!("Track superseded before Widevine session open"));
+    }
+
+    let key_uri_or_b64 = playlist
+        .key_uri
+        .clone()
+        .or_else(|| playlist.widevine_pssh_b64.clone())
+        .unwrap_or_else(|| BASE64_STD.encode(pssh_bytes));
+
+    // Step 1 (on `"simp-widevine-cdm"`, < 0.5ms): Drop any previous track's session, open a fresh
+    // `WidevineCdmSession` for `epoch`, and generate the initial challenge.
+    let lib_path_buf = lib_path.to_path_buf();
+    let pssh_vec = pssh_bytes.to_vec();
+    let first_challenge = run_on_cdm_worker(move |slot| {
+        *slot = None;
+        let mut session = WidevineCdmSession::open(&lib_path_buf)?;
+        let challenge = session.generate_license_challenge(&pssh_vec)?;
+        *slot = Some((epoch, session));
+        Ok(challenge)
+    })?;
+
+    if active_epoch.load(Ordering::SeqCst) != epoch {
+        return Err(anyhow!("Track superseded before license request #1"));
+    }
+
+    // Step 2 (on stream worker thread, NOT holding `"simp-widevine-cdm"`): Exchange challenge #1 via HTTP POST
+    let first_response = post_apple_widevine_license_request(
+        license_server_url,
+        dev_token,
+        user_token,
+        song_id,
+        &key_uri_or_b64,
+        &first_challenge,
+    )?;
+
+    if active_epoch.load(Ordering::SeqCst) != epoch {
+        return Err(anyhow!("Track superseded after license request #1"));
+    }
+
+    // Step 3 (on `"simp-widevine-cdm"`, < 0.5ms): Apply `first_response` via `UpdateSession`
+    let second_challenge = run_on_cdm_worker(move |slot| {
+        let Some((cur_epoch, ref mut session)) = slot else {
+            return Err(anyhow!("Widevine CDM session missing for epoch {epoch}"));
+        };
+        if *cur_epoch != epoch {
+            return Err(anyhow!("Widevine CDM session superseded by epoch {cur_epoch}"));
+        }
+        session.host.latest_challenge.clear();
+        session.update_session_with_license(&first_response)?;
+        Ok(session.host.latest_challenge.clone())
+    })?;
+
+    // Step 4: If `first_challenge` was a 2-byte Privacy Mode Service Certificate Request (`[0x08, 0x04]`),
+    // exchange the resulting full license challenge via HTTP POST and apply the CKC on `"simp-widevine-cdm"`.
+    if !second_challenge.is_empty() {
+        if active_epoch.load(Ordering::SeqCst) != epoch {
+            return Err(anyhow!("Track superseded before license request #2"));
+        }
+        let ckc_license = post_apple_widevine_license_request(
+            license_server_url,
+            dev_token,
+            user_token,
+            song_id,
+            &key_uri_or_b64,
+            &second_challenge,
+        )?;
+        if active_epoch.load(Ordering::SeqCst) != epoch {
+            return Err(anyhow!("Track superseded after license request #2"));
+        }
+        run_on_cdm_worker(move |slot| {
+            let Some((cur_epoch, ref mut session)) = slot else {
+                return Err(anyhow!("Widevine CDM session missing for epoch {epoch}"));
+            };
+            if *cur_epoch != epoch {
+                return Err(anyhow!("Widevine CDM session superseded by epoch {cur_epoch}"));
+            }
+            session.update_session_with_license(&ckc_license)
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Decrypts a batch of fMP4 media segments on `"simp-widevine-cdm"` using the active session for `epoch`.
+pub fn decrypt_segments_for_epoch(
+    epoch: u64,
+    mut segments: Vec<Vec<u8>>,
+    tenc: TrackEncryptionInfo,
+) -> Result<Vec<Vec<u8>>> {
+    run_on_cdm_worker(move |slot| {
+        let Some((cur_epoch, ref mut session)) = slot else {
+            return Err(anyhow!("Widevine CDM session missing for epoch {epoch}"));
+        };
+        if *cur_epoch != epoch {
+            return Err(anyhow!("Widevine CDM session superseded by epoch {cur_epoch}"));
+        }
+        for seg in &mut segments {
+            session.decrypt_fmp4_media_segment_in_place(seg, &tenc)?;
+        }
+        Ok(segments)
+    })
+}
+
+/// Executes a closure against a fresh `WidevineCdmSession` pinned to the dedicated `"simp-widevine-cdm"`
+/// OS thread (used by synchronous one-shot loaders).
+pub fn with_persistent_cdm_session<F, R>(lib_path: &Path, f: F) -> Result<R>
+where
+    F: FnOnce(&mut WidevineCdmSession) -> Result<R> + Send + 'static,
+    R: Send + 'static,
+{
+    let lib_path_buf = lib_path.to_path_buf();
+    run_on_cdm_worker(move |slot| {
+        *slot = None;
+        let mut s = WidevineCdmSession::open(&lib_path_buf)?;
+        let res = f(&mut s);
+        *slot = Some((0, s));
+        res
+    })
 }
 
 impl Drop for WidevineCdmSession {
