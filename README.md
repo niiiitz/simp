@@ -1,198 +1,121 @@
 <div align="center">
-  <img src="ui/public/simp-icon-dark.png" width="190" alt="SIMP — Orange Speaker Portal & Sonic Burst Logo" />
+  <img src="ui/public/simp-icon-dark.png" width="170" alt="SIMP Logo" />
 
-  # Simple Integrated Media Player (decky plugin)
+  # SIMP — Simple Integrated Media Player
 
-  **A controller-first, OLED-safe, hybrid local/cloud audio player, primarily targeted for SteamOS, Bazzite, and `gamescope` consoles.**
+  **A lightweight, controller-friendly music player for SteamOS, Bazzite, Linux desktops, and SteamVR.**
 
   [![Status: v0.1.0-alpha.39](https://img.shields.io/badge/status-v0.1.0--alpha.39-ff6a00?style=flat-square)](#)
-  [![Target: SteamOS / gamescope](https://img.shields.io/badge/target-SteamOS%20%7C%20Deck%20OLED%20%7C%20Steam%20Machine-000000?style=flat-square)](#)
-  [![Daemon: Rust + Tokio + Rodio](https://img.shields.io/badge/daemon-Rust%20%2B%20Tokio%20%2B%20Rodio-dea584?style=flat-square)](#)
-  [![Frontend: React + Decky QAM + MusicKit v3](https://img.shields.io/badge/UI-React%20%2B%20Decky%20QAM%20%2B%20MusicKit%20v3-2aa3c4?style=flat-square)](#)
+  [![Target: SteamOS / Linux / SteamVR](https://img.shields.io/badge/target-SteamOS%20%7C%20Linux%20%7C%20SteamVR-000000?style=flat-square)](#)
+  [![Backend: 100% Native Rust](https://img.shields.io/badge/backend-Native%20Rust-dea584?style=flat-square)](#)
 </div>
 
 ---
 
-## 1. Why create this?
+## What is this?
 
-SIMP seeks to fill a void with media playback from within gamescope; therefore this project seeks to produce an installable artifact that can offer native feeling playback for audio across a range of sources. 
+If you use a Steam Deck, a living-room Bazzite box, or a Linux desktop, playing music while you game is weirdly annoying. You either have to keep a heavy web browser open in the background, juggle separate apps for local files and streaming, or squint at tiny desktop buttons that were never meant for a controller.
 
+**SIMP** is a small, fast media player built to fix that. It runs a tiny Rust audio service in the background and gives you a clean, high-contrast console interface that works just as naturally with a gamepad or VR controller as it does with a mouse and keyboard.
 
-Modern Linux gaming handhelds (**Steam Deck OLED**) and living-room consoles (**SteamOS / Bazzite Steam Machines**) run inside `gamescope` (Steam Game Mode). While Game Mode excels at launching games, audio and music playback remain fragmented and hostile to a console/handheld environment:
-
-1. **No Native Apple Music Path on SteamOS:** There is no official Apple Music client for Linux or SteamOS, and attempting to run the full Apple Music web app inside a nested desktop browser window in Game Mode is unusable with a controller, breaks background playback when closed.
-2. **Ununified Audio Silos:** A player's music is split across downloaded **Steam Soundtracks (OSTs)**, local `FLAC`/`MP3` folders on SD cards or USB drives, **Apple Music** cloud streams, and—on docked/living-room Steam Machines—**physical Audio CDs** in an external USB optical drive.
-3. **OLED Burn-In & Resource Bleed:** Leaving a traditional media player open on an OLED display risks static sub-pixel wear, while heavyweight desktop players waste hundreds of megabytes of RAM and keep PipeWire audio graphs awake even when paused.
-
-**SIMP (`org.simp.player`)** solves these problems by decoupling a microscopic headless Rust audio orchestrator (`simp --daemon`) from a purpose-built **OLED Console UI** and a **Decky Loader Quick Access Menu (`simp-decky`)** drawer.
+*(Screenshots coming soon!)*
 
 ---
 
-## 2. What SIMP does
+## Highlights
 
-### 2.1 Native-ish Apple Music on SteamOS
-To make Apple Music feel like a built-in console service on SteamOS without an official Linux SDK:
-* **Native Rust `ES256` Developer Token Engine:** `simp-core` signs Apple `MusicKit` Developer JWTs directly in Rust (`p256` ECDSA / IEEE P1363) or loads a pre-baked publisher token embedded at release time.
-* **Persistent Headless Widevine Worker (`simp-widevine.service`):** When the user closes the SIMP UI to return to their game, a dedicated lightweight headless Chromium worker (`?worker=apple`) maintains the `MusicKit JS v3` Encrypted Media Extensions (EME) session so cloud tracks advance seamlessly in the background.
-* **LAN QR Companion Pairing (`/pair`):** Typing Apple ID credentials and 2FA codes on a gamepad on-screen keyboard—or using FIDO2/YubiKey/Passkeys inside an embedded WebView—is painful. SIMP serves a LAN pairing portal (`http://<steamdeck-ip>:18888/pair`) via an on-screen QR code so users can authenticate on their iPhone, Android, or PC using Face ID / Touch ID / Passkeys and beam the `Music-User-Token` straight into the SteamOS daemon.
-
-### 2.2 Apple Music Service Feeds & Full-Album Discovery
-SIMP surfaces Apple Music's core discovery and library feeds directly inside the controller-navigable `📚 Library & Queue` browser:
-* **`☁️ Cloud Playlists`:** Browse the user's personal iCloud Music Library playlists without cluttering the local database until explicitly pinned.
-* **`📻 Radio & For You`:** One-tap tuning into Apple Music live/personal Radio stations alongside algorithmic *Made For You* mixes and *Heavy Rotation* albums.
-* **`✨ New` Feed:** Browse Apple Music's *New Releases* and *Top Charts* (albums, featured playlists, and songs).
-* **Unified Live Catalog Search & `💿` Full-Album Resolution:** Typing into the search bar queries local mounts and the live Apple Music catalog simultaneously. Every track—whether playing on the Lock Screen or listed in search/playlists—exposes a **`💿` Open Full Album** action that resolves the complete parent album tracklist on demand.
-
-### 2.3 Lightweight Opt-In Pin Mechanism (`📌 Pinned in SIMP`)
-Users often have hundreds of legacy playlists in their cloud account that they do not want to scroll through on a handheld console:
-* **Zero-Bloat Opt-In Pinning:** Cloud playlists and full catalog albums can be previewed and played immediately, or **Pinned (`📌 Pin`)** into SIMP with a single button press.
-* **Instant Offline-Indexed Startup:** Pinned items (`origin = 'apple_remote'`) have their track metadata and artwork URLs persisted in SIMP's local SQLite `WAL` database (`~/.local/share/simp/library.db`), so the `📌 Pinned in SIMP` tab loads instantaneously on boot without waiting on cloud pagination. Unpinning (`✕`) cleanly removes the cached records.
-
-### 2.4 Comingled Local Files + Streaming Hybrid Playlists
-Most media players force a hard wall between local file queues and DRM streaming queues. SIMP's Rust `Orchestrator` abstracts playback across multiple audio sinks:
-* **Multi-Sink Queue Handoff:** A single queue or **`★ SIMP Hybrid Playlist` (`origin = 'simp_local'`)** can freely interleave local `FLAC`/`MP3`/`WAV`/`OGG`/`OPUS`/`M4A` files, auto-discovered **Steam Soundtracks** (parsed from `steamapps/libraryfolders.vdf`), and **Apple Music** tracks (`applemusic:song:*`).
-* **Automatic Sink Switching:** As the queue advances from a local file to an Apple Music stream (or vice versa), the Rust `Orchestrator` automatically pauses the outgoing sink, initializes the incoming sink (`LocalAudioEngine` via `rodio`/`symphonia` ↔ `AppleMusicVirtualSink` over WebSocket IPC), and synchronizes `MPRIS2` metadata and 60fps progress interpolation.
-
-### 2.5 External USB Optical Media (`cdda://`) & CDDB / MusicBrainz Integration
-For docked Steam Decks and living-room Steam Machines with an attached external USB CD/DVD drive:
-* **Zero-`sudo` Linux `ioctl` CD-DA Reader:** Reads Red Book Audio CD Table of Contents (`CDROMREADTOCHDR`, `CDROMREADTOCENTRY`) and streams raw 44.1 kHz 16-bit stereo PCM frames (`CDROMREADAUDIO`, 2,352 bytes/sector with automatic LBA/MSF fallback) directly from `/dev/sr0`..`/dev/sr3` into `rodio`—using standard Linux `udev` seat permissions (`uaccess` / `optical` group) with **no `sudo` required**.
-* **MusicBrainz DiscID + Cover Art Archive (Modern Open CDDB):** Computes the canonical SHA-1 **MusicBrainz DiscID** and full sector-offset TOC string from the physical disc, resolves album/artist/track titles via the MusicBrainz JSON Web Service (with fuzzy TOC sector matching), downloads front cover art from the Cover Art Archive, and caches the result in SQLite (`cd_cache`) so subsequent insertions of the same disc resolve instantaneously offline.
-* **No Background Drive Polling:** To prevent optical drive motor clicks, spin-up noise, and USB power drain, SIMP **never polls the optical drive in the background**. The drive is queried only on-demand (`🔄 Scan CD`) or while the user is actively viewing the CD source / Sources dialog while the app is awake.
-* **Ephemeral CD Player Ergonomics:** Optical CD tracks (`cdda://`) are intentionally isolated from saved playlists (no `+ Playlist` button)—behaving like a dedicated console CD player with **Play**, **Loop/Repeat**, **true random Shuffle**, **Seek**, and **Hardware Eject (`⏏`)**.
-
-### 2.6 OLED Burn-In Prevention & Handheld Power Engineering
-Designed specifically for the Steam Deck OLED and OLED TVs:
-* **True-Black (`#000000`) Pixel-Off Canvas:** Backgrounds use pure `#000000` so unlit pixels draw zero current and experience zero organic degradation.
-* **8-Point `±2px` Sub-Pixel Orbit:** Every 20 seconds, the root viewport shifts along an imperceptible 8-step circular `±2px` path (`translate3d`), ensuring high-contrast borders and typography never rest on the same sub-pixels.
-* **30-Second Relative Auto-Dim & True-Black Sleep Screen (`🌙`):** After 30 seconds of inactivity, UI luminance drops by 50% relative to the user's brightness setting. Users can also engage a **True-Black OLED Sleep Screen** from the Power Menu (`⏻`) that blanks the screen while keeping a protected wake-tap/button guard active.
-* **60-Second PipeWire DSP Idle-Suspend:** When playback is paused for 60 seconds, `LocalAudioEngine` drops the active ALSA/PipeWire output stream handle so the system audio graph can enter deep power-save (`0.00%` idle CPU).
+* **One queue for everything:** Mix local audio files (`FLAC`, `MP3`, `WAV`, `OGG`, `OPUS`, `M4A`), your installed **Steam Soundtracks**, **Apple Music** streams, and even physical **Audio CDs** (via an external USB drive) inside the same playlist.
+* **No background browser bloat:** Playback, library indexing, and Apple Music streaming run natively in a single ~4 MB Rust background daemon. Close the window to jump back into your game and your music keeps playing with `< 1%` CPU usage.
+* **Pin only what you care about:** Instead of dumping thousands of cloud tracks into your local library, you can browse your cloud playlists, radio stations, and catalog search results on demand, and **Pin** your favorites into SIMP for instant startup.
+* **Adapts to your input:** Pick up a controller and button hints (`L1`, `R1`, `A`, `B`, `X`, `Y`) light up for couch/handheld navigation. Move your mouse on a desktop and the controller badges get out of the way automatically.
+* **Built for OLED screens:** Pure `#000000` black backgrounds, subtle pixel-shifting, automatic idle dimming, and a one-tap sleep screen so you can leave your music up on an OLED display without worrying about burn-in.
+* **Plays nice with your OS & VR:** Integrates natively with Linux media keys and system tray controls (`MPRIS2`) and registers a native SteamVR dashboard overlay (`libopenvr_api.so`) when SteamVR is running.
 
 ---
 
-## 3. System Architecture & Technology Stack
+## Installation (SteamOS / Bazzite / Linux)
 
-```mermaid
-flowchart LR
-  subgraph Clients["Presentation & Control Surfaces"]
-    UI["OLED Console UI\n(React 19 + Vite)"]
-    QAM["simp-decky QAM Plugin\n(SteamOS Quick Access Menu)"]
-    PAIR["LAN Companion Portal\n(http://<ip>:18888/pair)"]
-    MPRIS["Linux MPRIS2 / Media Keys\n(souvlaki D-Bus)"]
-  end
+SIMP installs entirely into your home folder (`~/.local/share/simp`) and runs as a `systemd --user` service. It **never** requires disabling `steamos-readonly` or modifying system files.
 
-  subgraph Daemon["simp --daemon (Headless Rust Orchestrator)"]
-    IPC["Axum WebSocket & HTTP Server\n(127.0.0.1:18888/ws & /art)"]
-    ORCH["Multi-Sink Queue Orchestrator\n(Circuit Breaker + TimeTracker)"]
-    DB[("SQLite WAL Library & CD Cache\n+ Valve .vdf Config")]
-  end
-
-  subgraph Sinks["Audio Execution Sinks"]
-    LOCAL["LocalAudioEngine (rodio + symphonia)\nFLAC / MP3 / WAV / OGG / OPUS / M4A"]
-    CDDA["CddaTrackSource (Linux cdrom ioctl)\n/dev/sr0 Red Book PCM + MusicBrainz"]
-    APPLE["AppleMusicVirtualSink\n(MusicKit v3 + Widevine Worker)"]
-  end
-
-  UI <-->|"WebSocket JSON IPC"| IPC
-  QAM <-->|"WebSocket JSON IPC"| IPC
-  PAIR -->|"ES256 JWT + Music-User-Token"| IPC
-  MPRIS <-->|"D-Bus Transport Events"| ORCH
-  IPC <--> ORCH
-  ORCH <--> DB
-  ORCH --> LOCAL
-  ORCH --> CDDA
-  ORCH <--> APPLE
-```
-
-| Layer | Technology | Role & Design Rationale |
-| :--- | :--- | :--- |
-| **Core Daemon (`simp-daemon`, `simp-core`)** | **Rust**, `tokio` (2-thread runtime), `mimalloc`, `axum` | Sub-15 MB RSS headless background service; serves WebSocket IPC (`/ws`), local cover art (`/art/*`), and the `/pair` web portal on port `18888`. |
-| **Local & Optical Audio (`sinks/local.rs`, `sinks/cdda.rs`)** | `rodio`, `symphonia`, `lofty`, Linux `<linux/cdrom.h>` `ioctl` | Hardware-accelerated decoding, gapless-ready queue transitions, 60s PipeWire stream drop on pause, and direct `/dev/sr0` Red Book CD-DA sector streaming. |
-| **Metadata & Persistence (`library/db.rs`, `library/vdf.rs`)** | `rusqlite` (`WAL` mode), `keyvalues-parser` (`.vdf`), `sha1` | Non-destructive USB/SD hotplug tracking (`mounts`), Steam `libraryfolders.vdf` soundtrack scanner, hybrid playlists, and MusicBrainz `cd_cache`. |
-| **Apple Music Cryptography & DRM (`sinks/apple.rs`)** | Rust `p256` (`ES256` JWT), `MusicKit JS v3`, Chromium EME | Native Developer Token generation + persistent background Widevine worker (`simp-widevine.service`). |
-| **Console UI & Decky QAM (`ui/`, `decky-plugin/`)** | **React 19**, **TypeScript**, `@simp/client`, Valve `webpackChunksteamui` | True-black OLED interface with 2D spatial gamepad navigation (`D-Pad`, `Left/Right Sticks`, `ABXY`, `L1/R1`, `L2/R2`) and native SteamOS QAM focus integration. |
-
----
-
-## 4. Controller & Hardware Input Map
-
-| Control | `🎵 Player` View (`L1`) | `📚 Library & Queue` View (`R1`) / Modals |
-| :--- | :--- | :--- |
-| **`A` Button / `Enter`** | Toggle Play / Pause (`⏯`) | Activate focused item, play track, or open On-Screen Keyboard on text inputs |
-| **`B` Button / `Esc`** | Close active modal/popover or exit fullscreen console | Close On-Screen Keyboard / modal, or return to `🎵 Player` view |
-| **`X` Button** | Toggle Queue Shuffle (`🔀`) | Play selected Album / Playlist / CD in Shuffle mode |
-| **`Y` Button** | Cycle Repeat Mode (`Off` → `Queue` → `Track`) | Cycle Repeat Mode |
-| **`D-Pad Left / Right`** | Previous (`⏮`) / Next (`⏭`) Track | 2D Spatial Focus Navigation across columns |
-| **`D-Pad Up / Down`** | Master Volume `+5%` / `-5%` | 2D Spatial Focus Navigation up/down lists (1 row per click) |
-| **`L1` / `R1` Bumpers** | Switch to `🎵 Player` (`L1`) / `📚 Library & Queue` (`R1`) | Switch between `🎵 Player` (`L1`) and `📚 Library & Queue` (`R1`) |
-| **`L2` / `R2` Triggers** | Seek `-10s` (`⏪`) / `+10s` (`⏩`) | Seek `-10s` (`⏪`) / `+10s` (`⏩`) |
-| **`Select` / `View`** | Open **Sources, Optical CD & Auth** Modal | Open/Close **Sources, Optical CD & Auth** Modal |
-| **`Start` / `Menu`** | Open **Power, OLED Sleep & System** Modal (`⏻`) | Open/Close **Power, OLED Sleep & System** Modal (`⏻`) |
-
----
-
-## 5. Installation & First-Time Setup (SteamOS / Bazzite)
-
-Download `simp-steamos-userland-x86_64.tar.gz` from the [latest GitHub Release](https://github.com/niiiitz/simp/releases), then run the following 4 commands in a terminal (or over SSH):
+Grab `simp-steamos-userland-x86_64.tar.gz` from the [latest GitHub Release](https://github.com/niiiitz/simp/releases) and run:
 
 ```bash
 rm -rf /tmp/simp-steamos-userland && tar -xzf simp-steamos-userland-x86_64.tar.gz -C /tmp
-cd /tmp/simp-steamos-userland
-./install-steamos.sh
-sudo rm -rf "/home/deck/homebrew/plugins/simp-decky" && sudo cp -r "/tmp/simp-steamos-userland/simp-decky" "/home/deck/homebrew/plugins/simp-decky" && sudo systemctl restart plugin_loader
+/tmp/simp-steamos-userland/install-steamos.sh
 ```
 
-> **Note:** `./install-steamos.sh` installs the userland `simp` binary (`~/.local/share/simp/bin/simp`), Web UI (`~/.local/share/simp/ui`), desktop launcher, and `systemd --user` service (`simp.service`) without disabling `steamos-readonly`. Because Decky Loader owns `/home/deck/homebrew/plugins` as `root`, the final `sudo cp -r ... && sudo systemctl restart plugin_loader` command deploys the `simp-decky` QAM plugin and reloads Decky.
+Once installed:
+* **Launch:** Open **SIMP** from your desktop application menu, run `simp` in a terminal, or right-click **SIMP** in your app menu and select **Add to Steam** to launch it straight from Game Mode or SteamVR.
+* **Update:** Run `simp update` in a terminal, or open the in-app Power menu (`⏻`) and click **Update SIMP**.
+* **Uninstall:** Run `~/.local/share/simp/bin/uninstall-steamos.sh`.
 
-### Apple Music Pairing Guidance & Known `steamwebhelper` Limitation
-
-> [!IMPORTANT]
-> **Pair Apple Music in Desktop Mode or via a LAN Browser (`http://<device-ip>:18888/pair`):**
-> Initial Apple Music authorization is best performed in **SteamOS Desktop Mode** (opening `http://127.0.0.1:18888/pair` in Firefox/Chrome/Brave) or by scanning the **Companion QR Code** on a phone/PC on the same network.
->
-> **Known Issue ([#7](https://github.com/niiiitz/simp/issues/7) — `steamwebhelper` Game Mode OAuth Consent Popup):**
-> When attempting to sign into Apple Music directly inside the Game Mode `steamwebhelper` overlay, Apple's initial sign-in window opens and accepts credentials/2FA, but `steamwebhelper` fails to transition to or open the subsequent Apple Music data-access consent screen ("Allow access to your Apple Music account"). Because the user cannot click *Continue/Agree* on that second step, backing out of the overlay results in an invalid/incomplete OAuth error and the app remains signed out. Completing the one-time pairing in **Desktop Mode** (or via the LAN `/pair` portal) stores the `Music-User-Token` in the daemon (`~/.config/simp/settings.vdf`), after which playback and browsing work natively inside Game Mode.
+> **Optional Decky Loader Plugin (Handheld Steam Deck):**
+> SIMP works standalone and does **not** require Decky Loader. If you use Decky on a Steam Deck and want the optional Quick Access Menu drawer, you can install `simp-decky.zip` from the release page via Decky's *Install from ZIP* menu.
 
 ---
 
-## 6. Repository Layout & Developer Quick Start
+## Usage & Troubleshooting
 
-```text
-simp/
-├── crates/
-│   ├── simp-protocol/    # Shared serde IPC commands, events, OpticalDiscStatus & TrackMetadata
-│   ├── simp-core/        # Multi-sink Orchestrator, Local/CDDA/Apple sinks, SQLite/VDF indexer, MPRIS2
-│   └── simp-daemon/      # Headless systemd daemon + Axum WebSocket / Artwork / Pairing HTTP server
-├── src-tauri/            # Unified `simp` binary entrypoint (`--daemon` vs `--ui` / `--apple-worker`)
-├── packages/simp-client/ # Shared TypeScript WebSocket SDK (`@simp/client`)
-├── ui/                   # OLED Console Mode React + Vite frontend
-├── decky-plugin/         # `simp-decky` SteamOS Quick Access Menu (QAM) plugin
-└── scripts/              # SteamOS release packaging & one-line installer scripts
-```
+### Signing into Apple Music (Use the QR Code or Desktop Mode)
+Typing passwords and 2FA codes on a controller keyboard is no fun, and Steam's embedded Game Mode browser (`steamwebhelper`) has a known quirk ([#7](https://github.com/niiiitz/simp/issues/7)) where it blocks Apple's second "Allow access" confirmation popup.
 
-### Local Development (Linux / SteamOS / WSL2)
+To sign in smoothly (you only need to do this once):
+1. Open **Sources (`Select`)** in SIMP.
+2. Either scan the on-screen **QR Code** with your phone/PC on the same Wi-Fi network, **or** open `http://127.0.0.1:18888/pair` in Firefox/Chrome while in Desktop Mode.
+3. Once signed in, your token is saved to `~/.config/simp/settings.vdf` and Apple Music will work automatically everywhere (including Game Mode).
+
+### Controller Shortcuts
+
+| Button | On the Player Screen (`L1`) | In Library & Queue (`R1`) |
+| :--- | :--- | :--- |
+| **`A` / `Enter`** | Play / Pause | Play selected track, press button, or open keyboard on search boxes |
+| **`B` / `Esc`** | Close popups | Back out of menus / return to Player screen |
+| **`X` / `Y`** | Toggle Shuffle (`X`) / Cycle Repeat (`Y`) | Toggle Shuffle (`X`) / Cycle Repeat (`Y`) |
+| **`D-Pad Left / Right`** | Previous / Next track | Move between left and right columns |
+| **`D-Pad Up / Down`** | Volume `+5%` / `-5%` | Scroll up and down lists |
+| **`L1` / `R1` Bumpers** | Switch to Player (`L1`) / Library (`R1`) | Switch to Player (`L1`) / Library (`R1`) |
+| **`L2` / `R2` Triggers** | Rewind `-10s` / Fast-Forward `+10s` | Rewind `-10s` / Fast-Forward `+10s` |
+| **`Select` / `Start`** | Open Sources (`Select`) / Power Menu (`Start`) | Open Sources (`Select`) / Power Menu (`Start`) |
+
+### Where Things Live & Common Fixes
+
+* **Settings & Provisioning Config:** `~/.config/simp/settings.vdf` (Human-readable Valve VDF file holding your watched music folders, audio preferences, and CDM/update URLs).
+* **Database & Cache:** `~/.local/share/simp/library.db` (SQLite database for local tracks, pinned cloud playlists, and cached Audio CD lookups).
+* **Audio stops or daemon feels stuck:** Open the Power menu (`⏻`) inside SIMP and click **Restart Audio Daemon**, or run `systemctl --user restart simp.service`.
+* **Checking logs:** Run `journalctl --user -u simp.service -f` to see live logs from the background player.
+* **Optical Audio CDs not showing up:** SIMP never polls `/dev/sr0` in the background (so your USB disc drive doesn't click or spin up randomly). Pop in a CD, open **Sources**, and click **Scan CD**.
+
+---
+
+## How It Works Under the Hood
+
+SIMP is split into two pieces so the UI never weighs down your system:
+
+1. **The Rust Background Daemon (`simp --daemon`):** A tiny background service (`simp-core` + `simp-daemon`) that indexes your local music and Steam soundtracks into SQLite, talks to PipeWire/ALSA via `rodio` and `symphonia`, handles Apple Music HLS streams and Widevine decryption in-process, reads Red Book Audio CDs via Linux `cdrom` ioctls, and exposes system media controls (`MPRIS2` & OpenVR).
+2. **The Console UI (`http://127.0.0.1:18888`):** A lightweight React frontend served locally by the daemon over WebSockets. Because all state lives in the daemon, you can open the UI in a standalone app window, view it in VR, or even open `http://<your-device-ip>:18888` on your phone to use it as a couch remote.
+
+### Building from Source
 
 ```bash
-# 1. Start the headless Rust audio & IPC daemon (ws://127.0.0.1:18888/ws)
+# Run the background daemon in development
 cargo run -p simp -- --daemon
 
-# 2. Launch the OLED Console UI dev server (http://localhost:1420)
+# Start the UI dev server
 npm run dev:ui
 
-# 3. Build production UI, Decky plugin, and run Rust test suite
-npm run build:ui && npm run build:decky && cargo test --workspace
+# Build a full release bundle into dist/
+./packaging/scripts/package-release.sh
 ```
 
 ---
 
-## 7. License & Trademark Disclaimer
-
+## Disclaimer
 
 > **Trademark & Non-Affiliation Notice:**
-> **SIMP (Simple Integrated Media Player)** is an independent, third-party software project and is **not** affiliated with, endorsed by, sponsored by, or officially connected to **Valve Corporation**, **Apple Inc.**, **MetaBrainz Foundation**, or any of their subsidiaries or affiliates.
+> **SIMP (Simple Integrated Media Player)** is an independent, third-party open-source project and is **not** affiliated with, endorsed by, sponsored by, or officially connected to **Valve Corporation**, **Apple Inc.**, **SoundCloud**, **MetaBrainz Foundation**, or any of their subsidiaries or affiliates.
 >
-> * **Steam**, **SteamOS**, **Steam Deck**, and **Steam Machine** are trademarks and/or registered trademarks of **Valve Corporation** in the U.S. and/or other countries.
-> * **Apple**, **Apple Music**, **MusicKit**, **iCloud**, **iPhone**, **Face ID**, and **Touch ID** are trademarks of **Apple Inc.**, registered in the U.S. and other countries and regions.
+> * **Steam**, **SteamOS**, **Steam Deck**, **SteamVR**, and **Steam Frame** are trademarks and/or registered trademarks of **Valve Corporation**.
+> * **Apple**, **Apple Music**, and **MusicKit** are trademarks of **Apple Inc.**
 > * **MusicBrainz** and **Cover Art Archive** are trademarks of the **MetaBrainz Foundation**.
 >
-> All product, service, and company names mentioned in this repository are used strictly for identification and interoperability purposes (nominative fair use).
-
+> All product, service, and company names are used strictly for identification and interoperability purposes (nominative fair use).
