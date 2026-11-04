@@ -570,12 +570,33 @@ static CDM_FILE_IO_VTABLE: CdmFileIoVtable = CdmFileIoVtable {
 };
 
 // --- `cdm::Host_10` / `cdm::Host_11` C++ VTable & Instance ---
+// Exact slot order from Chromium `media/cdm/api/content_decryption_module.h`:
+//   0: Allocate(uint32_t capacity) -> Buffer*
+//   1: SetTimer(int64_t delay_ms, void* context)
+//   2: GetCurrentWallTime() -> Time (double)
+//   3: OnInitialized(bool success)
+//   4: OnResolveKeyStatusPromise(uint32_t promise_id, KeyStatus key_status)
+//   5: OnResolveNewSessionPromise(uint32_t promise_id, const char* session_id, uint32_t session_id_size)
+//   6: OnResolvePromise(uint32_t promise_id)
+//   7: OnRejectPromise(uint32_t promise_id, Exception exception, uint32_t system_code, const char* error_message, uint32_t error_message_size)
+//   8: OnSessionMessage(const char* session_id, uint32_t session_id_size, MessageType message_type, const char* message, uint32_t message_size)
+//   9: OnSessionKeysChange(const char* session_id, uint32_t session_id_size, bool has_additional_usable_key, const KeyInformation* keys_info, uint32_t keys_info_count)
+//  10: OnExpirationChange(const char* session_id, uint32_t session_id_size, Time new_expiry_time)
+//  11: OnSessionClosed(const char* session_id, uint32_t session_id_size)
+//  12: SendPlatformChallenge(const char* service_id, uint32_t service_id_size, const char* challenge, uint32_t challenge_size)
+//  13: EnableOutputProtection(uint32_t desired_protection_mask)
+//  14: QueryOutputProtectionStatus()
+//  15: OnDeferredInitializationDone(StreamType stream_type, Status decoder_status)
+//  16: CreateFileIO(FileIOClient* client) -> FileIO*
+//  17: RequestStorageId(uint32_t version)
+//  18: ReportMetrics(MetricName metric_name, uint64_t value) [Host_11+]
 
 #[repr(C)]
 struct CdmHostVtable {
     allocate: unsafe extern "C" fn(*mut CdmHostState, u32) -> *mut CdmBufferImpl,
     set_timer: unsafe extern "C" fn(*mut CdmHostState, i64, *mut c_void),
     get_current_wall_time: unsafe extern "C" fn(*mut CdmHostState) -> f64,
+    on_initialized: unsafe extern "C" fn(*mut CdmHostState, bool),
     on_resolve_key_status_promise: unsafe extern "C" fn(*mut CdmHostState, u32, u32),
     on_resolve_new_session_promise:
         unsafe extern "C" fn(*mut CdmHostState, u32, *const c_char, u32),
@@ -601,7 +622,6 @@ struct CdmHostVtable {
     on_deferred_initialization_done: unsafe extern "C" fn(*mut CdmHostState, u32, u32),
     create_file_io: unsafe extern "C" fn(*mut CdmHostState, *mut c_void) -> *mut c_void,
     request_storage_id: unsafe extern "C" fn(*mut CdmHostState, u32),
-    on_initialized: unsafe extern "C" fn(*mut CdmHostState, bool),
     // Extra slot used by `cdm::Host_11::ReportMetrics`
     report_metrics: unsafe extern "C" fn(*mut CdmHostState, u32, u64),
     dtor_complete: unsafe extern "C" fn(*mut CdmHostState),
@@ -618,13 +638,21 @@ pub struct CdmHostState {
     pub usable_keys_count: usize,
     pub last_rejection: Option<String>,
     pub trace_log: Vec<String>,
+    pub pending_timers: Vec<(i64, *mut c_void)>,
 }
 
 unsafe extern "C" fn host_allocate(_this: *mut CdmHostState, capacity: u32) -> *mut CdmBufferImpl {
     CdmBufferImpl::allocate(capacity)
 }
 
-unsafe extern "C" fn host_set_timer(_this: *mut CdmHostState, _delay_ms: i64, _context: *mut c_void) {
+unsafe extern "C" fn host_set_timer(this: *mut CdmHostState, delay_ms: i64, context: *mut c_void) {
+    let this_ref = &mut *this;
+    this_ref
+        .trace_log
+        .push(format!("Host::SetTimer(delay_ms={delay_ms})"));
+    if delay_ms <= 100 && !context.is_null() {
+        this_ref.pending_timers.push((delay_ms, context));
+    }
 }
 
 unsafe extern "C" fn host_get_current_wall_time(_this: *mut CdmHostState) -> f64 {
@@ -635,34 +663,49 @@ unsafe extern "C" fn host_get_current_wall_time(_this: *mut CdmHostState) -> f64
 }
 
 unsafe extern "C" fn host_on_resolve_key_status_promise(
-    _this: *mut CdmHostState,
-    _promise_id: u32,
-    _key_status: u32,
+    this: *mut CdmHostState,
+    promise_id: u32,
+    key_status: u32,
 ) {
+    let this_ref = &mut *this;
+    this_ref.trace_log.push(format!(
+        "Host::OnResolveKeyStatusPromise(promise={promise_id}, status={key_status})"
+    ));
 }
 
 unsafe extern "C" fn host_on_resolve_new_session_promise(
     this: *mut CdmHostState,
-    _promise_id: u32,
+    promise_id: u32,
     session_id: *const c_char,
     session_id_size: u32,
 ) {
+    let this_ref = &mut *this;
     if !session_id.is_null() && session_id_size > 0 {
         let bytes = std::slice::from_raw_parts(session_id as *const u8, session_id_size as usize);
-        (*this).session_id = String::from_utf8_lossy(bytes).to_string();
+        this_ref.session_id = String::from_utf8_lossy(bytes).to_string();
     }
+    this_ref.trace_log.push(format!(
+        "Host::OnResolveNewSessionPromise(promise={promise_id}, sid={})",
+        this_ref.session_id
+    ));
 }
 
-unsafe extern "C" fn host_on_resolve_promise(_this: *mut CdmHostState, _promise_id: u32) {}
+unsafe extern "C" fn host_on_resolve_promise(this: *mut CdmHostState, promise_id: u32) {
+    let this_ref = &mut *this;
+    this_ref
+        .trace_log
+        .push(format!("Host::OnResolvePromise(promise={promise_id})"));
+}
 
 unsafe extern "C" fn host_on_reject_promise(
     this: *mut CdmHostState,
-    _promise_id: u32,
+    promise_id: u32,
     exception: u32,
     system_code: u32,
     error_message: *const c_char,
     error_message_size: u32,
 ) {
+    let this_ref = &mut *this;
     let msg = if !error_message.is_null() && error_message_size > 0 {
         let bytes =
             std::slice::from_raw_parts(error_message as *const u8, error_message_size as usize);
@@ -670,16 +713,18 @@ unsafe extern "C" fn host_on_reject_promise(
     } else {
         String::new()
     };
-    (*this).last_rejection = Some(format!(
-        "CDM rejected promise (exception={exception}, sys={system_code}): {msg}"
-    ));
+    let formatted = format!(
+        "CDM rejected promise {promise_id} (exception={exception}, sys={system_code}): {msg}"
+    );
+    this_ref.trace_log.push(formatted.clone());
+    this_ref.last_rejection = Some(formatted);
 }
 
 unsafe extern "C" fn host_on_session_message(
     this: *mut CdmHostState,
     session_id: *const c_char,
     session_id_size: u32,
-    _message_type: u32,
+    message_type: u32,
     message: *const u8,
     message_size: u32,
 ) {
@@ -692,22 +737,30 @@ unsafe extern "C" fn host_on_session_message(
         let m_bytes = std::slice::from_raw_parts(message, message_size as usize);
         this_ref.latest_challenge = m_bytes.to_vec();
     }
+    this_ref.trace_log.push(format!(
+        "Host::OnSessionMessage(type={message_type}, bytes={message_size})"
+    ));
 }
 
 unsafe extern "C" fn host_on_session_keys_change(
     this: *mut CdmHostState,
     _session_id: *const c_char,
     _session_id_size: u32,
-    _has_additional_usable_key: bool,
+    has_additional_usable_key: bool,
     keys_info: *const CdmKeyInformation,
     keys_info_count: u32,
 ) {
+    let this_ref = &mut *this;
     if !keys_info.is_null() && keys_info_count > 0 {
         let slice = std::slice::from_raw_parts(keys_info, keys_info_count as usize);
-        (*this).usable_keys_count = slice.iter().filter(|k| k.status == 0).count().max(1);
+        this_ref.usable_keys_count = slice.iter().filter(|k| k.status == 0).count().max(1);
     } else {
-        (*this).usable_keys_count = (*this).usable_keys_count.max(1);
+        this_ref.usable_keys_count = this_ref.usable_keys_count.max(1);
     }
+    this_ref.trace_log.push(format!(
+        "Host::OnSessionKeysChange(has_usable={has_additional_usable_key}, count={keys_info_count}, usable={})",
+        this_ref.usable_keys_count
+    ));
 }
 
 unsafe extern "C" fn host_on_expiration_change(
@@ -793,6 +846,7 @@ static CDM_HOST_VTABLE: CdmHostVtable = CdmHostVtable {
     allocate: host_allocate,
     set_timer: host_set_timer,
     get_current_wall_time: host_get_current_wall_time,
+    on_initialized: host_on_initialized,
     on_resolve_key_status_promise: host_on_resolve_key_status_promise,
     on_resolve_new_session_promise: host_on_resolve_new_session_promise,
     on_resolve_promise: host_on_resolve_promise,
@@ -807,7 +861,6 @@ static CDM_HOST_VTABLE: CdmHostVtable = CdmHostVtable {
     on_deferred_initialization_done: host_on_deferred_init_done,
     create_file_io: host_create_file_io,
     request_storage_id: host_request_storage_id,
-    on_initialized: host_on_initialized,
     report_metrics: host_report_metrics,
     dtor_complete: host_dtor,
     dtor_deleting: host_dtor,
@@ -824,12 +877,13 @@ extern "C" fn get_cdm_host_callback(host_interface_version: c_int, user_data: *m
 
 /// Virtual method table layout of `cdm::ContentDecryptionModule_10` / `cdm::ContentDecryptionModule_11`.
 /// Note: In `content_decryption_module.h`, `~ContentDecryptionModule_10()` is declared at the bottom
-/// (`protected: virtual ~ContentDecryptionModule_10() {}`), so slot 0 is `Initialize`!
+/// (`protected: virtual ~ContentDecryptionModule_10() {}`), so slot 0 is `Initialize`,
+/// slot 1 is `GetStatusForPolicy`, and slot 2 is `SetServerCertificate`!
 #[repr(C)]
 struct CdmInstanceVtable {
     initialize: unsafe extern "C" fn(*mut c_void, bool, bool, bool),
-    set_server_certificate: unsafe extern "C" fn(*mut c_void, u32, *const u8, u32),
     get_status_for_policy: unsafe extern "C" fn(*mut c_void, u32, *const c_void),
+    set_server_certificate: unsafe extern "C" fn(*mut c_void, u32, *const u8, u32),
     create_session_and_generate_request:
         unsafe extern "C" fn(*mut c_void, u32, u32, u32, *const u8, u32),
     load_session: unsafe extern "C" fn(*mut c_void, u32, u32, *const c_char, u32),
@@ -987,6 +1041,7 @@ impl WidevineCdmSession {
                 usable_keys_count: 0,
                 last_rejection: None,
                 trace_log: Vec::new(),
+                pending_timers: Vec::new(),
             });
             let host_ptr: *mut CdmHostState = &mut *host;
 
@@ -1018,17 +1073,37 @@ impl WidevineCdmSession {
             let vtable_ptr = *(cdm_ptr as *const *const CdmInstanceVtable);
             eprintln!("[CDM-STEP] 5/5 cdm->Initialize(false, false, false)...");
             ((*vtable_ptr).initialize)(cdm_ptr, false, false, false);
-            eprintln!(
-                "[CDM-STEP] cdm->Initialize done (host.initialized={}, trace={:?})",
-                host.initialized, host.trace_log
-            );
-
-            Ok(Self {
+            let mut session = Self {
                 dl_handle,
                 cdm_ptr,
                 deinit_fn,
                 host,
-            })
+            };
+            session.pump_pending_timers();
+            eprintln!(
+                "[CDM-STEP] cdm->Initialize done (host.initialized={}, trace={:?})",
+                session.host.initialized, session.host.trace_log
+            );
+
+            Ok(session)
+        }
+    }
+
+    /// Pumps any deferred short timers scheduled by the CDM via `Host::SetTimer`.
+    pub fn pump_pending_timers(&mut self) {
+        for _ in 0..8 {
+            if self.host.pending_timers.is_empty() {
+                break;
+            }
+            let timers: Vec<(i64, *mut c_void)> = self.host.pending_timers.drain(..).collect();
+            for (_delay, ctx) in timers {
+                if !ctx.is_null() && !self.cdm_ptr.is_null() {
+                    unsafe {
+                        let vtable_ptr = *(self.cdm_ptr as *const *const CdmInstanceVtable);
+                        ((*vtable_ptr).timer_expired)(self.cdm_ptr, ctx);
+                    }
+                }
+            }
         }
     }
 
@@ -1046,6 +1121,7 @@ impl WidevineCdmSession {
                 cert_bytes.len() as u32,
             );
         }
+        self.pump_pending_timers();
         if let Some(ref rej) = self.host.last_rejection {
             return Err(anyhow!("{rej}"));
         }
@@ -1058,6 +1134,10 @@ impl WidevineCdmSession {
         self.host.latest_challenge.clear();
         self.host.last_rejection = None;
 
+        eprintln!(
+            "[CDM-STEP] 6/8 CreateSessionAndGenerateRequest(pssh_len={})...",
+            pssh_box.len()
+        );
         unsafe {
             let vtable_ptr = *(self.cdm_ptr as *const *const CdmInstanceVtable);
             // promise_id = 2, session_type = 0 (kTemporary), init_data_type = 0 (kCenc)
@@ -1070,6 +1150,13 @@ impl WidevineCdmSession {
                 pssh_box.len() as u32,
             );
         }
+        self.pump_pending_timers();
+        eprintln!(
+            "[CDM-STEP] CreateSessionAndGenerateRequest done (sid={}, challenge_len={}, trace={:?})",
+            self.host.session_id,
+            self.host.latest_challenge.len(),
+            self.host.trace_log
+        );
 
         if let Some(ref rej) = self.host.last_rejection {
             return Err(anyhow!("{rej}"));
@@ -1088,6 +1175,11 @@ impl WidevineCdmSession {
     pub fn update_session_with_license(&mut self, license_bytes: &[u8]) -> Result<()> {
         self.host.last_rejection = None;
         let sid_bytes = self.host.session_id.as_bytes();
+        eprintln!(
+            "[CDM-STEP] 7/8 UpdateSession(sid={}, license_len={})...",
+            self.host.session_id,
+            license_bytes.len()
+        );
         unsafe {
             let vtable_ptr = *(self.cdm_ptr as *const *const CdmInstanceVtable);
             ((*vtable_ptr).update_session)(
@@ -1099,6 +1191,13 @@ impl WidevineCdmSession {
                 license_bytes.len() as u32,
             );
         }
+        self.pump_pending_timers();
+        eprintln!(
+            "[CDM-STEP] UpdateSession done (usable_keys={}, challenge_len={}, trace={:?})",
+            self.host.usable_keys_count,
+            self.host.latest_challenge.len(),
+            self.host.trace_log
+        );
 
         if let Some(ref rej) = self.host.last_rejection {
             return Err(anyhow!("{rej}"));
@@ -1213,6 +1312,12 @@ impl WidevineCdmSession {
         let mut sample_cursor = 0usize;
         let mut decrypted_samples = 0usize;
 
+        eprintln!(
+            "[CDM-STEP] 8/8 Decrypting {} samples in mdat ({} bytes)...",
+            moof_info.sample_sizes.len(),
+            mdat_slice.len()
+        );
+
         for (idx, &sample_sz) in moof_info.sample_sizes.iter().enumerate() {
             let sz = sample_sz as usize;
             if sample_cursor + sz > mdat_slice.len() {
@@ -1240,6 +1345,7 @@ impl WidevineCdmSession {
             decrypted_samples += 1;
         }
 
+        eprintln!("[CDM-STEP] Decrypted {decrypted_samples} samples successfully!");
         Ok(decrypted_samples)
     }
 
@@ -1303,13 +1409,8 @@ impl Drop for WidevineCdmSession {
                 ((*vtable_ptr).destroy)(self.cdm_ptr);
                 self.cdm_ptr = std::ptr::null_mut();
             }
-            if let Some(deinit) = self.deinit_fn.take() {
-                deinit();
-            }
-            if !self.dl_handle.is_null() {
-                libc::dlclose(self.dl_handle);
-                self.dl_handle = std::ptr::null_mut();
-            }
+            let _ = self.deinit_fn;
+            let _ = self.dl_handle;
         }
     }
 }

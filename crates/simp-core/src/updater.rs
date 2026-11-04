@@ -130,10 +130,12 @@ pub fn spawn_delayed_daemon_restart() {
         .arg("-c")
         .arg(
             "sleep 0.45 && \
+             export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; \
              pkill -f 'simp-widevine-worker' 2>/dev/null || true; \
              pkill -f '18888/?worker=apple' 2>/dev/null || true; \
-             if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active simp.service >/dev/null 2>&1; then \
-               systemctl --user restart simp.service; \
+             if command -v systemctl >/dev/null 2>&1 && [ -f \"$HOME/.config/systemd/user/simp.service\" ]; then \
+               systemctl --user daemon-reload 2>/dev/null || true; \
+               systemctl --user restart simp.service 2>/dev/null || true; \
              else \
                pkill -f 'simp --daemon' 2>/dev/null || true; \
                sleep 0.2; \
