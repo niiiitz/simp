@@ -287,8 +287,8 @@ pub fn fetch_musicbrainz_cover_for_album(
         && !primary_artist.eq_ignore_ascii_case("Various Artists");
 
     let enc_title = urlencode_lucene(clean_title);
-    // Single combined Lucene query per album: matches both exact and compound titles (e.g. `Polly_Rhythm` -> `POLLYRHYTHM`)
-    // and artist prefixes/aliases (e.g. `Vze*` -> `VZEPOP`) or `Various Artists` compilations in 1 request.
+    // Single combined Lucene query per album: matches both exact and compound titles (e.g. `Synth_Wave` -> `SYNTHWAVE`)
+    // and artist prefixes/aliases or `Various Artists` compilations in 1 request.
     let query_url = if has_specific_artist {
         let enc_artist = urlencode_lucene(primary_artist);
         format!(
@@ -443,16 +443,17 @@ mod tests {
     #[test]
     fn test_musicbrainz_title_and_artist_normalization() {
         assert_eq!(
-            urlencode_lucene("Polly_Rhythm_On_the_Dance_Floor"),
-            "Polly%20Rhythm%20On%20the%20Dance%20Floor"
+            urlencode_lucene("Synth_Wave_On_the_Horizon"),
+            "Synth%20Wave%20On%20the%20Horizon"
         );
         assert_eq!(
-            normalize_title_for_match("Polly_Rhythm_On_the_Dance_Floor"),
-            normalize_title_for_match("POLLYRHYTHM ON THE DANCE FLOOR")
+            normalize_title_for_match("Synth_Wave_On_the_Horizon"),
+            normalize_title_for_match("SYNTHWAVE ON THE HORIZON")
         );
-        assert_eq!(extract_primary_artist("Vze & Kit Major"), "Vze");
-        let norm_primary = normalize_title_for_match(extract_primary_artist("Vze & Kit Major"));
-        let norm_mb = normalize_title_for_match("VZEPOP");
+        assert_eq!(extract_primary_artist("Nova & Guest Vocalist"), "Nova");
+        let norm_primary =
+            normalize_title_for_match(extract_primary_artist("Nova & Guest Vocalist"));
+        let norm_mb = normalize_title_for_match("NOVAPOP");
         assert!(norm_mb.contains(&norm_primary));
     }
 }

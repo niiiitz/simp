@@ -1495,7 +1495,7 @@ pub fn fetch_web_playback_manifest(
     };
 
     // Always pass `title` and `artist` from `library.db` when resolving `i.xxxx` library tracks
-    // so re-linked pinned playlists (e.g. "Tron Legacy" OST) resolve to their active catalog `salableAdamId`!
+    // so re-linked pinned playlists resolve to their active catalog `salableAdamId`!
     let mut db_meta_cache: Option<(Option<String>, Option<String>)> = None;
     if active_id.starts_with("i.") {
         let (t_opt, a_opt) = lookup_track_title_artist_in_db(clean_id);
