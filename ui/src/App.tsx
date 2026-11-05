@@ -740,10 +740,19 @@ const ConsoleMainApp: React.FC = () => {
     }
   };
 
-  const handleAddTracksToPlaylist = async (
+  const [pendingHybridAdd, setPendingHybridAdd] = useState<{
+    uris: string[];
+    label: string;
+    trackMetadata?: TrackMetadata[];
+    creatingNew?: boolean;
+  } | null>(null);
+
+  const commitAddTracksToPlaylist = async (
     uris: string[],
     label: string,
-    trackMetadata?: TrackMetadata[]
+    trackMetadata?: TrackMetadata[],
+    explicitPlaylistId?: string,
+    createNewName?: string
   ) => {
     if (uris.length === 0) return;
     try {
@@ -760,9 +769,33 @@ const ConsoleMainApp: React.FC = () => {
       }
 
       const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
-      const selectedWritable = writablePlaylists.find((p) => p.id === activePlaylistId);
-      let targetPlId = selectedWritable?.id || '';
-      let targetPlName = selectedWritable?.name || 'Favorites';
+      let targetPlId = '';
+      let targetPlName = 'Favorites';
+
+      if (createNewName !== undefined) {
+        const trimmedName = createNewName.trim() || 'New SIMP Playlist';
+        const created = await defaultSimpClient.query<PlaylistRecord>('create_playlist', {
+          name: trimmedName,
+          description: 'Hybrid Local + Apple Music SIMP playlist',
+        });
+        targetPlId = created.id;
+        targetPlName = created.name;
+        setActivePlaylistId(created.id);
+        setNewPlaylistName('');
+      } else if (explicitPlaylistId) {
+        const found = writablePlaylists.find((p) => p.id === explicitPlaylistId);
+        targetPlId = found?.id || explicitPlaylistId;
+        targetPlName = found?.name || 'SIMP Playlist';
+        setActivePlaylistId(targetPlId);
+      } else if (writablePlaylists.length === 1) {
+        targetPlId = writablePlaylists[0].id;
+        targetPlName = writablePlaylists[0].name;
+        setActivePlaylistId(targetPlId);
+      } else {
+        const selectedWritable = writablePlaylists.find((p) => p.id === activePlaylistId);
+        targetPlId = selectedWritable?.id || '';
+        targetPlName = selectedWritable?.name || 'Favorites';
+      }
 
       if (!targetPlId) {
         const created = await defaultSimpClient.query<PlaylistRecord>('create_playlist', {
@@ -787,10 +820,36 @@ const ConsoleMainApp: React.FC = () => {
         });
         setBrowserTracks(updated);
       }
-      showToast(`Added ${label} to "${targetPlName}"`);
+      showToast(`Added ${label} to "★ ${targetPlName}"`);
     } catch {
       showToast('Could not add tracks to playlist');
     }
+  };
+
+  const handleAddTracksToPlaylist = async (
+    uris: string[],
+    label: string,
+    trackMetadata?: TrackMetadata[]
+  ) => {
+    if (uris.length === 0) return;
+    const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
+    // When more than 1 SIMP Hybrid Playlist exists, prompt the user to choose which playlist (or + Add to New)
+    if (writablePlaylists.length > 1) {
+      setPendingHybridAdd({
+        uris,
+        label,
+        trackMetadata,
+        creatingNew: false,
+      });
+      window.setTimeout(() => {
+        const firstChoice = document.querySelector<HTMLElement>(
+          '[data-hybrid-picker-modal="true"] button[data-default-focus="true"], [data-hybrid-picker-modal="true"] button:not([disabled])'
+        );
+        if (firstChoice) applyFocusMarker(firstChoice);
+      }, 30);
+      return;
+    }
+    await commitAddTracksToPlaylist(uris, label, trackMetadata);
   };
 
   const handleRemoveTrackFromPlaylist = async (playlistId: string, trackUri: string, title: string) => {
@@ -927,6 +986,9 @@ const ConsoleMainApp: React.FC = () => {
           box-shadow: 0 0 0 3px rgba(42, 163, 196, 0.28) !important;
         }
         html[data-simp-input="pointer"] .simp-gp-badge {
+          display: none !important;
+        }
+        html[data-simp-input="gamepad"] .simp-mouse-only {
           display: none !important;
         }
         html[data-simp-input="pointer"] .simp-gpfocus,
@@ -1093,20 +1155,6 @@ const ConsoleMainApp: React.FC = () => {
           />
           <span>Source: {track?.source?.toUpperCase() || 'LOCAL / USB'}</span>
           <span style={{ color: '#71717a' }}>▾</span>
-          <span
-            className="simp-gp-badge"
-            style={{
-              padding: '2px 6px',
-              borderRadius: 6,
-              background: '#14141b',
-              border: '1px solid #262630',
-              fontSize: 11,
-              fontFamily: 'monospace',
-              color: '#9ca3af',
-            }}
-          >
-            Select
-          </span>
         </button>
 
         <div
@@ -1551,6 +1599,7 @@ const ConsoleMainApp: React.FC = () => {
       {powerModalOpen && (
         <PowerModal
           setPowerModalOpen={setPowerModalOpen}
+          setSourceModalOpen={setSourceModalOpen}
           setIsSleeping={setIsSleeping}
           dismissConsole={dismissConsole}
           brightnessPct={brightnessPct}
@@ -1564,6 +1613,265 @@ const ConsoleMainApp: React.FC = () => {
           refreshLibraryData={refreshLibraryData}
           showToast={showToast}
         />
+      )}
+
+      {/* On-Demand SIMP Hybrid Playlist Chooser Modal (shown when > 1 Hybrid Playlist exists) */}
+      {pendingHybridAdd && (
+        <div
+          onClick={() => {
+            setPendingHybridAdd(null);
+            setOskTarget(null);
+          }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.86)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+            boxSizing: 'border-box',
+            zIndex: 80,
+          }}
+        >
+          <div
+            data-modal-root="true"
+            data-hybrid-picker-modal="true"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: '100%',
+              maxWidth: 460,
+              maxHeight: '82vh',
+              overflowY: 'auto',
+              background: '#0a0a0e',
+              border: '2px solid #2aa3c4',
+              borderRadius: 18,
+              padding: 20,
+              boxSizing: 'border-box',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+              boxShadow: '0 16px 40px rgba(0, 0, 0, 0.85)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 800, color: '#bfeaf5' }}>
+                  ★ Add to SIMP Hybrid Playlist
+                </div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: '#8e8e99',
+                    marginTop: 2,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Adding {pendingHybridAdd.label}
+                </div>
+              </div>
+              <button
+                data-hybrid-picker-close="true"
+                onClick={() => {
+                  setPendingHybridAdd(null);
+                  setOskTarget(null);
+                }}
+                style={{
+                  minHeight: 38,
+                  padding: '0 12px',
+                  borderRadius: 9,
+                  background: '#16161f',
+                  border: '1px solid #2e2e3a',
+                  color: '#d4d4dc',
+                  fontFamily: 'monospace',
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
+              >
+                ✕<span className="simp-gp-badge"> B</span>
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              {playlists
+                .filter((p) => p.origin === 'simp_local')
+                .map((p, idx) => {
+                  const isPreferred =
+                    p.id === activePlaylistId || (!activePlaylistId && idx === 0);
+                  return (
+                    <button
+                      key={p.id}
+                      data-default-focus={
+                        !pendingHybridAdd.creatingNew && isPreferred ? 'true' : undefined
+                      }
+                      onClick={() => {
+                        const job = pendingHybridAdd;
+                        setPendingHybridAdd(null);
+                        setOskTarget(null);
+                        commitAddTracksToPlaylist(
+                          job.uris,
+                          job.label,
+                          job.trackMetadata,
+                          p.id
+                        );
+                      }}
+                      style={{
+                        minHeight: 44,
+                        padding: '0 14px',
+                        borderRadius: 10,
+                        background: isPreferred ? '#0f222a' : '#101018',
+                        border: isPreferred ? '1px solid #2aa3c4' : '1px solid #222230',
+                        color: '#e4e4ec',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 10,
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                      }}
+                    >
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
+                        ★ {p.name}
+                      </span>
+                      <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#67e8f9' }}>
+                        {p.track_count} {p.track_count === 1 ? 'track' : 'tracks'}
+                      </span>
+                    </button>
+                  );
+                })}
+            </div>
+
+            {/* Only shown when > 1 Hybrid Playlist already exists */}
+            {!pendingHybridAdd.creatingNew ? (
+              <button
+                onClick={() => {
+                  setNewPlaylistName('');
+                  setPendingHybridAdd((prev) =>
+                    prev ? { ...prev, creatingNew: true } : null
+                  );
+                  if (document.documentElement.dataset.simpInput === 'gamepad') {
+                    setOskTarget('playlist');
+                    if (window.parent && window.parent !== window) {
+                      window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                    }
+                    window.setTimeout(() => {
+                      const firstKey = document.querySelector<HTMLElement>(
+                        '[data-osk-root="true"] button[data-default-focus="true"], [data-osk-root="true"] button'
+                      );
+                      if (firstKey) applyFocusMarker(firstKey);
+                    }, 40);
+                  } else {
+                    window.setTimeout(() => {
+                      const inp = document.querySelector<HTMLInputElement>(
+                        '[data-hybrid-picker-modal="true"] input[data-osk-input="playlist"]'
+                      );
+                      inp?.focus();
+                    }, 30);
+                  }
+                }}
+                style={{
+                  minHeight: 42,
+                  padding: '0 14px',
+                  borderRadius: 10,
+                  background: '#121822',
+                  border: '1px dashed #2aa3c4',
+                  color: '#67e8f9',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                }}
+              >
+                + Add to New SIMP Playlist...
+              </button>
+            ) : (
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 8,
+                  padding: 10,
+                  borderRadius: 10,
+                  background: '#0c161c',
+                  border: '1px solid #2aa3c4',
+                }}
+              >
+                <input
+                  type="text"
+                  data-osk-input="playlist"
+                  placeholder="New SIMP Playlist name..."
+                  value={newPlaylistName}
+                  onChange={(e) => setNewPlaylistName(e.target.value)}
+                  onClick={() => {
+                    if (document.documentElement.dataset.simpInput === 'gamepad') {
+                      setOskTarget('playlist');
+                      if (window.parent && window.parent !== window) {
+                        window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                      }
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const job = pendingHybridAdd;
+                      const chosenName = newPlaylistName;
+                      setPendingHybridAdd(null);
+                      setOskTarget(null);
+                      commitAddTracksToPlaylist(
+                        job.uris,
+                        job.label,
+                        job.trackMetadata,
+                        undefined,
+                        chosenName
+                      );
+                    }
+                  }}
+                  style={{
+                    flex: 1,
+                    minHeight: 38,
+                    padding: '0 12px',
+                    borderRadius: 8,
+                    background: '#08080c',
+                    border: '1px solid #2e2e3c',
+                    color: '#d4d4dc',
+                    fontSize: 12,
+                  }}
+                />
+                <button
+                  data-hybrid-picker-submit="true"
+                  data-default-focus="true"
+                  onClick={() => {
+                    const job = pendingHybridAdd;
+                    const chosenName = newPlaylistName;
+                    setPendingHybridAdd(null);
+                    setOskTarget(null);
+                    commitAddTracksToPlaylist(
+                      job.uris,
+                      job.label,
+                      job.trackMetadata,
+                      undefined,
+                      chosenName
+                    );
+                  }}
+                  style={{
+                    minHeight: 38,
+                    padding: '0 14px',
+                    borderRadius: 8,
+                    background: '#0f222a',
+                    color: '#bfeaf5',
+                    border: '1px solid #2aa3c4',
+                    fontWeight: 800,
+                    fontSize: 12,
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                  }}
+                >
+                  Create & Add
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       {/* Controller-Navigable On-Screen Keyboard (OSK) Bar for Search, Playlist Name & Folder Path */}
@@ -1684,7 +1992,11 @@ const ConsoleMainApp: React.FC = () => {
                   const prevInputSelector = `[data-osk-input="${oskTarget}"]`;
                   setOskTarget(null);
                   window.setTimeout(() => {
-                    const inp = document.querySelector<HTMLElement>(prevInputSelector);
+                    const pickerSubmit = document.querySelector<HTMLElement>(
+                      '[data-hybrid-picker-submit="true"]:not([disabled])'
+                    );
+                    const inp =
+                      pickerSubmit || document.querySelector<HTMLElement>(prevInputSelector);
                     if (inp) applyFocusMarker(inp);
                   }, 30);
                 }}

@@ -122,6 +122,7 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/update/check", get(update_check_handler))
         .route("/api/update/apply", post(update_apply_handler))
         .route("/api/apple/playlists", get(apple_playlists_handler))
+        .route("/api/apple/library-recent", get(apple_library_recent_handler))
         .route("/api/apple/playlist-tracks", get(apple_playlist_tracks_handler))
         .route("/api/apple/playlist-cover", get(apple_playlist_cover_handler))
         .route("/api/apple/full-album", get(apple_full_album_handler))
@@ -375,6 +376,19 @@ async fn apple_radio_handler(State(state): State<DaemonIpcState>) -> impl IntoRe
     .await;
     match res {
         Ok(Ok(feed)) => Json(serde_json::json!({ "ok": true, "data": feed })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_library_recent_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::fetch_library_recently_added(&cfg)
+    })
+    .await;
+    match res {
+        Ok(Ok(albums)) => Json(serde_json::json!({ "ok": true, "data": albums })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }

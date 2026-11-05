@@ -27,6 +27,7 @@ export interface AppleCloudAlbumSummary {
   track_count: number;
   release_year: number | null;
   kind: 'catalog' | 'library';
+  date_added?: string | null;
 }
 
 export interface AppleRadioStationSummary {
@@ -393,6 +394,13 @@ export async function fetchAppleRadioAndForYou(): Promise<{
     playlists: AppleCloudPlaylistSummary[];
     albums: AppleCloudAlbumSummary[];
   }>('/api/apple/radio');
+}
+
+/**
+ * Fetches the user's "Recently Added" personal Cloud Library albums (`/api/apple/library-recent`).
+ */
+export async function fetchAppleLibraryRecentlyAdded(): Promise<AppleCloudAlbumSummary[]> {
+  return fetchAppleDaemonJson<AppleCloudAlbumSummary[]>('/api/apple/library-recent');
 }
 
 /**

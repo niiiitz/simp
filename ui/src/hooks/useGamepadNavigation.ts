@@ -99,7 +99,7 @@ export function useGamepadNavigation({
         return;
       }
       const dist = Math.hypot(e.clientX - lastMouseX, e.clientY - lastMouseY);
-      if (dist > 55) {
+      if (dist > 14) {
         lastMouseX = e.clientX;
         lastMouseY = e.clientY;
         if (document.documentElement.dataset.simpInput !== 'pointer') {
@@ -130,10 +130,11 @@ export function useGamepadNavigation({
     if (
       activeDom &&
       activeDom !== document.body &&
-      activeDom !== el &&
-      (activeDom.tagName === 'INPUT' ||
+      (activeDom.tagName === 'BUTTON' ||
+        activeDom.tagName === 'INPUT' ||
         activeDom.tagName === 'SELECT' ||
-        activeDom.tagName === 'TEXTAREA')
+        activeDom.tagName === 'TEXTAREA' ||
+        activeDom.hasAttribute('tabindex'))
     ) {
       activeDom.blur();
     }
@@ -200,7 +201,8 @@ export function useGamepadNavigation({
     (dir: 'up' | 'down' | 'left' | 'right') => {
       setIsDimmed(false);
       setIsSleeping(false);
-      const isModalOpen = sourceModalOpen || powerModalOpen;
+      const hasDomModal = Boolean(document.querySelector('[data-modal-root="true"]'));
+      const isModalOpen = sourceModalOpen || powerModalOpen || hasDomModal;
       const selector = oskTarget
         ? '[data-osk-root="true"] button:not([disabled])'
         : isModalOpen
@@ -490,15 +492,28 @@ export function useGamepadNavigation({
           }
           break;
         }
-        case 'back':
+        case 'back': {
           if (oskTarget) {
             const prevInputSelector = `[data-osk-input="${oskTarget}"]`;
             setOskTarget(null);
             window.setTimeout(() => {
-              const inp = document.querySelector<HTMLElement>(prevInputSelector);
+              const pickerSubmit = document.querySelector<HTMLElement>(
+                '[data-hybrid-picker-submit="true"]:not([disabled])'
+              );
+              const inp =
+                pickerSubmit || document.querySelector<HTMLElement>(prevInputSelector);
               if (inp) applyFocusMarker(inp);
             }, 30);
-          } else if (volumePopoverOpen || brightnessPopoverOpen) {
+            break;
+          }
+          const hybridPickerClose = document.querySelector<HTMLElement>(
+            '[data-hybrid-picker-close="true"]'
+          );
+          if (hybridPickerClose) {
+            hybridPickerClose.click();
+            break;
+          }
+          if (volumePopoverOpen || brightnessPopoverOpen) {
             setVolumePopoverOpen(false);
             setBrightnessPopoverOpen(false);
           } else if (confirmHardReset) {
@@ -554,11 +569,18 @@ export function useGamepadNavigation({
             window.parent.postMessage({ type: 'SIMP_EXIT_CONSOLE' }, '*');
           }
           break;
+        }
         case 'shuffle':
           defaultSimpClient.setShuffle(!shuffle);
           break;
         case 'repeat':
-          defaultSimpClient.cycleRepeat();
+          if (view === 'browser' && !sourceModalOpen && !powerModalOpen && !oskTarget) {
+            window.dispatchEvent(
+              new CustomEvent('simp-browser-gamepad-op', { detail: { op: 'y' } })
+            );
+          } else {
+            defaultSimpClient.cycleRepeat();
+          }
           break;
         case 'l1':
           setOskTarget(null);
@@ -574,9 +596,15 @@ export function useGamepadNavigation({
           defaultSimpClient.seekRelative(10_000);
           break;
         case 'sources':
-          setOskTarget(null);
-          setPowerModalOpen(false);
-          setSourceModalOpen((v) => !v);
+          if (view === 'browser' && !sourceModalOpen && !powerModalOpen && !oskTarget) {
+            window.dispatchEvent(
+              new CustomEvent('simp-browser-gamepad-op', { detail: { op: 'select' } })
+            );
+          } else {
+            setOskTarget(null);
+            setPowerModalOpen(false);
+            setSourceModalOpen((v) => !v);
+          }
           break;
         case 'power':
           setOskTarget(null);
@@ -594,9 +622,14 @@ export function useGamepadNavigation({
 
     gamepadActionRef.current = handleGamepadAction;
 
+    // Track standalone taps of `Control` (`L1` in Steam KDE Desktop Layout) and `Alt` (`R1` in Steam KDE Desktop Layout)
+    let pendingModifierKey: 'Control' | 'Alt' | null = null;
+    let pendingModifierTs = 0;
+
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+        pendingModifierKey = null;
         if (e.key === 'Escape') {
           (e.target as HTMLElement).blur();
           setOskTarget(null);
@@ -604,29 +637,94 @@ export function useGamepadNavigation({
         return;
       }
 
+      if (e.key === 'Control' || e.key === 'Alt') {
+        if (!e.repeat) {
+          pendingModifierKey = e.key;
+          pendingModifierTs = performance.now();
+        }
+        return;
+      } else {
+        pendingModifierKey = null;
+      }
+
       if (e.key === 'ArrowUp') {
         e.preventDefault();
+        e.stopPropagation();
         handleGamepadAction('up');
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
+        e.stopPropagation();
         handleGamepadAction('down');
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
+        e.stopPropagation();
         handleGamepadAction('left');
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
+        e.stopPropagation();
         handleGamepadAction('right');
       } else if (e.key === 'Enter') {
         e.preventDefault();
+        e.stopPropagation();
         handleGamepadAction('activate');
       } else if (e.key === 'Escape' || e.key === 'Backspace') {
         e.preventDefault();
+        e.stopPropagation();
         handleGamepadAction('back');
-      } else if (e.key === ' ') {
-        if (document.activeElement === document.body || !document.activeElement) {
-          e.preventDefault();
-          defaultSimpClient.togglePlayPause();
+      } else if (e.key === ' ' || e.key === 'y' || e.key === 'Y') {
+        // In Steam KDE Desktop Mode, the physical `Y` button sends `Space` (`' '`).
+        // Intercept in capture phase so `Space` triggers the `Y` action instead of clicking focused buttons like `A`.
+        e.preventDefault();
+        e.stopPropagation();
+        handleGamepadAction('repeat');
+      } else if (e.key === 'Tab') {
+        // In Steam KDE Desktop Mode, the physical `SELECT` (View) button sends `Tab`.
+        e.preventDefault();
+        e.stopPropagation();
+        handleGamepadAction('sources');
+      } else if (e.key === 'x' || e.key === 'X') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleGamepadAction('shuffle');
+      } else if (e.key === 'PageUp' || e.key === '[') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleGamepadAction('l1');
+      } else if (e.key === 'PageDown' || e.key === ']') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleGamepadAction('r1');
+      } else if (e.key === '-') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleGamepadAction('l2');
+      } else if (e.key === '=' || e.key === '+') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleGamepadAction('r2');
+      } else if (e.key === 'ContextMenu' || e.key === 'F2' || e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleGamepadAction('power');
+      }
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (
+        (e.key === 'Control' || e.key === 'Alt') &&
+        pendingModifierKey === e.key &&
+        performance.now() - pendingModifierTs < 400
+      ) {
+        const mod = pendingModifierKey;
+        pendingModifierKey = null;
+        e.preventDefault();
+        if (mod === 'Control') {
+          handleGamepadAction('l1');
+        } else if (mod === 'Alt') {
+          handleGamepadAction('r1');
         }
+      } else {
+        pendingModifierKey = null;
       }
     };
 
@@ -679,13 +777,15 @@ export function useGamepadNavigation({
       handleGamepadAction(action);
     };
 
-    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', onKeyUp, true);
     window.addEventListener('message', onMessage);
     window.addEventListener('vgp_onbuttondown', onVgpEvent as EventListener, true);
     window.addEventListener('vgp_ondirection', onVgpEvent as EventListener, true);
     window.addEventListener('simp-daemon-gamepad', onDaemonGamepad as EventListener);
     return () => {
-      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('keyup', onKeyUp, true);
       window.removeEventListener('message', onMessage);
       window.removeEventListener('vgp_onbuttondown', onVgpEvent as EventListener, true);
       window.removeEventListener('vgp_ondirection', onVgpEvent as EventListener, true);

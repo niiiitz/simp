@@ -18,6 +18,7 @@ export interface SimpUpdateStatus {
 
 export interface PowerModalProps {
   setPowerModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  setSourceModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setIsSleeping: React.Dispatch<React.SetStateAction<boolean>>;
   dismissConsole: () => void;
   brightnessPct: number;
@@ -34,6 +35,7 @@ export interface PowerModalProps {
 
 export const PowerModal: React.FC<PowerModalProps> = ({
   setPowerModalOpen,
+  setSourceModalOpen,
   setIsSleeping,
   dismissConsole,
   brightnessPct,
@@ -83,7 +85,9 @@ export const PowerModal: React.FC<PowerModalProps> = ({
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <strong style={{ fontSize: 15 }}>⏻ Power, Sleep & System Menu</strong>
+          <strong style={{ fontSize: 15 }}>
+            ⏻ Power, Sources & System Menu<span className="simp-gp-badge"> (START)</span>
+          </strong>
           <button
             onClick={() => setPowerModalOpen(false)}
             style={{
@@ -101,10 +105,44 @@ export const PowerModal: React.FC<PowerModalProps> = ({
           </button>
         </div>
 
+        {/* 0. Storage Mounts, Sources & Apple Music Authentication Node */}
+        <button
+          data-default-focus="true"
+          onClick={() => {
+            setPowerModalOpen(false);
+            setSourceModalOpen(true);
+          }}
+          style={{
+            minHeight: 54,
+            padding: '10px 14px',
+            borderRadius: 12,
+            background: '#0f222a',
+            border: '1px solid #2aa3c4',
+            color: '#bfeaf5',
+            textAlign: 'left',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 10,
+            cursor: 'pointer',
+          }}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <span style={{ fontSize: 13, fontWeight: 800 }}>
+              ⚙ Storage Mounts, Sources & Apple Music Auth
+            </span>
+            <span style={{ fontSize: 11, color: '#8e8e99' }}>
+              Manage local folders, optical disc drive, and Apple Music account pairing
+            </span>
+          </div>
+          <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#67e8f9', fontWeight: 800 }}>
+            Open →
+          </span>
+        </button>
+
         {/* 1. Sleep Screen, Minimize to Tray/Background & Pause/Dismiss Quick Actions */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
           <button
-            data-default-focus="true"
             onClick={() => {
               setPowerModalOpen(false);
               setIsSleeping(true);

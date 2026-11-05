@@ -30,6 +30,20 @@ pub struct AppleCloudAlbumSummary {
     pub track_count: usize,
     pub release_year: Option<u32>,
     pub kind: String, // "catalog" | "library"
+    #[serde(default)]
+    pub date_added: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AppleAssetEncryptionKind {
+    /// Encrypted fMP4 HLS stream (`28:ctrp256` / `28:ctrp64`) requiring a Widevine CDM license.
+    #[default]
+    WidevineCenc,
+    /// Unencrypted fMP4 HLS `.m3u8` stream (e.g., user-uploaded / iTunes Match Cloud Locker track without `#EXT-X-KEY`).
+    ClearHlsFmp4,
+    /// Direct unencrypted audio file URL (`.m4a` / `.mp3` / `plus256` / `itemDownload`) from the user's Cloud Locker.
+    ClearDirectAudio,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +83,8 @@ pub struct AppleCatalogSearchResults {
 }
 
 /// Stage C Browserless Foundation: Metadata returned by Apple's `webPlayback` endpoint
-/// (`https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback`) for native Rust HLS + Widevine CDM.
+/// (`https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback`) for native Rust HLS + Widevine CDM
+/// as well as DRM-free uploaded / iTunes Match Cloud Locker streams.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppleWebPlaybackAsset {
     pub song_id: String,
@@ -77,6 +92,8 @@ pub struct AppleWebPlaybackAsset {
     pub hls_playlist_url: String,
     pub key_server_url: Option<String>,
     pub key_cert_url: Option<String>,
+    #[serde(default)]
+    pub encryption_kind: AppleAssetEncryptionKind,
 }
 
 pub fn format_apple_art_url(raw_url: Option<&str>, size: u32) -> Option<String> {
@@ -467,7 +484,193 @@ pub fn fetch_playlist_tracks(
     Ok(tracks)
 }
 
-/// Resolves a full Apple Music Catalog Album from a catalog album ID, library album ID (`l.xxxx`), or song URI.
+/// Helper to parse a `library-albums` or `albums` JSON item into `AppleCloudAlbumSummary`,
+/// automatically healing `blobstore.apple.com` artwork with `relationships.catalog.data[0]` when present.
+fn parse_apple_album_summary(alb: &Value, default_kind: &str) -> Option<AppleCloudAlbumSummary> {
+    let id = alb.get("id")?.as_str()?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let attrs = alb.get("attributes").unwrap_or(alb);
+    let rel_catalog_art = alb
+        .pointer("/relationships/catalog/data/0/attributes/artwork/url")
+        .and_then(|v| v.as_str());
+    let attr_art = attrs.pointer("/artwork/url").and_then(|v| v.as_str());
+    let raw_art = match (attr_art, rel_catalog_art) {
+        (Some(a), Some(c)) if a.contains("blobstore.apple.com") => Some(c),
+        (Some(a), _) => Some(a),
+        (None, Some(c)) => Some(c),
+        (None, None) => None,
+    };
+    let release_year = attrs
+        .get("releaseDate")
+        .or_else(|| {
+            alb.pointer("/relationships/catalog/data/0/attributes/releaseDate")
+        })
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.get(0..4))
+        .and_then(|y| y.parse::<u32>().ok());
+    let date_added = attrs
+        .get("dateAdded")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let kind = if id.starts_with("l.") {
+        "library"
+    } else if id.chars().all(|c| c.is_ascii_digit()) {
+        "catalog"
+    } else {
+        default_kind
+    }
+    .to_string();
+
+    Some(AppleCloudAlbumSummary {
+        id: id.to_string(),
+        title: attrs
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Album")
+            .to_string(),
+        artist: attrs
+            .get("artistName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Artist")
+            .to_string(),
+        art_url: format_apple_art_url(raw_art, 300),
+        track_count: attrs
+            .get("trackCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+        release_year,
+        kind,
+        date_added,
+    })
+}
+
+/// Fetches a personal Cloud Library Album (`l.xxxx`) and all of its tracks from `/v1/me/library/albums/{id}`.
+fn fetch_library_album_with_tracks(
+    dev_token: &str,
+    user_token: &str,
+    lib_album_id: &str,
+) -> Result<AppleFullAlbumResponse> {
+    let alb_json = apple_get_json(
+        &format!(
+            "/v1/me/library/albums/{}?include=tracks,catalog",
+            urlencode(lib_album_id)
+        ),
+        dev_token,
+        user_token,
+    )
+    .or_else(|_| {
+        apple_get_json(
+            &format!("/v1/me/library/albums/{}?include=tracks", urlencode(lib_album_id)),
+            dev_token,
+            user_token,
+        )
+    })?;
+
+    let alb_data = alb_json
+        .pointer("/data/0")
+        .ok_or_else(|| anyhow!("Library album {lib_album_id} not found in Your Library"))?;
+    let mut summary = parse_apple_album_summary(alb_data, "library")
+        .ok_or_else(|| anyhow!("Invalid library album payload for {lib_album_id}"))?;
+    if let Some(ref art) = summary.art_url {
+        summary.art_url = Some(art.replace("300x300bb", "400x400bb"));
+    }
+
+    let mut tracks: Vec<TrackMetadata> = alb_data
+        .pointer("/relationships/tracks/data")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(map_apple_item_to_track).collect())
+        .unwrap_or_default();
+
+    let has_more_tracks = alb_data
+        .pointer("/relationships/tracks/next")
+        .and_then(|v| v.as_str())
+        .is_some()
+        || (summary.track_count > tracks.len() && summary.track_count > 0);
+
+    if tracks.is_empty() || has_more_tracks {
+        let mut next_url: Option<String> = Some(format!(
+            "/v1/me/library/albums/{}/tracks?include=catalog&limit=100",
+            urlencode(lib_album_id)
+        ));
+        let mut paginated = Vec::new();
+        for page_idx in 0..6 {
+            let Some(ref url) = next_url else { break };
+            let page_json = match apple_get_json(url, dev_token, user_token) {
+                Ok(j) => j,
+                Err(_) if page_idx == 0 && url.contains("include=catalog") => {
+                    match apple_get_json(
+                        &format!("/v1/me/library/albums/{}/tracks?limit=100", urlencode(lib_album_id)),
+                        dev_token,
+                        user_token,
+                    ) {
+                        Ok(j) => j,
+                        Err(_) => break,
+                    }
+                }
+                Err(_) => break,
+            };
+            if let Some(arr) = page_json.get("data").and_then(|v| v.as_array()) {
+                for item in arr {
+                    if let Some(tr) = map_apple_item_to_track(item) {
+                        paginated.push(tr);
+                    }
+                }
+            }
+            next_url = page_json
+                .get("next")
+                .and_then(|v| v.as_str())
+                .map(with_limit_100);
+        }
+        if paginated.len() >= tracks.len() {
+            tracks = paginated;
+        }
+    }
+
+    // Heal any missing or expiring blobstore track artwork with the album's cover art
+    if summary.art_url.is_none()
+        || summary
+            .art_url
+            .as_deref()
+            .map(|u| u.contains("blobstore.apple.com"))
+            .unwrap_or(false)
+    {
+        if let Some(track_mz_art) = tracks
+            .iter()
+            .find_map(|t| t.art_url.as_ref().filter(|u| u.contains("mzstatic.com")))
+            .cloned()
+        {
+            summary.art_url = Some(track_mz_art);
+        } else if summary.art_url.is_none() {
+            summary.art_url = tracks.first().and_then(|t| t.art_url.clone());
+        }
+    }
+    if let Some(ref album_art) = summary.art_url {
+        for tr in &mut tracks {
+            let needs_art = tr
+                .art_url
+                .as_deref()
+                .map(|u| u.is_empty() || (u.contains("blobstore.apple.com") && album_art.contains("mzstatic.com")))
+                .unwrap_or(true);
+            if needs_art {
+                tr.art_url = Some(album_art.clone());
+                remember_track_metadata_hint(tr);
+            }
+        }
+    }
+    if !tracks.is_empty() {
+        summary.track_count = tracks.len();
+    }
+
+    Ok(AppleFullAlbumResponse {
+        album: summary,
+        tracks,
+    })
+}
+
+/// Resolves a full Apple Music Catalog Album or Personal Cloud Library Album (`l.xxxx`)
+/// from a catalog album ID, library album ID (`l.xxxx`), or song URI.
 pub fn fetch_full_album(
     settings: &SimpSettings,
     album_id: Option<&str>,
@@ -477,6 +680,7 @@ pub fn fetch_full_album(
     let storefront = get_storefront(&dev_token, &user_token);
 
     let mut catalog_album_id: Option<String> = None;
+    let mut library_album_id: Option<String> = None;
 
     if let Some(raw_alb) = album_id.filter(|s| !s.trim().is_empty()) {
         let clean_alb = raw_alb
@@ -484,6 +688,7 @@ pub fn fetch_full_album(
             .unwrap_or(raw_alb)
             .trim();
         if clean_alb.starts_with("l.") {
+            library_album_id = Some(clean_alb.to_string());
             if let Ok(json) = apple_get_json(
                 &format!("/v1/me/library/albums/{}/catalog", urlencode(clean_alb)),
                 &dev_token,
@@ -499,7 +704,7 @@ pub fn fetch_full_album(
         }
     }
 
-    if catalog_album_id.is_none() {
+    if catalog_album_id.is_none() && library_album_id.is_none() {
         if let Some(raw_song) = song_uri.filter(|s| !s.trim().is_empty()) {
             let clean_song = raw_song
                 .strip_prefix("applemusic:song:")
@@ -507,19 +712,41 @@ pub fn fetch_full_album(
                 .or_else(|| raw_song.strip_prefix("applemusic:"))
                 .unwrap_or(raw_song)
                 .trim();
-            let path = if clean_song.starts_with("i.") {
-                format!(
-                    "/v1/me/library/songs/{}/catalog?include=albums",
-                    urlencode(clean_song)
-                )
-            } else {
-                format!(
+            if clean_song.starts_with("i.") {
+                if let Ok(json) = apple_get_json(
+                    &format!(
+                        "/v1/me/library/songs/{}/catalog?include=albums",
+                        urlencode(clean_song)
+                    ),
+                    &dev_token,
+                    &user_token,
+                ) {
+                    catalog_album_id = json
+                        .pointer("/data/0/relationships/albums/data/0/id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                }
+                if catalog_album_id.is_none() {
+                    if let Ok(json) = apple_get_json(
+                        &format!("/v1/me/library/songs/{}/albums", urlencode(clean_song)),
+                        &dev_token,
+                        &user_token,
+                    ) {
+                        library_album_id = json
+                            .pointer("/data/0/id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                }
+            } else if let Ok(json) = apple_get_json(
+                &format!(
                     "/v1/catalog/{}/songs/{}?include=albums",
                     storefront,
                     urlencode(clean_song)
-                )
-            };
-            if let Ok(json) = apple_get_json(&path, &dev_token, &user_token) {
+                ),
+                &dev_token,
+                &user_token,
+            ) {
                 catalog_album_id = json
                     .pointer("/data/0/relationships/albums/data/0/id")
                     .and_then(|v| v.as_str())
@@ -528,10 +755,21 @@ pub fn fetch_full_album(
         }
     }
 
-    let cat_id = catalog_album_id
-        .ok_or_else(|| anyhow!("Could not resolve full catalog album on Apple Music"))?;
+    // If this is a personal Cloud Library album (`l.xxxx`) that is NOT in the public streaming catalog
+    // (e.g., an uploaded vinyl download, Bandcamp purchase, or delisted release), resolve directly from `/v1/me/library/albums/{id}`!
+    if let Some(ref lib_id) = library_album_id {
+        if catalog_album_id.is_none() {
+            return fetch_library_album_with_tracks(&dev_token, &user_token, lib_id);
+        }
+    }
 
-    let alb_json = apple_get_json(
+    let Some(cat_id) = catalog_album_id else {
+        return Err(anyhow!(
+            "Could not resolve full album on Apple Music Catalog or Your Library"
+        ));
+    };
+
+    let alb_json = match apple_get_json(
         &format!(
             "/v1/catalog/{}/albums/{}?include=tracks",
             storefront,
@@ -539,7 +777,15 @@ pub fn fetch_full_album(
         ),
         &dev_token,
         &user_token,
-    )?;
+    ) {
+        Ok(j) => j,
+        Err(e) => {
+            if let Some(ref lib_id) = library_album_id {
+                return fetch_library_album_with_tracks(&dev_token, &user_token, lib_id);
+            }
+            return Err(e);
+        }
+    };
 
     let alb_data = alb_json
         .pointer("/data/0")
@@ -592,12 +838,15 @@ pub fn fetch_full_album(
         track_count,
         release_year,
         kind: "catalog".to_string(),
+        date_added: None,
     };
 
     Ok(AppleFullAlbumResponse { album, tracks })
 }
 
-/// Live Apple Music Catalog Search in native Rust.
+/// Live Apple Music Dual-Scope Search (`"Your Library"` `/v1/me/library/search` + `"Apple Music Catalog"` `/v1/catalog/{storefront}/search`).
+/// Personal Cloud Library matches (`library-albums`, `library-playlists`, `library-songs`) are placed first so uploaded/matched
+/// releases (such as vinyl companion digital downloads not in the streaming catalog) are immediately discoverable.
 pub fn search_catalog(settings: &SimpSettings, term: &str) -> Result<AppleCatalogSearchResults> {
     let cleaned = term.trim();
     if cleaned.is_empty() {
@@ -611,120 +860,217 @@ pub fn search_catalog(settings: &SimpSettings, term: &str) -> Result<AppleCatalo
 
     let (dev_token, user_token) = resolve_tokens(settings)?;
     let storefront = get_storefront(&dev_token, &user_token);
-    let url = format!(
+    let encoded_term = urlencode(cleaned);
+
+    let catalog_url = format!(
         "/v1/catalog/{}/search?term={}&types=songs,albums,playlists,stations&limit=15",
-        storefront,
-        urlencode(cleaned)
+        storefront, encoded_term
     );
-    let json = apple_get_json(&url, &dev_token, &user_token)?;
-    let results = json.get("results").unwrap_or(&json);
+    let library_url = format!(
+        "/v1/me/library/search?term={}&types=library-albums,library-songs,library-playlists&limit=20",
+        encoded_term
+    );
 
-    let songs: Vec<TrackMetadata> = results
-        .pointer("/songs/data")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(map_apple_item_to_track).collect())
-        .unwrap_or_default();
+    let (lib_res, cat_res) = std::thread::scope(|s| {
+        let d1 = &dev_token;
+        let u1 = &user_token;
+        let l_url = &library_url;
+        let lib_handle = s.spawn(move || apple_get_json(l_url, d1, u1));
 
-    let albums: Vec<AppleCloudAlbumSummary> = results
-        .pointer("/albums/data")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|alb| {
-                    let id = alb.get("id")?.as_str()?.to_string();
-                    let attrs = alb.get("attributes").unwrap_or(alb);
-                    Some(AppleCloudAlbumSummary {
-                        id,
-                        title: attrs
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Album")
-                            .to_string(),
-                        artist: attrs
-                            .get("artistName")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Unknown Artist")
-                            .to_string(),
-                        art_url: format_apple_art_url(
-                            attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
-                            300,
-                        ),
-                        track_count: attrs
-                            .get("trackCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as usize,
-                        release_year: attrs
-                            .get("releaseDate")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| s.get(0..4))
-                            .and_then(|y| y.parse::<u32>().ok()),
-                        kind: "catalog".to_string(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        let d2 = &dev_token;
+        let u2 = &user_token;
+        let c_url = &catalog_url;
+        let cat_handle = s.spawn(move || apple_get_json(c_url, d2, u2));
 
-    let playlists: Vec<AppleCloudPlaylistSummary> = results
-        .pointer("/playlists/data")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|pl| {
-                    let id = pl.get("id")?.as_str()?.to_string();
-                    let attrs = pl.get("attributes").unwrap_or(pl);
-                    Some(AppleCloudPlaylistSummary {
-                        id,
-                        name: attrs
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Playlist")
-                            .to_string(),
-                        description: attrs
-                            .get("curatorName")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Apple Music Playlist")
-                            .to_string(),
-                        art_url: format_apple_art_url(
-                            attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
-                            300,
-                        ),
-                        kind: "catalog".to_string(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        (lib_handle.join().ok(), cat_handle.join().ok())
+    });
 
-    let stations: Vec<AppleRadioStationSummary> = results
-        .pointer("/stations/data")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|st| {
-                    let id = st.get("id")?.as_str()?.to_string();
-                    let attrs = st.get("attributes").unwrap_or(st);
-                    Some(AppleRadioStationSummary {
-                        id,
-                        name: attrs
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Station")
-                            .to_string(),
-                        subtitle: attrs
-                            .pointer("/editorialNotes/short")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Apple Music Radio")
-                            .to_string(),
-                        art_url: format_apple_art_url(
-                            attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
-                            300,
-                        ),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut songs: Vec<TrackMetadata> = Vec::new();
+    let mut albums: Vec<AppleCloudAlbumSummary> = Vec::new();
+    let mut playlists: Vec<AppleCloudPlaylistSummary> = Vec::new();
+    let mut stations: Vec<AppleRadioStationSummary> = Vec::new();
+
+    let mut seen_song_uris = HashSet::new();
+    let mut seen_album_ids = HashSet::new();
+    let mut seen_playlist_ids = HashSet::new();
+
+    // 1. Parse Personal Cloud Library ("Your Library") matches first
+    if let Some(Ok(lib_json)) = lib_res {
+        let lib_results = lib_json.get("results").unwrap_or(&lib_json);
+
+        if let Some(arr) = lib_results
+            .pointer("/library-albums/data")
+            .and_then(|v| v.as_array())
+        {
+            for alb in arr {
+                if let Some(summary) = parse_apple_album_summary(alb, "library") {
+                    if seen_album_ids.insert(summary.id.clone()) {
+                        albums.push(summary);
+                    }
+                }
+            }
+        }
+
+        if let Some(arr) = lib_results
+            .pointer("/library-playlists/data")
+            .and_then(|v| v.as_array())
+        {
+            for pl in arr {
+                let Some(id) = pl.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !seen_playlist_ids.insert(id.to_string()) {
+                    continue;
+                }
+                let attrs = pl.get("attributes").unwrap_or(pl);
+                playlists.push(AppleCloudPlaylistSummary {
+                    id: id.to_string(),
+                    name: attrs
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Library Playlist")
+                        .to_string(),
+                    description: attrs
+                        .pointer("/description/standard")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("☁️ In Your Library")
+                        .to_string(),
+                    art_url: format_apple_art_url(
+                        attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
+                        300,
+                    ),
+                    kind: "library".to_string(),
+                });
+            }
+        }
+
+        if let Some(arr) = lib_results
+            .pointer("/library-songs/data")
+            .and_then(|v| v.as_array())
+        {
+            for item in arr {
+                if let Some(mut tr) = map_apple_item_to_track(item) {
+                    if !tr.album.starts_with("☁️ ") && tr.uri.contains(":i.") {
+                        tr.album = format!("☁️ {}", tr.album);
+                    }
+                    if seen_song_uris.insert(tr.uri.clone()) {
+                        songs.push(tr);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Parse Public Storefront Catalog matches & heal any blobstore artwork on matching Library Albums
+    if let Some(Ok(json)) = cat_res {
+        let results = json.get("results").unwrap_or(&json);
+
+        if let Some(arr) = results.pointer("/albums/data").and_then(|v| v.as_array()) {
+            for alb in arr {
+                let Some(cat_alb) = parse_apple_album_summary(alb, "catalog") else {
+                    continue;
+                };
+                let cat_title_lower = cat_alb.title.trim().to_lowercase();
+                let cat_artist_lower = cat_alb.artist.trim().to_lowercase();
+
+                if let Some(existing_lib) = albums.iter_mut().find(|a| {
+                    a.kind == "library"
+                        && a.title.trim().to_lowercase() == cat_title_lower
+                        && a.artist.trim().to_lowercase() == cat_artist_lower
+                }) {
+                    let lib_needs_art = existing_lib
+                        .art_url
+                        .as_deref()
+                        .map(|u| u.is_empty() || u.contains("blobstore.apple.com"))
+                        .unwrap_or(true);
+                    if lib_needs_art && cat_alb.art_url.is_some() {
+                        existing_lib.art_url = cat_alb.art_url.clone();
+                    }
+                    if existing_lib.release_year.is_none() {
+                        existing_lib.release_year = cat_alb.release_year;
+                    }
+                    // If the user's library album is only a partial stub (fewer tracks than the full catalog album),
+                    // also include the full catalog album so the user can open either!
+                    if existing_lib.track_count >= cat_alb.track_count && existing_lib.track_count > 0 {
+                        continue;
+                    }
+                }
+
+                if seen_album_ids.insert(cat_alb.id.clone()) {
+                    albums.push(cat_alb);
+                }
+            }
+        }
+
+        if let Some(arr) = results
+            .pointer("/playlists/data")
+            .and_then(|v| v.as_array())
+        {
+            for pl in arr {
+                let Some(id) = pl.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !seen_playlist_ids.insert(id.to_string()) {
+                    continue;
+                }
+                let attrs = pl.get("attributes").unwrap_or(pl);
+                playlists.push(AppleCloudPlaylistSummary {
+                    id: id.to_string(),
+                    name: attrs
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Playlist")
+                        .to_string(),
+                    description: attrs
+                        .get("curatorName")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Apple Music Playlist")
+                        .to_string(),
+                    art_url: format_apple_art_url(
+                        attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
+                        300,
+                    ),
+                    kind: "catalog".to_string(),
+                });
+            }
+        }
+
+        if let Some(arr) = results.pointer("/stations/data").and_then(|v| v.as_array()) {
+            for st in arr {
+                let Some(id) = st.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let attrs = st.get("attributes").unwrap_or(st);
+                stations.push(AppleRadioStationSummary {
+                    id: id.to_string(),
+                    name: attrs
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Station")
+                        .to_string(),
+                    subtitle: attrs
+                        .pointer("/editorialNotes/short")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Apple Music Radio")
+                        .to_string(),
+                    art_url: format_apple_art_url(
+                        attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
+                        300,
+                    ),
+                });
+            }
+        }
+
+        if let Some(arr) = results.pointer("/songs/data").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(tr) = map_apple_item_to_track(item) {
+                    if seen_song_uris.insert(tr.uri.clone()) {
+                        songs.push(tr);
+                    }
+                }
+            }
+        }
+    }
 
     Ok(AppleCatalogSearchResults {
         songs,
@@ -732,6 +1078,58 @@ pub fn search_catalog(settings: &SimpSettings, term: &str) -> Result<AppleCatalo
         playlists,
         stations,
     })
+}
+
+/// Fetches the user's "Recently Added" personal Cloud Library albums (`/v1/me/library/recently-added?include=catalog&limit=25`
+/// + `/v1/me/library/albums?include=catalog&limit=50`), automatically filtering out 1-track single-song playlist stubs
+/// when full (`2+` track) albums are present.
+pub fn fetch_library_recently_added(settings: &SimpSettings) -> Result<Vec<AppleCloudAlbumSummary>> {
+    let (dev_token, user_token) = resolve_tokens(settings)?;
+    let mut raw_albums = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    for url in [
+        "/v1/me/library/recently-added?include=catalog&limit=25",
+        "/v1/me/library/recently-added?include=catalog&offset=25&limit=25",
+    ] {
+        let json = match apple_get_json(url, &dev_token, &user_token) {
+            Ok(j) => j,
+            Err(_) => {
+                let fallback = url.replace("include=catalog&", "");
+                match apple_get_json(&fallback, &dev_token, &user_token) {
+                    Ok(j) => j,
+                    Err(_) => break,
+                }
+            }
+        };
+        if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
+            if arr.is_empty() {
+                break;
+            }
+            for item in arr {
+                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if item_type == "library-albums" || item_type == "albums" {
+                    if let Some(alb) = parse_apple_album_summary(item, "library") {
+                        if seen_ids.insert(alb.id.clone()) {
+                            raw_albums.push(alb);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let full_albums: Vec<AppleCloudAlbumSummary> = raw_albums
+        .iter()
+        .filter(|a| a.track_count >= 2)
+        .cloned()
+        .collect();
+
+    if !full_albums.is_empty() {
+        Ok(full_albums)
+    } else {
+        Ok(raw_albums)
+    }
 }
 
 /// Fetches Radio & For You recommendations in native Rust.
@@ -825,33 +1223,12 @@ pub fn fetch_radio_and_for_you(settings: &SimpSettings) -> Result<AppleRadioAndF
                 if !seen_albums.insert(id.to_string()) {
                     return;
                 }
-                albums.push(AppleCloudAlbumSummary {
-                    id: id.to_string(),
-                    title: attrs
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Album")
-                        .to_string(),
-                    artist: attrs
-                        .get("artistName")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Apple Music")
-                        .to_string(),
-                    art_url: format_apple_art_url(
-                        attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
-                        300,
-                    ),
-                    track_count: attrs
-                        .get("trackCount")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize,
-                    release_year: attrs
-                        .get("releaseDate")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.get(0..4))
-                        .and_then(|y| y.parse::<u32>().ok()),
-                    kind: if id.starts_with("l.") { "library" } else { "catalog" }.to_string(),
-                });
+                if let Some(alb) = parse_apple_album_summary(
+                    item,
+                    if id.starts_with("l.") { "library" } else { "catalog" },
+                ) {
+                    albums.push(alb);
+                }
             }
             _ => {}
         }
@@ -940,6 +1317,7 @@ pub fn fetch_new_feed(settings: &SimpSettings) -> Result<AppleNewFeedResponse> {
                             track_count: attrs.get("trackCount").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
                             release_year: attrs.get("releaseDate").and_then(|v| v.as_str()).and_then(|s| s.get(0..4)).and_then(|y| y.parse::<u32>().ok()),
                             kind: "catalog".to_string(),
+                            date_added: None,
                         });
                     }
                 }
@@ -1290,24 +1668,23 @@ fn search_storefront_catalog_song_id(
     );
     let json = apple_get_json(&url, dev_token, user_token).ok()?;
     let candidates = json.pointer("/results/songs/data")?.as_array()?;
-    let t_lower = t.to_lowercase();
-    let a_lower = a.to_lowercase();
-    let chosen = candidates
-        .iter()
-        .find(|c| {
-            let n = c
-                .pointer("/attributes/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let ar = c
-                .pointer("/attributes/artistName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            n == t_lower && (a_lower.is_empty() || ar.contains(&a_lower))
-        })
-        .or_else(|| candidates.first())?;
+    let t_lower = t.trim().to_lowercase();
+    let a_lower = a.trim().to_lowercase();
+    let chosen = candidates.iter().find(|c| {
+        let n = c
+            .pointer("/attributes/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let ar = c
+            .pointer("/attributes/artistName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        n == t_lower && (a_lower.is_empty() || ar.contains(&a_lower) || a_lower.contains(&ar))
+    })?;
 
     let id = chosen.get("id")?.as_str()?;
     let art_url = format_apple_art_url(
@@ -1325,6 +1702,8 @@ fn search_storefront_catalog_song_id(
 
 /// Resolves a re-linked or tombstoned playlist track ID (`i.xxxx` library song ID or stale catalog ID)
 /// to its active storefront catalog song ID in native Rust, with persistent SQLite + in-memory caching.
+/// Note: For uploaded Cloud Library tracks (`i.xxxx`) that have no catalog equivalent, returns `Ok(None)`
+/// so `fetch_web_playback_manifest` preserves the user's `universalLibraryId` (`i.xxxx`).
 pub fn resolve_replacement_catalog_song_id(
     settings: &SimpSettings,
     raw_id: &str,
@@ -1347,10 +1726,9 @@ pub fn resolve_replacement_catalog_song_id(
     let (dev_token, user_token) = resolve_tokens(settings)?;
     let storefront = get_storefront(&dev_token, &user_token);
 
-    // Prefer live storefront catalog search (`GET /v1/catalog/{storefront}/search`) first whenever
-    // `title` is known: this resolves directly to the active, licensed storefront `salableAdamId` in
-    // 1 HTTP call instead of hitting `/v1/me/library/songs/i.xxxx/catalog` (which either 404s or
-    // returns delisted 2010 pressing IDs that fail `acquireWebPlaybackLicense` with `status: -1003`).
+    // If `title` + `artist` have an exact storefront catalog match, resolve to the active licensed `salableAdamId`.
+    // Because `search_storefront_catalog_song_id` requires an exact title+artist match (no fuzzy `candidates.first()`),
+    // uploaded tracks that aren't in the streaming catalog safely fall through without being overwritten!
     if let Some((resolved, art_url)) =
         search_storefront_catalog_song_id(&dev_token, &user_token, &storefront, clean_id, title, artist)
     {
@@ -1457,22 +1835,32 @@ pub fn spawn_queue_catalog_prewarmer(settings: SimpSettings, tracks: Vec<TrackMe
         });
 }
 
-fn has_widevine_ctrp_asset(json: &Value) -> bool {
+fn has_playable_cloud_or_widevine_asset(json: &Value) -> bool {
     json.pointer("/songList/0/assets")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter().any(|a| {
-                a.get("flavor")
+                let has_url = a
+                    .get("URL")
                     .and_then(|v| v.as_str())
-                    .map(|f| f.contains("ctrp"))
-                    .unwrap_or(false)
+                    .map(|u| !u.trim().is_empty())
+                    .unwrap_or(false);
+                if !has_url {
+                    return false;
+                }
+                let flavor = a.get("flavor").and_then(|v| v.as_str()).unwrap_or("");
+                flavor.contains("ctrp")
+                    || flavor.contains("plus")
+                    || flavor.contains("itemDownload")
+                    || json.pointer("/songList/0/hls-key-server-url").is_none()
             })
         })
         .unwrap_or(false)
 }
 
 /// Stage C Browserless Foundation: Queries Apple's `webPlayback` endpoint directly from Rust
-/// to retrieve the encrypted HLS `.m3u8` asset stream URL and Widevine license server URLs.
+/// to retrieve the encrypted HLS `.m3u8` asset stream URL and Widevine license server URLs
+/// (or DRM-free `plus256` / `itemDownload` / clear HLS assets for uploaded & iTunes Match Cloud Locker tracks).
 pub fn fetch_web_playback_manifest(
     settings: &SimpSettings,
     song_id: &str,
@@ -1495,7 +1883,8 @@ pub fn fetch_web_playback_manifest(
     };
 
     // Always pass `title` and `artist` from `library.db` when resolving `i.xxxx` library tracks
-    // so re-linked pinned playlists resolve to their active catalog `salableAdamId`!
+    // so re-linked pinned playlists resolve to their active catalog `salableAdamId`, while uploaded
+    // tracks without a catalog match preserve their `universalLibraryId` (`i.xxxx`).
     let mut db_meta_cache: Option<(Option<String>, Option<String>)> = None;
     if active_id.starts_with("i.") {
         let (t_opt, a_opt) = lookup_track_title_artist_in_db(clean_id);
@@ -1525,7 +1914,7 @@ pub fn fetch_web_playback_manifest(
         &make_payload(&active_id),
     )?;
 
-    if (json.pointer("/songList/0").is_none() || !has_widevine_ctrp_asset(&json))
+    if (json.pointer("/songList/0").is_none() || !has_playable_cloud_or_widevine_asset(&json))
         && clean_id.starts_with("i.")
         && active_id != clean_id
     {
@@ -1546,7 +1935,9 @@ pub fn fetch_web_playback_manifest(
                 &user_token,
                 &fallback_payload,
             ) {
-                if candidate.pointer("/songList/0").is_some() && has_widevine_ctrp_asset(&candidate) {
+                if candidate.pointer("/songList/0").is_some()
+                    && has_playable_cloud_or_widevine_asset(&candidate)
+                {
                     json = candidate;
                     break;
                 }
@@ -1554,7 +1945,7 @@ pub fn fetch_web_playback_manifest(
         }
     }
 
-    if json.pointer("/songList/0").is_none() || !has_widevine_ctrp_asset(&json) {
+    if json.pointer("/songList/0").is_none() || !has_playable_cloud_or_widevine_asset(&json) {
         let (title_opt, artist_opt) =
             db_meta_cache.unwrap_or_else(|| lookup_track_title_artist_in_db(clean_id));
         let storefront = get_storefront(&dev_token, &user_token);
@@ -1607,8 +1998,9 @@ pub fn fetch_web_playback_manifest(
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow!("No HLS assets in webPlayback response"))?;
 
-    // Prefer 256kbps Widevine CTR (`28:ctrp256`) or 64kbps Widevine CTR (`28:ctrp64`)
-    // ahead of FairPlay-only (`30:cbcp256`) assets so `#EXT-X-KEY` includes the Widevine PSSH!
+    // Prefer:
+    // 1. DRM-free `plus256` / `itemDownload` assets when playing user-uploaded / iTunes Match Cloud Locker tracks without `hls-key-server-url`
+    // 2. 256kbps Widevine CTR (`28:ctrp256`) or 64kbps Widevine CTR (`28:ctrp64`) ahead of FairPlay-only (`30:cbcp256`)
     let chosen = assets
         .iter()
         .find(|a| {
@@ -1622,6 +2014,14 @@ pub fn fetch_web_playback_manifest(
                 a.get("flavor")
                     .and_then(|v| v.as_str())
                     .map(|f| f.contains("ctrp"))
+                    .unwrap_or(false)
+            })
+        })
+        .or_else(|| {
+            assets.iter().find(|a| {
+                a.get("flavor")
+                    .and_then(|v| v.as_str())
+                    .map(|f| f.contains("plus") || f.contains("itemDownload"))
                     .unwrap_or(false)
             })
         })
@@ -1647,12 +2047,34 @@ pub fn fetch_web_playback_manifest(
         .unwrap_or("default")
         .to_string();
 
+    let url_path_lower = hls_playlist_url
+        .split('?')
+        .next()
+        .unwrap_or(&hls_playlist_url)
+        .to_lowercase();
+    let is_direct_audio_file = !url_path_lower.ends_with(".m3u8")
+        && (url_path_lower.ends_with(".m4a")
+            || url_path_lower.ends_with(".mp3")
+            || url_path_lower.ends_with(".aac")
+            || url_path_lower.ends_with(".flac")
+            || url_path_lower.ends_with(".wav")
+            || flavor.contains("itemDownload"));
+
+    let encryption_kind = if is_direct_audio_file {
+        AppleAssetEncryptionKind::ClearDirectAudio
+    } else if flavor.contains("plus") || (key_server_url.is_none() && !flavor.contains("ctrp") && !flavor.contains("cbcp")) {
+        AppleAssetEncryptionKind::ClearHlsFmp4
+    } else {
+        AppleAssetEncryptionKind::WidevineCenc
+    };
+
     Ok(AppleWebPlaybackAsset {
         song_id: canonical_song_id,
         flavor,
         hls_playlist_url,
         key_server_url,
         key_cert_url,
+        encryption_kind,
     })
 }
 
@@ -1755,5 +2177,43 @@ mod tests {
             with_limit_100("/v1/me/library/playlists"),
             "/v1/me/library/playlists?limit=100"
         );
+    }
+
+    #[test]
+    fn test_parse_apple_album_summary_handles_personal_cloud_library_album() {
+        let lib_album = serde_json::json!({
+            "id": "l.abc98765",
+            "type": "library-albums",
+            "attributes": {
+                "name": "Sample Uploaded Vinyl Companion",
+                "artistName": "Example Artist",
+                "trackCount": 37,
+                "releaseDate": "2017-12-22",
+                "dateAdded": "2024-05-10T14:20:00Z",
+                "artwork": {
+                    "url": "https://is1-ssl.mzstatic.com/image/thumb/Music118/v4/aa/bb/cc/cover.jpg/{w}x{h}bb.jpg"
+                }
+            }
+        });
+
+        let summary = parse_apple_album_summary(&lib_album, "library").expect("should parse library album");
+        assert_eq!(summary.id, "l.abc98765");
+        assert_eq!(summary.kind, "library");
+        assert_eq!(summary.title, "Sample Uploaded Vinyl Companion");
+        assert_eq!(summary.artist, "Example Artist");
+        assert_eq!(summary.track_count, 37);
+        assert_eq!(summary.release_year, Some(2017));
+        assert_eq!(summary.date_added.as_deref(), Some("2024-05-10T14:20:00Z"));
+
+        let cloud_locker_manifest = serde_json::json!({
+            "songList": [{
+                "songId": "i.uploadedTrack01",
+                "assets": [{
+                    "flavor": "28:plus256",
+                    "URL": "https://audio-ssl.itunes.apple.com/itunes-assets/clear_stream.m3u8"
+                }]
+            }]
+        });
+        assert!(has_playable_cloud_or_widevine_asset(&cloud_locker_manifest));
     }
 }

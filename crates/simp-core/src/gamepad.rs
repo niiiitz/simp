@@ -18,7 +18,9 @@ use tokio::sync::broadcast;
 /// Linux `joydev` ioctl `JSIOCGBTNMAP` (`_IOR('j', 0x34, __u16[KEY_MAX - BTN_MISC + 1])`)
 /// Queries the exact kernel `BTN_*` keycode mapped to each `js_event.number` button index.
 #[cfg(target_os = "linux")]
-const JSIOCGBTNMAP: libc::Ioctl = 0x80406a34u32 as libc::Ioctl;
+const JSIOCGBTNMAP: libc::Ioctl = 0x84006a34u32 as libc::Ioctl;
+#[cfg(target_os = "linux")]
+const JSIOCGBTNMAP_LEGACY: libc::Ioctl = 0x80406a34u32 as libc::Ioctl;
 
 /// Linux `evdev` ioctl `EVIOCGABS(axis)` (`_IOR('E', 0x40 + axis, struct input_absinfo)`)
 #[cfg(target_os = "linux")]
@@ -65,13 +67,15 @@ fn is_ignored_sensor_or_keyboard_name(name: &str) -> bool {
 #[cfg(target_os = "linux")]
 fn is_evdev_gamepad_candidate(idx: usize) -> bool {
     let dev_dir = format!("/sys/class/input/event{idx}/device");
-    // If this input device already exposes a `js*` joydev node that is readable, let `read_joystick_loop` handle it
-    // so we never emit duplicate events for the same physical/virtual controller.
+    // If this input device already exposes a `js*` joydev node that is readable by our process,
+    // let `read_joystick_loop` handle it so we never emit duplicate events for the same controller.
+    // (If `/dev/input/js*` exists but lacks user ACL read permission while `/dev/input/event*` has `uaccess`,
+    // do not skip `event*`!)
     if let Ok(entries) = std::fs::read_dir(&dev_dir) {
         for entry in entries.flatten() {
             let fname = entry.file_name();
             let s = fname.to_string_lossy();
-            if s.starts_with("js") && Path::new(&format!("/dev/input/{s}")).exists() {
+            if s.starts_with("js") && File::open(format!("/dev/input/{s}")).is_ok() {
                 return false;
             }
         }
@@ -265,6 +269,7 @@ fn read_joystick_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sende
     let mut raw_btn_map = [0u16; 640];
     let has_btn_map = unsafe {
         libc::ioctl(file.as_raw_fd(), JSIOCGBTNMAP, raw_btn_map.as_mut_ptr()) >= 0
+            || libc::ioctl(file.as_raw_fd(), JSIOCGBTNMAP_LEGACY, raw_btn_map.as_mut_ptr()) >= 0
     };
     let btn_map_ref = if has_btn_map {
         Some(&raw_btn_map)

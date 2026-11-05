@@ -1,6 +1,7 @@
 use crate::sinks::apple::AppleMusicSink;
 use crate::sinks::apple_api::{
-    fetch_web_playback_manifest, force_resolve_catalog_song_by_search, AppleWebPlaybackAsset,
+    fetch_web_playback_manifest, force_resolve_catalog_song_by_search, AppleAssetEncryptionKind,
+    AppleWebPlaybackAsset,
 };
 use crate::sinks::apple_native::{
     cdm_host::{
@@ -926,9 +927,64 @@ pub fn spawn_progressive_apple_music_rodio_source(
                 mark_aborted(&state);
                 return;
             }
+            if manifest.encryption_kind == AppleAssetEncryptionKind::ClearDirectAudio {
+                match fetch_hls_bytes(&manifest.hls_playlist_url, None)
+                    .and_then(decode_fmp4_bytes_to_pcm)
+                {
+                    Ok((pcm, _, _)) => {
+                        if let Ok(mut g) = state.lock() {
+                            g.total_expected_samples = pcm.len();
+                            g.samples = pcm;
+                            g.is_complete = true;
+                        }
+                        if active_epoch.load(Ordering::SeqCst) == epoch {
+                            if let Ok(mut tr) = tracker.lock() {
+                                tr.reset();
+                                tr.seek(start_pos_ms);
+                                if !user_paused_flag.load(Ordering::SeqCst) {
+                                    tr.play();
+                                }
+                            }
+                            if let Some(next_uri) = next_track_uri {
+                                prefetch_apple_music_track(settings.clone(), next_uri);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to download/decode DRM-free Cloud Locker asset for {song_uri}: {e}"
+                        );
+                        mark_aborted(&state);
+                    }
+                }
+                return;
+            }
             let mut playlist = match fetch_and_parse_apple_hls(&manifest.hls_playlist_url) {
                 Ok(p) => p,
                 Err(e) => {
+                    // Fallback: if `webPlayback` returned a direct audio file URL (`.m4a`/`.mp3`) without an `.m3u8` extension
+                    if let Ok((pcm, _, _)) = fetch_hls_bytes(&manifest.hls_playlist_url, None)
+                        .and_then(decode_fmp4_bytes_to_pcm)
+                    {
+                        if let Ok(mut g) = state.lock() {
+                            g.total_expected_samples = pcm.len();
+                            g.samples = pcm;
+                            g.is_complete = true;
+                        }
+                        if active_epoch.load(Ordering::SeqCst) == epoch {
+                            if let Ok(mut tr) = tracker.lock() {
+                                tr.reset();
+                                tr.seek(start_pos_ms);
+                                if !user_paused_flag.load(Ordering::SeqCst) {
+                                    tr.play();
+                                }
+                            }
+                            if let Some(next_uri) = next_track_uri {
+                                prefetch_apple_music_track(settings.clone(), next_uri);
+                            }
+                        }
+                        return;
+                    }
                     tracing::warn!("Apple HLS playlist fetch failed for {song_uri}: {e}");
                     mark_aborted(&state);
                     return;
@@ -1081,6 +1137,10 @@ fn stream_cold_or_partial_track(
         }
     };
 
+    let mut is_unencrypted_hls = manifest.encryption_kind == AppleAssetEncryptionKind::ClearHlsFmp4
+        || (playlist.encryption_method.is_none()
+            && playlist.widevine_pssh_bytes.is_empty()
+            && manifest.key_server_url.is_none());
     let mut license_ok = false;
     if let Some(lic_r) = lic_res {
         match lic_r {
@@ -1090,6 +1150,7 @@ fn stream_cold_or_partial_track(
             }
         }
     } else if let Some(pssh_bytes) = find_widevine_pssh_in_mp4(&init_and_tenc.0) {
+        is_unencrypted_hls = false;
         match negotiate_apple_license_for_epoch(
             &cdm_lib.library_path,
             epoch,
@@ -1106,6 +1167,9 @@ fn stream_cold_or_partial_track(
                 tracing::warn!("Widevine license attempt #1 failed for {song_uri}: {e}");
             }
         }
+    } else if is_unencrypted_hls {
+        // DRM-free Uploaded / iTunes Match Cloud Locker fMP4 HLS stream (no Widevine PSSH in `.m3u8` or `init_segment`)
+        license_ok = true;
     }
 
     // Self-healing fallback: if a library song's linked catalog ID was delisted (`status: -1003`),
@@ -1171,8 +1235,10 @@ fn stream_cold_or_partial_track(
 
     let (init_bytes, tenc) = init_and_tenc;
 
-    // Decrypt initial segments on the dedicated CDM thread for `active_song_id`
-    let decrypted_initial =
+    // Decrypt initial segments on the dedicated CDM thread for `active_song_id` (or pass through directly if DRM-free Cloud Locker HLS)
+    let decrypted_initial = if is_unencrypted_hls {
+        initial_segs
+    } else {
         match decrypt_segments_for_epoch(epoch, &active_song_id, initial_segs, tenc.clone()) {
             Ok(segs) => segs,
             Err(e) => {
@@ -1180,7 +1246,8 @@ fn stream_cold_or_partial_track(
                 mark_aborted(&state);
                 return;
             }
-        };
+        }
+    };
 
     let clear_init = rewrite_init_segment_enca_to_clear(&init_bytes);
     let mut all_decrypted_segs = Vec::with_capacity(playlist.segments.len());
@@ -1247,14 +1314,17 @@ fn stream_cold_or_partial_track(
             return;
         }
 
-        let dec_batch =
+        let dec_batch = if is_unencrypted_hls {
+            batch_segs
+        } else {
             match decrypt_segments_for_epoch(epoch, &active_song_id, batch_segs, tenc.clone()) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!("Background segment batch decrypt failed: {e}");
                     break;
                 }
-            };
+            }
+        };
 
         all_decrypted_segs.extend(dec_batch);
         if let Ok((full_pcm, _, _)) =
