@@ -38,6 +38,7 @@ pub struct AudioOrchestrator {
     mpris_controls: Option<MprisHandle>,
     transition_epoch: u64,
     consecutive_failures: u32,
+    active_station: Option<(String, Option<String>)>,
     internal_event_tx: mpsc::UnboundedSender<PlaybackEvent>,
     broadcast_tx: broadcast::Sender<PlaybackEvent>,
 }
@@ -50,6 +51,7 @@ impl AudioOrchestrator {
         internal_event_tx: mpsc::UnboundedSender<PlaybackEvent>,
         broadcast_tx: broadcast::Sender<PlaybackEvent>,
     ) -> Self {
+        crate::sinks::apple_api::set_shared_library_db(db.clone());
         let initial_vol = settings.lock().unwrap().audio.master_volume;
         let initial_brightness = settings.lock().unwrap().ui.brightness_pct.clamp(25, 100);
         let mut local_engine = LocalAudioEngine::new();
@@ -99,6 +101,7 @@ impl AudioOrchestrator {
             mpris_controls,
             transition_epoch: 0,
             consecutive_failures: 0,
+            active_station: None,
             internal_event_tx,
             broadcast_tx,
         };
@@ -137,6 +140,21 @@ impl AudioOrchestrator {
         match cmd {
             AudioCommand::Load { uri } => {
                 let track = self.resolve_track_from_uri(&uri);
+                if uri.starts_with("applemusic:station:") {
+                    if let Some(station_tracks) =
+                        self.expand_radio_station_tracks(&uri, Some(&track.title))
+                    {
+                        {
+                            let mut st = self.state.lock().unwrap();
+                            st.queue = station_tracks;
+                            st.queue_index = 0;
+                        }
+                        self.emit_queue_updated();
+                        self.transition_to_index(0);
+                        return;
+                    }
+                }
+                self.active_station = None;
                 {
                     let mut st = self.state.lock().unwrap();
                     st.queue = vec![track];
@@ -156,10 +174,18 @@ impl AudioOrchestrator {
                 let mut provided_map = std::collections::HashMap::new();
                 for t in tracks {
                     let mut clean = t.clone();
+                    crate::sinks::apple_api::remember_track_metadata_hint(&clean);
                     if clean.source == "apple_music" {
                         // Do not attach unpinned streaming tracks to an album_id unless already pinned
-                        if self.db.get_track_by_uri(&clean.uri).ok().flatten().is_none() {
-                            clean.album_id = None;
+                        let existing = self.db.get_track_by_uri(&clean.uri).ok().flatten();
+                        let should_upsert = existing
+                            .as_ref()
+                            .map(|ex| ex.title == "Unknown Track" || ex.title.trim().is_empty())
+                            .unwrap_or(true);
+                        if should_upsert && clean.title != "Unknown Track" {
+                            if existing.is_none() {
+                                clean.album_id = None;
+                            }
                             let _ = self.db.upsert_track(&clean, None, None);
                         }
                     }
@@ -177,8 +203,25 @@ impl AudioOrchestrator {
                 if queue.is_empty() {
                     return;
                 }
-                self.heal_and_prewarm_queue(&mut queue);
                 let idx = start_index.min(queue.len() - 1);
+                if queue[idx].uri.starts_with("applemusic:station:") {
+                    let st_uri = queue[idx].uri.clone();
+                    let st_title = queue[idx].title.clone();
+                    if let Some(station_tracks) =
+                        self.expand_radio_station_tracks(&st_uri, Some(&st_title))
+                    {
+                        {
+                            let mut st = self.state.lock().unwrap();
+                            st.queue = station_tracks;
+                            st.queue_index = 0;
+                        }
+                        self.emit_queue_updated();
+                        self.transition_to_index(0);
+                        return;
+                    }
+                }
+                self.active_station = None;
+                self.heal_and_prewarm_queue(&mut queue);
                 {
                     let mut st = self.state.lock().unwrap();
                     st.queue = queue;
@@ -188,6 +231,7 @@ impl AudioOrchestrator {
                 self.transition_to_index(idx);
             }
             AudioCommand::PlayAlbum { album_id, shuffle } => {
+                self.active_station = None;
                 if let Ok(mut tracks) = self.db.get_album_tracks(&album_id) {
                     if !tracks.is_empty() {
                         self.heal_and_prewarm_queue(&mut tracks);
@@ -203,6 +247,7 @@ impl AudioOrchestrator {
                 }
             }
             AudioCommand::PlayPlaylist { playlist_id, shuffle } => {
+                self.active_station = None;
                 if let Ok(mut tracks) = self.db.get_playlist_items(&playlist_id, 5000, 0) {
                     if !tracks.is_empty() {
                         self.heal_and_prewarm_queue(&mut tracks);
@@ -876,6 +921,43 @@ impl AudioOrchestrator {
         self.persist_session_to_vdf();
     }
 
+    fn expand_radio_station_tracks(
+        &mut self,
+        station_uri: &str,
+        title_hint: Option<&str>,
+    ) -> Option<Vec<TrackMetadata>> {
+        let cfg = self.settings.lock().unwrap().clone();
+        match crate::sinks::apple_api::fetch_radio_station_tracks(
+            &cfg,
+            station_uri,
+            title_hint,
+            15,
+        ) {
+            Ok(mut tracks) if !tracks.is_empty() => {
+                for t in &tracks {
+                    crate::sinks::apple_api::remember_track_metadata_hint(t);
+                    let mut clean = t.clone();
+                    if self.db.get_track_by_uri(&clean.uri).ok().flatten().is_none() {
+                        clean.album_id = None;
+                        let _ = self.db.upsert_track(&clean, None, None);
+                    }
+                }
+                self.heal_and_prewarm_queue(&mut tracks);
+                self.active_station =
+                    Some((station_uri.to_string(), title_hint.map(|s| s.to_string())));
+                Some(tracks)
+            }
+            Ok(_) => {
+                tracing::warn!("Radio station {} returned 0 tracks", station_uri);
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Failed to resolve radio station {}: {e}", station_uri);
+                None
+            }
+        }
+    }
+
     fn transition_to_index(&mut self, index: usize) {
         // 1. Bump transition_epoch to invalidate any in-flight monitor events
         self.transition_epoch = self.transition_epoch.wrapping_add(1);
@@ -921,15 +1003,35 @@ impl AudioOrchestrator {
             t
         };
 
+        // If a radio station URI (`applemusic:station:...`) was restored from `session_state.vdf`
+        // or queued directly, expand it into its playable song stream before dispatching to the sink.
+        if track.uri.starts_with("applemusic:station:") {
+            let st_uri = track.uri.clone();
+            let st_title = track.title.clone();
+            if let Some(station_tracks) =
+                self.expand_radio_station_tracks(&st_uri, Some(&st_title))
+            {
+                {
+                    let mut st = self.state.lock().unwrap();
+                    st.queue = station_tracks;
+                    st.queue_index = 0;
+                    track = st.queue[0].clone();
+                }
+                self.emit_queue_updated();
+            }
+        }
+
+        crate::sinks::apple_api::remember_track_metadata_hint(&track);
+
         let target_engine = if self.apple_sink.supports_uri(&track.uri) {
             self.apple_sink.engine_kind()
         } else {
             self.local_engine.engine_kind()
         };
 
-        // 2. Suspend outgoing sink if switching engines (unless both Local and AppleMusic
-        // are running on Native Rust PipeWire (`using_native_cdm`), in which case keeping
-        // the stream warm avoids PipeWire stream teardown/re-open overhead!)
+        // 2. Always suspend and release the outgoing engine's PipeWire/ALSA stream when switching
+        // between Local and AppleMusic so two `OutputStream` handles are never open simultaneously
+        // (which causes PulseAudio/PipeWire socket contention on WSL2 and SteamOS).
         let using_native_cdm = crate::sinks::apple::is_native_apple_cdm_preferred()
             && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some();
         let prev_engine = self.state.lock().unwrap().active_engine;
@@ -937,11 +1039,7 @@ impl AudioOrchestrator {
             if let Some((prev_sink, _internal_tx, broadcast_tx, _epoch)) =
                 self.sink_and_channels_mut(prev_engine)
             {
-                if using_native_cdm {
-                    prev_sink.pause_playback(broadcast_tx);
-                } else {
-                    prev_sink.suspend_sink(broadcast_tx);
-                }
+                prev_sink.suspend_sink(broadcast_tx);
             }
         }
 
@@ -1026,6 +1124,29 @@ impl AudioOrchestrator {
     }
 
     fn advance_queue(&mut self, manual_skip: bool) {
+        // If playing an endless Apple Music Radio station and nearing the end of the queue,
+        // automatically fetch and append the next batch of station tracks.
+        let need_station_refill = {
+            let st = self.state.lock().unwrap();
+            self.active_station.is_some() && st.queue_index + 2 >= st.queue.len()
+        };
+        if need_station_refill {
+            if let Some((st_uri, st_title)) = self.active_station.clone() {
+                if let Some(more_tracks) =
+                    self.expand_radio_station_tracks(&st_uri, st_title.as_deref())
+                {
+                    let mut st = self.state.lock().unwrap();
+                    let existing_uris: std::collections::HashSet<String> =
+                        st.queue.iter().map(|t| t.uri.clone()).collect();
+                    for t in more_tracks {
+                        if !existing_uris.contains(&t.uri) {
+                            st.queue.push(t);
+                        }
+                    }
+                }
+            }
+        }
+
         let (queue_len, current_idx, repeat_mode, shuffle) = {
             let st = self.state.lock().unwrap();
             (st.queue.len(), st.queue_index, st.repeat_mode, st.shuffle)

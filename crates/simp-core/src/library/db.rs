@@ -16,8 +16,10 @@ impl LibraryDatabase {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(db_path)?;
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
         conn.execute_batch(
             "
+            PRAGMA busy_timeout = 5000;
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;

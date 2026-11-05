@@ -428,6 +428,7 @@ impl crate::sinks::AudioSink for AppleMusicSink {
                             tracing::warn!(
                                 "Native Widevine CDM playback failed ({e}); falling back to browser worker"
                             );
+                            eng.release_pipewire_stream();
                             self.using_native_engine = false;
                         }
                     }
@@ -437,9 +438,19 @@ impl crate::sinks::AudioSink for AppleMusicSink {
                     "AppleMusicSink: no compatible native Widevine CDM library found for arch={}; falling back to browser MusicKit worker",
                     std::env::consts::ARCH
                 );
+                if let Ok(mut guard) = self.native_engine.lock() {
+                    if let Some(ref mut eng) = *guard {
+                        eng.release_pipewire_stream();
+                    }
+                }
                 self.using_native_engine = false;
             }
         } else {
+            if let Ok(mut guard) = self.native_engine.lock() {
+                if let Some(ref mut eng) = *guard {
+                    eng.release_pipewire_stream();
+                }
+            }
             self.using_native_engine = false;
         }
 
@@ -465,11 +476,9 @@ impl crate::sinks::AudioSink for AppleMusicSink {
     }
 
     fn pause_playback(&mut self, broadcast_tx: &broadcast::Sender<PlaybackEvent>) {
-        if self.using_native_engine {
-            if let Ok(mut guard) = self.native_engine.lock() {
-                if let Some(ref mut eng) = *guard {
-                    eng.pause();
-                }
+        if let Ok(mut guard) = self.native_engine.lock() {
+            if let Some(ref mut eng) = *guard {
+                eng.pause();
             }
         }
         self.emit_pause(broadcast_tx);

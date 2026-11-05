@@ -174,7 +174,7 @@ pub fn map_apple_item_to_track(item: &Value) -> Option<TrackMetadata> {
         .map(|n| n as u32)
         .or(Some(1));
 
-    Some(TrackMetadata {
+    let meta = TrackMetadata {
         uri: format!("applemusic:song:{track_id}"),
         title,
         artists: vec![artist_name],
@@ -186,7 +186,19 @@ pub fn map_apple_item_to_track(item: &Value) -> Option<TrackMetadata> {
         duration_ms,
         source: "apple_music".to_string(),
         mount_root: None,
-    })
+    };
+    remember_track_metadata_hint(&meta);
+    if let Some(raw_item_id) = item_id {
+        if raw_item_id != track_id {
+            remember_raw_id_metadata_hint(
+                raw_item_id,
+                &meta.title,
+                meta.artists.first().map(|s| s.as_str()).unwrap_or(""),
+                meta.art_url.clone(),
+            );
+        }
+    }
+    Some(meta)
 }
 
 fn resolve_tokens(settings: &SimpSettings) -> Result<(String, String)> {
@@ -215,6 +227,7 @@ fn apple_get_json(url: &str, dev_token: &str, user_token: &str) -> Result<Value>
     let headers = [
         ("Authorization", auth_header.as_str()),
         ("Music-User-Token", user_token.trim()),
+        ("X-Apple-Music-User-Token", user_token.trim()),
         ("Origin", "https://music.apple.com"),
         ("Referer", "https://music.apple.com/"),
     ];
@@ -233,6 +246,7 @@ fn apple_post_json(url: &str, dev_token: &str, user_token: &str, body: &Value) -
     let headers = [
         ("Authorization", auth_header.as_str()),
         ("Music-User-Token", user_token.trim()),
+        ("X-Apple-Music-User-Token", user_token.trim()),
         ("Content-Type", "application/json"),
         ("Origin", "https://music.apple.com"),
         ("Referer", "https://music.apple.com/"),
@@ -971,17 +985,89 @@ pub fn fetch_new_feed(settings: &SimpSettings) -> Result<AppleNewFeedResponse> {
     })
 }
 
-static SHARED_APPLE_DB: std::sync::OnceLock<Option<crate::library::db::LibraryDatabase>> =
-    std::sync::OnceLock::new();
+static SHARED_APPLE_DB: std::sync::OnceLock<
+    std::sync::Mutex<Option<crate::library::db::LibraryDatabase>>,
+> = std::sync::OnceLock::new();
 
-fn shared_library_db() -> Option<&'static crate::library::db::LibraryDatabase> {
-    SHARED_APPLE_DB
-        .get_or_init(|| {
-            let data_dir = dirs::data_local_dir()?;
-            let db_path = data_dir.join("simp").join("library.db");
-            crate::library::db::LibraryDatabase::open(&db_path).ok()
-        })
-        .as_ref()
+fn shared_db_slot() -> &'static std::sync::Mutex<Option<crate::library::db::LibraryDatabase>> {
+    SHARED_APPLE_DB.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Registers the daemon's main `LibraryDatabase` handle so `apple_api` shares the exact same
+/// `Arc<Mutex<Connection>>` without opening a second SQLite connection or risking `SQLITE_BUSY`.
+pub fn set_shared_library_db(db: crate::library::db::LibraryDatabase) {
+    if let Ok(mut guard) = shared_db_slot().lock() {
+        *guard = Some(db.clone());
+    }
+    if let Ok(persisted) = db.get_all_apple_catalog_mappings() {
+        if let Ok(mut cache) = catalog_id_cache().lock() {
+            for (k, v) in persisted {
+                cache.entry(k).or_insert(v);
+            }
+        }
+    }
+}
+
+fn shared_library_db() -> Option<crate::library::db::LibraryDatabase> {
+    if let Ok(mut guard) = shared_db_slot().lock() {
+        if let Some(ref db) = *guard {
+            return Some(db.clone());
+        }
+        let data_dir = dirs::data_local_dir()?;
+        let db_path = data_dir.join("simp").join("library.db");
+        if let Ok(opened) = crate::library::db::LibraryDatabase::open(&db_path) {
+            *guard = Some(opened.clone());
+            return Some(opened);
+        }
+    }
+    None
+}
+
+static TRACK_META_HINTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (String, String, Option<String>)>>,
+> = std::sync::OnceLock::new();
+
+fn track_meta_hints(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, String, Option<String>)>>
+{
+    TRACK_META_HINTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub fn remember_raw_id_metadata_hint(
+    raw_id_or_uri: &str,
+    title: &str,
+    artist: &str,
+    art_url: Option<String>,
+) {
+    let clean_id = raw_id_or_uri
+        .strip_prefix("applemusic:song:")
+        .or_else(|| raw_id_or_uri.strip_prefix("applemusic:track:"))
+        .or_else(|| raw_id_or_uri.strip_prefix("applemusic:"))
+        .unwrap_or(raw_id_or_uri)
+        .trim();
+    if clean_id.is_empty() || title.trim().is_empty() || title == "Unknown Track" {
+        return;
+    }
+    if let Ok(mut guard) = track_meta_hints().lock() {
+        let valid_art = art_url.filter(|u| !u.is_empty() && !u.contains("blobstore.apple.com"));
+        let prev_art = guard.get(clean_id).and_then(|(_, _, a)| a.clone());
+        guard.insert(
+            clean_id.to_string(),
+            (
+                title.trim().to_string(),
+                artist.trim().to_string(),
+                valid_art.or(prev_art),
+            ),
+        );
+    }
+}
+
+pub fn remember_track_metadata_hint(track: &TrackMetadata) {
+    if !track.uri.starts_with("applemusic:") {
+        return;
+    }
+    let artist = track.artists.first().map(|s| s.as_str()).unwrap_or("");
+    remember_raw_id_metadata_hint(&track.uri, &track.title, artist, track.art_url.clone());
 }
 
 static RESOLVED_CATALOG_ID_CACHE: std::sync::OnceLock<
@@ -1027,6 +1113,13 @@ pub fn get_healed_track_art_url(song_uri_or_id: &str) -> Option<String> {
             return Some(art.clone());
         }
     }
+    if let Ok(guard) = track_meta_hints().lock() {
+        if let Some((_, _, Some(art))) = guard.get(clean_id) {
+            if art.contains("mzstatic.com") {
+                return Some(art.clone());
+            }
+        }
+    }
     if let Some(db) = shared_library_db() {
         for prefix in ["applemusic:song:", "applemusic:track:"] {
             let lookup_uri = format!("{prefix}{clean_id}");
@@ -1041,15 +1134,142 @@ pub fn get_healed_track_art_url(song_uri_or_id: &str) -> Option<String> {
 }
 
 fn lookup_track_title_artist_in_db(clean_id: &str) -> (Option<String>, Option<String>) {
+    if let Ok(guard) = track_meta_hints().lock() {
+        if let Some((t, a, _)) = guard.get(clean_id) {
+            if !t.is_empty() && t != "Unknown Track" {
+                let a_opt = if a.is_empty() || a == "Unknown Artist" {
+                    None
+                } else {
+                    Some(a.clone())
+                };
+                return (Some(t.clone()), a_opt);
+            }
+        }
+    }
     if let Some(db) = shared_library_db() {
         for prefix in ["applemusic:song:", "applemusic:track:"] {
             let lookup_uri = format!("{prefix}{clean_id}");
             if let Ok(Some(meta)) = db.get_track_by_uri(&lookup_uri) {
-                return (Some(meta.title), meta.artists.first().cloned());
+                if !meta.title.is_empty() && meta.title != "Unknown Track" {
+                    return (Some(meta.title), meta.artists.first().cloned());
+                }
             }
         }
     }
     (None, None)
+}
+
+/// Resolves an Apple Music Radio Station (`applemusic:station:ra.xxxx`) into a batch of playable
+/// catalog songs (`TrackMetadata`) in native Rust so radio stations stream 100% natively through
+/// SIMP's Zero-Browser Widevine CDM + PipeWire engine on SteamOS, Steam Frame, and Linux.
+pub fn fetch_radio_station_tracks(
+    settings: &SimpSettings,
+    station_uri_or_id: &str,
+    station_title_hint: Option<&str>,
+    limit: usize,
+) -> Result<Vec<TrackMetadata>> {
+    let (dev_token, user_token) = resolve_tokens(settings)?;
+    let station_id = station_uri_or_id
+        .strip_prefix("applemusic:station:")
+        .or_else(|| station_uri_or_id.strip_prefix("applemusic:"))
+        .unwrap_or(station_uri_or_id)
+        .trim();
+    if station_id.is_empty() {
+        return Err(anyhow!("Empty Apple Music radio station ID"));
+    }
+
+    let safe_limit = limit.clamp(5, 25);
+    let next_tracks_url = format!(
+        "https://api.music.apple.com/v1/me/stations/next-tracks/{}?limit={}",
+        urlencode(station_id),
+        safe_limit
+    );
+
+    if let Ok(json) = apple_post_json(
+        &next_tracks_url,
+        &dev_token,
+        &user_token,
+        &serde_json::json!({}),
+    ) {
+        if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
+            let tracks: Vec<TrackMetadata> = arr
+                .iter()
+                .filter_map(map_apple_item_to_track)
+                .collect();
+            if !tracks.is_empty() {
+                return Ok(tracks);
+            }
+        }
+    }
+
+    // Fallback for global live broadcast stations (`isLive: true`, e.g. `ra.978194965` Apple Music 1,
+    // Apple Music Hits, Apple Music Country, Apple Music Club, Apple Musica Uno, Apple Music Chill)
+    // where `/v1/me/stations/next-tracks` returns empty `data: []`:
+    let storefront = get_storefront(&dev_token, &user_token);
+    let raw_hint = station_title_hint
+        .unwrap_or("")
+        .trim_start_matches('📻')
+        .trim();
+    let lower_hint = raw_hint.to_lowercase();
+
+    // If it's "Apple Music 1" or no specific genre hint, try storefront Top Songs chart first
+    if lower_hint.is_empty() || lower_hint.contains("apple music 1") {
+        let chart_url = format!("/v1/catalog/{storefront}/charts?types=songs&limit=25");
+        if let Ok(json) = apple_get_json(&chart_url, &dev_token, &user_token) {
+            if let Some(arr) = json
+                .pointer("/results/songs/0/data")
+                .and_then(|v| v.as_array())
+            {
+                let tracks: Vec<TrackMetadata> = arr
+                    .iter()
+                    .filter_map(map_apple_item_to_track)
+                    .collect();
+                if !tracks.is_empty() {
+                    return Ok(tracks);
+                }
+            }
+        }
+    }
+
+    let search_term = if lower_hint.contains("country") {
+        "Country Hits"
+    } else if lower_hint.contains("club") {
+        "Dance Electronic Club"
+    } else if lower_hint.contains("uno") || lower_hint.contains("latino") {
+        "Musica Latina Hits"
+    } else if lower_hint.contains("chill") {
+        "Chill Ambient Lo-Fi"
+    } else if lower_hint.contains("hits") {
+        "Today's Hits"
+    } else if !raw_hint.is_empty() && !lower_hint.starts_with("apple music") {
+        raw_hint
+    } else {
+        "Top Hits"
+    };
+
+    let search_url = format!(
+        "/v1/catalog/{}/search?term={}&types=songs&limit=25",
+        storefront,
+        urlencode(search_term)
+    );
+    if let Ok(json) = apple_get_json(&search_url, &dev_token, &user_token) {
+        if let Some(arr) = json
+            .pointer("/results/songs/data")
+            .and_then(|v| v.as_array())
+        {
+            let tracks: Vec<TrackMetadata> = arr
+                .iter()
+                .filter_map(map_apple_item_to_track)
+                .collect();
+            if !tracks.is_empty() {
+                return Ok(tracks);
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "Could not resolve tracks for Apple Music station {station_id}"
+    ))
 }
 
 fn search_storefront_catalog_song_id(
@@ -1304,6 +1524,35 @@ pub fn fetch_web_playback_manifest(
         &user_token,
         &make_payload(&active_id),
     )?;
+
+    if (json.pointer("/songList/0").is_none() || !has_widevine_ctrp_asset(&json))
+        && clean_id.starts_with("i.")
+        && active_id != clean_id
+    {
+        // Some user library songs require both `universalLibraryId` and `subscriptionAdamId`
+        // (or just `universalLibraryId` directly) in the `webPlayback` request body.
+        for fallback_payload in [
+            serde_json::json!({
+                "universalLibraryId": clean_id,
+                "subscriptionAdamId": active_id,
+            }),
+            serde_json::json!({
+                "universalLibraryId": clean_id,
+            }),
+        ] {
+            if let Ok(candidate) = apple_post_json(
+                "https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback",
+                &dev_token,
+                &user_token,
+                &fallback_payload,
+            ) {
+                if candidate.pointer("/songList/0").is_some() && has_widevine_ctrp_asset(&candidate) {
+                    json = candidate;
+                    break;
+                }
+            }
+        }
+    }
 
     if json.pointer("/songList/0").is_none() || !has_widevine_ctrp_asset(&json) {
         let (title_opt, artist_opt) =

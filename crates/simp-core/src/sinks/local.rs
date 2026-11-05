@@ -66,13 +66,46 @@ impl LocalAudioEngine {
     }
 
     fn ensure_stream(&mut self) -> Result<()> {
+        if self._stream.is_some() && self.sink.is_some() {
+            #[cfg(unix)]
+            {
+                // If WSLg PulseServer socket died while `_stream` was cached, drop stale stream and revive
+                let wslg_pulse = Path::new("/mnt/wslg/PulseServer");
+                if wslg_pulse.exists()
+                    && std::os::unix::net::UnixStream::connect(wslg_pulse).is_err()
+                {
+                    tracing::warn!(
+                        "WSLg PulseServer socket disconnected — releasing stale OutputStream and reviving PulseAudio"
+                    );
+                    self.sink = None;
+                    self.stream_handle = None;
+                    self._stream = None;
+                }
+            }
+        }
+
         if self._stream.is_none() || self.sink.is_none() {
             ensure_wslg_alsa_pulse_bridge();
-            let (stream, handle) = OutputStream::try_default().map_err(|e| {
-                tracing::error!("Failed to open PipeWire/ALSA OutputStream: {e}");
-                anyhow!("Failed to open PipeWire/ALSA OutputStream: {e}")
-            })?;
-            let sink = Sink::try_new(&handle).context("Failed to create rodio Sink")?;
+            let open_attempt = || -> Result<(OutputStream, OutputStreamHandle, Sink)> {
+                let (stream, handle) = OutputStream::try_default().map_err(|e| {
+                    anyhow!("Failed to open PipeWire/ALSA OutputStream: {e}")
+                })?;
+                let sink = Sink::try_new(&handle).context("Failed to create rodio Sink")?;
+                Ok((stream, handle, sink))
+            };
+
+            let (stream, handle, sink) = match open_attempt() {
+                Ok(v) => v,
+                Err(_first_err) => {
+                    // Retry once after forcing a WSLg / PipeWire / PulseAudio bridge check
+                    ensure_wslg_alsa_pulse_bridge();
+                    open_attempt().map_err(|e| {
+                        tracing::error!("{e}");
+                        e
+                    })?
+                }
+            };
+
             sink.set_volume(self.volume);
             self._stream = Some(stream);
             self.stream_handle = Some(handle);
@@ -416,10 +449,21 @@ fn spawn_rodio_monitor(
     })
 }
 
-/// Ensures PipeWire / PulseAudio / WSLg runtime environment variables are populated before opening ALSA.
+/// Ensures PipeWire / PulseAudio / WSLg runtime environment variables are populated before opening ALSA,
+/// and automatically revives WSLg's internal PulseAudio daemon if `/mnt/wslg/PulseServer` has crashed.
 fn ensure_wslg_alsa_pulse_bridge() {
     #[cfg(unix)]
     {
+        let wslg_pulse = Path::new("/mnt/wslg/PulseServer");
+        let wslg_dir = Path::new("/mnt/wslg");
+        if wslg_dir.is_dir() {
+            let socket_alive = wslg_pulse.exists()
+                && std::os::unix::net::UnixStream::connect(wslg_pulse).is_ok();
+            if !socket_alive {
+                revive_wslg_pulseaudio_daemon();
+            }
+        }
+
         let uid = unsafe { libc::getuid() };
         let run_user = format!("/run/user/{uid}");
         if Path::new(&run_user).is_dir() {
@@ -435,34 +479,63 @@ fn ensure_wslg_alsa_pulse_bridge() {
                     std::env::set_var("PIPEWIRE_RUNTIME_DIR", &run_user);
                 }
             }
-            if std::env::var_os("PULSE_SERVER").is_none()
-                && Path::new(&format!("{run_user}/pulse/native")).exists()
+            let user_pulse = format!("{run_user}/pulse/native");
+            if Path::new(&user_pulse).exists()
+                && std::os::unix::net::UnixStream::connect(&user_pulse).is_ok()
             {
                 unsafe {
-                    std::env::set_var("PULSE_SERVER", format!("unix:{run_user}/pulse/native"));
+                    std::env::set_var("PULSE_SERVER", format!("unix:{user_pulse}"));
+                }
+            }
+        }
+
+        if wslg_pulse.exists() && std::os::unix::net::UnixStream::connect(wslg_pulse).is_ok() {
+            unsafe {
+                std::env::set_var("PULSE_SERVER", "unix:/mnt/wslg/PulseServer");
+            }
+            if let Some(home) = dirs::home_dir() {
+                let asoundrc = home.join(".asoundrc");
+                if !asoundrc.exists() {
+                    let config =
+                        "pcm.!default {\n    type pulse\n}\nctl.!default {\n    type pulse\n}\n";
+                    let _ = std::fs::write(&asoundrc, config);
                 }
             }
         }
     }
+}
 
-    let wslg_pulse = Path::new("/mnt/wslg/PulseServer");
-    if !wslg_pulse.exists() {
+#[cfg(unix)]
+fn revive_wslg_pulseaudio_daemon() {
+    let wsl_exe = Path::new("/mnt/c/Windows/System32/wsl.exe");
+    if !wsl_exe.is_file() {
         return;
     }
+    tracing::warn!(
+        "WSLg /mnt/wslg/PulseServer is not responding (Connection refused) — attempting automatic WSLg PulseAudio recovery..."
+    );
+    let script = "rm -f /mnt/wslg/PulseServer /mnt/wslg/runtime-dir/pulse/native /mnt/wslg/runtime-dir/pulse/pid; \
+                  PULSE_AUDIO_RDP_SINK=/mnt/wslg/RDSink \
+                  PULSE_AUDIO_RDP_SOURCE=/mnt/wslg/RDSource \
+                  PULSE_RUNTIME_PATH=/mnt/wslg/runtime-dir/pulse \
+                  /usr/bin/pulseaudio -D --exit-idle-time=-1 \
+                  --load='module-rdp-sink sink_name=RDPSink' \
+                  --load='module-rdp-source source_name=RDPSource' \
+                  --load='module-native-protocol-unix socket=/mnt/wslg/PulseServer auth-anonymous=1' \
+                  --log-target=file:/mnt/wslg/pulseaudio.log || true";
+    let _ = std::process::Command::new(wsl_exe)
+        .args(["--system", "-u", "wslg", "--", "sh", "-c", script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 
-    if std::env::var_os("PULSE_SERVER").is_none() {
-        // SAFETY: Called on the single-threaded audio orchestrator thread before opening ALSA
-        unsafe {
-            std::env::set_var("PULSE_SERVER", "unix:/mnt/wslg/PulseServer");
+    for _ in 0..10 {
+        if std::os::unix::net::UnixStream::connect("/mnt/wslg/PulseServer").is_ok() {
+            tracing::info!("WSLg PulseAudio server successfully revived at /mnt/wslg/PulseServer!");
+            return;
         }
-    }
-
-    if let Some(home) = dirs::home_dir() {
-        let asoundrc = home.join(".asoundrc");
-        if !asoundrc.exists() {
-            let config = "pcm.!default {\n    type pulse\n}\nctl.!default {\n    type pulse\n}\n";
-            let _ = std::fs::write(&asoundrc, config);
-        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
