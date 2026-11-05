@@ -394,7 +394,16 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     </div>
   );
 
-  // Reusable 2-Column Visual Card for SIMP Hybrid & Pinned Playlists (in `📌 My SIMP Library`)
+  // Responsive 4-Column-Max Tile Grid Style (up to 4 taller tiles per row, zero horizontal overflow)
+  const tileGridStyle: React.CSSProperties = {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(max(175px, calc((100% - 30px) / 4)), 1fr))',
+    gap: 10,
+    width: '100%',
+    minWidth: 0,
+  };
+
+  // Reusable Taller Visual Tile for SIMP Hybrid & Pinned Playlists (in `📌 My SIMP Library`)
   const renderSimpPlaylistCard = (pl: PlaylistRecord) => {
     const isLocal = pl.origin === 'simp_local';
     const isSelected =
@@ -403,15 +412,17 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       <div
         key={pl.id}
         style={{
-          minHeight: 62,
-          padding: '8px 10px',
+          position: 'relative',
+          minWidth: 0,
+          minHeight: 136,
+          padding: 12,
           borderRadius: 12,
           background: isSelected ? '#0d1b22' : '#0a0a0e',
           border: isSelected ? '1px solid #2aa3c4' : '1px solid #181822',
           display: 'flex',
+          flexDirection: 'column',
           justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 10,
+          boxSizing: 'border-box',
         }}
       >
         <button
@@ -423,6 +434,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           }}
           style={{
             flex: 1,
+            width: '100%',
             minWidth: 0,
             background: 'transparent',
             border: 'none',
@@ -430,51 +442,68 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             textAlign: 'left',
             cursor: 'pointer',
             display: 'flex',
-            alignItems: 'center',
-            gap: 10,
+            flexDirection: 'column',
+            alignItems: 'flex-start',
+            gap: 8,
             padding: 0,
           }}
         >
-          {pl.cover_art_url ? (
-            <img
-              src={pl.cover_art_url}
-              alt=""
-              loading="lazy"
-              style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
-                objectFit: 'cover',
-                border: '1px solid #262632',
-                flexShrink: 0,
-              }}
-            />
-          ) : (
-            <div
-              style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
-                background: isLocal ? '#0f222a' : '#251018',
-                border: isLocal ? '1px solid #2aa3c4' : '1px solid #4c1d2e',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 18,
-                flexShrink: 0,
-              }}
-            >
-              {isLocal ? '🎵' : '📌'}
-            </div>
-          )}
-          <div style={{ minWidth: 0, flex: 1 }}>
+          <div
+            style={{
+              width: '100%',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'flex-start',
+              paddingRight: 52,
+              boxSizing: 'border-box',
+            }}
+          >
+            {pl.cover_art_url ? (
+              <img
+                src={pl.cover_art_url}
+                alt=""
+                loading="lazy"
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 10,
+                  objectFit: 'cover',
+                  border: '1px solid #262632',
+                  flexShrink: 0,
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 10,
+                  background: isLocal ? '#0f222a' : '#251018',
+                  border: isLocal ? '1px solid #2aa3c4' : '1px solid #4c1d2e',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 22,
+                  flexShrink: 0,
+                }}
+              >
+                {isLocal ? '🎵' : '📌'}
+              </div>
+            )}
+          </div>
+          <div style={{ minWidth: 0, width: '100%' }}>
             <div
               style={{
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 800,
+                lineHeight: 1.3,
+                color: '#e4e4ec',
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
                 overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+                whiteSpace: 'normal',
+                overflowWrap: 'anywhere',
               }}
             >
               {pl.name}
@@ -482,42 +511,50 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             <div
               style={{
                 fontSize: 11,
+                lineHeight: 1.35,
                 color: isLocal ? '#2aa3c4' : '#fda4af',
+                marginTop: 4,
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
                 overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+                whiteSpace: 'normal',
+                overflowWrap: 'anywhere',
               }}
             >
-              {isLocal ? '★ SIMP Hybrid Playlist' : '📌 Pinned Apple Playlist'} • {pl.track_count} trk
+              {isLocal ? '★ SIMP Hybrid' : '📌 Pinned Apple'} • {pl.track_count} tracks
             </div>
           </div>
         </button>
         <button
-          data-row-aux="true"
+          data-tile-aux="true"
+          tabIndex={-1}
           onClick={(e) => {
             e.stopPropagation();
             handleDeletePlaylist(pl.id, pl.name);
           }}
           title={isLocal ? `Delete "${pl.name}"` : `Unpin "${pl.name}" from SIMP`}
           style={{
-            padding: '5px 8px',
+            position: 'absolute',
+            top: 10,
+            right: 10,
+            padding: '4px 8px',
             borderRadius: 8,
             background: '#1f1216',
             border: '1px solid #4c2228',
             color: '#f87171',
-            fontSize: 11,
+            fontSize: 10,
             fontWeight: 700,
             cursor: 'pointer',
-            flexShrink: 0,
           }}
         >
-          {isLocal ? '🗑' : '✕ Unpin'}
+          {isLocal ? '🗑' : '✕'}
         </button>
       </div>
     );
   };
 
-  // Reusable 2-Column Visual Card for Local & Pinned Albums (in `📌 My SIMP Library`)
+  // Reusable Taller Visual Tile for Local & Pinned Albums (in `📌 My SIMP Library`)
   const renderSimpAlbumCard = (alb: AlbumRecord) => {
     const isAppleAlbum = alb.id.startsWith('applemusic:album:');
     const isSelected =
@@ -526,21 +563,24 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       <div
         key={alb.id}
         style={{
-          minHeight: 62,
-          padding: '8px 10px',
+          position: 'relative',
+          minWidth: 0,
+          minHeight: 136,
+          padding: 12,
           borderRadius: 12,
           background: isSelected ? '#0d1b22' : '#0a0a0e',
           border: isSelected ? '1px solid #2aa3c4' : '1px solid #181822',
           display: 'flex',
+          flexDirection: 'column',
           justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 10,
+          boxSizing: 'border-box',
         }}
       >
         <button
           onClick={() => selectLocalCollection({ kind: 'album', id: alb.id })}
           style={{
             flex: 1,
+            width: '100%',
             minWidth: 0,
             background: 'transparent',
             border: 'none',
@@ -548,51 +588,68 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             textAlign: 'left',
             cursor: 'pointer',
             display: 'flex',
-            alignItems: 'center',
-            gap: 10,
+            flexDirection: 'column',
+            alignItems: 'flex-start',
+            gap: 8,
             padding: 0,
           }}
         >
-          {alb.art_url ? (
-            <img
-              src={alb.art_url}
-              alt=""
-              loading="lazy"
-              style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
-                objectFit: 'cover',
-                border: '1px solid #262632',
-                flexShrink: 0,
-              }}
-            />
-          ) : (
-            <div
-              style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
-                background: '#121820',
-                border: '1px solid #222e3c',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 18,
-                flexShrink: 0,
-              }}
-            >
-              💿
-            </div>
-          )}
-          <div style={{ minWidth: 0, flex: 1 }}>
+          <div
+            style={{
+              width: '100%',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'flex-start',
+              paddingRight: isAppleAlbum ? 44 : 0,
+              boxSizing: 'border-box',
+            }}
+          >
+            {alb.art_url ? (
+              <img
+                src={alb.art_url}
+                alt=""
+                loading="lazy"
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 10,
+                  objectFit: 'cover',
+                  border: '1px solid #262632',
+                  flexShrink: 0,
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 10,
+                  background: '#121820',
+                  border: '1px solid #222e3c',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 22,
+                  flexShrink: 0,
+                }}
+              >
+                💿
+              </div>
+            )}
+          </div>
+          <div style={{ minWidth: 0, width: '100%' }}>
             <div
               style={{
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 800,
+                lineHeight: 1.3,
+                color: '#e4e4ec',
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
                 overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+                whiteSpace: 'normal',
+                overflowWrap: 'anywhere',
               }}
             >
               {alb.title}
@@ -600,26 +657,35 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             <div
               style={{
                 fontSize: 11,
+                lineHeight: 1.35,
                 color: '#8e8e99',
+                marginTop: 4,
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
                 overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+                whiteSpace: 'normal',
+                overflowWrap: 'anywhere',
               }}
             >
-              {alb.album_artist} • {alb.track_count} trk
+              {alb.album_artist} • {alb.track_count} tracks
             </div>
           </div>
         </button>
         {isAppleAlbum && (
           <button
-            data-row-aux="true"
+            data-tile-aux="true"
+            tabIndex={-1}
             onClick={(e) => {
               e.stopPropagation();
               handleDeleteAlbum(alb.id, alb.title);
             }}
             title={`Unpin "${alb.title}" from SIMP`}
             style={{
-              padding: '5px 8px',
+              position: 'absolute',
+              top: 10,
+              right: 10,
+              padding: '4px 8px',
               borderRadius: 8,
               background: '#1f1216',
               border: '1px solid #4c2228',
@@ -627,17 +693,16 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               fontSize: 10,
               fontWeight: 700,
               cursor: 'pointer',
-              flexShrink: 0,
             }}
           >
-            ✕ Unpin
+            ✕
           </button>
         )}
       </div>
     );
   };
 
-  // Reusable 2-Column Visual Card for Cloud Playlists
+  // Reusable Taller Visual Tile for Cloud Playlists
   const renderCloudPlaylistCard = (pl: AppleCloudPlaylistSummary) => {
     const isSelected = browserTarget?.kind === 'cloud_playlist' && browserTarget.id === pl.id;
     const isPinned = playlists.some((p) => p.id === `applemusic:playlist:${pl.id}`);
@@ -645,21 +710,24 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       <div
         key={pl.id}
         style={{
-          minHeight: 62,
-          padding: '8px 10px',
+          position: 'relative',
+          minWidth: 0,
+          minHeight: 136,
+          padding: 12,
           borderRadius: 12,
           background: isSelected ? '#28111b' : '#0a0a0e',
           border: isSelected ? '1px solid #fa243c' : '1px solid #181822',
           display: 'flex',
+          flexDirection: 'column',
           justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 10,
+          boxSizing: 'border-box',
         }}
       >
         <button
           onClick={() => selectCloudPlaylist(pl)}
           style={{
             flex: 1,
+            width: '100%',
             minWidth: 0,
             background: 'transparent',
             border: 'none',
@@ -667,51 +735,68 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             textAlign: 'left',
             cursor: 'pointer',
             display: 'flex',
-            alignItems: 'center',
-            gap: 10,
+            flexDirection: 'column',
+            alignItems: 'flex-start',
+            gap: 8,
             padding: 0,
           }}
         >
-          {pl.art_url ? (
-            <img
-              src={pl.art_url}
-              alt=""
-              loading="lazy"
-              style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
-                objectFit: 'cover',
-                border: '1px solid #262632',
-                flexShrink: 0,
-              }}
-            />
-          ) : (
-            <div
-              style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
-                background: '#181118',
-                border: '1px solid #321a24',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 18,
-                flexShrink: 0,
-              }}
-            >
-              ☁️
-            </div>
-          )}
-          <div style={{ minWidth: 0, flex: 1 }}>
+          <div
+            style={{
+              width: '100%',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'flex-start',
+              paddingRight: 58,
+              boxSizing: 'border-box',
+            }}
+          >
+            {pl.art_url ? (
+              <img
+                src={pl.art_url}
+                alt=""
+                loading="lazy"
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 10,
+                  objectFit: 'cover',
+                  border: '1px solid #262632',
+                  flexShrink: 0,
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 10,
+                  background: '#181118',
+                  border: '1px solid #321a24',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 22,
+                  flexShrink: 0,
+                }}
+              >
+                ☁️
+              </div>
+            )}
+          </div>
+          <div style={{ minWidth: 0, width: '100%' }}>
             <div
               style={{
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 800,
+                lineHeight: 1.3,
+                color: '#e4e4ec',
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
                 overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+                whiteSpace: 'normal',
+                overflowWrap: 'anywhere',
               }}
             >
               {pl.name}
@@ -719,10 +804,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             <div
               style={{
                 fontSize: 11,
+                lineHeight: 1.35,
                 color: '#8e8e99',
+                marginTop: 4,
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
                 overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+                whiteSpace: 'normal',
+                overflowWrap: 'anywhere',
               }}
             >
               {pl.description || 'Apple Music Playlist'}
@@ -730,7 +820,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           </div>
         </button>
         <button
-          data-row-aux="true"
+          data-tile-aux="true"
+          tabIndex={-1}
           onClick={(e) => {
             e.stopPropagation();
             if (isPinned) {
@@ -741,61 +832,63 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           }}
           title={isPinned ? 'Unpin from SIMP' : 'Pin playlist to SIMP'}
           style={{
-            padding: '5px 10px',
+            position: 'absolute',
+            top: 10,
+            right: 10,
+            padding: '4px 8px',
             borderRadius: 8,
             background: isPinned ? '#0f222a' : '#251018',
             border: isPinned ? '1px solid #2aa3c4' : '1px solid #4c1d2e',
             color: isPinned ? '#67e8f9' : '#fda4af',
-            fontSize: 11,
+            fontSize: 10,
             fontWeight: 800,
             cursor: 'pointer',
-            flexShrink: 0,
           }}
         >
-          {isPinned ? '✓ Pinned' : '📌 Pin'}
+          {isPinned ? '✓ Pin' : '📌 Pin'}
         </button>
       </div>
     );
   };
 
-  // Reusable 2-Column Visual Card for Cloud / Catalog Albums
+  // Reusable Taller Visual Tile for Cloud / Catalog Albums
   const renderCloudAlbumCard = (alb: AppleCloudAlbumSummary) => {
     const isSelected = browserTarget?.kind === 'cloud_album' && browserTarget.id === alb.id;
     const isPinned = albums.some((a) => a.id === `applemusic:album:${alb.id}`);
     return (
-      <div
+      <button
         key={alb.id}
+        onClick={() =>
+          selectCloudAlbum({
+            albumId: alb.id,
+            fallbackTitle: alb.title,
+          })
+        }
         style={{
-          minHeight: 62,
-          padding: '8px 10px',
+          minWidth: 0,
+          minHeight: 136,
+          padding: 12,
           borderRadius: 12,
           background: isSelected ? '#28111b' : '#0a0a0e',
           border: isSelected ? '1px solid #fa243c' : '1px solid #181822',
+          color: '#d4d4dc',
+          textAlign: 'left',
+          cursor: 'pointer',
           display: 'flex',
+          flexDirection: 'column',
           justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 10,
+          alignItems: 'flex-start',
+          gap: 8,
+          boxSizing: 'border-box',
         }}
       >
-        <button
-          onClick={() =>
-            selectCloudAlbum({
-              albumId: alb.id,
-              fallbackTitle: alb.title,
-            })
-          }
+        <div
           style={{
-            flex: 1,
-            minWidth: 0,
-            background: 'transparent',
-            border: 'none',
-            color: '#d4d4dc',
-            textAlign: 'left',
-            cursor: 'pointer',
+            width: '100%',
             display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            padding: 0,
+            justifyContent: 'space-between',
+            alignItems: 'flex-start',
+            gap: 6,
           }}
         >
           {alb.art_url ? (
@@ -804,9 +897,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               alt=""
               loading="lazy"
               style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
+                width: 56,
+                height: 56,
+                borderRadius: 10,
                 objectFit: 'cover',
                 border: '1px solid #262632',
                 flexShrink: 0,
@@ -815,76 +908,77 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           ) : (
             <div
               style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
+                width: 56,
+                height: 56,
+                borderRadius: 10,
                 background: '#181118',
                 border: '1px solid #321a24',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                fontSize: 18,
+                fontSize: 22,
                 flexShrink: 0,
               }}
             >
               💿
             </div>
           )}
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div
-              style={{
-                fontSize: 13,
-                fontWeight: 700,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {alb.title}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: '#8e8e99',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {alb.artist}
-              {alb.release_year ? ` • ${alb.release_year}` : ''}
-              {alb.track_count ? ` • ${alb.track_count} trk` : ''}
-            </div>
+          <span
+            style={{
+              padding: '3px 7px',
+              borderRadius: 6,
+              background: isPinned ? '#0f222a' : '#181822',
+              border: isPinned ? '1px solid #2aa3c4' : '1px solid #2e2e3c',
+              color: isPinned ? '#67e8f9' : '#fda4af',
+              fontSize: 10,
+              fontWeight: 800,
+              flexShrink: 0,
+            }}
+          >
+            {isPinned ? '✓ Pinned' : 'Album →'}
+          </span>
+        </div>
+        <div style={{ minWidth: 0, width: '100%' }}>
+          <div
+            style={{
+              fontSize: 13,
+              fontWeight: 800,
+              lineHeight: 1.3,
+              color: '#e4e4ec',
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              whiteSpace: 'normal',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            {alb.title}
           </div>
-        </button>
-        <button
-          data-row-aux="true"
-          onClick={() =>
-            selectCloudAlbum({
-              albumId: alb.id,
-              fallbackTitle: alb.title,
-            })
-          }
-          title={isPinned ? 'Pinned in SIMP — Open Album' : 'Open Full Album to Preview or Pin'}
-          style={{
-            padding: '5px 9px',
-            borderRadius: 8,
-            background: isPinned ? '#0f222a' : '#181822',
-            border: isPinned ? '1px solid #2aa3c4' : '1px solid #2e2e3c',
-            color: isPinned ? '#67e8f9' : '#fda4af',
-            fontSize: 10,
-            fontWeight: 800,
-            cursor: 'pointer',
-            flexShrink: 0,
-          }}
-        >
-          {isPinned ? '✓ Pinned' : 'Open →'}
-        </button>
-      </div>
+          <div
+            style={{
+              fontSize: 11,
+              lineHeight: 1.35,
+              color: '#8e8e99',
+              marginTop: 4,
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              whiteSpace: 'normal',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            {alb.artist}
+            {alb.release_year ? ` • ${alb.release_year}` : ''}
+            {alb.track_count ? ` • ${alb.track_count} trk` : ''}
+          </div>
+        </div>
+      </button>
     );
   };
 
-  // Reusable 2-Column Visual Card for Radio Stations
+  // Reusable Taller Visual Tile for Radio Stations
   const renderStationCard = (st: AppleRadioStationSummary) => {
     const isPlayingStation = playingContextId === `station:${st.id}`;
     return (
@@ -892,30 +986,41 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         key={st.id}
         onClick={() => handleStartAppleStation(st)}
         style={{
-          minHeight: 62,
-          padding: '8px 10px',
+          minWidth: 0,
+          minHeight: 136,
+          padding: 12,
           borderRadius: 12,
           background: isPlayingStation ? '#28111b' : '#0a0a0e',
           border: isPlayingStation ? '1px solid #fa243c' : '1px solid #181822',
           color: '#d4d4dc',
           textAlign: 'left',
           display: 'flex',
+          flexDirection: 'column',
           justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 10,
+          alignItems: 'flex-start',
+          gap: 8,
           cursor: 'pointer',
+          boxSizing: 'border-box',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+        <div
+          style={{
+            width: '100%',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-start',
+            gap: 6,
+          }}
+        >
           {st.art_url ? (
             <img
               src={st.art_url}
               alt=""
               loading="lazy"
               style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
+                width: 56,
+                height: 56,
+                borderRadius: 10,
                 objectFit: 'cover',
                 border: '1px solid #262632',
                 flexShrink: 0,
@@ -924,61 +1029,71 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           ) : (
             <div
               style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
+                width: 56,
+                height: 56,
+                borderRadius: 10,
                 background: '#221118',
                 border: '1px solid #4c1d2e',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                fontSize: 18,
+                fontSize: 22,
                 flexShrink: 0,
               }}
             >
               📻
             </div>
           )}
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div
-              style={{
-                fontSize: 13,
-                fontWeight: 700,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {st.name}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: '#8e8e99',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {st.subtitle || 'Apple Music Station'}
-            </div>
+          <span
+            style={{
+              fontSize: 10,
+              fontFamily: 'monospace',
+              color: '#fda4af',
+              fontWeight: 800,
+              padding: '3px 7px',
+              borderRadius: 6,
+              background: '#251018',
+              border: '1px solid #4c1d2e',
+              flexShrink: 0,
+            }}
+          >
+            ▶ LIVE
+          </span>
+        </div>
+        <div style={{ minWidth: 0, width: '100%' }}>
+          <div
+            style={{
+              fontSize: 13,
+              fontWeight: 800,
+              lineHeight: 1.3,
+              color: '#e4e4ec',
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              whiteSpace: 'normal',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            {st.name}
+          </div>
+          <div
+            style={{
+              fontSize: 11,
+              lineHeight: 1.35,
+              color: '#8e8e99',
+              marginTop: 4,
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              whiteSpace: 'normal',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            {st.subtitle || 'Apple Music Station'}
           </div>
         </div>
-        <span
-          style={{
-            fontSize: 10,
-            fontFamily: 'monospace',
-            color: '#fda4af',
-            fontWeight: 800,
-            padding: '4px 8px',
-            borderRadius: 6,
-            background: '#251018',
-            border: '1px solid #4c1d2e',
-            flexShrink: 0,
-          }}
-        >
-          ▶ TUNE IN
-        </span>
       </button>
     );
   };
@@ -1129,14 +1244,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       style={{
         flex: 1,
         display: hidden ? 'none' : 'grid',
-        gridTemplateColumns: '36% 64%',
+        gridTemplateColumns: 'minmax(250px, 32%) minmax(0, 68%)',
         overflow: 'hidden',
         boxSizing: 'border-box',
         width: '100%',
+        minWidth: 0,
       }}
     >
       {/* =====================================================================
-          LEFT COLUMN (36%): Search + 2x2 Right-Pane Hub Selector + Collapsible Quick-Jump Library
+          LEFT COLUMN (32%): Search + 2x2 Right-Pane Hub Selector + Collapsible Quick-Jump Library
          ===================================================================== */}
       <div
         data-nav-col="left"
@@ -1144,6 +1260,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           borderRight: '1px solid #16161c',
           padding: 14,
           overflowY: 'auto',
+          overflowX: 'hidden',
+          minWidth: 0,
           WebkitOverflowScrolling: 'touch',
           touchAction: 'pan-y',
           display: 'flex',
@@ -1935,13 +2053,17 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       </div>
 
       {/* =====================================================================
-          RIGHT COLUMN (64%): Context-Driven Main Canvas (Grid Hub OR Collection Tracklist)
+          RIGHT COLUMN (68%): Context-Driven Main Canvas (4-Col Max Tile Grid OR Collection Tracklist)
          ===================================================================== */}
       <div
         data-nav-col="right"
         style={{
           padding: 16,
           overflowY: 'auto',
+          overflowX: 'hidden',
+          minWidth: 0,
+          maxWidth: '100%',
+          boxSizing: 'border-box',
           WebkitOverflowScrolling: 'touch',
           touchAction: 'pan-y',
           display: 'flex',
@@ -1950,10 +2072,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         }}
       >
         {/* =================================================================
-            STATE A: ⊞ 2-COLUMN VISUAL CARD GRID (My SIMP Library, Apple Playlists, Radio, New, Search)
+            STATE A: ⊞ 4-COLUMN-MAX VISUAL TILE GRID (My SIMP Library, Apple Playlists, Radio, New, Search)
            ================================================================= */}
         {rightPaneMode === 'browse' ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0, width: '100%' }}>
             {/* Not Signed In Setup Card (only shown when opening an Apple Cloud Hub while not authenticated) */}
             {!snap?.apple_authenticated &&
               appleSubTab !== 'pinned' &&
@@ -2043,13 +2165,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
                       📌 MATCHING SIMP & PINNED PLAYLISTS ({filteredPlaylists.length})
                     </div>
-                    <div
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: '1fr 1fr',
-                        gap: 8,
-                      }}
-                    >
+                    <div style={tileGridStyle}>
                       {filteredPlaylists.map(renderSimpPlaylistCard)}
                     </div>
                   </>
@@ -2061,13 +2177,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
                       ☁️ MATCHING APPLE LIBRARY PLAYLISTS ({filteredCloudPlaylists.length})
                     </div>
-                    <div
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: '1fr 1fr',
-                        gap: 8,
-                      }}
-                    >
+                    <div style={tileGridStyle}>
                       {filteredCloudPlaylists.slice(0, 50).map(renderCloudPlaylistCard)}
                     </div>
                   </>
@@ -2079,13 +2189,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
                       💿 MATCHING SIMP LIBRARY ALBUMS ({albums.length})
                     </div>
-                    <div
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: '1fr 1fr',
-                        gap: 8,
-                      }}
-                    >
+                    <div style={tileGridStyle}>
                       {albums.slice(0, 24).map(renderSimpAlbumCard)}
                     </div>
                   </>
@@ -2099,13 +2203,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
                           🍎 APPLE CATALOG ALBUMS ({catalogSearchResults.albums.length})
                         </div>
-                        <div
-                          style={{
-                            display: 'grid',
-                            gridTemplateColumns: '1fr 1fr',
-                            gap: 8,
-                          }}
-                        >
+                        <div style={tileGridStyle}>
                           {catalogSearchResults.albums.map(renderCloudAlbumCard)}
                         </div>
                       </>
@@ -2116,13 +2214,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
                           🎶 APPLE CATALOG PLAYLISTS ({catalogSearchResults.playlists.length})
                         </div>
-                        <div
-                          style={{
-                            display: 'grid',
-                            gridTemplateColumns: '1fr 1fr',
-                            gap: 8,
-                          }}
-                        >
+                        <div style={tileGridStyle}>
                           {catalogSearchResults.playlists.map(renderCloudPlaylistCard)}
                         </div>
                       </>
@@ -2133,13 +2225,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
                           📻 RADIO STATIONS ({catalogSearchResults.stations.length})
                         </div>
-                        <div
-                          style={{
-                            display: 'grid',
-                            gridTemplateColumns: '1fr 1fr',
-                            gap: 8,
-                          }}
-                        >
+                        <div style={tileGridStyle}>
                           {catalogSearchResults.stations.map(renderStationCard)}
                         </div>
                       </>
@@ -2321,13 +2407,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
                             ★ SIMP HYBRID PLAYLISTS ({hybridPlaylistsList.length})
                           </div>
-                          <div
-                            style={{
-                              display: 'grid',
-                              gridTemplateColumns: '1fr 1fr',
-                              gap: 8,
-                            }}
-                          >
+                          <div style={tileGridStyle}>
                             {hybridPlaylistsList.map(renderSimpPlaylistCard)}
                           </div>
                         </>
@@ -2340,13 +2420,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
                             📌 PINNED APPLE MUSIC PLAYLISTS ({pinnedPlaylistsList.length})
                           </div>
-                          <div
-                            style={{
-                              display: 'grid',
-                              gridTemplateColumns: '1fr 1fr',
-                              gap: 8,
-                            }}
-                          >
+                          <div style={tileGridStyle}>
                             {pinnedPlaylistsList.map(renderSimpPlaylistCard)}
                           </div>
                         </>
@@ -2359,13 +2433,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
                             💿 ALBUMS & SOUNDTRACKS ({albums.length})
                           </div>
-                          <div
-                            style={{
-                              display: 'grid',
-                              gridTemplateColumns: '1fr 1fr',
-                              gap: 8,
-                            }}
-                          >
+                          <div style={tileGridStyle}>
                             {albums.map(renderSimpAlbumCard)}
                           </div>
                         </>
@@ -2519,20 +2587,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       </div>
                     </div>
 
-                    <div
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: '1fr 1fr',
-                        gap: 8,
-                      }}
-                    >
+                    <div style={tileGridStyle}>
                       {pagedCloudPlaylists.map(renderCloudPlaylistCard)}
                     </div>
                   </>
                 )}
 
                 {/* ---------------------------------------------------------
-                    4. 📻 RADIO & FOR YOU HUB (Sub-filter Pills + 2-Col Artwork Cards)
+                    4. 📻 RADIO & FOR YOU HUB (Sub-filter Pills + 4-Col-Max Artwork Tiles)
                    --------------------------------------------------------- */}
                 {appleSubTab === 'radio' && snap?.apple_authenticated && (
                   <>
@@ -2620,13 +2682,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
                             📻 LIVE & PERSONAL RADIO STATIONS ({radioStations.length})
                           </div>
-                          <div
-                            style={{
-                              display: 'grid',
-                              gridTemplateColumns: '1fr 1fr',
-                              gap: 8,
-                            }}
-                          >
+                          <div style={tileGridStyle}>
                             {radioStations.map(renderStationCard)}
                           </div>
                         </>
@@ -2638,13 +2694,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
                             ✨ MADE FOR YOU & HEAVY ROTATION ({forYouPlaylists.length})
                           </div>
-                          <div
-                            style={{
-                              display: 'grid',
-                              gridTemplateColumns: '1fr 1fr',
-                              gap: 8,
-                            }}
-                          >
+                          <div style={tileGridStyle}>
                             {forYouPlaylists.map(renderCloudPlaylistCard)}
                           </div>
                         </>
@@ -2656,13 +2706,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
                             💿 RECOMMENDED FULL ALBUMS ({forYouAlbums.length})
                           </div>
-                          <div
-                            style={{
-                              display: 'grid',
-                              gridTemplateColumns: '1fr 1fr',
-                              gap: 8,
-                            }}
-                          >
+                          <div style={tileGridStyle}>
                             {forYouAlbums.map(renderCloudAlbumCard)}
                           </div>
                         </>
@@ -2671,7 +2715,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 )}
 
                 {/* ---------------------------------------------------------
-                    5. ✨ NEW RELEASES & TOP CHARTS HUB (2-Col Cards + Direct Singles)
+                    5. ✨ NEW RELEASES & TOP CHARTS HUB (4-Col-Max Tiles + Direct Singles)
                    --------------------------------------------------------- */}
                 {appleSubTab === 'new' && snap?.apple_authenticated && (
                   <>
@@ -2765,13 +2809,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
                             💿 NEW & TOP ALBUMS ({newFeedAlbums.length})
                           </div>
-                          <div
-                            style={{
-                              display: 'grid',
-                              gridTemplateColumns: '1fr 1fr',
-                              gap: 8,
-                            }}
-                          >
+                          <div style={tileGridStyle}>
                             {newFeedAlbums.map(renderCloudAlbumCard)}
                           </div>
                         </>
@@ -2783,13 +2821,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
                             🎶 NEW & FEATURED PLAYLISTS ({newFeedPlaylists.length})
                           </div>
-                          <div
-                            style={{
-                              display: 'grid',
-                              gridTemplateColumns: '1fr 1fr',
-                              gap: 8,
-                            }}
-                          >
+                          <div style={tileGridStyle}>
                             {newFeedPlaylists.map(renderCloudPlaylistCard)}
                           </div>
                         </>
@@ -2814,7 +2846,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           /* =================================================================
              STATE B: 🎵 SELECTED COLLECTION TRACKLIST & MANAGEMENT VIEW
              ================================================================= */
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, width: '100%' }}>
             <div
               style={{
                 display: 'flex',
@@ -2824,9 +2856,11 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 borderBottom: '1px solid #16161c',
                 flexWrap: 'wrap',
                 gap: 10,
+                minWidth: 0,
+                width: '100%',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
                 <button
                   onClick={() => setRightPaneMode('browse')}
                   title={`Return to ${activeHubLabel} Grid`}
@@ -3177,21 +3211,25 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   }}
                   style={{
                     minHeight: 50,
-                    padding: '0 12px',
+                    padding: '6px 12px',
                     borderRadius: 12,
                     background: track?.uri === t.uri ? '#0d1b22' : '#0a0a0e',
                     border: track?.uri === t.uri ? '1px solid #2aa3c4' : '1px solid #16161e',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
+                    gap: 10,
                     cursor: 'pointer',
+                    minWidth: 0,
+                    width: '100%',
+                    boxSizing: 'border-box',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
-                    <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
+                    <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a', flexShrink: 0 }}>
                       {String(t.track_number ?? i + 1).padStart(2, '0')}
                     </span>
-                    <div style={{ minWidth: 0 }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
                       <div
                         style={{
                           fontSize: 13,

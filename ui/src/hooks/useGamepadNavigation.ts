@@ -205,7 +205,7 @@ export function useGamepadNavigation({
         ? '[data-osk-root="true"] button:not([disabled])'
         : isModalOpen
         ? '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled]), [data-modal-root="true"] select:not([disabled]), [data-modal-root="true"] a'
-        : 'button:not([disabled]), input:not([disabled]), select:not([disabled]), [data-focusable="true"]';
+        : 'button:not([disabled]):not([data-tile-aux="true"]), input:not([disabled]), select:not([disabled]), [data-focusable="true"]';
       const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter((el) => {
         const rect = el.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
@@ -273,8 +273,9 @@ export function useGamepadNavigation({
           if (dir === 'down' && dy <= 6) continue;
           if (dir === 'up' && dy >= -6) continue;
 
-          // Strongly prioritize vertical proximity within the same column so wide rows vs grid buttons never skip
-          const score = Math.abs(dy) + Math.abs(dx) * 0.22;
+          // Keep multi-column grid tiles in their vertical lane while still allowing full-width rows to transition smoothly
+          const overlapsX = r.right > cur.left + 8 && r.left < cur.right - 8;
+          const score = Math.abs(dy) + Math.abs(dx) * (overlapsX ? 0.15 : 1.15);
           if (score < bestInColScore) {
             bestInColScore = score;
             bestInCol = candidate;
@@ -325,7 +326,8 @@ export function useGamepadNavigation({
           const dx = tx - cx;
           const dy = ty - cy;
 
-          if (Math.abs(dy) > 22) continue;
+          const overlapsY = r.bottom > cur.top + 6 && r.top < cur.bottom - 6;
+          if (!overlapsY && Math.abs(dy) > 36) continue;
           if (dir === 'right' && dx <= 6) continue;
           if (dir === 'left' && dx >= -6) continue;
 
