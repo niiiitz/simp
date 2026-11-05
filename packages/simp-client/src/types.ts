@@ -63,6 +63,7 @@ export interface SimpStateSnapshot {
   mounts: MountStatus[];
   power: PowerState;
   apple_authenticated: boolean;
+  brightness_pct?: number;
 }
 
 export interface AppleMusicAuthConfig {

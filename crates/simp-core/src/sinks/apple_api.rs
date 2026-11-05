@@ -277,14 +277,27 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-/// Fetches the user's Apple Music Cloud Playlists in native Rust.
+/// Ensures Apple Music pagination `next` cursor URLs retain `limit=100` (Apple strips `limit` on page 2+
+/// and falls back to `limit=25`, which previously capped 3-page fetches at `100 + 25 + 25 = 150`).
+fn with_limit_100(url: &str) -> String {
+    if url.contains("limit=") {
+        url.to_string()
+    } else if url.contains('?') {
+        format!("{url}&limit=100")
+    } else {
+        format!("{url}?limit=100")
+    }
+}
+
+/// Fetches the user's Apple Music Cloud Playlists in native Rust (up to 2,500 playlists).
 pub fn fetch_cloud_playlists(settings: &SimpSettings) -> Result<Vec<AppleCloudPlaylistSummary>> {
     let (dev_token, user_token) = resolve_tokens(settings)?;
     let mut next_url: Option<String> =
         Some("/v1/me/library/playlists?limit=100".to_string());
     let mut items = Vec::new();
+    let mut seen_ids = HashSet::new();
 
-    for _ in 0..3 {
+    for _ in 0..25 {
         let Some(ref url) = next_url else { break };
         let Ok(json) = apple_get_json(url, &dev_token, &user_token) else {
             break;
@@ -294,6 +307,9 @@ pub fn fetch_cloud_playlists(settings: &SimpSettings) -> Result<Vec<AppleCloudPl
                 let Some(id) = pl.get("id").and_then(|v| v.as_str()) else {
                     continue;
                 };
+                if !seen_ids.insert(id.to_string()) {
+                    continue;
+                }
                 let attrs = pl.get("attributes").unwrap_or(pl);
                 let name = attrs
                     .get("name")
@@ -327,7 +343,7 @@ pub fn fetch_cloud_playlists(settings: &SimpSettings) -> Result<Vec<AppleCloudPl
         next_url = json
             .get("next")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(with_limit_100);
     }
 
     Ok(items)
@@ -361,7 +377,7 @@ pub fn fetch_playlist_tracks(
     });
 
     let mut tracks = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..10 {
         let Some(ref url) = next_url else { break };
         let Ok(json) = apple_get_json(url, &dev_token, &user_token) else {
             break;
@@ -376,7 +392,7 @@ pub fn fetch_playlist_tracks(
         next_url = json
             .get("next")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(with_limit_100);
     }
 
     Ok(tracks)
@@ -1418,6 +1434,22 @@ mod tests {
             track.art_url.as_deref(),
             Some("https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/38/4b/5c/mzi.cfikjxuv.jpg/400x400bb.jpg"),
             "Must replace 24-hour expiring blobstore.apple.com URL with permanent mzstatic.com catalog artwork"
+        );
+    }
+
+    #[test]
+    fn test_with_limit_100_preserves_pagination_page_size() {
+        assert_eq!(
+            with_limit_100("/v1/me/library/playlists?offset=100"),
+            "/v1/me/library/playlists?offset=100&limit=100"
+        );
+        assert_eq!(
+            with_limit_100("/v1/me/library/playlists?offset=200&limit=100"),
+            "/v1/me/library/playlists?offset=200&limit=100"
+        );
+        assert_eq!(
+            with_limit_100("/v1/me/library/playlists"),
+            "/v1/me/library/playlists?limit=100"
         );
     }
 }

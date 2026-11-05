@@ -21,6 +21,7 @@ pub enum AudioCommand {
     Seek { position_ms: u32 },
     SeekRelative { delta_ms: i32 },
     SetVolume { volume: f64 },
+    SetBrightness { brightness_pct: u8 },
     SetShuffle { enabled: bool },
     SetRepeat { mode: RepeatMode },
     CycleRepeat,

@@ -156,6 +156,10 @@ pub struct AudioSettings {
     pub pause_on_headphone_disconnect: bool,
 }
 
+fn default_brightness_pct() -> u8 {
+    100
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiSettings {
     pub modality: String,
@@ -164,6 +168,8 @@ pub struct UiSettings {
     pub battery_auto_dim: bool,
     pub battery_dim_timeout_sec: u32,
     pub battery_dim_opacity: f64,
+    #[serde(default = "default_brightness_pct")]
+    pub brightness_pct: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -210,6 +216,7 @@ impl Default for SimpSettings {
                 battery_auto_dim: true,
                 battery_dim_timeout_sec: 30,
                 battery_dim_opacity: 0.15,
+                brightness_pct: 100,
             },
             library: LibrarySettings {
                 scan_steam_osts: true,

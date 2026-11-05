@@ -26,6 +26,7 @@ pub struct OrchestratorSnapshot {
     pub queue: Vec<TrackMetadata>,
     pub queue_index: usize,
     pub apple_authenticated: bool,
+    pub brightness_pct: u8,
 }
 
 pub struct AudioOrchestrator {
@@ -50,6 +51,7 @@ impl AudioOrchestrator {
         broadcast_tx: broadcast::Sender<PlaybackEvent>,
     ) -> Self {
         let initial_vol = settings.lock().unwrap().audio.master_volume;
+        let initial_brightness = settings.lock().unwrap().ui.brightness_pct.clamp(25, 100);
         let mut local_engine = LocalAudioEngine::new();
         local_engine.set_volume(initial_vol);
 
@@ -83,6 +85,7 @@ impl AudioOrchestrator {
             queue: Vec::new(),
             queue_index: 0,
             apple_authenticated: initial_apple_auth,
+            brightness_pct: initial_brightness,
         }));
 
         let mpris_controls = initialize_mpris(state.clone(), cmd_tx);
@@ -304,6 +307,11 @@ impl AudioOrchestrator {
                 let _ = self
                     .broadcast_tx
                     .send(PlaybackEvent::VolumeSynced { volume: clamped });
+            }
+            AudioCommand::SetBrightness { brightness_pct } => {
+                let clamped = brightness_pct.clamp(25, 100);
+                self.state.lock().unwrap().brightness_pct = clamped;
+                self.settings.lock().unwrap().ui.brightness_pct = clamped;
             }
             AudioCommand::SetShuffle { enabled } => {
                 self.state.lock().unwrap().shuffle = enabled;
@@ -1286,6 +1294,7 @@ pub fn build_state_snapshot(
         mounts,
         power,
         apple_authenticated: st.apple_authenticated,
+        brightness_pct: st.brightness_pct,
     }
 }
 

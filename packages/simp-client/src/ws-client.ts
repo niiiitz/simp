@@ -58,6 +58,7 @@ export class SimpDaemonClient {
     mounts: [],
     power: { on_battery: false, battery_pct: null },
     apple_authenticated: false,
+    brightness_pct: 100,
   };
 
   constructor(url = resolveDefaultWsUrl()) {
@@ -101,6 +102,7 @@ export class SimpDaemonClient {
         mounts: msg.mounts ?? [],
         power: msg.power ?? { on_battery: false, battery_pct: null },
         apple_authenticated: !!msg.apple_authenticated,
+        brightness_pct: typeof msg.brightness_pct === 'number' && msg.brightness_pct >= 25 ? msg.brightness_pct : 100,
       };
       this.notifyState();
       this.notifyProgress(this.state.position_ms);
@@ -224,6 +226,10 @@ export class SimpDaemonClient {
   public seek = (position_ms: number) => this.sendCommand('seek', { position_ms });
   public seekRelative = (delta_ms: number) => this.sendCommand('seek_relative', { delta_ms });
   public setVolume = (volume: number) => this.sendCommand('set_volume', { volume });
+  public setBrightness = (brightness_pct: number) =>
+    this.sendCommand('set_brightness', {
+      brightness_pct: Math.max(25, Math.min(100, Math.round(brightness_pct))),
+    });
   public setShuffle = (enabled: boolean) => this.sendCommand('set_shuffle', { enabled });
   public setRepeat = (mode: RepeatMode) => this.sendCommand('set_repeat', { mode });
   public cycleRepeat = () => this.sendCommand('cycle_repeat');

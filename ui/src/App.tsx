@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlbumRecord,
   AppleMusicAuthConfig,
@@ -98,10 +98,51 @@ const ConsoleMainApp: React.FC = () => {
 
   // OLED auto-dim, active luminance percentage, popovers & sub-pixel orbit state
   const [isDimmed, setIsDimmed] = useState(false);
-  const [brightnessPct, setBrightnessPct] = useState<number>(86);
+  const [brightnessPct, setBrightnessPct] = useState<number>(() => {
+    try {
+      const saved = window.localStorage.getItem('simp_brightness_pct');
+      if (saved) {
+        const parsed = Number(saved);
+        if (Number.isFinite(parsed) && parsed >= 25 && parsed <= 100) {
+          return Math.round(parsed);
+        }
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+    return 100;
+  });
+  const brightnessHydratedRef = useRef(false);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
   const [brightnessPopoverOpen, setBrightnessPopoverOpen] = useState(false);
   const [orbitStep, setOrbitStep] = useState(0);
+
+  // Hydrate brightnessPct once from daemon settings.vdf snapshot if not overridden in localStorage
+  useEffect(() => {
+    if (!brightnessHydratedRef.current && snap?.brightness_pct && snap.brightness_pct >= 25) {
+      brightnessHydratedRef.current = true;
+      try {
+        if (!window.localStorage.getItem('simp_brightness_pct')) {
+          setBrightnessPct(Math.max(25, Math.min(100, Math.round(snap.brightness_pct))));
+        }
+      } catch {
+        setBrightnessPct(Math.max(25, Math.min(100, Math.round(snap.brightness_pct))));
+      }
+    }
+  }, [snap?.brightness_pct]);
+
+  // Persist brightnessPct to localStorage & daemon settings.vdf after 3 seconds of being unchanged
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem('simp_brightness_pct', String(brightnessPct));
+      } catch {
+        // Ignore storage errors
+      }
+      defaultSimpClient.setBrightness(brightnessPct);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [brightnessPct]);
 
   // 8-point ±2px circular sub-pixel orbit to prevent static OLED sub-pixel image retention
   const ORBIT_OFFSETS: ReadonlyArray<readonly [number, number]> = [
@@ -393,7 +434,10 @@ const ConsoleMainApp: React.FC = () => {
     if (view !== 'browser' || browserSourceFilter === 'local' || !snap?.apple_authenticated) {
       return;
     }
-    if (appleSubTab === 'cloud_playlists' && cloudPlaylists.length === 0) {
+    if (
+      (appleSubTab === 'cloud_playlists' || Boolean(browserSearch.trim())) &&
+      cloudPlaylists.length === 0
+    ) {
       setCloudLoading(true);
       fetchAppleCloudPlaylists()
         .then(setCloudPlaylists)
@@ -435,6 +479,7 @@ const ConsoleMainApp: React.FC = () => {
     browserSourceFilter,
     snap?.apple_authenticated,
     appleSubTab,
+    browserSearch,
     cloudPlaylists.length,
     radioStations.length,
     forYouPlaylists.length,

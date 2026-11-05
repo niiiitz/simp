@@ -73,6 +73,8 @@ pub enum ServerEnvelope {
         mounts: Vec<MountStatus>,
         power: PowerState,
         apple_authenticated: bool,
+        #[serde(default)]
+        brightness_pct: u8,
     },
     QueryResponse {
         req_id: u64,

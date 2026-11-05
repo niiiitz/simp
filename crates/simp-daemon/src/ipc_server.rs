@@ -436,6 +436,7 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
                         let persist = matches!(
                             command,
                             AudioCommand::SetVolume { .. }
+                                | AudioCommand::SetBrightness { .. }
                                 | AudioCommand::AddLibraryPath { .. }
                                 | AudioCommand::RemoveLibraryPath { .. }
                                 | AudioCommand::ConfigureAppleMusic { .. }
