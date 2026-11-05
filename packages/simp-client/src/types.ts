@@ -33,6 +33,8 @@ export interface PlaylistRecord {
   cover_art_url?: string | null;
   track_count: number;
   updated_at: number;
+  has_local?: boolean;
+  has_apple?: boolean;
 }
 
 export interface MountStatus {

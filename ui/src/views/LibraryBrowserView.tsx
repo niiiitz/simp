@@ -271,11 +271,21 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
   const searchLower = browserSearch.trim().toLowerCase();
 
+  // Source-aware SIMP Playlist membership (`has_local` & `has_apple`)
   const filteredPlaylists = useMemo(
     () =>
       playlists.filter((pl) => {
-        if (browserSourceFilter === 'local' && pl.origin === 'apple_remote') return false;
-        if (browserSourceFilter === 'apple_music' && pl.origin !== 'apple_remote') return false;
+        if (browserSourceFilter === 'local') {
+          if (pl.origin === 'apple_remote') return false;
+          // Exclude user-created SIMP playlists that contain ONLY Apple Music tracks
+          if (pl.track_count > 0 && pl.has_apple && !pl.has_local) return false;
+        } else if (browserSourceFilter === 'apple_music') {
+          // Include Pinned Apple Playlists (`apple_remote`), empty new SIMP playlists,
+          // and any SIMP Playlist (`simp_local`) that contains Apple Music tracks (`has_apple`)!
+          if (pl.origin === 'simp_local' && pl.track_count > 0 && !pl.has_apple) {
+            return false;
+          }
+        }
         if (searchLower) {
           return (
             pl.name.toLowerCase().includes(searchLower) ||
@@ -286,6 +296,22 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       }),
     [playlists, browserSourceFilter, searchLower]
   );
+
+  const formatPlaylistSourceLabel = (pl: PlaylistRecord): string => {
+    if (pl.origin !== 'simp_local') {
+      return '📌 Pinned Apple';
+    }
+    if (pl.has_local && pl.has_apple) {
+      return '★ Hybrid (💾 + 🍎)';
+    }
+    if (pl.has_apple && !pl.has_local) {
+      return '★ SIMP Playlist (🍎)';
+    }
+    if (pl.has_local && !pl.has_apple) {
+      return '★ SIMP Playlist (💾)';
+    }
+    return '★ SIMP Playlist';
+  };
 
   const hybridPlaylistsList = useMemo(
     () => filteredPlaylists.filter((p) => p.origin === 'simp_local'),
@@ -344,55 +370,67 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
   const activeHubLabel = browserSearch.trim()
     ? 'Search Results'
+    : browserSourceFilter === 'local'
+    ? 'Local SIMP Library'
     : appleSubTab === 'cloud_playlists'
     ? 'Apple Playlists'
     : appleSubTab === 'radio'
     ? 'Radio & For You'
     : appleSubTab === 'new'
     ? 'New & Charts'
+    : browserSourceFilter === 'apple_music'
+    ? 'SIMP Library (Apple)'
     : 'My SIMP Library';
 
-  // Reusable Hybrid Playlist Target Selector (`Add + to: [Playlist ▾]`)
-  const renderHybridTargetSelector = () => (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        background: '#0c0c12',
-        border: '1px solid #262634',
-        borderRadius: 10,
-        padding: '0 8px',
-        minHeight: 36,
-      }}
-    >
-      <span style={{ fontSize: 11, color: '#8e8e99' }}>Add `+` to:</span>
-      {writablePlaylists.length > 0 ? (
-        <select
-          value={activePlaylistId}
-          onChange={(e) => setActivePlaylistId(e.target.value)}
-          style={{
-            background: 'transparent',
-            border: 'none',
-            color: '#67e8f9',
-            fontSize: 11,
-            fontWeight: 700,
-            cursor: 'pointer',
-          }}
-        >
-          {writablePlaylists.map((wp) => (
-            <option key={wp.id} value={wp.id} style={{ background: '#0c0c12' }}>
-              {wp.name} ({wp.track_count})
-            </option>
-          ))}
-        </select>
-      ) : (
-        <span style={{ fontSize: 11, color: '#67e8f9', fontWeight: 700 }}>
-          Favorites (auto-create)
+  // Interactive Controller & Mouse Friendly Target Playlist Button (`🎯 Add + to: ★ ...`)
+  const renderHybridTargetSelector = () => {
+    const activeIdx = Math.max(
+      0,
+      writablePlaylists.findIndex((wp) => wp.id === activePlaylistId)
+    );
+    const activeWp = writablePlaylists[activeIdx] || null;
+    return (
+      <button
+        onClick={() => {
+          if (writablePlaylists.length >= 2) {
+            const nextWp = writablePlaylists[(activeIdx + 1) % writablePlaylists.length];
+            setActivePlaylistId(nextWp.id);
+          } else {
+            setPlaylistsOpen(true);
+            setCreatingPlaylist(true);
+          }
+        }}
+        title={
+          writablePlaylists.length >= 2
+            ? 'Click or press A to cycle target SIMP Playlist for + buttons'
+            : 'Click or press A to create a new SIMP Playlist'
+        }
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          background: '#0c161c',
+          border: '1px solid #2aa3c4',
+          borderRadius: 10,
+          padding: '0 10px',
+          minHeight: 36,
+          color: '#bfeaf5',
+          fontSize: 11,
+          fontWeight: 800,
+          cursor: 'pointer',
+        }}
+      >
+        <span style={{ color: '#8e8e99', fontWeight: 600 }}>Add `+` to:</span>
+        <span style={{ color: '#67e8f9' }}>
+          {activeWp
+            ? writablePlaylists.length >= 2
+              ? `★ ${activeWp.name} ⟳ (${activeIdx + 1}/${writablePlaylists.length})`
+              : `★ ${activeWp.name} (+ New)`
+            : '★ Favorites (+ Create)'}
         </span>
-      )}
-    </div>
-  );
+      </button>
+    );
+  };
 
   // Responsive 4-Column-Max Tile Grid Style (up to 4 taller tiles per row, zero horizontal overflow)
   const tileGridStyle: React.CSSProperties = {
@@ -522,7 +560,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 overflowWrap: 'anywhere',
               }}
             >
-              {isLocal ? '★ SIMP Hybrid' : '📌 Pinned Apple'} • {pl.track_count} tracks
+              {formatPlaylistSourceLabel(pl)} • {pl.track_count} tracks
             </div>
           </div>
         </button>
@@ -1323,73 +1361,161 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           )}
         </div>
 
-        {/* Row 2: 2x2 Right-Pane Browse Hub Selector (Controls what Grid Hub is open on the Right Pane) */}
+        {/* Row 2: Top-Level Source Filter Bar (`[ 🌐 All | 💾 Local | 🍎 Apple Music ]`) */}
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
+            gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)',
             gap: 6,
           }}
         >
           {(
             [
+              { id: 'all', label: '🌐 All', isApple: false },
+              { id: 'local', label: '💾 Local', isApple: false },
               {
-                id: 'pinned',
-                label: `📌 My SIMP Library (${playlists.length + albums.length})`,
-                isSimp: true,
+                id: 'apple_music',
+                label:
+                  appleAuthState === 'reauth_required' ? '🍎 Apple ⚠️' : '🍎 Apple Music',
+                isApple: true,
               },
-              {
-                id: 'cloud_playlists',
-                label: `☁️ Apple Playlists${
-                  cloudPlaylists.length ? ` (${cloudPlaylists.length})` : ''
-                }`,
-                isSimp: false,
-              },
-              { id: 'radio', label: '📻 Radio & For You', isSimp: false },
-              { id: 'new', label: '✨ New & Charts', isSimp: false },
             ] as const
-          ).map((hub) => {
-            const active = appleSubTab === hub.id && rightPaneMode === 'browse';
+          ).map((tab) => {
+            const active = browserSourceFilter === tab.id;
             return (
               <button
-                key={hub.id}
-                data-default-focus={hub.id === 'pinned' ? 'true' : undefined}
+                key={tab.id}
                 onClick={() => {
-                  setAppleSubTab(hub.id);
-                  if (!hub.isSimp && browserSourceFilter === 'local') {
-                    setBrowserSourceFilter('all');
+                  setBrowserSourceFilter(tab.id);
+                  if (tab.id === 'local') {
+                    setAppleSubTab('pinned');
+                    setRightPaneMode('browse');
+                  } else if (
+                    tab.id === 'apple_music' &&
+                    (browserTarget?.kind === 'mount' || browserTarget?.kind === 'cdda')
+                  ) {
+                    setRightPaneMode('browse');
                   }
-                  setRightPaneMode('browse');
                 }}
                 style={{
-                  minHeight: 36,
-                  padding: '0 8px',
+                  minHeight: 34,
+                  padding: '0 6px',
                   borderRadius: 8,
-                  background: active
-                    ? hub.isSimp
-                      ? '#0f222a'
-                      : '#28111b'
-                    : '#0a0a0e',
+                  background: active ? (tab.isApple ? '#28111b' : '#0f222a') : '#0a0a0e',
                   border: active
-                    ? hub.isSimp
-                      ? '1px solid #2aa3c4'
-                      : '1px solid #fa243c'
+                    ? tab.isApple
+                      ? '1px solid #fa243c'
+                      : '1px solid #2aa3c4'
                     : '1px solid #1e1e26',
-                  color: active
-                    ? hub.isSimp
-                      ? '#bfeaf5'
-                      : '#fecdd3'
-                    : '#9ca3af',
+                  color: active ? (tab.isApple ? '#fecdd3' : '#bfeaf5') : '#9ca3af',
                   fontSize: 11,
                   fontWeight: 800,
                   cursor: 'pointer',
                 }}
               >
-                {hub.label}
+                {tab.label}
               </button>
             );
           })}
         </div>
+
+        {/* Row 3: Right-Pane Browse Hub Selector (Local SIMP Library when Local; 2x2 Hub Grid when All/Apple) */}
+        {browserSourceFilter === 'local' ? (
+          <button
+            data-default-focus="true"
+            onClick={() => {
+              setAppleSubTab('pinned');
+              setRightPaneMode('browse');
+            }}
+            style={{
+              minHeight: 36,
+              padding: '0 10px',
+              borderRadius: 8,
+              background: rightPaneMode === 'browse' ? '#0f222a' : '#0a0a0e',
+              border: rightPaneMode === 'browse' ? '1px solid #2aa3c4' : '1px solid #1e1e26',
+              color: rightPaneMode === 'browse' ? '#bfeaf5' : '#9ca3af',
+              fontSize: 11,
+              fontWeight: 800,
+              cursor: 'pointer',
+              textAlign: 'left',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <span>📌 Local SIMP Library ({filteredPlaylists.length + albums.length})</span>
+            <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#2aa3c4' }}>
+              ⊞ Grid
+            </span>
+          </button>
+        ) : (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+              gap: 6,
+            }}
+          >
+            {(
+              [
+                {
+                  id: 'pinned',
+                  label:
+                    browserSourceFilter === 'apple_music'
+                      ? `📌 SIMP Library (${filteredPlaylists.length + albums.length})`
+                      : `📌 My SIMP Library (${filteredPlaylists.length + albums.length})`,
+                  isSimp: true,
+                },
+                {
+                  id: 'cloud_playlists',
+                  label: `☁️ Apple Playlists${
+                    cloudPlaylists.length ? ` (${cloudPlaylists.length})` : ''
+                  }`,
+                  isSimp: false,
+                },
+                { id: 'radio', label: '📻 Radio & For You', isSimp: false },
+                { id: 'new', label: '✨ New & Charts', isSimp: false },
+              ] as const
+            ).map((hub) => {
+              const active = appleSubTab === hub.id && rightPaneMode === 'browse';
+              return (
+                <button
+                  key={hub.id}
+                  data-default-focus={hub.id === 'pinned' ? 'true' : undefined}
+                  onClick={() => {
+                    setAppleSubTab(hub.id);
+                    setRightPaneMode('browse');
+                  }}
+                  style={{
+                    minHeight: 36,
+                    padding: '0 8px',
+                    borderRadius: 8,
+                    background: active
+                      ? hub.isSimp
+                        ? '#0f222a'
+                        : '#28111b'
+                      : '#0a0a0e',
+                    border: active
+                      ? hub.isSimp
+                        ? '1px solid #2aa3c4'
+                        : '1px solid #fa243c'
+                      : '1px solid #1e1e26',
+                    color: active
+                      ? hub.isSimp
+                        ? '#bfeaf5'
+                        : '#fecdd3'
+                      : '#9ca3af',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {hub.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Re-Auth Prompt Pill (only shown when user has pinned Apple content while signed out) */}
         {appleAuthState === 'reauth_required' && browserSourceFilter !== 'local' && (
@@ -1427,53 +1553,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           </div>
         )}
 
-        {/* Row 3: Quick-Jump Sidebar Filter Pills (Filters your SIMP Playlists & Albums by Source) */}
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr 1fr',
-            gap: 6,
-            marginTop: 2,
-          }}
-        >
-          {(
-            [
-              { id: 'all', label: '🌐 All SIMP' },
-              { id: 'local', label: '💾 Local / OST' },
-              {
-                id: 'apple_music',
-                label:
-                  appleAuthState === 'reauth_required' ? '🍎 Pinned ⚠️' : '🍎 Pinned Apple',
-              },
-            ] as const
-          ).map((tab) => {
-            const active = browserSourceFilter === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => {
-                  setBrowserSourceFilter(tab.id);
-                }}
-                style={{
-                  minHeight: 30,
-                  padding: '0 6px',
-                  borderRadius: 7,
-                  background: active ? '#0f222a' : '#08080c',
-                  border: active ? '1px solid #2aa3c4' : '1px solid #181822',
-                  color: active ? '#bfeaf5' : '#8e8e99',
-                  fontSize: 10,
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                }}
-              >
-                {tab.label}
-              </button>
-            );
-          })}
-        </div>
-
         {/* =================================================================
-            COLLAPSIBLE BUCKET 1: 📌 PLAYLISTS (PINNED & HYBRID)
+            COLLAPSIBLE BUCKET 1: 📌 SIMP PLAYLISTS (HYBRID & PINNED)
            ================================================================= */}
         <div
           style={{
@@ -1504,42 +1585,37 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             }}
           >
             <span>
-              {playlistsOpen ? '▾' : '▸'}{' '}
-              {browserSourceFilter === 'apple_music'
-                ? `PINNED PLAYLISTS (${filteredPlaylists.length})`
-                : `SIMP PLAYLISTS (${filteredPlaylists.length})`}
+              {playlistsOpen ? '▾' : '▸'} SIMP PLAYLISTS ({filteredPlaylists.length})
             </span>
           </button>
-          {browserSourceFilter !== 'apple_music' && (
-            <button
-              data-row-aux="true"
-              onClick={() => {
-                setPlaylistsOpen(true);
-                setCreatingPlaylist((v) => !v);
-              }}
-              style={{
-                padding: '6px 10px',
-                borderRadius: 8,
-                background: '#12121a',
-                border: '1px solid #262634',
-                color: '#2aa3c4',
-                fontSize: 11,
-                fontWeight: 700,
-                cursor: 'pointer',
-                flexShrink: 0,
-              }}
-            >
-              {creatingPlaylist ? 'Cancel' : '+ New'}
-            </button>
-          )}
+          <button
+            data-row-aux="true"
+            onClick={() => {
+              setPlaylistsOpen(true);
+              setCreatingPlaylist((v) => !v);
+            }}
+            style={{
+              padding: '6px 10px',
+              borderRadius: 8,
+              background: '#12121a',
+              border: '1px solid #262634',
+              color: '#2aa3c4',
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            {creatingPlaylist ? 'Cancel' : '+ New'}
+          </button>
         </div>
 
-        {creatingPlaylist && browserSourceFilter !== 'apple_music' && (
+        {creatingPlaylist && (
           <div style={{ display: 'flex', gap: 6 }}>
             <input
               type="text"
               data-osk-input="playlist"
-              placeholder="New Hybrid Playlist name (Press A)..."
+              placeholder="New SIMP Playlist name (Press A)..."
               value={newPlaylistName}
               onChange={(e) => setNewPlaylistName(e.target.value)}
               onClick={() => {
@@ -1636,7 +1712,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   <div
                     style={{ fontSize: 10, color: isLocalPlaylist ? '#2aa3c4' : '#fda4af' }}
                   >
-                    {isLocalPlaylist ? '★ SIMP Hybrid Playlist' : 'Pinned Apple Playlist'}
+                    {formatPlaylistSourceLabel(pl)}
                   </div>
                 </button>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
@@ -1697,7 +1773,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           <span>
             {albumsOpen ? '▾' : '▸'}{' '}
             {browserSourceFilter === 'apple_music'
-              ? `PINNED FULL ALBUMS (${albums.length})`
+              ? `PINNED ALBUMS (${albums.length})`
+              : browserSourceFilter === 'local'
+              ? `LOCAL ALBUMS (${albums.length})`
               : `ALBUMS & SOUNDTRACKS (${albums.length})`}
             {browserTarget?.kind === 'mount' && selectedMountObj
               ? ` — ${selectedMountObj.label}`
@@ -1795,259 +1873,265 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           })}
 
         {/* =================================================================
-            COLLAPSIBLE BUCKET 3 (Bottom of Left Sidebar): 💾 STORAGE & OPTICAL CD
+            COLLAPSIBLE BUCKET 3 (Only in `🌐 All` or `💾 Local`): 💾 STORAGE & OPTICAL CD
            ================================================================= */}
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginTop: 2,
-            gap: 6,
-          }}
-        >
-          <button
-            onClick={toggleStorageOpen}
-            style={{
-              flex: 1,
-              background: '#0d0d14',
-              border: '1px solid #1e1e28',
-              borderRadius: 8,
-              padding: '6px 10px',
-              color: '#c8c8d4',
-              fontSize: 11,
-              fontFamily: 'monospace',
-              fontWeight: 800,
-              textAlign: 'left',
-              cursor: 'pointer',
-            }}
-          >
-            {storageOpen ? '▾' : '▸'} STORAGE & CD ({snap?.mounts.length ?? 0})
-          </button>
-          <button
-            data-row-aux="true"
-            onClick={() => setSourceModalOpen(true)}
-            style={{
-              padding: '6px 10px',
-              borderRadius: 8,
-              background: '#12121a',
-              border: '1px solid #262634',
-              color: '#2aa3c4',
-              fontSize: 11,
-              fontWeight: 700,
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            Sources
-          </button>
-        </div>
-
-        {storageOpen && (
+        {browserSourceFilter !== 'apple_music' && (
           <>
-            {snap?.mounts.map((m) => {
-              const isMountSelected =
-                rightPaneMode === 'tracks' &&
-                browserTarget?.kind === 'mount' &&
-                browserTarget.id === m.mount_root;
-              return (
-                <button
-                  key={m.mount_root}
-                  onClick={() => {
-                    if (isMountSelected) {
-                      setBrowserTarget(null);
-                      setRightPaneMode('browse');
-                    } else {
-                      selectLocalCollection({ kind: 'mount', id: m.mount_root });
-                    }
-                  }}
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginTop: 2,
+                gap: 6,
+              }}
+            >
+              <button
+                onClick={toggleStorageOpen}
+                style={{
+                  flex: 1,
+                  background: '#0d0d14',
+                  border: '1px solid #1e1e28',
+                  borderRadius: 8,
+                  padding: '6px 10px',
+                  color: '#c8c8d4',
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  fontWeight: 800,
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                }}
+              >
+                {storageOpen ? '▾' : '▸'} STORAGE & CD ({snap?.mounts.length ?? 0})
+              </button>
+              <button
+                data-row-aux="true"
+                onClick={() => setSourceModalOpen(true)}
+                style={{
+                  padding: '6px 10px',
+                  borderRadius: 8,
+                  background: '#12121a',
+                  border: '1px solid #262634',
+                  color: '#2aa3c4',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
+              >
+                Sources
+              </button>
+            </div>
+
+            {storageOpen && (
+              <>
+                {snap?.mounts.map((m) => {
+                  const isMountSelected =
+                    rightPaneMode === 'tracks' &&
+                    browserTarget?.kind === 'mount' &&
+                    browserTarget.id === m.mount_root;
+                  return (
+                    <button
+                      key={m.mount_root}
+                      onClick={() => {
+                        if (isMountSelected) {
+                          setBrowserTarget(null);
+                          setRightPaneMode('browse');
+                        } else {
+                          selectLocalCollection({ kind: 'mount', id: m.mount_root });
+                        }
+                      }}
+                      style={{
+                        padding: '7px 10px',
+                        borderRadius: 10,
+                        background: isMountSelected ? '#0d1b22' : '#0a0a0e',
+                        border: isMountSelected ? '1px solid #2aa3c4' : '1px solid #1e1e26',
+                        color: '#d4d4dc',
+                        textAlign: 'left',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                        fontSize: 12,
+                        opacity: m.is_online ? 1 : 0.65,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div
+                          style={{
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            fontWeight: 700,
+                          }}
+                        >
+                          {m.is_online ? '🟢' : '⚫'} {m.label}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 10,
+                            fontFamily: 'monospace',
+                            color: '#71717a',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                          title={m.mount_root}
+                        >
+                          {m.mount_root}
+                        </div>
+                      </div>
+                      <span
+                        style={{
+                          fontFamily: 'monospace',
+                          color: '#2aa3c4',
+                          fontWeight: 700,
+                          flexShrink: 0,
+                        }}
+                      >
+                        {m.track_count}
+                      </span>
+                    </button>
+                  );
+                })}
+
+                {/* Optical CD-ROM Drive (`cdda://` + MusicBrainz DiscID) */}
+                <div
                   style={{
                     padding: '7px 10px',
                     borderRadius: 10,
-                    background: isMountSelected ? '#0d1b22' : '#0a0a0e',
-                    border: isMountSelected ? '1px solid #2aa3c4' : '1px solid #1e1e26',
-                    color: '#d4d4dc',
-                    textAlign: 'left',
+                    background:
+                      browserTarget?.kind === 'cdda'
+                        ? '#1f160d'
+                        : opticalDisc?.is_audio_cd
+                        ? '#12100e'
+                        : '#0a0a0e',
+                    border:
+                      browserTarget?.kind === 'cdda'
+                        ? '1px solid #f59e0b'
+                        : opticalDisc?.is_audio_cd
+                        ? '1px solid #78350f'
+                        : '1px solid #1e1e26',
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
                     gap: 8,
-                    fontSize: 12,
-                    opacity: m.is_online ? 1 : 0.65,
-                    cursor: 'pointer',
                   }}
                 >
-                  <div style={{ minWidth: 0, flex: 1 }}>
+                  <button
+                    onClick={() => {
+                      if (opticalDisc?.is_audio_cd) {
+                        selectLocalCollection({
+                          kind: 'cdda',
+                          id: opticalDisc.disc_id || opticalDisc.device_path || '/dev/sr0',
+                          title: `💿 ${opticalDisc.album_title || 'Audio CD'}`,
+                          subtitle: `${opticalDisc.artist_name || 'Unknown Artist'}${
+                            opticalDisc.release_year ? ` • ${opticalDisc.release_year}` : ''
+                          }${
+                            opticalDisc.disc_id
+                              ? ` • DiscID ${opticalDisc.disc_id.slice(0, 8)}…`
+                              : ''
+                          }`,
+                          art_url: opticalDisc.art_url,
+                        });
+                        setBrowserTracks(opticalDisc.tracks);
+                      } else {
+                        handleScanOpticalDisc(false, false);
+                      }
+                    }}
+                    style={{
+                      minWidth: 0,
+                      flex: 1,
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#d4d4dc',
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                      padding: 0,
+                    }}
+                  >
                     <div
                       style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        color: opticalDisc?.is_audio_cd ? '#fcd34d' : '#c8c8d2',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
-                        fontWeight: 700,
                       }}
                     >
-                      {m.is_online ? '🟢' : '⚫'} {m.label}
+                      {opticalDisc?.is_audio_cd
+                        ? `🟢 💿 ${opticalDisc.album_title || 'Audio CD'}`
+                        : '⚫ 💿 Optical CD Drive'}
                     </div>
                     <div
                       style={{
                         fontSize: 10,
                         fontFamily: 'monospace',
-                        color: '#71717a',
+                        color: '#8e8e99',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
                       }}
-                      title={m.mount_root}
                     >
-                      {m.mount_root}
+                      {cdScanning
+                        ? '⏳ Reading TOC & MusicBrainz...'
+                        : opticalDisc?.is_audio_cd
+                        ? `${opticalDisc.artist_name || 'Unknown Artist'} • ${
+                            opticalDisc.tracks.length
+                          } tracks`
+                        : opticalDisc?.status_message || 'Click Scan when CD-ROM is connected'}
                     </div>
-                  </div>
-                  <span
-                    style={{
-                      fontFamily: 'monospace',
-                      color: '#2aa3c4',
-                      fontWeight: 700,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {m.track_count}
-                  </span>
-                </button>
-              );
-            })}
-
-            {/* Optical CD-ROM Drive (`cdda://` + MusicBrainz DiscID) */}
-            <div
-              style={{
-                padding: '7px 10px',
-                borderRadius: 10,
-                background:
-                  browserTarget?.kind === 'cdda'
-                    ? '#1f160d'
-                    : opticalDisc?.is_audio_cd
-                    ? '#12100e'
-                    : '#0a0a0e',
-                border:
-                  browserTarget?.kind === 'cdda'
-                    ? '1px solid #f59e0b'
-                    : opticalDisc?.is_audio_cd
-                    ? '1px solid #78350f'
-                    : '1px solid #1e1e26',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: 8,
-              }}
-            >
-              <button
-                onClick={() => {
-                  if (opticalDisc?.is_audio_cd) {
-                    selectLocalCollection({
-                      kind: 'cdda',
-                      id: opticalDisc.disc_id || opticalDisc.device_path || '/dev/sr0',
-                      title: `💿 ${opticalDisc.album_title || 'Audio CD'}`,
-                      subtitle: `${opticalDisc.artist_name || 'Unknown Artist'}${
-                        opticalDisc.release_year ? ` • ${opticalDisc.release_year}` : ''
-                      }${
-                        opticalDisc.disc_id ? ` • DiscID ${opticalDisc.disc_id.slice(0, 8)}…` : ''
-                      }`,
-                      art_url: opticalDisc.art_url,
-                    });
-                    setBrowserTracks(opticalDisc.tracks);
-                  } else {
-                    handleScanOpticalDisc(false, false);
-                  }
-                }}
-                style={{
-                  minWidth: 0,
-                  flex: 1,
-                  background: 'transparent',
-                  border: 'none',
-                  color: '#d4d4dc',
-                  textAlign: 'left',
-                  cursor: 'pointer',
-                  padding: 0,
-                }}
-              >
-                <div
-                  style={{
-                    fontSize: 12,
-                    fontWeight: 700,
-                    color: opticalDisc?.is_audio_cd ? '#fcd34d' : '#c8c8d2',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {opticalDisc?.is_audio_cd
-                    ? `🟢 💿 ${opticalDisc.album_title || 'Audio CD'}`
-                    : '⚫ 💿 Optical CD Drive'}
-                </div>
-                <div
-                  style={{
-                    fontSize: 10,
-                    fontFamily: 'monospace',
-                    color: '#8e8e99',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {cdScanning
-                    ? '⏳ Reading TOC & MusicBrainz...'
-                    : opticalDisc?.is_audio_cd
-                    ? `${opticalDisc.artist_name || 'Unknown Artist'} • ${
-                        opticalDisc.tracks.length
-                      } tracks`
-                    : opticalDisc?.status_message || 'Click Scan when CD-ROM is connected'}
-                </div>
-              </button>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
-                <button
-                  data-row-aux="true"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleScanOpticalDisc(true, false);
-                  }}
-                  disabled={cdScanning}
-                  style={{
-                    padding: '4px 8px',
-                    borderRadius: 6,
-                    background: '#161622',
-                    border: '1px solid #2e2e3e',
-                    color: '#fcd34d',
-                    fontSize: 10,
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {cdScanning ? '⏳' : '🔄 Scan'}
-                </button>
-                {opticalDisc?.drive_present && (
-                  <button
-                    data-row-aux="true"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleEjectOpticalDisc();
-                    }}
-                    title="Eject Optical Disc"
-                    style={{
-                      padding: '4px 7px',
-                      borderRadius: 6,
-                      background: '#1f1216',
-                      border: '1px solid #4c2228',
-                      color: '#fca5a5',
-                      fontSize: 10,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    ⏏
                   </button>
-                )}
-              </div>
-            </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+                    <button
+                      data-row-aux="true"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleScanOpticalDisc(true, false);
+                      }}
+                      disabled={cdScanning}
+                      style={{
+                        padding: '4px 8px',
+                        borderRadius: 6,
+                        background: '#161622',
+                        border: '1px solid #2e2e3e',
+                        color: '#fcd34d',
+                        fontSize: 10,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {cdScanning ? '⏳' : '🔄 Scan'}
+                    </button>
+                    {opticalDisc?.drive_present && (
+                      <button
+                        data-row-aux="true"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleEjectOpticalDisc();
+                        }}
+                        title="Eject Optical Disc"
+                        style={{
+                          padding: '4px 7px',
+                          borderRadius: 6,
+                          background: '#1f1216',
+                          border: '1px solid #4c2228',
+                          color: '#fca5a5',
+                          fontSize: 10,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        ⏏
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
           </>
         )}
       </div>
@@ -2286,19 +2370,23 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                             marginRight: 6,
                           }}
                         >
-                          📌 My SIMP Library
+                          📌 {activeHubLabel}
                         </span>
                         {(
                           [
                             { id: 'all', label: 'All' },
                             {
                               id: 'hybrid',
-                              label: `★ Hybrid Playlists (${hybridPlaylistsList.length})`,
+                              label: `★ SIMP Playlists (${hybridPlaylistsList.length})`,
                             },
-                            {
-                              id: 'pinned',
-                              label: `📌 Pinned Playlists (${pinnedPlaylistsList.length})`,
-                            },
+                            ...(browserSourceFilter !== 'local'
+                              ? [
+                                  {
+                                    id: 'pinned' as const,
+                                    label: `📌 Pinned Playlists (${pinnedPlaylistsList.length})`,
+                                  },
+                                ]
+                              : []),
                             { id: 'albums', label: `💿 Albums (${albums.length})` },
                           ] as const
                         ).map((f) => {
@@ -2339,7 +2427,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                             cursor: 'pointer',
                           }}
                         >
-                          {creatingPlaylist ? 'Cancel' : '+ New Hybrid Playlist'}
+                          {creatingPlaylist ? 'Cancel' : '+ New SIMP Playlist'}
                         </button>
                       </div>
                     </div>
@@ -2949,7 +3037,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
               {browserTarget && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  {browserTarget.kind !== 'cdda' && renderHybridTargetSelector()}
+                  {browserTarget.kind !== 'cdda' &&
+                    !(
+                      browserTarget.kind === 'playlist' &&
+                      selectedPlaylistObj?.origin === 'simp_local'
+                    ) &&
+                    renderHybridTargetSelector()}
 
                   {/* Optical CD-ROM Controls */}
                   {browserTarget.kind === 'cdda' && (
@@ -3313,14 +3406,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         💿 Album
                       </button>
                     )}
-                    {t.source !== 'cdda' && (
+                    {!isViewingLocalPlaylist && t.source !== 'cdda' && (
                       <button
                         data-row-aux="true"
                         onClick={(e) => {
                           e.stopPropagation();
                           handleAddTracksToPlaylist([t.uri], `"${t.title}"`, [t]);
                         }}
-                        title="Add track to selected SIMP Hybrid Playlist"
+                        title="Add track to selected SIMP Playlist"
                         style={{
                           padding: '5px 9px',
                           borderRadius: 8,

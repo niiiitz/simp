@@ -54,6 +54,10 @@ pub struct PlaylistRecord {
     pub cover_art_url: Option<String>,
     pub track_count: usize,
     pub updated_at: i64,
+    #[serde(default)]
+    pub has_local: bool,
+    #[serde(default)]
+    pub has_apple: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

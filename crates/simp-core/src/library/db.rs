@@ -512,20 +512,27 @@ impl LibraryDatabase {
     pub fn get_playlists(&self) -> Result<Vec<PlaylistRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, origin, cover_art_url, track_count, updated_at
-             FROM playlists
-             ORDER BY CASE WHEN origin = 'simp_local' THEN 0 ELSE 1 END ASC,
-                      name COLLATE NOCASE ASC",
+            "SELECT p.id, p.name, p.description, p.origin, p.cover_art_url, p.track_count, p.updated_at,
+                    EXISTS(SELECT 1 FROM playlist_items pi WHERE pi.playlist_id = p.id AND pi.track_uri NOT LIKE 'applemusic:%') AS has_local,
+                    EXISTS(SELECT 1 FROM playlist_items pi WHERE pi.playlist_id = p.id AND pi.track_uri LIKE 'applemusic:%') AS has_apple
+             FROM playlists p
+             ORDER BY CASE WHEN p.origin = 'simp_local' THEN 0 ELSE 1 END ASC,
+                      p.name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], |row| {
+            let origin: String = row.get(3)?;
+            let has_local: bool = row.get(7).unwrap_or(false);
+            let has_apple: bool = row.get(8).unwrap_or(false) || origin == "apple_remote";
             Ok(PlaylistRecord {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 description: row.get(2)?,
-                origin: row.get(3)?,
+                origin,
                 cover_art_url: row.get(4)?,
                 track_count: row.get::<_, i64>(5)? as usize,
                 updated_at: row.get(6)?,
+                has_local,
+                has_apple,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -598,6 +605,8 @@ impl LibraryDatabase {
             cover_art_url: None,
             track_count: 0,
             updated_at,
+            has_local: false,
+            has_apple: false,
         })
     }
 
