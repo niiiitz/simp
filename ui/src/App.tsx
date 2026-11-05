@@ -1380,8 +1380,8 @@ const ConsoleMainApp: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Viewport: Either Lock Screen (PlayerView) or Split Browser (LibraryBrowserView) */}
-      {view === 'lock' ? (
+      {/* Main Viewport: Lock Screen (PlayerView) + Persistent Split Browser (LibraryBrowserView stays mounted to preserve scroll & selection state) */}
+      {view === 'lock' && (
         <PlayerView
           snap={snap}
           track={track}
@@ -1393,9 +1393,10 @@ const ConsoleMainApp: React.FC = () => {
           setView={setView}
           handleOpenFullAppleAlbum={handleOpenFullAppleAlbum}
         />
-      ) : (
-        <LibraryBrowserView
-          snap={snap}
+      )}
+      <LibraryBrowserView
+        hidden={view !== 'browser'}
+        snap={snap}
           track={track}
           albums={albums}
           playlists={playlists}
@@ -1454,7 +1455,6 @@ const ConsoleMainApp: React.FC = () => {
           handleOpenFullAppleAlbum={handleOpenFullAppleAlbum}
           handleStartAppleStation={handleStartAppleStation}
         />
-      )}
 
       {/* Source Selection, Custom Folder Picker & Authentication Pop-Up Modal */}
       {sourceModalOpen && (

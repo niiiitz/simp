@@ -73,6 +73,7 @@ export function useGamepadNavigation({
   const gamepadActionRef = useRef<(action: string) => void>(() => {});
   const lastWebGamepadTsRef = useRef<number>(0);
   const lastGamepadInputTsRef = useRef<number>(0);
+  const lastBrowserFocusRef = useRef<HTMLElement | null>(null);
 
   // Adaptive Input Modality (`data-simp-input="pointer" | "gamepad"`):
   // Default to `gamepad` inside SteamUI's `/simp-console` iframe and `pointer` in standalone desktop windows,
@@ -147,19 +148,47 @@ export function useGamepadNavigation({
     if (el) {
       el.setAttribute('data-simp-active-focus', 'true');
       el.classList.add('simp-gpfocus');
+      if (el.closest('[data-nav-col]')) {
+        lastBrowserFocusRef.current = el;
+      }
       el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     }
   }, []);
 
-  // Automatically place the focus marker on the default focus target when entering Browser or opening Modals
+  // Automatically place the focus marker on the default focus target when entering Browser (or restore last browser focus) or opening Modals
   useEffect(() => {
     if (view !== 'browser' && !sourceModalOpen && !powerModalOpen) return;
     const t = window.setTimeout(() => {
-      const rootSelector =
-        sourceModalOpen || powerModalOpen
-          ? '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled])'
-          : 'button[data-default-focus="true"]:not([disabled]), [data-nav-col="left"] button:not([disabled])';
-      const preferred = document.querySelector<HTMLElement>(rootSelector);
+      if (sourceModalOpen || powerModalOpen) {
+        const modalTarget = document.querySelector<HTMLElement>(
+          '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled])'
+        );
+        if (modalTarget) {
+          applyFocusMarker(modalTarget);
+        }
+        return;
+      }
+      // Restore the last focused element in the Library Browser if it is still mounted & visible
+      const saved = lastBrowserFocusRef.current;
+      if (saved && saved.isConnected) {
+        const rect = saved.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          document
+            .querySelectorAll<HTMLElement>('[data-simp-active-focus="true"], .simp-gpfocus')
+            .forEach((node) => {
+              if (node !== saved) {
+                node.removeAttribute('data-simp-active-focus');
+                node.classList.remove('simp-gpfocus');
+              }
+            });
+          saved.setAttribute('data-simp-active-focus', 'true');
+          saved.classList.add('simp-gpfocus');
+          return;
+        }
+      }
+      const preferred = document.querySelector<HTMLElement>(
+        'button[data-default-focus="true"]:not([disabled]), [data-nav-col="left"] button:not([disabled])'
+      );
       if (preferred) {
         applyFocusMarker(preferred);
       }
