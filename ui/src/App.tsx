@@ -284,14 +284,12 @@ const ConsoleMainApp: React.FC = () => {
   const refreshLibraryData = useCallback(() => {
     const sourceParam =
       browserSourceFilter === 'all' ? null : browserSourceFilter;
-    const mountParam =
-      browserTarget?.kind === 'mount' ? browserTarget.id : null;
     const searchParam = browserSearch.trim() ? browserSearch.trim() : null;
 
     defaultSimpClient
       .query<AlbumRecord[]>('get_albums', {
         source: sourceParam,
-        mount_root: mountParam,
+        mount_root: null,
         search: searchParam,
         limit: 1000,
         offset: 0,
@@ -319,7 +317,7 @@ const ConsoleMainApp: React.FC = () => {
         }
       })
       .catch(() => {});
-  }, [browserSourceFilter, browserTarget?.kind, browserTarget?.id, browserSearch]);
+  }, [browserSourceFilter, browserSearch]);
 
   useEffect(() => {
     if (view === 'browser' || sourceModalOpen || powerModalOpen) {
@@ -561,6 +559,22 @@ const ConsoleMainApp: React.FC = () => {
       try {
         const tracks = await fetchApplePlaylistTracks(pl.id, pl.kind);
         setBrowserTracks(tracks);
+        const fallbackArt = tracks.find(
+          (t) => t.art_url && !t.art_url.includes('blobstore.apple.com')
+        )?.art_url;
+        if (fallbackArt && (!pl.art_url || pl.art_url.includes('blobstore.apple.com'))) {
+          setCloudPlaylists((prev) =>
+            prev.map((item) => (item.id === pl.id ? { ...item, art_url: fallbackArt } : item))
+          );
+          setActiveCloudPlaylist((prev) =>
+            prev && prev.id === pl.id ? { ...prev, art_url: fallbackArt } : prev
+          );
+          setBrowserTarget((prev) =>
+            prev && prev.kind === 'cloud_playlist' && prev.id === pl.id
+              ? { ...prev, art_url: fallbackArt }
+              : prev
+          );
+        }
       } catch (err: any) {
         showToast(err?.message || 'Could not load playlist tracks');
       } finally {

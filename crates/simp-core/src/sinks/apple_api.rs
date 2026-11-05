@@ -290,17 +290,27 @@ fn with_limit_100(url: &str) -> String {
 }
 
 /// Fetches the user's Apple Music Cloud Playlists in native Rust (up to 2,500 playlists).
+/// Requests `?include=catalog` so catalog playlists in the user's library use permanent `mzstatic.com` CDN artwork
+/// instead of throttled/expiring `blobstore.apple.com` URLs.
 pub fn fetch_cloud_playlists(settings: &SimpSettings) -> Result<Vec<AppleCloudPlaylistSummary>> {
     let (dev_token, user_token) = resolve_tokens(settings)?;
     let mut next_url: Option<String> =
-        Some("/v1/me/library/playlists?limit=100".to_string());
+        Some("/v1/me/library/playlists?include=catalog&limit=100".to_string());
     let mut items = Vec::new();
     let mut seen_ids = HashSet::new();
 
-    for _ in 0..25 {
+    for page_idx in 0..25 {
         let Some(ref url) = next_url else { break };
-        let Ok(json) = apple_get_json(url, &dev_token, &user_token) else {
-            break;
+        let json = match apple_get_json(url, &dev_token, &user_token) {
+            Ok(j) => j,
+            Err(_) if page_idx == 0 && url.contains("include=catalog") => {
+                match apple_get_json("/v1/me/library/playlists?limit=100", &dev_token, &user_token)
+                {
+                    Ok(j) => j,
+                    Err(_) => break,
+                }
+            }
+            Err(_) => break,
         };
         if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
             for pl in arr {
@@ -318,13 +328,23 @@ pub fn fetch_cloud_playlists(settings: &SimpSettings) -> Result<Vec<AppleCloudPl
                     .to_string();
                 let description = attrs
                     .pointer("/description/standard")
+                    .or_else(|| {
+                        pl.pointer("/relationships/catalog/data/0/attributes/description/standard")
+                    })
                     .and_then(|v| v.as_str())
                     .unwrap_or("iCloud Music Library Playlist")
                     .to_string();
-                let art_url = format_apple_art_url(
-                    attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
-                    300,
-                );
+                let rel_catalog_art = pl
+                    .pointer("/relationships/catalog/data/0/attributes/artwork/url")
+                    .and_then(|v| v.as_str());
+                let attr_art = attrs.pointer("/artwork/url").and_then(|v| v.as_str());
+                let raw_art = match (attr_art, rel_catalog_art) {
+                    (Some(a), Some(c)) if a.contains("blobstore.apple.com") => Some(c),
+                    (Some(a), _) => Some(a),
+                    (None, Some(c)) => Some(c),
+                    (None, None) => None,
+                };
+                let art_url = format_apple_art_url(raw_art, 300);
                 let kind = if id.starts_with("pl.") {
                     "catalog"
                 } else {
@@ -347,6 +367,41 @@ pub fn fetch_cloud_playlists(settings: &SimpSettings) -> Result<Vec<AppleCloudPl
     }
 
     Ok(items)
+}
+
+/// Resolves a permanent `mzstatic.com` cover artwork URL for an Apple Music playlist that has no playlist-level cover
+/// (or whose `blobstore.apple.com` cover was rate-limited/expired) by fetching its first track with `?include=catalog&limit=1`.
+pub fn fetch_playlist_cover_art(
+    settings: &SimpSettings,
+    playlist_id: &str,
+    kind: Option<&str>,
+) -> Option<String> {
+    let (dev_token, user_token) = resolve_tokens(settings).ok()?;
+    let storefront = get_storefront(&dev_token, &user_token);
+    let clean_id = playlist_id
+        .strip_prefix("applemusic:playlist:")
+        .unwrap_or(playlist_id)
+        .trim();
+    if clean_id.is_empty() {
+        return None;
+    }
+    let is_catalog = kind == Some("catalog") || clean_id.starts_with("pl.");
+    let url = if is_catalog {
+        format!(
+            "/v1/catalog/{}/playlists/{}/tracks?limit=1",
+            storefront,
+            urlencode(clean_id)
+        )
+    } else {
+        format!(
+            "/v1/me/library/playlists/{}/tracks?include=catalog&limit=1",
+            urlencode(clean_id)
+        )
+    };
+    let json = apple_get_json(&url, &dev_token, &user_token).ok()?;
+    let first_item = json.pointer("/data/0")?;
+    let track = map_apple_item_to_track(first_item)?;
+    track.art_url
 }
 
 /// Fetches all tracks for a library (`p.xxxx`) or catalog (`pl.xxxx`) playlist in native Rust,

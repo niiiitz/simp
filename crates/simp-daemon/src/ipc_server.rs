@@ -123,6 +123,7 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/update/apply", post(update_apply_handler))
         .route("/api/apple/playlists", get(apple_playlists_handler))
         .route("/api/apple/playlist-tracks", get(apple_playlist_tracks_handler))
+        .route("/api/apple/playlist-cover", get(apple_playlist_cover_handler))
         .route("/api/apple/full-album", get(apple_full_album_handler))
         .route("/api/apple/radio", get(apple_radio_handler))
         .route("/api/apple/new", get(apple_new_handler))
@@ -255,8 +256,25 @@ async fn update_apply_handler() -> impl IntoResponse {
 
 async fn apple_playlists_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
     let cfg = state.settings.lock().unwrap().clone();
+    let db = state.db.clone();
     let res = tokio::task::spawn_blocking(move || {
-        simp_core::sinks::apple_api::fetch_cloud_playlists(&cfg)
+        let mut playlists = simp_core::sinks::apple_api::fetch_cloud_playlists(&cfg)?;
+        let cached_art = db.get_all_cached_apple_playlist_art();
+        for pl in &mut playlists {
+            let needs_heal = pl
+                .art_url
+                .as_deref()
+                .map(|u| u.is_empty() || u.contains("blobstore.apple.com"))
+                .unwrap_or(true);
+            if needs_heal {
+                if let Some(cached) = cached_art.get(&pl.id) {
+                    pl.art_url = Some(cached.clone());
+                }
+            } else if let Some(ref valid_url) = pl.art_url {
+                let _ = db.set_cached_apple_playlist_art(&pl.id, valid_url);
+            }
+        }
+        Ok::<_, anyhow::Error>(playlists)
     })
     .await;
     match res {
@@ -271,16 +289,58 @@ async fn apple_playlist_tracks_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let cfg = state.settings.lock().unwrap().clone();
+    let db = state.db.clone();
     let id = params.get("id").cloned().unwrap_or_default();
     let kind = params.get("kind").cloned();
     let res = tokio::task::spawn_blocking(move || {
-        simp_core::sinks::apple_api::fetch_playlist_tracks(&cfg, &id, kind.as_deref())
+        let tracks =
+            simp_core::sinks::apple_api::fetch_playlist_tracks(&cfg, &id, kind.as_deref())?;
+        if let Some(first_art) = tracks
+            .iter()
+            .find_map(|t| t.art_url.as_deref())
+            .filter(|u| !u.is_empty() && !u.contains("blobstore.apple.com"))
+        {
+            let _ = db.set_cached_apple_playlist_art(&id, first_art);
+        }
+        Ok::<_, anyhow::Error>(tracks)
     })
     .await;
     match res {
         Ok(Ok(tracks)) => Json(serde_json::json!({ "ok": true, "data": tracks })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_playlist_cover_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let db = state.db.clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let kind = params.get("kind").cloned();
+    let force = params.get("force").map(|v| v == "1").unwrap_or(false);
+    let res = tokio::task::spawn_blocking(move || {
+        if !force {
+            if let Some(cached) = db
+                .get_cached_apple_playlist_art(&id)
+                .filter(|u| !u.is_empty() && !u.contains("blobstore.apple.com"))
+            {
+                return Some(cached);
+            }
+        }
+        let fetched =
+            simp_core::sinks::apple_api::fetch_playlist_cover_art(&cfg, &id, kind.as_deref());
+        if let Some(ref url) = fetched {
+            let _ = db.set_cached_apple_playlist_art(&id, url);
+        }
+        fetched
+    })
+    .await;
+    match res {
+        Ok(Some(art_url)) => Json(serde_json::json!({ "ok": true, "art_url": art_url })),
+        _ => Json(serde_json::json!({ "ok": false, "art_url": serde_json::Value::Null })),
     }
 }
 

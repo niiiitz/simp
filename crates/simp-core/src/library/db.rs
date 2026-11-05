@@ -101,6 +101,19 @@ impl LibraryDatabase {
                 art_url         TEXT,
                 updated_at      INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS musicbrainz_album_art_cache (
+                album_id        TEXT PRIMARY KEY,
+                status          TEXT NOT NULL,
+                art_url         TEXT,
+                checked_at      INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS apple_playlist_art_cache (
+                playlist_id     TEXT PRIMARY KEY,
+                art_url         TEXT NOT NULL,
+                updated_at      INTEGER NOT NULL
+            );
             ",
         )?;
 
@@ -259,12 +272,15 @@ impl LibraryDatabase {
         Ok(rows.filter_map(Result::ok).collect())
     }
 
-    /// Returns a map of `uri -> (mtime, size)` for fast incremental indexing of a mount root.
+    /// Returns a map of `uri -> (mtime, size, art_url)` for fast incremental indexing of a mount root.
     /// Tracks with `art_url IS NULL` are excluded so newly added folder artwork (`cover.jpg`) is picked up on rescan.
-    pub fn get_mount_file_fingerprints(&self, mount_root: &str) -> Result<HashMap<String, (i64, i64)>> {
+    pub fn get_mount_file_fingerprints(
+        &self,
+        mount_root: &str,
+    ) -> Result<HashMap<String, (i64, i64, Option<String>)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT uri, COALESCE(file_mtime, 0), COALESCE(file_size, 0)
+            "SELECT uri, COALESCE(file_mtime, 0), COALESCE(file_size, 0), art_url
              FROM tracks WHERE mount_root = ?1 AND art_url IS NOT NULL",
         )?;
         let mut map = HashMap::new();
@@ -273,10 +289,11 @@ impl LibraryDatabase {
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?;
         for row in rows.flatten() {
-            map.insert(row.0, (row.1, row.2));
+            map.insert(row.0, (row.1, row.2, row.3));
         }
         Ok(map)
     }
@@ -295,7 +312,11 @@ impl LibraryDatabase {
             "INSERT INTO albums (id, title, album_artist, release_year, steam_app_id, art_cache_path, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s', 'now'))
              ON CONFLICT(id) DO UPDATE SET
-               art_cache_path = COALESCE(excluded.art_cache_path, albums.art_cache_path),
+               art_cache_path = CASE
+                 WHEN excluded.art_cache_path IS NOT NULL THEN excluded.art_cache_path
+                 WHEN albums.art_cache_path LIKE '%/mb_%' OR albums.art_cache_path LIKE '%mzstatic.com%' THEN albums.art_cache_path
+                 ELSE NULL
+               END,
                steam_app_id = COALESCE(excluded.steam_app_id, albums.steam_app_id)",
             params![id, title, album_artist, release_year, steam_app_id, art_cache_path],
         )?;
@@ -323,7 +344,11 @@ impl LibraryDatabase {
                 track_number = excluded.track_number,
                 disc_number = excluded.disc_number,
                 duration_ms = excluded.duration_ms,
-                art_url = COALESCE(excluded.art_url, tracks.art_url),
+                art_url = CASE
+                  WHEN excluded.art_url IS NOT NULL THEN excluded.art_url
+                  WHEN tracks.art_url LIKE '%/mb_%' OR tracks.art_url LIKE '%mzstatic.com%' THEN tracks.art_url
+                  ELSE NULL
+                END,
                 file_mtime = excluded.file_mtime,
                 file_size = excluded.file_size",
             params![
@@ -949,6 +974,134 @@ impl LibraryDatabase {
                fetched_at = strftime('%s', 'now')",
             params![disc_id, album_title, artist_name, tracks_json, art_url],
         )?;
+        Ok(())
+    }
+
+    /// Returns `(album_id, title, album_artist)` for local albums that currently have no cover artwork (`art_cache_path IS NULL`).
+    pub fn get_local_albums_missing_artwork(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT a.id, a.title, a.album_artist
+             FROM albums a
+             JOIN tracks t ON t.album_id = a.id
+             WHERE (a.art_cache_path IS NULL OR a.art_cache_path = '')
+               AND a.id NOT LIKE 'applemusic:%'
+               AND t.source != 'apple_music'
+             ORDER BY a.title COLLATE NOCASE ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    pub fn get_musicbrainz_art_cache(
+        &self,
+        album_id: &str,
+    ) -> Option<(String, Option<String>, i64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT status, art_url, checked_at FROM musicbrainz_album_art_cache WHERE album_id = ?1",
+            params![album_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_musicbrainz_art_cache(
+        &self,
+        album_id: &str,
+        status: &str,
+        art_url: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO musicbrainz_album_art_cache (album_id, status, art_url, checked_at)
+             VALUES (?1, ?2, ?3, strftime('%s', 'now'))
+             ON CONFLICT(album_id) DO UPDATE SET
+               status = excluded.status,
+               art_url = excluded.art_url,
+               checked_at = strftime('%s', 'now')",
+            params![album_id, status, art_url],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_album_and_tracks_artwork(&self, album_id: &str, art_url: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE albums SET art_cache_path = ?1 WHERE id = ?2",
+            params![art_url, album_id],
+        )?;
+        conn.execute(
+            "UPDATE tracks SET art_url = ?1 WHERE album_id = ?2 AND (art_url IS NULL OR art_url = '' OR art_url LIKE '%/simp_art_%')",
+            params![art_url, album_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_all_cached_apple_playlist_art(&self) -> HashMap<String, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut map = HashMap::new();
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT playlist_id, art_url FROM apple_playlist_art_cache")
+        {
+            if let Ok(rows) =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            {
+                for row in rows.flatten() {
+                    map.insert(row.0, row.1);
+                }
+            }
+        }
+        map
+    }
+
+    pub fn get_cached_apple_playlist_art(&self, playlist_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        let clean = playlist_id
+            .strip_prefix("applemusic:playlist:")
+            .unwrap_or(playlist_id);
+        conn.query_row(
+            "SELECT art_url FROM apple_playlist_art_cache WHERE playlist_id = ?1",
+            params![clean],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_cached_apple_playlist_art(&self, playlist_id: &str, art_url: &str) -> Result<()> {
+        if art_url.trim().is_empty() {
+            return Ok(());
+        }
+        let clean = playlist_id
+            .strip_prefix("applemusic:playlist:")
+            .unwrap_or(playlist_id);
+        let pinned_id = format!("applemusic:playlist:{clean}");
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO apple_playlist_art_cache (playlist_id, art_url, updated_at)
+             VALUES (?1, ?2, strftime('%s', 'now'))
+             ON CONFLICT(playlist_id) DO UPDATE SET
+               art_url = excluded.art_url,
+               updated_at = strftime('%s', 'now')",
+            params![clean, art_url],
+        )?;
+        let _ = conn.execute(
+            "UPDATE playlists
+             SET cover_art_url = ?1
+             WHERE id = ?2
+               AND (cover_art_url IS NULL OR cover_art_url = '' OR cover_art_url LIKE '%blobstore.apple.com%')",
+            params![art_url, pinned_id],
+        );
         Ok(())
     }
 }

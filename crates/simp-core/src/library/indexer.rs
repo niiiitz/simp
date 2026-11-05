@@ -1,4 +1,6 @@
-use crate::library::artwork::resolve_and_cache_artwork;
+use crate::library::artwork::{
+    fetch_musicbrainz_cover_for_album, folder_has_local_artwork_file, resolve_and_cache_artwork,
+};
 use crate::library::db::LibraryDatabase;
 use crate::library::mounts::discover_removable_mounts;
 use crate::library::vdf::{discover_steam_music_directories, normalize_platform_path};
@@ -6,9 +8,9 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
 use simp_protocol::{SimpSettings, TrackMetadata};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
@@ -76,6 +78,9 @@ pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize
         }
     }
 
+    // 4. Polite MusicBrainz + Cover Art Archive lookup for any local albums still missing cover art
+    resolve_missing_local_album_artwork_via_musicbrainz(db);
+
     let (albums, tracks) = db.get_library_counts().unwrap_or((0, 0));
     tracing::info!(
         "Storage scan complete: {} albums, {} tracks indexed in SQLite",
@@ -83,6 +88,53 @@ pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize
         tracks
     );
     (albums, tracks)
+}
+
+fn resolve_missing_local_album_artwork_via_musicbrainz(db: &LibraryDatabase) {
+    let Ok(missing_albums) = db.get_local_albums_missing_artwork() else {
+        return;
+    };
+    if missing_albums.is_empty() {
+        return;
+    }
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut made_network_call = false;
+
+    for (album_id, title, album_artist) in missing_albums {
+        if let Some((status, cached_art, checked_at)) = db.get_musicbrainz_art_cache(&album_id) {
+            if status == "found" {
+                if let Some(url) = cached_art {
+                    let _ = db.set_album_and_tracks_artwork(&album_id, &url);
+                    continue;
+                }
+            } else if status == "not_found" && (now_secs - checked_at) < 86_400 {
+                // Negative cache valid for 24 hours so unmatched local folders never spam MusicBrainz
+                continue;
+            }
+        }
+
+        if made_network_call {
+            // Respect MusicBrainz's 1 req/sec rate limit policy
+            std::thread::sleep(Duration::from_millis(1100));
+        }
+        made_network_call = true;
+
+        if let Some(art_url) = fetch_musicbrainz_cover_for_album(&album_id, &title, &album_artist) {
+            tracing::info!(
+                "Resolved missing local album artwork via MusicBrainz + Cover Art Archive: '{}' ({})",
+                title,
+                album_artist
+            );
+            let _ = db.set_album_and_tracks_artwork(&album_id, &art_url);
+            let _ = db.set_musicbrainz_art_cache(&album_id, "found", Some(&art_url));
+        } else {
+            let _ = db.set_musicbrainz_art_cache(&album_id, "not_found", None);
+        }
+    }
 }
 
 fn scan_mount_directory(db: &LibraryDatabase, dir: &Path, mount_root: &str, source: &str) {
@@ -122,9 +174,13 @@ fn scan_mount_directory(db: &LibraryDatabase, dir: &Path, mount_root: &str, sour
     });
 
     let mut seen_stems: HashSet<(PathBuf, String)> = HashSet::new();
+    let mut folder_art_present: HashMap<PathBuf, bool> = HashMap::new();
 
     for path in audio_files {
         let parent_dir = path.parent().unwrap_or(dir).to_path_buf();
+        let has_local_dir_art = *folder_art_present
+            .entry(parent_dir.clone())
+            .or_insert_with(|| folder_has_local_artwork_file(&parent_dir));
         let stem_key = path
             .file_stem()
             .map(|s| s.to_string_lossy().to_lowercase())
@@ -147,9 +203,19 @@ fn scan_mount_directory(db: &LibraryDatabase, dir: &Path, mount_root: &str, sour
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        if let Some(&(cached_mtime, cached_size)) = fingerprints.get(&uri) {
-            if cached_mtime == file_mtime && cached_size == file_size {
-                continue;
+        if let Some((cached_mtime, cached_size, cached_art)) = fingerprints.get(&uri) {
+            if *cached_mtime == file_mtime && *cached_size == file_size {
+                let art_str = cached_art.as_deref().unwrap_or("");
+                let is_emb = art_str.contains("/simp_art_emb_");
+                let is_mb = art_str.contains("/mb_");
+                // Only reuse cached fingerprint if:
+                // - Artwork came from embedded audio tags (`simp_art_emb_`), OR
+                // - Folder still has a local cover image (`has_local_dir_art == true`), OR
+                // - Artwork came from MusicBrainz (`mb_`) and no local folder cover image was added.
+                // This ensures deleting or adding `cover.png`/`cover.jpg` in a folder is immediately detected!
+                if is_emb || (is_mb && !has_local_dir_art) || (!is_mb && has_local_dir_art) {
+                    continue;
+                }
             }
         }
 
