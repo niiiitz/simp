@@ -1444,6 +1444,7 @@ const ConsoleMainApp: React.FC = () => {
           setOskTarget={setOskTarget}
           setSourceModalOpen={setSourceModalOpen}
           setView={setView}
+          applyFocusMarker={applyFocusMarker}
           handleCreatePlaylist={handleCreatePlaylist}
           handleAddTracksToPlaylist={handleAddTracksToPlaylist}
           handleRemoveTrackFromPlaylist={handleRemoveTrackFromPlaylist}

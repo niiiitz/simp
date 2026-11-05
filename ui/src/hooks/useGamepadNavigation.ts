@@ -507,11 +507,49 @@ export function useGamepadNavigation({
             setPowerModalOpen(false);
           } else if (sourceModalOpen) {
             setSourceModalOpen(false);
-          } else if (activeCloudAlbum || activeCloudPlaylist) {
-            setActiveCloudAlbum(null);
-            setActiveCloudPlaylist(null);
           } else if (view === 'browser') {
-            setView('lock');
+            // Hierarchical Back ('B') Navigation inside the Library Browser:
+            // 1. If viewing a Collection Tracklist on the Right Pane -> return to Right-Pane Tile Grid
+            const backToGridBtn = document.querySelector<HTMLElement>(
+              '[data-right-back-grid="true"]:not([disabled])'
+            );
+            if (backToGridBtn) {
+              backToGridBtn.click();
+              break;
+            }
+            if (activeCloudAlbum || activeCloudPlaylist) {
+              setActiveCloudAlbum(null);
+              setActiveCloudPlaylist(null);
+              break;
+            }
+            // 2. If focus is in the Right Pane (Tile Grid) or Header -> return focus to the Left Column
+            const activeEl =
+              (document.querySelector<HTMLElement>(
+                '[data-simp-active-focus="true"]'
+              ) as HTMLElement | null) || (document.activeElement as HTMLElement | null);
+            const activeCol =
+              activeEl?.closest<HTMLElement>('[data-nav-col]')?.dataset.navCol || null;
+            if (activeCol !== 'left') {
+              const leftTarget =
+                document.querySelector<HTMLElement>(
+                  '[data-nav-col="left"] button[data-left-active="true"]:not([disabled])'
+                ) ||
+                document.querySelector<HTMLElement>(
+                  '[data-nav-col="left"] button[data-default-focus="true"]:not([disabled])'
+                ) ||
+                document.querySelector<HTMLElement>('[data-nav-col="left"] button:not([disabled])');
+              if (leftTarget) {
+                applyFocusMarker(leftTarget);
+              }
+              break;
+            }
+            // 3. Already in Left Column: if search has text, clear it; otherwise stay in Left Column (L1 switches to Player)
+            const clearSearchBtn = document.querySelector<HTMLElement>(
+              '[data-clear-search="true"]:not([disabled])'
+            );
+            if (clearSearchBtn) {
+              clearSearchBtn.click();
+            }
           } else if (window.parent && window.parent !== window) {
             window.parent.postMessage({ type: 'SIMP_EXIT_CONSOLE' }, '*');
           }

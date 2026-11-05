@@ -322,7 +322,7 @@ export async function pinApplePlaylistToSimp(
   }
   const record: PlaylistRecord = {
     id: `applemusic:playlist:${pl.id.replace(/^applemusic:playlist:/, '')}`,
-    name: pl.name.startsWith('🍎') ? pl.name : `🍎 ${pl.name}`,
+    name: pl.name.replace(/^[\s🍎📌]+/u, '').trim() || pl.name,
     description: pl.description || 'Pinned Apple Music Playlist',
     origin: 'apple_remote',
     cover_art_url: pl.art_url || tracks[0]?.art_url || null,
@@ -364,7 +364,7 @@ export async function pinAppleAlbumToSimp(
   const albId = `applemusic:album:${album.id.replace(/^applemusic:album:/, '')}`;
   const record: AlbumRecord = {
     id: albId,
-    title: album.title.startsWith('🍎') ? album.title : `🍎 ${album.title}`,
+    title: album.title.replace(/^[\s🍎📌💿]+/u, '').trim() || album.title,
     album_artist: album.artist,
     release_year: album.release_year,
     steam_app_id: null,
