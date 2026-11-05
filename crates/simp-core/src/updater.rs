@@ -204,26 +204,41 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
 /// Spawns a detached background shell that waits 450ms (allowing the HTTP 200 OK response to flush
 /// to the UI / Decky QAM client) and then cleanly restarts `simp.service` (or the daemon process).
 pub fn spawn_delayed_daemon_restart() {
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(
-            "sleep 0.45 && \
-             export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; \
-             pkill -f 'simp-widevine-worker' 2>/dev/null || true; \
-             pkill -f '18888/?worker=apple' 2>/dev/null || true; \
-             if command -v systemctl >/dev/null 2>&1 && [ -f \"$HOME/.config/systemd/user/simp.service\" ]; then \
-               systemctl --user daemon-reload 2>/dev/null || true; \
-               systemctl --user restart simp.service 2>/dev/null || true; \
-             else \
-               pkill -f 'simp --daemon' 2>/dev/null || true; \
-               sleep 0.2; \
-               nohup \"$HOME/.local/share/simp/bin/simp\" --daemon >/dev/null 2>&1 & \
-             fi",
-        )
+    let script = "sleep 0.45; \
+        export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; \
+        pkill -f 'simp-widevine-worker' 2>/dev/null || true; \
+        pkill -f '18888/?worker=apple' 2>/dev/null || true; \
+        if command -v systemctl >/dev/null 2>&1 && [ -f \"$HOME/.config/systemd/user/simp.service\" ]; then \
+          systemctl --user daemon-reload 2>/dev/null || true; \
+          systemctl --user stop simp.service 2>/dev/null || true; \
+        fi; \
+        pkill -TERM -f 'simp --daemon' 2>/dev/null || true; \
+        sleep 0.25; \
+        pkill -9 -f 'simp --daemon' 2>/dev/null || true; \
+        if command -v systemctl >/dev/null 2>&1 && [ -f \"$HOME/.config/systemd/user/simp.service\" ]; then \
+          systemctl --user start simp.service 2>/dev/null || true; \
+          sleep 0.5; \
+        fi; \
+        if ! curl -fsS --max-time 2 http://127.0.0.1:18888/health >/dev/null 2>&1; then \
+          nohup \"$HOME/.local/share/simp/bin/simp\" --daemon >/dev/null 2>&1 & \
+        fi";
+
+    // Detach into a new session via `setsid` so `systemctl --user stop simp.service` never kills the restart script
+    let spawned = Command::new("setsid")
+        .args(["sh", "-c", script])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
+
+    if spawned.is_err() {
+        let _ = Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
 }
 
 /// Downloads the latest `simp-steamos-userland-{arch}.tar.gz` release bundle from GitHub,
@@ -411,17 +426,95 @@ pub fn apply_self_update(
     let decky_staged = install_root.join("decky-staged");
     if src_decky.is_dir() {
         let _ = std::fs::remove_dir_all(&decky_staged);
-        if copy_dir_contents(&src_decky, &decky_staged).is_ok() {
-            decky_updated = true;
-        }
+        let _ = copy_dir_contents(&src_decky, &decky_staged);
     }
 
-    let decky_plugins_dir = home.join("homebrew/plugins");
+    let homebrew_dir = home.join("homebrew");
+    let decky_plugins_dir = homebrew_dir.join("plugins");
     let decky_target = decky_plugins_dir.join("simp-decky");
-    if src_decky.is_dir() && (decky_target.is_dir() || decky_plugins_dir.is_dir()) {
+    if src_decky.is_dir()
+        && (decky_target.is_dir() || decky_plugins_dir.is_dir() || homebrew_dir.is_dir())
+    {
+        // Clean any nested/legacy subdirectories inside simp-decky so stale binaries never linger
         let _ = std::fs::remove_dir_all(decky_target.join("simp-decky"));
+        let _ = std::fs::remove_dir_all(decky_target.join("bin"));
+        let _ = std::fs::remove_dir_all(decky_target.join("ui"));
+
         if copy_dir_contents(&src_decky, &decky_target).is_ok() {
             decky_updated = true;
+        } else {
+            #[cfg(unix)]
+            {
+                let uid = unsafe { libc::getuid() };
+                let gid = unsafe { libc::getgid() };
+                let target_str = decky_target.to_string_lossy().to_string();
+                let plugins_str = decky_plugins_dir.to_string_lossy().to_string();
+                let uid_str = uid.to_string();
+                let gid_str = gid.to_string();
+                let fix_perms_cmd =
+                    "mkdir -p \"$1\" && chown -R \"$2:$3\" \"$4\" \"$1\" && chmod 0755 \"$4\" \"$1\"";
+
+                // 3a. Try non-interactive sudo first
+                let _ = Command::new("sudo")
+                    .args([
+                        "-n",
+                        "sh",
+                        "-c",
+                        fix_perms_cmd,
+                        "--",
+                        &target_str,
+                        &uid_str,
+                        &gid_str,
+                        &plugins_str,
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+
+                if copy_dir_contents(&src_decky, &decky_target).is_ok() {
+                    decky_updated = true;
+                } else if unsafe { libc::isatty(0) == 1 } {
+                    // 3b. Running interactively from `simp update` CLI in a terminal — prompt with sudo
+                    println!(
+                        "🔒 ~/homebrew/plugins is owned by root (Decky Loader). Restoring ~/homebrew/plugins/simp-decky..."
+                    );
+                    let _ = Command::new("sudo")
+                        .args([
+                            "sh",
+                            "-c",
+                            fix_perms_cmd,
+                            "--",
+                            &target_str,
+                            &uid_str,
+                            &gid_str,
+                            &plugins_str,
+                        ])
+                        .status();
+                    if copy_dir_contents(&src_decky, &decky_target).is_ok() {
+                        decky_updated = true;
+                    }
+                }
+            }
+        }
+
+        if decky_updated {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let main_py = decky_target.join("main.py");
+                if main_py.is_file() {
+                    let _ =
+                        std::fs::set_permissions(&main_py, std::fs::Permissions::from_mode(0o755));
+                }
+                // Best-effort non-interactive reload of Decky's plugin_loader service if passwordless sudo is enabled
+                let _ = Command::new("sudo")
+                    .args(["-n", "systemctl", "restart", "plugin_loader"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
         }
     }
 

@@ -75,6 +75,8 @@ pub enum ServerEnvelope {
         apple_authenticated: bool,
         #[serde(default)]
         brightness_pct: u8,
+        #[serde(default)]
+        daemon_version: String,
     },
     QueryResponse {
         req_id: u64,

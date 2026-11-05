@@ -105,15 +105,62 @@ def _run_as_user(cmd: list[str], user: str, home: str, uid: int, gid: int):
     )
 
 
+def _parse_version_tuple(raw: str) -> tuple[int, int, int, int, int]:
+    cleaned = raw.strip()
+    if "simp " in cleaned:
+        cleaned = cleaned.split("simp ", 1)[1].strip()
+    cleaned = cleaned.lstrip("v")
+    if "-" in cleaned:
+        core, pre = cleaned.split("-", 1)
+    else:
+        core, pre = cleaned, ""
+    parts = [int(p) if p.isdigit() else 0 for p in core.split(".")]
+    while len(parts) < 3:
+        parts.append(0)
+    if not pre:
+        return (parts[0], parts[1], parts[2], 1, 0)
+    pre_tail = pre.rsplit(".", 1)[-1]
+    pre_num = int(pre_tail) if pre_tail.isdigit() else 0
+    return (parts[0], parts[1], parts[2], 0, pre_num)
+
+
+def _binary_version_tuple(bin_path: str) -> tuple[int, int, int, int, int]:
+    if not os.path.isfile(bin_path):
+        return (0, 0, 0, 0, 0)
+    try:
+        res = subprocess.run(
+            [bin_path, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if res.returncode == 0 and res.stdout:
+            return _parse_version_tuple(res.stdout.splitlines()[0])
+    except Exception:
+        pass
+    return (0, 0, 0, 0, 0)
+
+
 def _sync_staged_decky_plugin(plugin_dir: str, home: str, uid: int, gid: int) -> bool:
     """
     If `simp` self-updater staged a newer Decky plugin bundle into `~/.local/share/simp/decky-staged/`,
     copy its files into `~/homebrew/plugins/simp-decky/` (with root privileges if running under Decky Loader)
-    and grant `deck:deck` ownership so future updates work seamlessly.
+    and grant `deck:deck` ownership on both `~/homebrew/plugins` and `~/homebrew/plugins/simp-decky`
+    so future updates and restores work seamlessly without sudo.
     """
+    plugins_parent = os.path.dirname(plugin_dir)
+    if os.path.isdir(plugins_parent):
+        try:
+            os.chown(plugins_parent, uid, gid)
+            os.chmod(plugins_parent, 0o755)
+        except Exception:
+            pass
+
     staged_dir = os.path.join(home, ".local", "share", "simp", "decky-staged")
     staged_dist_index = os.path.join(staged_dir, "dist", "index.js")
     if not os.path.isfile(staged_dist_index):
+        _chown_tree(plugin_dir, uid, gid)
         return False
 
     current_dist_index = os.path.join(plugin_dir, "dist", "index.js")
@@ -139,6 +186,9 @@ def _sync_staged_decky_plugin(plugin_dir: str, home: str, uid: int, gid: int) ->
             os.path.join(plugin_dir, "dist"),
             dirs_exist_ok=True,
         )
+        # Remove any stale bundled bin/ or ui/ from an older simp-decky.zip install
+        shutil.rmtree(os.path.join(plugin_dir, "bin"), ignore_errors=True)
+        shutil.rmtree(os.path.join(plugin_dir, "ui"), ignore_errors=True)
         _chown_tree(plugin_dir, uid, gid)
         return True
     except Exception:
@@ -180,17 +230,17 @@ def _provision_and_start_userland():
     binary_updated = False
 
     # 2. If `simp-decky.zip` includes the bundled `bin/simp` + `ui/`, install/update them into userland
-    # Never overwrite a newer `~/.local/share/simp/bin/simp` (installed via `install-steamos.sh`) with an older bundle!
+    # ONLY if `~/.local/share/simp/bin/simp` does not exist or has a strictly older semver than `bundled_bin`.
     bundled_is_newer = False
     if os.path.isfile(bundled_bin):
         if not os.path.isfile(dest_bin):
             bundled_is_newer = True
         else:
-            try:
-                bundled_is_newer = os.path.getmtime(bundled_bin) > (
-                    os.path.getmtime(dest_bin) + 2.0
-                )
-            except Exception:
+            bundled_ver = _binary_version_tuple(bundled_bin)
+            dest_ver = _binary_version_tuple(dest_bin)
+            if bundled_ver > (0, 0, 0, 0, 0) and dest_ver > (0, 0, 0, 0, 0):
+                bundled_is_newer = bundled_ver > dest_ver
+            else:
                 bundled_is_newer = False
 
     if os.path.isfile(bundled_bin) and bundled_is_newer:
@@ -229,6 +279,12 @@ def _provision_and_start_userland():
         if os.path.isfile(os.path.join(bundled_ui, "index.html")):
             shutil.copytree(bundled_ui, ui_dest_dir, dirs_exist_ok=True)
             binary_updated = True
+
+    # Once userland has a valid `dest_bin`, clean up any `plugin_dir/bin` and `plugin_dir/ui` from `simp-decky.zip`
+    # so an older bundled binary can never overwrite a future self-update.
+    if os.path.isfile(dest_bin) and os.path.isdir(os.path.join(plugin_dir, "bin")):
+        shutil.rmtree(os.path.join(plugin_dir, "bin"), ignore_errors=True)
+        shutil.rmtree(os.path.join(plugin_dir, "ui"), ignore_errors=True)
 
     if os.path.isfile(dest_bin):
         symlink_path = os.path.join(local_bin_dir, "simp")

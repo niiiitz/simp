@@ -90,6 +90,26 @@ pub fn detect_lan_ips() -> Vec<String> {
     ips
 }
 
+async fn no_cache_headers_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_art = req.uri().path().starts_with("/art/");
+    let mut res = next.run(req).await;
+    if !is_art {
+        let headers = res.headers_mut();
+        headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+        );
+        headers.insert(
+            axum::http::header::PRAGMA,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+    }
+    res
+}
+
 pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
     let art_cache_dir = dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -134,7 +154,10 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .lock()
         .unwrap()
         .apple_authenticated;
-    let app = app.layer(CorsLayer::permissive()).with_state(ipc_state);
+    let app = app
+        .layer(axum::middleware::from_fn(no_cache_headers_middleware))
+        .layer(CorsLayer::permissive())
+        .with_state(ipc_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 18888));
     let lan_ips = detect_lan_ips();

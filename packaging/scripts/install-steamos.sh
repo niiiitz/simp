@@ -299,9 +299,11 @@ fi
 if [[ "${SIMP_INSTALL_DECKY:-${DEFAULT_INSTALL_DECKY}}" == "1" && -d "${DECKY_PLUGINS_DIR}" && -d "${DECKY_SRC}" ]]; then
   DECKY_TARGET="${DECKY_PLUGINS_DIR}/simp-decky"
   if [[ "${EUID:-$(id -u)}" -eq 0 ]] || { [[ ! -w "${DECKY_PLUGINS_DIR}" ]] && [[ ! -w "${DECKY_TARGET}" ]]; }; then
-    echo "ℹ Granting ${REAL_USER} ownership on ${DECKY_TARGET} so future 1-click updates require zero sudo..."
+    echo "ℹ Granting ${REAL_USER} ownership on ${DECKY_PLUGINS_DIR} & ${DECKY_TARGET} so future 1-click updates and restores require zero sudo..."
     sudo mkdir -p "${DECKY_TARGET}" >/dev/null 2>&1 || mkdir -p "${DECKY_TARGET}" >/dev/null 2>&1 || true
-    sudo rm -rf "${DECKY_TARGET}/simp-decky" >/dev/null 2>&1 || rm -rf "${DECKY_TARGET}/simp-decky" >/dev/null 2>&1 || true
+    sudo rm -rf "${DECKY_TARGET}/simp-decky" "${DECKY_TARGET}/bin" "${DECKY_TARGET}/ui" >/dev/null 2>&1 || rm -rf "${DECKY_TARGET}/simp-decky" "${DECKY_TARGET}/bin" "${DECKY_TARGET}/ui" >/dev/null 2>&1 || true
+    sudo chown "${REAL_UID}:${REAL_GID}" "${DECKY_PLUGINS_DIR}" >/dev/null 2>&1 || chown "${REAL_UID}:${REAL_GID}" "${DECKY_PLUGINS_DIR}" >/dev/null 2>&1 || true
+    sudo chmod 0755 "${DECKY_PLUGINS_DIR}" >/dev/null 2>&1 || chmod 0755 "${DECKY_PLUGINS_DIR}" >/dev/null 2>&1 || true
     sudo chown -R "${REAL_UID}:${REAL_GID}" "${DECKY_TARGET}" >/dev/null 2>&1 || chown -R "${REAL_UID}:${REAL_GID}" "${DECKY_TARGET}" >/dev/null 2>&1 || true
   fi
 

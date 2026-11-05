@@ -168,10 +168,20 @@ const ConsoleMainApp: React.FC = () => {
 
   const [updateStatus, setUpdateStatus] = useState<SimpUpdateStatus>({});
 
+  useEffect(() => {
+    if (snap?.daemon_version) {
+      setUpdateStatus((prev) =>
+        prev.current_version === snap.daemon_version
+          ? prev
+          : { ...prev, current_version: snap.daemon_version }
+      );
+    }
+  }, [snap?.daemon_version]);
+
   const checkSimpUpdates = useCallback(async (_silent = false) => {
     setUpdateStatus((prev) => ({ ...prev, checking: true, error: undefined }));
     try {
-      const resp = await fetch('/api/update/check');
+      const resp = await fetch(`/api/update/check?t=${Date.now()}`, { cache: 'no-store' });
       const data = await resp.json();
       if (data.ok) {
         setUpdateStatus({
@@ -204,13 +214,37 @@ const ConsoleMainApp: React.FC = () => {
     setUpdateStatus((prev) => ({ ...prev, applying: true, error: undefined }));
     showToast('Downloading & installing latest SIMP release from GitHub...');
     try {
-      const resp = await fetch('/api/update/apply', { method: 'POST' });
+      const resp = await fetch('/api/update/apply', { method: 'POST', cache: 'no-store' });
       const data = await resp.json();
       if (data.ok) {
+        const nextVer = String(data.updated_version || '').replace(/^v/, '');
+        if (nextVer) {
+          setUpdateStatus((prev) => ({
+            ...prev,
+            current_version: nextVer,
+            update_available: false,
+          }));
+        }
         showToast(`${data.message} — restarting SIMP...`);
-        window.setTimeout(() => {
-          window.location.reload();
-        }, 2000);
+        await new Promise((r) => window.setTimeout(r, 950));
+        for (let attempt = 0; attempt < 15; attempt++) {
+          try {
+            const hr = await fetch(`/health?t=${Date.now()}`, { cache: 'no-store' });
+            if (hr.ok) {
+              const hj = await hr.json();
+              const reported = String(hj?.version || '').replace(/^v/, '');
+              if (reported && (!nextVer || reported === nextVer)) {
+                break;
+              }
+            }
+          } catch {
+            // Daemon is still restarting
+          }
+          await new Promise((r) => window.setTimeout(r, 400));
+        }
+        window.location.replace(
+          `${window.location.pathname}?v=${encodeURIComponent(nextVer || 'latest')}&t=${Date.now()}`
+        );
       } else {
         setUpdateStatus((prev) => ({
           ...prev,

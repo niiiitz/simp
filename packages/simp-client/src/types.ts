@@ -66,6 +66,7 @@ export interface SimpStateSnapshot {
   power: PowerState;
   apple_authenticated: boolean;
   brightness_pct?: number;
+  daemon_version?: string;
 }
 
 export interface AppleMusicAuthConfig {

@@ -14,7 +14,8 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.48';
+const SIMP_VERSION = 'v0.1.0-alpha.49';
+let cachedLiveDaemonVersion = SIMP_VERSION;
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 
 let cachedSteamFocusable: any = null;
@@ -392,6 +393,7 @@ const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit
   const { useEffect, useRef } = SP_REACT;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const mountTsRef = useRef<number>(Date.now());
   const lastSentByActionRef = useRef<Record<string, number>>({});
 
   const sendAction = (action: SteamPadAction) => {
@@ -508,7 +510,7 @@ const SimpNativeConsoleRoute: ReactTypes.FC<{ onExit?: () => void }> = ({ onExit
       >
         <iframe
           ref={iframeRef}
-          src={`http://127.0.0.1:18888/?v=${encodeURIComponent(SIMP_VERSION)}`}
+          src={`http://127.0.0.1:18888/?v=${encodeURIComponent(cachedLiveDaemonVersion)}&t=${mountTsRef.current}`}
           title="SIMP Console"
           allow="autoplay; encrypted-media; clipboard-write"
           style={{
@@ -647,7 +649,7 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
   const [reloading, setReloading] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [updateLabel, setUpdateLabel] = useState<string>('⬆️ Update');
-  const [liveVersion, setLiveVersion] = useState<string>(SIMP_VERSION);
+  const [liveVersion, setLiveVersion] = useState<string>(cachedLiveDaemonVersion);
   const [updateAvailableTag, setUpdateAvailableTag] = useState<string | null>(null);
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
@@ -693,11 +695,23 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
         setAuthCfg(cfg);
       })
       .catch(() => {});
-    fetch('http://127.0.0.1:18888/api/update/check')
+    fetch(`http://127.0.0.1:18888/health?t=${Date.now()}`)
+      .then((r) => r.json())
+      .then((h) => {
+        if (h?.version) {
+          const v = `v${String(h.version).replace(/^v/, '')}`;
+          cachedLiveDaemonVersion = v;
+          setLiveVersion(v);
+        }
+      })
+      .catch(() => {});
+    fetch(`http://127.0.0.1:18888/api/update/check?t=${Date.now()}`)
       .then((r) => r.json())
       .then((info) => {
         if (info?.current_version) {
-          setLiveVersion(`v${String(info.current_version).replace(/^v/, '')}`);
+          const v = `v${String(info.current_version).replace(/^v/, '')}`;
+          cachedLiveDaemonVersion = v;
+          setLiveVersion(v);
         }
         if (info?.update_available && info?.latest_tag) {
           setUpdateAvailableTag(String(info.latest_tag));
@@ -720,6 +734,11 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
     const unsubState = defaultSimpClient.subscribeState((s) => {
       setSnap({ ...s });
       setConnected(true);
+      if (s?.daemon_version) {
+        const v = `v${String(s.daemon_version).replace(/^v/, '')}`;
+        cachedLiveDaemonVersion = v;
+        setLiveVersion(v);
+      }
     });
 
     const getInteractiveNodes = (): HTMLElement[] => {
@@ -923,16 +942,19 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
     if (updating) return;
     setUpdating(true);
     setUpdateLabel('⏳ Updating...');
+    let targetVer = '';
     try {
       const resp = await fetch('http://127.0.0.1:18888/api/update/apply', { method: 'POST' });
       const data = await resp.json();
       if (data.ok || data.status === 'ok') {
-        const nextVer = String(data.updated_version || data.installed_version || '').replace(/^v/, '');
-        if (nextVer) {
-          setLiveVersion(`v${nextVer}`);
+        targetVer = String(data.updated_version || data.installed_version || '').replace(/^v/, '');
+        if (targetVer) {
+          const v = `v${targetVer}`;
+          cachedLiveDaemonVersion = v;
+          setLiveVersion(v);
         }
         setUpdateAvailableTag(null);
-        setUpdateLabel(`✅ v${nextVer || 'Updated'}`);
+        setUpdateLabel(`✅ v${targetVer || 'Updated'}`);
         try {
           if (serverApi?.callPluginMethod) {
             await serverApi.callPluginMethod('sync_decky_plugin', {});
@@ -945,14 +967,34 @@ const SimpDeckyDrawer: ReactTypes.FC<{ serverApi?: any }> = ({ serverApi }) => {
       }
     } catch {
       setUpdateLabel('🔄 Restarting...');
-    } finally {
-      window.setTimeout(() => {
-        defaultSimpClient.connect();
-        refreshCatalogs();
-        setUpdating(false);
-        setUpdateLabel('⬆️ Update');
-      }, 3000);
     }
+
+    // Wait for the newly restarted daemon to come online on :18888 before re-querying /health & /api/update/check
+    // so an in-flight shutdown of the old daemon never reverts `liveVersion` to the previous release.
+    await new Promise((r) => window.setTimeout(r, 950));
+    for (let attempt = 0; attempt < 15; attempt++) {
+      try {
+        const hr = await fetch(`http://127.0.0.1:18888/health?t=${Date.now()}`);
+        if (hr.ok) {
+          const hj = await hr.json();
+          const reported = String(hj?.version || '').replace(/^v/, '');
+          if (reported && (!targetVer || reported === targetVer)) {
+            const v = `v${reported}`;
+            cachedLiveDaemonVersion = v;
+            setLiveVersion(v);
+            break;
+          }
+        }
+      } catch {
+        // Daemon is still restarting
+      }
+      await new Promise((r) => window.setTimeout(r, 400));
+    }
+
+    defaultSimpClient.connect();
+    refreshCatalogs();
+    setUpdating(false);
+    setUpdateLabel('⬆️ Update');
   };
 
   const toggleDrawerTab = (tab: 'albums' | 'playlists' | 'pair') => {

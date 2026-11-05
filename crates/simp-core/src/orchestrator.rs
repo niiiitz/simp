@@ -1295,6 +1295,7 @@ pub fn build_state_snapshot(
         power,
         apple_authenticated: st.apple_authenticated,
         brightness_pct: st.brightness_pct,
+        daemon_version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
 
