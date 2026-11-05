@@ -3,6 +3,10 @@ name = "simp-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["experimental-dvd"]
+experimental-dvd = []
+
 [dependencies]
 simp-protocol = { path = "../simp-protocol" }
 serde.workspace = true

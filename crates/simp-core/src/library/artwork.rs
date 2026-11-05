@@ -181,8 +181,8 @@ fn urlencode_lucene(s: &str) -> String {
         .map(|c| {
             if matches!(
                 c,
-                '+' | '-' | '&' | '|' | '!' | '(' | ')' | '{' | '}' | '[' | ']' | '^' | '"' | '~'
-                    | '*' | '?' | ':' | '\\' | '/'
+                '+' | '-' | '_' | '&' | '|' | '!' | '(' | ')' | '{' | '}' | '[' | ']' | '^'
+                    | '"' | '~' | '*' | '?' | ':' | '\\' | '/'
             ) {
                 ' '
             } else {
@@ -191,14 +191,59 @@ fn urlencode_lucene(s: &str) -> String {
         })
         .collect();
     let mut out = String::with_capacity(cleaned.len() * 2);
+    let mut prev_space = false;
     for b in cleaned.trim().bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(b as char),
-            b' ' => out.push_str("%20"),
-            _ => out.push_str(&format!("%{:02X}", b)),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' => {
+                out.push(b as char);
+                prev_space = false;
+            }
+            b' ' => {
+                if !prev_space {
+                    out.push_str("%20");
+                    prev_space = true;
+                }
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+                prev_space = false;
+            }
         }
     }
     out
+}
+
+fn extract_primary_artist(artist: &str) -> &str {
+    let mut primary = artist.trim();
+    for sep in [
+        " & ",
+        " feat. ",
+        " feat ",
+        " ft. ",
+        " ft ",
+        " featuring ",
+        " vs. ",
+        " vs ",
+        ", ",
+    ] {
+        if let Some(idx) = primary.to_lowercase().find(sep) {
+            let candidate = primary[..idx].trim();
+            if !candidate.is_empty() {
+                primary = candidate;
+            }
+        }
+    }
+    primary
+}
+
+/// Outcome of a MusicBrainz + Cover Art Archive lookup.
+pub enum MusicBrainzArtOutcome {
+    /// Successfully matched and downloaded cover art (`http://127.0.0.1:18888/art/mb_{id}.jpg`).
+    Found(String),
+    /// MusicBrainz responded cleanly, and no matching release with cover art exists.
+    NotFound,
+    /// Transient network or rate-limit (HTTP 503) error; caller should not negative-cache.
+    TransientError,
 }
 
 /// Queries MusicBrainz Release Search API + Cover Art Archive (`release-group` and `release` `front-500`)
@@ -208,14 +253,14 @@ pub fn fetch_musicbrainz_cover_for_album(
     album_id: &str,
     album_title: &str,
     album_artist: &str,
-) -> Option<String> {
+) -> MusicBrainzArtOutcome {
     let clean_title = album_title.trim();
     if clean_title.len() < 2 || clean_title.eq_ignore_ascii_case("Unknown Album") {
-        return None;
+        return MusicBrainzArtOutcome::NotFound;
     }
     let norm_target_title = normalize_title_for_match(clean_title);
     if norm_target_title.is_empty() {
-        return None;
+        return MusicBrainzArtOutcome::NotFound;
     }
 
     let safe_id: String = album_id
@@ -231,42 +276,40 @@ pub fn fetch_musicbrainz_cover_for_album(
     let dest_path = cache_dir.join(&filename);
 
     if dest_path.is_file() && dest_path.metadata().map(|m| m.len() > 512).unwrap_or(false) {
-        return Some(format!("http://127.0.0.1:18888/art/{filename}"));
+        return MusicBrainzArtOutcome::Found(format!("http://127.0.0.1:18888/art/{filename}"));
     }
 
     let clean_artist = album_artist.trim();
-    let has_specific_artist = !clean_artist.is_empty()
-        && !clean_artist.eq_ignore_ascii_case("Unknown Artist")
-        && !clean_artist.eq_ignore_ascii_case("Steam Soundtrack")
-        && !clean_artist.eq_ignore_ascii_case("Various Artists");
+    let primary_artist = extract_primary_artist(clean_artist);
+    let has_specific_artist = !primary_artist.is_empty()
+        && !primary_artist.eq_ignore_ascii_case("Unknown Artist")
+        && !primary_artist.eq_ignore_ascii_case("Steam Soundtrack")
+        && !primary_artist.eq_ignore_ascii_case("Various Artists");
 
     let enc_title = urlencode_lucene(clean_title);
+    // Single combined Lucene query per album: matches both exact and compound titles (e.g. `Polly_Rhythm` -> `POLLYRHYTHM`)
+    // and artist prefixes/aliases (e.g. `Vze*` -> `VZEPOP`) or `Various Artists` compilations in 1 request.
     let query_url = if has_specific_artist {
-        let enc_artist = urlencode_lucene(clean_artist);
+        let enc_artist = urlencode_lucene(primary_artist);
         format!(
-            "https://musicbrainz.org/ws/2/release/?query=release:%22{enc_title}%22%20AND%20artist:%22{enc_artist}%22&fmt=json&limit=5"
+            "https://musicbrainz.org/ws/2/release/?query={enc_title}%20AND%20%28artist:{enc_artist}*%20OR%20artist:%22Various%20Artists%22%29&fmt=json&limit=5"
         )
     } else {
         format!(
-            "https://musicbrainz.org/ws/2/release/?query=release:%22{enc_title}%22&fmt=json&limit=5"
+            "https://musicbrainz.org/ws/2/release/?query={enc_title}&fmt=json&limit=5"
         )
     };
 
-    let mut releases = query_mb_releases(&query_url);
-    // If track-1 artist didn't match because it's a multi-artist soundtrack/compilation on MusicBrainz,
-    // fall back to searching by exact release title.
-    if releases.is_empty() && has_specific_artist {
-        let fallback_url = format!(
-            "https://musicbrainz.org/ws/2/release/?query=release:%22{enc_title}%22&fmt=json&limit=5"
-        );
-        releases = query_mb_releases(&fallback_url);
-    }
-
     let norm_target_artist = normalize_title_for_match(clean_artist);
+    let norm_primary_artist = normalize_title_for_match(primary_artist);
+
+    let Some(releases) = query_mb_releases(&query_url) else {
+        return MusicBrainzArtOutcome::TransientError;
+    };
 
     for rel in releases {
         let score = rel.get("score").and_then(|v| v.as_u64()).unwrap_or(0);
-        if score < 90 {
+        if score < 85 {
             continue;
         }
         let rel_title = rel.get("title").and_then(|v| v.as_str()).unwrap_or("");
@@ -279,26 +322,36 @@ pub fn fetch_musicbrainz_cover_for_album(
         }
 
         // Verify artist match if we have a specific artist (unless MusicBrainz credits Various Artists / Soundtrack)
-        if has_specific_artist && !norm_target_artist.is_empty() {
-            let mb_artist = rel
-                .get("artist-credit")
-                .and_then(|ac| ac.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|first| {
-                    first
+        if has_specific_artist && !norm_primary_artist.is_empty() {
+            let mut artist_matched = false;
+            if let Some(ac_arr) = rel.get("artist-credit").and_then(|ac| ac.as_array()) {
+                for credit in ac_arr {
+                    let mb_artist = credit
                         .get("name")
                         .and_then(|v| v.as_str())
-                        .or_else(|| first.pointer("/artist/name").and_then(|v| v.as_str()))
-                })
-                .unwrap_or("");
-            let norm_mb_artist = normalize_title_for_match(mb_artist);
-            let is_various = mb_artist.eq_ignore_ascii_case("Various Artists");
-            if !is_various
-                && !norm_mb_artist.is_empty()
-                && norm_mb_artist != norm_target_artist
-                && !norm_mb_artist.contains(&norm_target_artist)
-                && !norm_target_artist.contains(&norm_mb_artist)
-            {
+                        .or_else(|| credit.pointer("/artist/name").and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    if mb_artist.eq_ignore_ascii_case("Various Artists") {
+                        artist_matched = true;
+                        break;
+                    }
+                    let norm_mb = normalize_title_for_match(mb_artist);
+                    if !norm_mb.is_empty()
+                        && (norm_mb == norm_target_artist
+                            || norm_mb == norm_primary_artist
+                            || (norm_primary_artist.len() >= 3
+                                && (norm_mb.contains(&norm_primary_artist)
+                                    || norm_primary_artist.contains(&norm_mb)))
+                            || (norm_target_artist.len() >= 3
+                                && (norm_mb.contains(&norm_target_artist)
+                                    || norm_target_artist.contains(&norm_mb))))
+                    {
+                        artist_matched = true;
+                        break;
+                    }
+                }
+            }
+            if !artist_matched {
                 continue;
             }
         }
@@ -309,7 +362,7 @@ pub fn fetch_musicbrainz_cover_for_album(
             if download_cover_art_to(&rg_url, &dest_path) {
                 let tmp_path = PathBuf::from("/tmp").join(&filename);
                 let _ = fs::copy(&dest_path, &tmp_path);
-                return Some(format!("http://127.0.0.1:18888/art/{filename}"));
+                return MusicBrainzArtOutcome::Found(format!("http://127.0.0.1:18888/art/{filename}"));
             }
         }
 
@@ -319,22 +372,27 @@ pub fn fetch_musicbrainz_cover_for_album(
             if download_cover_art_to(&rel_url, &dest_path) {
                 let tmp_path = PathBuf::from("/tmp").join(&filename);
                 let _ = fs::copy(&dest_path, &tmp_path);
-                return Some(format!("http://127.0.0.1:18888/art/{filename}"));
+                return MusicBrainzArtOutcome::Found(format!("http://127.0.0.1:18888/art/{filename}"));
             }
         }
     }
 
-    None
+    MusicBrainzArtOutcome::NotFound
 }
 
-fn query_mb_releases(url: &str) -> Vec<serde_json::Value> {
+fn query_mb_releases(url: &str) -> Option<Vec<serde_json::Value>> {
     let out = std::process::Command::new("curl")
         .args([
             "-4",
             "--http1.1",
             "-sL",
+            "--fail",
+            "--retry",
+            "3",
+            "--retry-delay",
+            "2",
             "--max-time",
-            "8",
+            "15",
             "-H",
             "User-Agent: SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)",
             "-H",
@@ -342,20 +400,14 @@ fn query_mb_releases(url: &str) -> Vec<serde_json::Value> {
             url,
         ])
         .output()
-        .ok();
-    let Some(out) = out else {
-        return Vec::new();
-    };
+        .ok()?;
     if !out.status.success() || out.stdout.is_empty() {
-        return Vec::new();
+        return None;
     }
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
-        return Vec::new();
-    };
+    let json = serde_json::from_slice::<serde_json::Value>(&out.stdout).ok()?;
     json.get("releases")
         .and_then(|v| v.as_array())
         .cloned()
-        .unwrap_or_default()
 }
 
 fn download_cover_art_to(url: &str, dest_path: &Path) -> bool {
@@ -381,5 +433,26 @@ fn download_cover_art_to(url: &str, dest_path: &Path) -> bool {
     } else {
         let _ = fs::remove_file(dest_path);
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_musicbrainz_title_and_artist_normalization() {
+        assert_eq!(
+            urlencode_lucene("Polly_Rhythm_On_the_Dance_Floor"),
+            "Polly%20Rhythm%20On%20the%20Dance%20Floor"
+        );
+        assert_eq!(
+            normalize_title_for_match("Polly_Rhythm_On_the_Dance_Floor"),
+            normalize_title_for_match("POLLYRHYTHM ON THE DANCE FLOOR")
+        );
+        assert_eq!(extract_primary_artist("Vze & Kit Major"), "Vze");
+        let norm_primary = normalize_title_for_match(extract_primary_artist("Vze & Kit Major"));
+        let norm_mb = normalize_title_for_match("VZEPOP");
+        assert!(norm_mb.contains(&norm_primary));
     }
 }

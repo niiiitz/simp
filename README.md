@@ -5,7 +5,7 @@
 
   **A lightweight, controller-friendly music player for SteamOS, Bazzite, Linux desktops, and SteamVR.**
 
-  [![Status: v0.1.0-alpha.50](https://img.shields.io/badge/status-v0.1.0--alpha.50-ff6a00?style=flat-square)](#)
+  [![Status: v0.1.0-alpha.51](https://img.shields.io/badge/status-v0.1.0--alpha.51-ff6a00?style=flat-square)](#)
   [![Target: SteamOS / Linux / SteamVR](https://img.shields.io/badge/target-SteamOS%20%7C%20Linux%20%7C%20SteamVR-000000?style=flat-square)](#)
   [![Backend: 100% Native Rust](https://img.shields.io/badge/backend-Native%20Rust-dea584?style=flat-square)](#)
 </div>
@@ -89,7 +89,8 @@ To sign in smoothly (you only need to do this once):
 * **Database & Cache:** `~/.local/share/simp/library.db` (SQLite database for local tracks, pinned cloud playlists, and cached Audio CD lookups).
 * **Audio stops or daemon feels stuck:** Open the Power menu (`⏻`) inside SIMP and click **Restart Audio Daemon**, or run `systemctl --user restart simp.service`.
 * **Checking logs:** Run `journalctl --user -u simp.service -f` to see live logs from the background player.
-* **Optical Audio CDs not showing up:** SIMP never polls `/dev/sr0` in the background (so your USB disc drive doesn't click or spin up randomly). Pop in a CD, open **Sources**, and click **Scan CD**.
+* **Optical Audio CDs & DVD-Video (`cdda://` / `dvd://`):** SIMP never polls `/dev/sr0` in the background (so your USB disc drive doesn't click or spin up randomly). Pop in an Audio CD or DVD-Video disc and click the **🔄 Scan** button on the Optical Disc entry under `▾ SIMP PLAYLISTS` (or inside **Sources**).
+* **Encrypted Commercial DVD-Video Playback (`libdvdcss.so.2`):** SIMP does not bundle or redistribute `libdvdcss`. To play CSS-encrypted commercial DVDs (with multi-track audio and subtitle support), place your platform's `libdvdcss.so.2` (`x86_64` on Steam Deck / Linux Desktop, or `aarch64` on Steam Frame) into `~/.local/share/simp/lib/libdvdcss.so.2` (this userland path survives SteamOS system updates) or install your distro's `libdvdcss` package into `/usr/lib`. Video streaming uses `/usr/bin/ffmpeg` (pre-installed on SteamOS) or `~/.local/share/simp/bin/ffmpeg`.
 
 ---
 

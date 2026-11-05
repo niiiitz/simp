@@ -1,5 +1,6 @@
 use crate::library::artwork::{
     fetch_musicbrainz_cover_for_album, folder_has_local_artwork_file, resolve_and_cache_artwork,
+    MusicBrainzArtOutcome,
 };
 use crate::library::db::LibraryDatabase;
 use crate::library::mounts::discover_removable_mounts;
@@ -111,28 +112,38 @@ fn resolve_missing_local_album_artwork_via_musicbrainz(db: &LibraryDatabase) {
                     let _ = db.set_album_and_tracks_artwork(&album_id, &url);
                     continue;
                 }
-            } else if status == "not_found" && (now_secs - checked_at) < 86_400 {
-                // Negative cache valid for 24 hours so unmatched local folders never spam MusicBrainz
+            } else if status == "not_found" && (now_secs - checked_at) < 600 {
+                // Negative cache valid for 10 minutes so unmatched local folders don't spam MusicBrainz
                 continue;
             }
         }
 
         if made_network_call {
-            // Respect MusicBrainz's 1 req/sec rate limit policy
-            std::thread::sleep(Duration::from_millis(1100));
+            // Respect MusicBrainz's 1 req/sec rate limit policy with safety margin
+            std::thread::sleep(Duration::from_millis(1500));
         }
         made_network_call = true;
 
-        if let Some(art_url) = fetch_musicbrainz_cover_for_album(&album_id, &title, &album_artist) {
-            tracing::info!(
-                "Resolved missing local album artwork via MusicBrainz + Cover Art Archive: '{}' ({})",
-                title,
-                album_artist
-            );
-            let _ = db.set_album_and_tracks_artwork(&album_id, &art_url);
-            let _ = db.set_musicbrainz_art_cache(&album_id, "found", Some(&art_url));
-        } else {
-            let _ = db.set_musicbrainz_art_cache(&album_id, "not_found", None);
+        match fetch_musicbrainz_cover_for_album(&album_id, &title, &album_artist) {
+            MusicBrainzArtOutcome::Found(art_url) => {
+                tracing::info!(
+                    "Resolved missing local album artwork via MusicBrainz + Cover Art Archive: '{}' ({})",
+                    title,
+                    album_artist
+                );
+                let _ = db.set_album_and_tracks_artwork(&album_id, &art_url);
+                let _ = db.set_musicbrainz_art_cache(&album_id, "found", Some(&art_url));
+            }
+            MusicBrainzArtOutcome::NotFound => {
+                let _ = db.set_musicbrainz_art_cache(&album_id, "not_found", None);
+            }
+            MusicBrainzArtOutcome::TransientError => {
+                tracing::warn!(
+                    "Transient MusicBrainz/network error while looking up '{}' ({}); will retry on next scan",
+                    title,
+                    album_artist
+                );
+            }
         }
     }
 }
@@ -253,8 +264,9 @@ fn parse_audio_file(
 
     let mut title = parsed_title;
     let mut artist = parsed_artist
-        .or(grandparent_artist)
+        .or_else(|| grandparent_artist.clone())
         .unwrap_or_else(|| "Unknown Artist".to_string());
+    let mut tag_album_artist: Option<String> = None;
     let mut album = folder_album.clone();
     let mut track_number = parsed_track_no;
     let mut disc_number = Some(1);
@@ -273,6 +285,11 @@ fn parse_audio_file(
                 if let Some(a) = tag.artist() {
                     if !a.trim().is_empty() {
                         artist = a.into_owned();
+                    }
+                }
+                if let Some(aa) = tag.get_string(&lofty::tag::ItemKey::AlbumArtist) {
+                    if !aa.trim().is_empty() {
+                        tag_album_artist = Some(aa.trim().to_string());
                     }
                 }
                 if let Some(al) = tag.album() {
@@ -301,16 +318,20 @@ fn parse_audio_file(
     let album_id_input = format!("{}::{}::{}", album.to_lowercase(), parent_folder_key, source);
     let album_id = blake3::hash(album_id_input.as_bytes()).to_hex()[..16].to_string();
 
-    let album_artist = if source == "steam_ost" {
-        "Steam Soundtrack"
+    let album_artist_owned = if source == "steam_ost" {
+        "Steam Soundtrack".to_string()
+    } else if let Some(aa) = tag_album_artist {
+        aa
+    } else if let Some(gp) = &grandparent_artist {
+        gp.clone()
     } else {
-        &artist
+        artist.clone()
     };
 
     let _ = db.upsert_album(
         &album_id,
         &album,
-        album_artist,
+        &album_artist_owned,
         year,
         None,
         art_http.as_deref(),

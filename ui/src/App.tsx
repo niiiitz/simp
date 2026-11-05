@@ -386,8 +386,19 @@ const ConsoleMainApp: React.FC = () => {
         setOpticalDisc(res);
         setBrowserTarget((prev) => {
           if (prev?.kind === 'cdda') {
-            if (!res.is_audio_cd) {
+            if (!res.is_audio_cd && !res.is_dvd_video) {
               return null;
+            }
+            if (res.is_dvd_video) {
+              return {
+                kind: 'cdda',
+                id: res.disc_id || res.device_path || '/dev/sr0',
+                title: `📀 ${res.album_title || 'DVD Video'}`,
+                subtitle: `${res.artist_name || 'DVD-Video'}${
+                  res.release_year ? ` • ${res.release_year}` : ''
+                }`,
+                art_url: res.art_url,
+              };
             }
             return {
               kind: 'cdda',
@@ -423,6 +434,8 @@ const ConsoleMainApp: React.FC = () => {
             ...prev,
             disc_present: false,
             is_audio_cd: false,
+            is_dvd_video: false,
+            dvd_titles: [],
             tracks: [],
             status_message: 'Tray ejected',
           }

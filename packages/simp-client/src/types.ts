@@ -92,6 +92,41 @@ export interface AppleSinkCommandPayload {
   volume?: number | null;
 }
 
+export interface DvdAudioTrack {
+  stream_index: number;
+  lang_code: string;
+  lang_name: string;
+  codec: string;
+  channels: number;
+  label: string;
+}
+
+export interface DvdSubtitleTrack {
+  stream_index: number;
+  lang_code: string;
+  lang_name: string;
+  label: string;
+}
+
+export interface DvdChapterInfo {
+  chapter_number: number;
+  start_ms: number;
+  duration_ms: number;
+}
+
+export interface DvdTitleInfo {
+  title_number: number;
+  vts_number: number;
+  vts_ttn: number;
+  label: string;
+  duration_ms: number;
+  aspect_ratio: string;
+  angles: number;
+  chapters: DvdChapterInfo[];
+  audio_tracks: DvdAudioTrack[];
+  subtitle_tracks: DvdSubtitleTrack[];
+}
+
 export interface OpticalDiscStatus {
   drive_present: boolean;
   device_path: string;
@@ -104,6 +139,10 @@ export interface OpticalDiscStatus {
   art_url?: string | null;
   tracks: TrackMetadata[];
   status_message: string;
+  is_dvd_video?: boolean;
+  dvd_css_available?: boolean;
+  dvd_ffmpeg_available?: boolean;
+  dvd_titles?: DvdTitleInfo[];
 }
 
 

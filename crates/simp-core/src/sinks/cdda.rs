@@ -307,6 +307,7 @@ pub fn scan_optical_disc(
         art_url: None,
         tracks: Vec::new(),
         status_message: "Direct optical CD-DA drive scanning is supported on Linux".to_string(),
+        ..Default::default()
     }
 }
 
@@ -331,6 +332,7 @@ pub fn scan_optical_disc(
             art_url: None,
             tracks: Vec::new(),
             status_message: "No USB optical drive (/dev/sr0) connected".to_string(),
+            ..Default::default()
         };
     };
 
@@ -353,6 +355,7 @@ pub fn scan_optical_disc(
                 art_url: None,
                 tracks: Vec::new(),
                 status_message: format!("Optical drive busy or inaccessible ({e})"),
+                ..Default::default()
             };
         }
     };
@@ -373,6 +376,7 @@ pub fn scan_optical_disc(
                 art_url: None,
                 tracks: Vec::new(),
                 status_message: "Drive ready — No disc inserted".to_string(),
+                ..Default::default()
             };
         }
         CDS_TRAY_OPEN => {
@@ -388,6 +392,7 @@ pub fn scan_optical_disc(
                 art_url: None,
                 tracks: Vec::new(),
                 status_message: "Drive tray is open".to_string(),
+                ..Default::default()
             };
         }
         CDS_DRIVE_NOT_READY => {
@@ -403,6 +408,7 @@ pub fn scan_optical_disc(
                 art_url: None,
                 tracks: Vec::new(),
                 status_message: "Optical drive spinning up — reading disc...".to_string(),
+                ..Default::default()
             };
         }
         CDS_DISC_OK | CDS_NO_INFO | _ => {}
@@ -415,6 +421,12 @@ pub fn scan_optical_disc(
         Ok(t) => t,
         Err(e) => {
             if disc_status > 0 && disc_status != CDS_AUDIO && disc_status != CDS_MIXED {
+                #[cfg(feature = "experimental-dvd")]
+                if let Some(dvd_status) =
+                    crate::sinks::dvd::scan_dvd_disc(&device_path, force_refresh)
+                {
+                    return dvd_status;
+                }
                 return OpticalDiscStatus {
                     drive_present: true,
                     device_path,
@@ -427,6 +439,7 @@ pub fn scan_optical_disc(
                     art_url: None,
                     tracks: Vec::new(),
                     status_message: "Data disc inserted (not an Audio CD)".to_string(),
+                    ..Default::default()
                 };
             }
             return OpticalDiscStatus {
@@ -441,6 +454,7 @@ pub fn scan_optical_disc(
                 art_url: None,
                 tracks: Vec::new(),
                 status_message: format!("No readable Audio CD TOC ({e})"),
+                ..Default::default()
             };
         }
     };
@@ -448,6 +462,10 @@ pub fn scan_optical_disc(
     let audio_tracks: Vec<&CdTrackTocEntry> =
         toc.tracks.iter().filter(|t| !t.is_data_track).collect();
     if audio_tracks.is_empty() {
+        #[cfg(feature = "experimental-dvd")]
+        if let Some(dvd_status) = crate::sinks::dvd::scan_dvd_disc(&device_path, force_refresh) {
+            return dvd_status;
+        }
         return OpticalDiscStatus {
             drive_present: true,
             device_path,
@@ -460,6 +478,7 @@ pub fn scan_optical_disc(
             art_url: None,
             tracks: Vec::new(),
             status_message: "Disc contains data tracks only (0 audio tracks)".to_string(),
+            ..Default::default()
         };
     }
 
@@ -470,7 +489,7 @@ pub fn scan_optical_disc(
         {
             if !cached_tracks.is_empty() {
                 for t in &mut cached_tracks {
-                    if let Some( num) = t.track_number {
+                    if let Some(num) = t.track_number {
                         t.uri = format!("cdda://{device_path}#track={num}");
                     }
                     if t.art_url.is_none() {
@@ -489,6 +508,7 @@ pub fn scan_optical_disc(
                     art_url: cached_art,
                     tracks: cached_tracks,
                     status_message: "Audio CD ready (cached MusicBrainz metadata)".to_string(),
+                    ..Default::default()
                 };
             }
         }
@@ -568,6 +588,7 @@ pub fn scan_optical_disc(
         art_url: resolved_art,
         tracks,
         status_message: status_msg,
+        ..Default::default()
     }
 }
 

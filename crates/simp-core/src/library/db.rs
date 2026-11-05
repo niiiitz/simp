@@ -1046,6 +1046,15 @@ impl LibraryDatabase {
         Ok(())
     }
 
+    pub fn clear_musicbrainz_negative_cache(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM musicbrainz_album_art_cache WHERE status = 'not_found'",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn get_all_cached_apple_playlist_art(&self) -> HashMap<String, String> {
         let conn = self.conn.lock().unwrap();
         let mut map = HashMap::new();

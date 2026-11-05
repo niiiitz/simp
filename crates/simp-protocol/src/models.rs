@@ -76,7 +76,46 @@ pub struct PowerState {
     pub battery_pct: Option<u8>,
 }
 
-/// Ephemeral Optical Audio CD (`cdda://`) status & resolved MusicBrainz metadata
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct DvdAudioTrack {
+    pub stream_index: u8,
+    pub lang_code: String,
+    pub lang_name: String,
+    pub codec: String,
+    pub channels: u8,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct DvdSubtitleTrack {
+    pub stream_index: u8,
+    pub lang_code: String,
+    pub lang_name: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct DvdChapterInfo {
+    pub chapter_number: u16,
+    pub start_ms: u32,
+    pub duration_ms: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct DvdTitleInfo {
+    pub title_number: u16,
+    pub vts_number: u8,
+    pub vts_ttn: u8,
+    pub label: String,
+    pub duration_ms: u32,
+    pub aspect_ratio: String,
+    pub angles: u8,
+    pub chapters: Vec<DvdChapterInfo>,
+    pub audio_tracks: Vec<DvdAudioTrack>,
+    pub subtitle_tracks: Vec<DvdSubtitleTrack>,
+}
+
+/// Ephemeral Optical Disc (`cdda://` Audio CD or `dvd://` DVD-Video) status & resolved metadata
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct OpticalDiscStatus {
     pub drive_present: bool,
@@ -90,6 +129,14 @@ pub struct OpticalDiscStatus {
     pub art_url: Option<String>,
     pub tracks: Vec<TrackMetadata>,
     pub status_message: String,
+    #[serde(default)]
+    pub is_dvd_video: bool,
+    #[serde(default)]
+    pub dvd_css_available: bool,
+    #[serde(default)]
+    pub dvd_ffmpeg_available: bool,
+    #[serde(default)]
+    pub dvd_titles: Vec<DvdTitleInfo>,
 }
 
 /// Valve Data Format (`~/.config/simp/settings.vdf`) schema

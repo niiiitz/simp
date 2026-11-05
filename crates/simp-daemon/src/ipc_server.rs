@@ -131,6 +131,7 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/apple/resolve-track", get(apple_resolve_track_handler))
         .route("/api/apple/web-playback", get(apple_web_playback_handler))
         .route("/api/apple/native-probe", get(apple_native_probe_handler))
+        .route("/api/dvd/stream", get(dvd_stream_handler))
         .route("/ws", get(ws_handler))
         .nest_service("/art", ServeDir::new(art_cache_dir));
 
@@ -465,6 +466,87 @@ async fn apple_native_probe_handler(
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
+}
+
+async fn dvd_stream_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let device = params
+        .get("device")
+        .cloned()
+        .or_else(|| simp_core::sinks::cdda::find_optical_device(None))
+        .unwrap_or_else(|| "/dev/sr0".to_string());
+    let title = params
+        .get("title")
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(1);
+    let chapter = params
+        .get("chapter")
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(1);
+    let audio = params
+        .get("audio")
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or(0);
+    let sub = params
+        .get("sub")
+        .filter(|v| !v.is_empty() && *v != "off")
+        .and_then(|v| v.parse::<u8>().ok());
+
+    let mut child = match simp_core::sinks::dvd::spawn_dvd_title_mp4_stream(
+        &device, title, chapter, audio, sub,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+            .body(axum::body::Body::from("Missing ffmpeg stdout pipe"))
+            .unwrap();
+    };
+
+    let (tx, rx) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>(24);
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = vec![0u8; 32 * 1024];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.blocking_send(Ok(buf[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    break;
+                }
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    });
+
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "video/mp4")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap()
 }
 
 async fn ws_handler(

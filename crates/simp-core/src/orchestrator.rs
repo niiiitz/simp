@@ -401,6 +401,7 @@ impl AudioOrchestrator {
                 let bcast = self.broadcast_tx.clone();
                 let state_ref = self.state.clone();
                 tokio::task::spawn_blocking(move || {
+                    let _ = db.clear_musicbrainz_negative_cache();
                     let (total_albums, total_tracks) = scan_all_storage(&db, &cfg);
                     // Refresh current_track metadata (e.g., if cover.jpg was just added to the album folder)
                     let cur_uri = state_ref

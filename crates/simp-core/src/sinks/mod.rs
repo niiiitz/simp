@@ -2,6 +2,8 @@ pub mod apple;
 pub mod apple_api;
 pub mod apple_native;
 pub mod cdda;
+#[cfg(feature = "experimental-dvd")]
+pub mod dvd;
 pub mod local;
 
 use anyhow::Result;

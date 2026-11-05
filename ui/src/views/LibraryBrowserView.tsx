@@ -2,11 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlbumRecord,
   defaultSimpClient,
+  DvdTitleInfo,
   OpticalDiscStatus,
   PlaylistRecord,
   SimpStateSnapshot,
   TrackMetadata,
 } from '@simp/client';
+import { DvdPlayerModal } from '../components/DvdPlayerModal';
 import {
   AppleCatalogSearchResults,
   AppleCloudAlbumSummary,
@@ -329,6 +331,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       return false;
     }
   });
+
+  const [activeDvdPlayback, setActiveDvdPlayback] = useState<{
+    titleInfo: DvdTitleInfo;
+    chapter: number;
+    audioIdx: number;
+    subIdx: string;
+  } | null>(null);
+  const [dvdAudioChoice, setDvdAudioChoice] = useState<number>(0);
+  const [dvdSubChoice, setDvdSubChoice] = useState<string>('off');
 
   const togglePlacesOpen = () => {
     setPlacesOpen((prev) => {
@@ -1844,7 +1855,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           </button>
         )}
 
-        {/* Loaded Audio CD / Optical Drive (`cdda://` + MusicBrainz DiscID) — acts like a single disc playlist */}
+        {/* Loaded Audio CD or DVD-Video (`cdda://` or `dvd://`) — acts like a single disc collection */}
         {playlistsOpen && browserSourceFilter !== 'apple_music' && (
           <div
             style={{
@@ -1853,13 +1864,13 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               background:
                 rightPaneMode === 'tracks' && browserTarget?.kind === 'cdda'
                   ? '#1f160d'
-                  : opticalDisc?.is_audio_cd
+                  : opticalDisc?.is_audio_cd || opticalDisc?.is_dvd_video
                   ? '#12100e'
                   : '#0a0a0e',
               border:
                 rightPaneMode === 'tracks' && browserTarget?.kind === 'cdda'
                   ? '1px solid #f59e0b'
-                  : opticalDisc?.is_audio_cd
+                  : opticalDisc?.is_audio_cd || opticalDisc?.is_dvd_video
                   ? '1px solid #78350f'
                   : '1px solid #181820',
               display: 'flex',
@@ -1888,6 +1899,17 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     art_url: opticalDisc.art_url,
                   });
                   setBrowserTracks(opticalDisc.tracks);
+                } else if (opticalDisc?.is_dvd_video) {
+                  selectLocalCollection({
+                    kind: 'cdda',
+                    id: opticalDisc.disc_id || opticalDisc.device_path || '/dev/sr0',
+                    title: `📀 ${opticalDisc.album_title || 'DVD Video'}`,
+                    subtitle: `${opticalDisc.artist_name || 'DVD-Video'}${
+                      opticalDisc.release_year ? ` • ${opticalDisc.release_year}` : ''
+                    }`,
+                    art_url: opticalDisc.art_url,
+                  });
+                  setBrowserTracks([]);
                 } else {
                   handleScanOpticalDisc(false, false);
                 }
@@ -1897,7 +1919,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 flex: 1,
                 background: 'transparent',
                 border: 'none',
-                color: opticalDisc?.is_audio_cd ? '#fcd34d' : '#c8c8d2',
+                color:
+                  opticalDisc?.is_audio_cd || opticalDisc?.is_dvd_video ? '#fcd34d' : '#c8c8d2',
                 textAlign: 'left',
                 cursor: 'pointer',
                 padding: 0,
@@ -1909,10 +1932,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               }}
             >
               {cdScanning
-                ? '⏳ 💿 Scanning CD...'
+                ? '⏳ 💿 Scanning Disc...'
                 : opticalDisc?.is_audio_cd
                 ? `💿 ${opticalDisc.album_title || 'Audio CD'} (${opticalDisc.tracks.length})`
-                : '💿 Optical CD Drive'}
+                : opticalDisc?.is_dvd_video
+                ? `📀 ${opticalDisc.album_title || 'DVD Video'} (${
+                    opticalDisc.dvd_titles?.length || 0
+                  })`
+                : '💿 Optical Disc Drive'}
             </button>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
               <button
@@ -3282,6 +3309,20 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   <button
                     data-right-play-all="true"
                     onClick={() => {
+                      if (
+                        browserTarget.kind === 'cdda' &&
+                        opticalDisc?.is_dvd_video &&
+                        opticalDisc.dvd_titles &&
+                        opticalDisc.dvd_titles.length > 0
+                      ) {
+                        setActiveDvdPlayback({
+                          titleInfo: opticalDisc.dvd_titles[0],
+                          chapter: 1,
+                          audioIdx: dvdAudioChoice,
+                          subIdx: dvdSubChoice,
+                        });
+                        return;
+                      }
                       const ctxKey = `${browserTarget.kind}:${browserTarget.id}`;
                       setPlayingContextId(ctxKey);
                       if (browserTarget.kind === 'album') {
@@ -3311,41 +3352,249 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   >
                     ▶ (A)
                   </button>
-                  <button
-                    onClick={() => {
-                      const ctxKey = `${browserTarget.kind}:${browserTarget.id}`;
-                      setPlayingContextId(ctxKey);
-                      if (browserTarget.kind === 'album') {
-                        defaultSimpClient.playAlbum(browserTarget.id, true);
-                      } else if (browserTarget.kind === 'playlist') {
-                        defaultSimpClient.playPlaylist(browserTarget.id, true);
-                      } else if (browserTracks.length > 0) {
-                        defaultSimpClient.setShuffle(true);
-                        defaultSimpClient.loadQueue(
-                          browserTracks.map((tr) => tr.uri),
-                          0,
-                          browserTracks
-                        );
-                      }
-                      setView('lock');
-                    }}
-                    style={{
-                      minHeight: 40,
-                      padding: '0 14px',
-                      borderRadius: 10,
-                      background: '#14141c',
-                      color: '#d4d4dc',
-                      border: '1px solid #2e2e3a',
-                      fontWeight: 700,
-                      fontSize: 12,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    🔀 (X)
-                  </button>
+                  {!(browserTarget.kind === 'cdda' && opticalDisc?.is_dvd_video) && (
+                    <button
+                      onClick={() => {
+                        const ctxKey = `${browserTarget.kind}:${browserTarget.id}`;
+                        setPlayingContextId(ctxKey);
+                        if (browserTarget.kind === 'album') {
+                          defaultSimpClient.playAlbum(browserTarget.id, true);
+                        } else if (browserTarget.kind === 'playlist') {
+                          defaultSimpClient.playPlaylist(browserTarget.id, true);
+                        } else if (browserTracks.length > 0) {
+                          defaultSimpClient.setShuffle(true);
+                          defaultSimpClient.loadQueue(
+                            browserTracks.map((tr) => tr.uri),
+                            0,
+                            browserTracks
+                          );
+                        }
+                        setView('lock');
+                      }}
+                      style={{
+                        minHeight: 40,
+                        padding: '0 14px',
+                        borderRadius: 10,
+                        background: '#14141c',
+                        color: '#d4d4dc',
+                        border: '1px solid #2e2e3a',
+                        fontWeight: 700,
+                        fontSize: 12,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      🔀 (X)
+                    </button>
+                  )}
                 </div>
               )}
             </div>
+
+            {/* DVD-Video Title & Episode Browser */}
+            {browserTarget?.kind === 'cdda' && opticalDisc?.is_dvd_video && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: 10,
+                    background: '#11131c',
+                    border: '1px solid #242838',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        padding: '3px 8px',
+                        borderRadius: 6,
+                        background: opticalDisc.dvd_css_available ? '#0f291e' : '#261a0d',
+                        color: opticalDisc.dvd_css_available ? '#6ee7b7' : '#fcd34d',
+                        border: opticalDisc.dvd_css_available
+                          ? '1px solid #059669'
+                          : '1px solid #b45309',
+                      }}
+                    >
+                      {opticalDisc.dvd_css_available
+                        ? '🔓 libdvdcss.so.2 Active'
+                        : '🔒 Unencrypted Only (place libdvdcss.so.2 in ~/.local/share/simp/lib/)'}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        padding: '3px 8px',
+                        borderRadius: 6,
+                        background: opticalDisc.dvd_ffmpeg_available ? '#0f222a' : '#291216',
+                        color: opticalDisc.dvd_ffmpeg_available ? '#67e8f9' : '#fca5a5',
+                        border: opticalDisc.dvd_ffmpeg_available
+                          ? '1px solid #0891b2'
+                          : '1px solid #991b1b',
+                      }}
+                    >
+                      {opticalDisc.dvd_ffmpeg_available
+                        ? '🎞️ ffmpeg Streamer Ready'
+                        : '⚠️ ffmpeg Not Found in PATH'}
+                    </span>
+                  </div>
+
+                  {/* Default Audio & Subtitle Selectors from Title 1 */}
+                  {opticalDisc.dvd_titles && opticalDisc.dvd_titles.length > 0 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      {opticalDisc.dvd_titles[0].audio_tracks.length > 0 && (
+                        <label style={{ fontSize: 11, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 4 }}>
+                          🔊 Audio:
+                          <select
+                            value={dvdAudioChoice}
+                            onChange={(e) => setDvdAudioChoice(Number(e.target.value))}
+                            style={{
+                              background: '#0a0a0e',
+                              color: '#f8fafc',
+                              border: '1px solid #2e2e3e',
+                              borderRadius: 6,
+                              padding: '3px 6px',
+                              fontSize: 11,
+                            }}
+                          >
+                            {opticalDisc.dvd_titles[0].audio_tracks.map((a) => (
+                              <option key={a.stream_index} value={a.stream_index}>
+                                {a.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                      {opticalDisc.dvd_titles[0].subtitle_tracks.length > 0 && (
+                        <label style={{ fontSize: 11, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 4 }}>
+                          💬 Subtitles:
+                          <select
+                            value={dvdSubChoice}
+                            onChange={(e) => setDvdSubChoice(e.target.value)}
+                            style={{
+                              background: '#0a0a0e',
+                              color: '#f8fafc',
+                              border: '1px solid #2e2e3e',
+                              borderRadius: 6,
+                              padding: '3px 6px',
+                              fontSize: 11,
+                            }}
+                          >
+                            <option value="off">Off</option>
+                            {opticalDisc.dvd_titles[0].subtitle_tracks.map((s) => (
+                              <option key={s.stream_index} value={String(s.stream_index)}>
+                                {s.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {(opticalDisc.dvd_titles || []).map((tInfo) => {
+                  const totalSec = Math.floor(tInfo.duration_ms / 1000);
+                  const mins = Math.floor(totalSec / 60);
+                  const secs = totalSec % 60;
+                  return (
+                    <div
+                      key={tInfo.title_number}
+                      style={{
+                        padding: '10px 12px',
+                        borderRadius: 12,
+                        background: '#0a0a0e',
+                        border: '1px solid #181822',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 8,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 10,
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 800, color: '#f8fafc' }}>
+                            📀 {tInfo.label} (Title {tInfo.title_number})
+                          </div>
+                          <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+                            {mins}m {String(secs).padStart(2, '0')}s • {tInfo.aspect_ratio} •{' '}
+                            {tInfo.chapters.length} Chapters
+                            {tInfo.audio_tracks.length > 0
+                              ? ` • ${tInfo.audio_tracks.map((a) => a.lang_name).join(', ')}`
+                              : ''}
+                          </div>
+                        </div>
+                        <button
+                          data-right-track="true"
+                          onClick={() =>
+                            setActiveDvdPlayback({
+                              titleInfo: tInfo,
+                              chapter: 1,
+                              audioIdx: dvdAudioChoice,
+                              subIdx: dvdSubChoice,
+                            })
+                          }
+                          style={{
+                            minHeight: 36,
+                            padding: '0 14px',
+                            borderRadius: 8,
+                            background: '#0f222a',
+                            border: '1px solid #2aa3c4',
+                            color: '#bfeaf5',
+                            fontSize: 12,
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                            flexShrink: 0,
+                          }}
+                        >
+                          ▶ Play
+                        </button>
+                      </div>
+
+                      {tInfo.chapters.length > 1 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                          {tInfo.chapters.map((ch) => (
+                            <button
+                              key={ch.chapter_number}
+                              onClick={() =>
+                                setActiveDvdPlayback({
+                                  titleInfo: tInfo,
+                                  chapter: ch.chapter_number,
+                                  audioIdx: dvdAudioChoice,
+                                  subIdx: dvdSubChoice,
+                                })
+                              }
+                              style={{
+                                padding: '3px 8px',
+                                borderRadius: 6,
+                                background: '#14141e',
+                                border: '1px solid #262636',
+                                color: '#cbd5e1',
+                                fontSize: 10,
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              Ch {ch.chapter_number}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {browserTracks.map((t, i) => {
               const currentCtxKey = browserTarget
@@ -3535,6 +3784,18 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           </div>
         )}
       </div>
+
+      {activeDvdPlayback && opticalDisc && (
+        <DvdPlayerModal
+          devicePath={opticalDisc.device_path || '/dev/sr0'}
+          discTitle={opticalDisc.album_title || 'DVD Video'}
+          titleInfo={activeDvdPlayback.titleInfo}
+          initialChapter={activeDvdPlayback.chapter}
+          initialAudioIndex={activeDvdPlayback.audioIdx}
+          initialSubtitleIndex={activeDvdPlayback.subIdx}
+          onClose={() => setActiveDvdPlayback(null)}
+        />
+      )}
     </main>
   );
 };
