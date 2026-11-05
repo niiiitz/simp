@@ -42,6 +42,14 @@ pub struct LocalAudioEngine {
     monitor_handle: Option<JoinHandle<()>>,
 }
 
+/// Maps a normalized linear UI volume (`0.0..=1.0`) to a perceptual PCM amplitude gain (`v³`)
+/// matching the PipeWire / PulseAudio cubic audio taper (`-60 * log10(v)` dB).
+#[inline]
+pub fn perceptual_cubic_gain(normalized_vol: f64) -> f32 {
+    let v = normalized_vol.clamp(0.0, 1.0) as f32;
+    v * v * v
+}
+
 impl LocalAudioEngine {
     pub fn new() -> Self {
         Self {
@@ -49,7 +57,7 @@ impl LocalAudioEngine {
             stream_handle: None,
             sink: None,
             current_uri: None,
-            volume: 0.80,
+            volume: perceptual_cubic_gain(0.80),
             tracker: Arc::new(Mutex::new(LocalTimeTracker::new())),
             active_epoch: Arc::new(AtomicU64::new(0)),
             user_paused: Arc::new(AtomicBool::new(false)),
@@ -284,7 +292,7 @@ impl LocalAudioEngine {
     }
 
     pub fn set_volume(&mut self, normalized_vol: f64) {
-        self.volume = normalized_vol.clamp(0.0, 1.0) as f32;
+        self.volume = perceptual_cubic_gain(normalized_vol);
         if let Some(sink) = &self.sink {
             sink.set_volume(self.volume);
         }

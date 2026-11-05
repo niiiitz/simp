@@ -88,6 +88,17 @@ mod tests {
 
         let _ = std::fs::remove_file(&tmp_db);
     }
+
+    #[test]
+    fn test_perceptual_cubic_volume_taper() {
+        use crate::sinks::local::perceptual_cubic_gain;
+        assert_eq!(perceptual_cubic_gain(0.0), 0.0);
+        assert!((perceptual_cubic_gain(0.05) - 0.000125).abs() < 1e-6);
+        assert!((perceptual_cubic_gain(0.30) - 0.027).abs() < 1e-6);
+        assert!((perceptual_cubic_gain(0.50) - 0.125).abs() < 1e-6);
+        assert!((perceptual_cubic_gain(0.70) - 0.343).abs() < 1e-6);
+        assert_eq!(perceptual_cubic_gain(1.0), 1.0);
+    }
 }
 
 

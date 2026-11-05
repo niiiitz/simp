@@ -112,7 +112,7 @@ impl AppleMusicSink {
             action: "load_and_play".to_string(),
             uri: Some(uri.to_string()),
             position_ms: Some(position_ms),
-            volume: Some(self.volume),
+            volume: Some(crate::sinks::local::perceptual_cubic_gain(self.volume) as f64),
         });
     }
 
@@ -122,7 +122,7 @@ impl AppleMusicSink {
             action: "play".to_string(),
             uri: None,
             position_ms: None,
-            volume: Some(self.volume),
+            volume: Some(crate::sinks::local::perceptual_cubic_gain(self.volume) as f64),
         });
     }
 
@@ -270,7 +270,7 @@ impl AppleMusicSink {
             action: "set_volume".to_string(),
             uri: None,
             position_ms: None,
-            volume: Some(volume.clamp(0.0, 1.0)),
+            volume: Some(crate::sinks::local::perceptual_cubic_gain(volume) as f64),
         });
     }
 
