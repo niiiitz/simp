@@ -208,7 +208,7 @@ else
   BUILT_BIN="${REPO_ROOT}/target/release/simp"
 fi
 
-echo "4/4 Assembling Decky-free dist/simp-steamos-userland/..."
+echo "4/4 Assembling dist/simp-steamos-userland/..."
 rm -rf "${OUT_DIR}"
 mkdir -p \
   "${OUT_DIR}/bin" \
@@ -226,6 +226,16 @@ cp -r "${REPO_ROOT}/ui/dist/"* "${OUT_DIR}/ui/"
 cp "${REPO_ROOT}/packaging/systemd/simp.service" "${OUT_DIR}/systemd/simp.service"
 cp "${REPO_ROOT}/packaging/desktop/org.simp.player.desktop" "${OUT_DIR}/desktop/org.simp.player.desktop"
 cp "${REPO_ROOT}/packaging/openvr/org.simp.player.vrmanifest" "${OUT_DIR}/openvr/org.simp.player.vrmanifest"
+
+# On x86_64 (Steam Deck / gamescope), bundle `simp-decky/` (~65 KB) inside `simp-steamos-userland`
+# so both `install-steamos.sh` and 1-touch `simp update` install/update the Decky QAM plugin automatically!
+if [[ "${WITH_DECKY}" == "1" ]]; then
+  mkdir -p "${OUT_DIR}/simp-decky/dist"
+  cp "${REPO_ROOT}/decky-plugin/plugin.json" "${OUT_DIR}/simp-decky/"
+  cp "${REPO_ROOT}/decky-plugin/package.json" "${OUT_DIR}/simp-decky/"
+  cp "${REPO_ROOT}/decky-plugin/main.py" "${OUT_DIR}/simp-decky/"
+  cp "${REPO_ROOT}/decky-plugin/dist/"* "${OUT_DIR}/simp-decky/dist/"
+fi
 
 cp "${REPO_ROOT}/packaging/scripts/install-steamos.sh" "${OUT_DIR}/install-steamos.sh"
 cp "${REPO_ROOT}/packaging/scripts/uninstall-steamos.sh" "${OUT_DIR}/uninstall-steamos.sh"

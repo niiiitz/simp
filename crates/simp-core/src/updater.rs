@@ -416,8 +416,9 @@ pub fn apply_self_update(
         }
     }
 
-    let decky_target = home.join("homebrew/plugins/simp-decky");
-    if src_decky.is_dir() && decky_target.is_dir() {
+    let decky_plugins_dir = home.join("homebrew/plugins");
+    let decky_target = decky_plugins_dir.join("simp-decky");
+    if src_decky.is_dir() && (decky_target.is_dir() || decky_plugins_dir.is_dir()) {
         let _ = std::fs::remove_dir_all(decky_target.join("simp-decky"));
         if copy_dir_contents(&src_decky, &decky_target).is_ok() {
             decky_updated = true;

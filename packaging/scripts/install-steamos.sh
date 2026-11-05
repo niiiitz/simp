@@ -275,8 +275,28 @@ else
   echo "ℹ systemd user bus not active in this shell; launch with: simp --daemon"
 fi
 
-# 7. Optional Decky Loader plugin installation (strictly opt-in via SIMP_INSTALL_DECKY=1 if present)
-if [[ "${SIMP_INSTALL_DECKY:-0}" == "1" && -d "${DECKY_PLUGINS_DIR}" && -d "${DECKY_SRC}" ]]; then
+# 7. Decky Loader plugin installation (enabled by default on x86_64 Steam Deck / gamescope when ~/homebrew/plugins exists; skipped on aarch64 Steam Frame)
+if [[ "$(uname -m)" == "aarch64" ]]; then
+  DEFAULT_INSTALL_DECKY="0"
+else
+  DEFAULT_INSTALL_DECKY="1"
+fi
+
+if [[ -d "${DECKY_SRC}" ]]; then
+  rm -rf "${INSTALL_ROOT}/decky-staged"
+  mkdir -p "${INSTALL_ROOT}/decky-staged/dist"
+  cp "${DECKY_SRC}/plugin.json" "${INSTALL_ROOT}/decky-staged/" 2>/dev/null || true
+  cp "${DECKY_SRC}/package.json" "${INSTALL_ROOT}/decky-staged/" 2>/dev/null || true
+  cp "${DECKY_SRC}/main.py" "${INSTALL_ROOT}/decky-staged/" 2>/dev/null || true
+  if [[ -f "${DECKY_SRC}/dist/index.js" ]]; then
+    cp "${DECKY_SRC}/dist/"* "${INSTALL_ROOT}/decky-staged/dist/" 2>/dev/null || true
+  fi
+  if [[ "${EUID:-$(id -u)}" -eq 0 && "${REAL_USER}" != "root" ]]; then
+    chown -R "${REAL_UID}:${REAL_GID}" "${INSTALL_ROOT}/decky-staged" >/dev/null 2>&1 || true
+  fi
+fi
+
+if [[ "${SIMP_INSTALL_DECKY:-${DEFAULT_INSTALL_DECKY}}" == "1" && -d "${DECKY_PLUGINS_DIR}" && -d "${DECKY_SRC}" ]]; then
   DECKY_TARGET="${DECKY_PLUGINS_DIR}/simp-decky"
   if [[ "${EUID:-$(id -u)}" -eq 0 ]] || { [[ ! -w "${DECKY_PLUGINS_DIR}" ]] && [[ ! -w "${DECKY_TARGET}" ]]; }; then
     echo "ℹ Granting ${REAL_USER} ownership on ${DECKY_TARGET} so future 1-click updates require zero sudo..."
@@ -297,10 +317,11 @@ if [[ "${SIMP_INSTALL_DECKY:-0}" == "1" && -d "${DECKY_PLUGINS_DIR}" && -d "${DE
     if [[ "${EUID:-$(id -u)}" -eq 0 && "${REAL_USER}" != "root" ]]; then
       chown -R "${REAL_UID}:${REAL_GID}" "${DECKY_TARGET}" >/dev/null 2>&1 || true
     fi
+    sudo -n systemctl restart plugin_loader >/dev/null 2>&1 || true
     echo "✓ Installed Decky QAM:  ${DECKY_TARGET}"
   else
     echo "ℹ Decky directory (${DECKY_PLUGINS_DIR}) requires permissions; run:"
-    echo "   sudo rm -rf \"${DECKY_TARGET}\" && sudo cp -r \"${DECKY_SRC}\" \"${DECKY_TARGET}\" && sudo systemctl restart plugin_loader"
+    echo "   sudo rm -rf \"${DECKY_TARGET}\" && sudo cp -r \"${DECKY_SRC}\" \"${DECKY_TARGET}\" && sudo chown -R \$(id -u):\$(id -g) \"${DECKY_TARGET}\" && sudo systemctl restart plugin_loader"
   fi
 fi
 

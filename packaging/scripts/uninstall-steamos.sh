@@ -96,13 +96,26 @@ if [[ -f "${DESKTOP_FILE}" ]]; then
   echo "✓ Removed launcher:     ${DESKTOP_FILE}"
 fi
 
-# 4. Remove Decky plugin if present and writable
+# 4. Remove Decky plugin if present
+# Note: on POSIX/Linux, removing `~/homebrew/plugins/simp-decky` requires write permission on the
+# parent directory `~/homebrew/plugins` (which Decky Loader creates as `root:root`), NOT just on `simp-decky`!
+# Never run non-sudo `rm -rf "${DECKY_TARGET}"` when `~/homebrew/plugins` is root-owned, or `rm -rf` will
+# delete the files inside `simp-decky/` and then fail on `rmdir`, leaving an empty broken folder in Decky!
 if [[ -d "${DECKY_TARGET}" ]]; then
-  if [[ -w "${DECKY_TARGET}" || -w "$(dirname "${DECKY_TARGET}")" ]]; then
+  if [[ -w "$(dirname "${DECKY_TARGET}")" ]]; then
     rm -rf "${DECKY_TARGET}"
     echo "✓ Removed Decky plugin: ${DECKY_TARGET}"
+  elif sudo -n rm -rf "${DECKY_TARGET}" 2>/dev/null; then
+    sudo -n systemctl restart plugin_loader >/dev/null 2>&1 || true
+    echo "✓ Removed Decky plugin: ${DECKY_TARGET}"
   else
-    echo "ℹ Note: To remove root-owned Decky plugin directory, run: sudo rm -rf \"${DECKY_TARGET}\""
+    echo "ℹ Removing Decky plugin directory (${DECKY_TARGET}) via sudo..."
+    if sudo rm -rf "${DECKY_TARGET}"; then
+      sudo systemctl restart plugin_loader >/dev/null 2>&1 || true
+      echo "✓ Removed Decky plugin: ${DECKY_TARGET}"
+    else
+      echo "ℹ Note: To remove Decky plugin directory manually, run: sudo rm -rf \"${DECKY_TARGET}\" && sudo systemctl restart plugin_loader"
+    fi
   fi
 fi
 
