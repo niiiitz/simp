@@ -944,9 +944,13 @@ async fn ia_discover_handler(
     })
     .await;
     match res {
-        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "data": items })),
-        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
-        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "items": items, "data": items })),
+        Ok(Err(e)) => Json(
+            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
+        ),
+        Err(e) => Json(
+            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
+        ),
     }
 }
 
@@ -961,7 +965,7 @@ async fn ia_item_handler(
     })
     .await;
     match res {
-        Ok(Ok(detail)) => Json(serde_json::json!({ "ok": true, "data": detail })),
+        Ok(Ok(detail)) => Json(serde_json::json!({ "ok": true, "detail": detail, "data": detail })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
@@ -979,9 +983,13 @@ async fn ia_search_handler(
     })
     .await;
     match res {
-        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "data": items })),
-        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
-        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "items": items, "data": items })),
+        Ok(Err(e)) => Json(
+            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
+        ),
+        Err(e) => Json(
+            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
+        ),
     }
 }
 
@@ -1000,7 +1008,7 @@ async fn local_video_handler(
 
     if want_meta {
         let ep = simp_core::sinks::internet_archive_api::build_local_video_episode(&path_buf, 1);
-        return Json(serde_json::json!({ "ok": true, "data": ep })).into_response();
+        return Json(serde_json::json!({ "ok": true, "episodes": [ep], "data": ep })).into_response();
     }
 
     if !path_buf.is_file() {

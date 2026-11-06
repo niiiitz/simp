@@ -223,15 +223,33 @@ pub fn build_advancedsearch_url(query: &str, sort: &str, rows: usize, page: usiz
     let encoded_sort = url_encode_component(sort);
     format!(
         "https://archive.org/advancedsearch.php?q={encoded_q}\
-         &fl[]=identifier&fl[]=title&fl[]=creator&fl[]=mediatype&fl[]=description\
-         &fl[]=year&fl[]=date&fl[]=downloads&fl[]=week&fl[]=month&fl[]=runtime\
-         &sort[]={encoded_sort}&rows={rows}&page={page}&output=json"
+         &fl%5B%5D=identifier&fl%5B%5D=title&fl%5B%5D=creator&fl%5B%5D=mediatype&fl%5B%5D=description\
+         &fl%5B%5D=year&fl%5B%5D=date&fl%5B%5D=downloads&fl%5B%5D=week&fl%5B%5D=month&fl%5B%5D=runtime\
+         &sort%5B%5D={encoded_sort}&rows={rows}&page={page}&output=json"
     )
 }
 
 fn parse_search_doc(doc: &Value) -> Option<ArchiveItemSummary> {
     let identifier = doc.get("identifier")?.as_str()?.trim().to_string();
     if identifier.is_empty() {
+        return None;
+    }
+    let mediatype = {
+        let m = value_as_first_string(doc.get("mediatype")).to_lowercase();
+        if m.is_empty() {
+            "movies".to_string()
+        } else {
+            m
+        }
+    };
+    if mediatype == "collection"
+        || mediatype == "account"
+        || mediatype == "web"
+        || mediatype == "texts"
+        || mediatype == "software"
+        || mediatype == "data"
+        || mediatype == "image"
+    {
         return None;
     }
     let title = {
@@ -248,14 +266,6 @@ fn parse_search_doc(doc: &Value) -> Option<ArchiveItemSummary> {
             "Internet Archive".to_string()
         } else {
             c
-        }
-    };
-    let mediatype = {
-        let m = value_as_first_string(doc.get("mediatype")).to_lowercase();
-        if m.is_empty() {
-            "movies".to_string()
-        } else {
-            m
         }
     };
     let year = parse_year_field(doc.get("year")).or_else(|| parse_year_field(doc.get("date")));
@@ -336,7 +346,7 @@ pub fn fetch_discover_hub(
     let creds = resolve_internet_archive_credentials(settings);
     let sub = sub_filter.unwrap_or("all").trim().to_lowercase();
 
-    if hub == "audio" && sub == "favorites" {
+    if sub == "favorites" {
         return fetch_user_favorites(&creds);
     }
 
@@ -351,11 +361,11 @@ pub fn fetch_discover_hub(
                 "week desc",
             ),
             "all_time" => (
-                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:computerchronicles OR collection:etree) AND -collection:inlibrary",
+                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary",
                 "downloads desc",
             ),
             _ => (
-                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:computerchronicles OR collection:etree) AND -collection:inlibrary",
+                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary",
                 "week desc",
             ),
         },
@@ -421,12 +431,12 @@ pub fn fetch_discover_hub(
                 "week desc",
             ),
             _ => (
-                "(collection:etree OR collection:netlabels OR collection:oldtimeradio OR collection:librivoxaudio) AND -collection:inlibrary",
+                "(collection:etree OR collection:netlabels OR collection:oldtimeradio OR collection:librivoxaudio) AND (mediatype:etree OR mediatype:audio) AND -collection:inlibrary",
                 "week desc",
             ),
         },
         _ => (
-            "(collection:feature_films OR collection:computerchronicles OR collection:etree) AND -collection:inlibrary",
+            "(collection:feature_films OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary",
             "week desc",
         ),
     };
