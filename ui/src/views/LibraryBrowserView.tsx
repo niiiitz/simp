@@ -512,19 +512,50 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     }
   }, [browserSourceFilter, activeMountRoot]);
 
-  // Fetch Internet Archive discovery hub items
-  const loadIaDiscover = useCallback((hub: string, sub: string) => {
-    setIaLoading(true);
-    fetch(`/api/ia/discover?hub=${encodeURIComponent(hub)}&sub=${encodeURIComponent(sub)}`)
-      .then((r) => r.json())
-      .then((d) => {
-        if (d?.ok && Array.isArray(d.items)) {
-          setIaItems(d.items);
-        }
-      })
-      .catch(() => {})
-      .finally(() => setIaLoading(false));
+  const resolveDaemonUrl = useCallback((path: string): string => {
+    if (typeof window !== 'undefined' && window.location?.hostname) {
+      const host = window.location.hostname;
+      if (
+        window.location.protocol === 'http:' &&
+        host !== 'steamloopback.host' &&
+        host !== '127.0.0.1' &&
+        host !== 'localhost'
+      ) {
+        const port = window.location.port === '1420' ? '18888' : window.location.port || '18888';
+        return `http://${host}:${port}${path}`;
+      }
+      if (window.location.port === '18888') {
+        return path;
+      }
+    }
+    return `http://127.0.0.1:18888${path}`;
   }, []);
+
+  // Fetch Internet Archive discovery hub items
+  const loadIaDiscover = useCallback(
+    (hub: string, sub: string) => {
+      setIaLoading(true);
+      fetch(
+        resolveDaemonUrl(
+          `/api/ia/discover?hub=${encodeURIComponent(hub)}&sub=${encodeURIComponent(sub)}`
+        )
+      )
+        .then((r) => r.json())
+        .then((d) => {
+          const list = Array.isArray(d?.items)
+            ? d.items
+            : Array.isArray(d?.data)
+              ? d.data
+              : [];
+          if (d?.ok) {
+            setIaItems(list);
+          }
+        })
+        .catch(() => {})
+        .finally(() => setIaLoading(false));
+    },
+    [resolveDaemonUrl]
+  );
 
   useEffect(() => {
     if (browserSourceFilter !== 'internet_archive' || iaSubTab === 'pinned') return;
@@ -544,17 +575,22 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       return;
     }
     const timer = window.setTimeout(() => {
-      fetch(`/api/ia/search?q=${encodeURIComponent(q)}`)
+      fetch(resolveDaemonUrl(`/api/ia/search?q=${encodeURIComponent(q)}`))
         .then((r) => r.json())
         .then((d) => {
-          if (d?.ok && Array.isArray(d.items)) {
-            setIaSearchResults(d.items);
+          const list = Array.isArray(d?.items)
+            ? d.items
+            : Array.isArray(d?.data)
+              ? d.data
+              : [];
+          if (d?.ok) {
+            setIaSearchResults(list);
           }
         })
         .catch(() => {});
     }, 280);
     return () => window.clearTimeout(timer);
-  }, [browserSearch, browserSourceFilter, snap?.internet_archive_authenticated]);
+  }, [browserSearch, browserSourceFilter, snap?.internet_archive_authenticated, resolveDaemonUrl]);
 
   // Auto-load Internet Archive item detail when jumping directly from Player ('Open Collection')
   useEffect(() => {
@@ -562,17 +598,18 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     setRightPaneMode('tracks');
     if (activeIaDetail?.summary.identifier === browserTarget.id) return;
     setIaLoading(true);
-    fetch(`/api/ia/item?id=${encodeURIComponent(browserTarget.id)}`)
+    fetch(resolveDaemonUrl(`/api/ia/item?id=${encodeURIComponent(browserTarget.id)}`))
       .then((r) => r.json())
       .then((d) => {
-        if (d?.ok && d?.detail) {
-          setActiveIaDetail(d.detail);
-          setBrowserTracks(d.detail.tracks || []);
+        const detail: ArchiveItemDetail | undefined = d?.detail || d?.data;
+        if (d?.ok && detail) {
+          setActiveIaDetail(detail);
+          setBrowserTracks(detail.tracks || []);
         }
       })
       .catch(() => {})
       .finally(() => setIaLoading(false));
-  }, [browserTarget, activeIaDetail?.summary.identifier, setBrowserTracks]);
+  }, [browserTarget, activeIaDetail?.summary.identifier, setBrowserTracks, resolveDaemonUrl]);
 
   // Load albums and tracks belonging to the selected Storage Mount Place (`activeMountRoot`)
   useEffect(() => {
@@ -1110,27 +1147,31 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   const openLocalVideoFile = useCallback(
     async (t: TrackMetadata) => {
       try {
-        const resp = await fetch(`/api/video/local?path=${encodeURIComponent(t.uri)}&meta=1`);
+        const resp = await fetch(
+          resolveDaemonUrl(`/api/video/local?path=${encodeURIComponent(t.uri)}&meta=1`)
+        );
         const d = await resp.json();
         const episodes: VideoEpisodeItem[] =
           d?.ok && Array.isArray(d.episodes) && d.episodes.length > 0
             ? d.episodes
-            : [
-                {
-                  episode_number: 1,
-                  label: t.title,
-                  duration_ms: t.duration_ms || 0,
-                  qualities: [
-                    {
-                      label: 'Original',
-                      stream_url: `/api/video/local?path=${encodeURIComponent(t.uri)}`,
-                      format: 'Local File',
-                      size_bytes: null,
-                    },
-                  ],
-                  subtitles: [],
-                },
-              ];
+            : d?.ok && d?.data && d.data.qualities
+              ? [d.data]
+              : [
+                  {
+                    episode_number: 1,
+                    label: t.title,
+                    duration_ms: t.duration_ms || 0,
+                    qualities: [
+                      {
+                        label: 'Original',
+                        stream_url: `/api/video/local?path=${encodeURIComponent(t.uri)}`,
+                        format: 'Local File',
+                        size_bytes: null,
+                      },
+                    ],
+                    subtitles: [],
+                  },
+                ];
         setActiveVideoModal({
           mode: 'local_video',
           title: t.album ? `${t.album} — ${t.title}` : t.title,
@@ -1161,20 +1202,22 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         });
       }
     },
-    []
+    [resolveDaemonUrl]
   );
 
   const openIaItem = useCallback(
     async (item: ArchiveItemSummary, watchImmediately = false) => {
       setIaLoading(true);
       try {
-        const resp = await fetch(`/api/ia/item?id=${encodeURIComponent(item.identifier)}`);
+        const resp = await fetch(
+          resolveDaemonUrl(`/api/ia/item?id=${encodeURIComponent(item.identifier)}`)
+        );
         const d = await resp.json();
-        if (!d?.ok || !d?.detail) {
+        const detail: ArchiveItemDetail | undefined = d?.detail || d?.data;
+        if (!d?.ok || !detail) {
           showToast('Could not load Internet Archive item metadata');
           return;
         }
-        const detail: ArchiveItemDetail = d.detail;
         setActiveIaDetail(detail);
         pushCurrentNavState();
         setBrowserTarget({
@@ -1208,7 +1251,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         setIaLoading(false);
       }
     },
-    [pushCurrentNavState, setBrowserTarget, setBrowserTracks, focusRightPaneFirstTrack, showToast]
+    [
+      resolveDaemonUrl,
+      pushCurrentNavState,
+      setBrowserTarget,
+      setBrowserTracks,
+      focusRightPaneFirstTrack,
+      showToast,
+    ]
   );
 
   const handlePinArchiveItem = useCallback(
@@ -1217,9 +1267,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       try {
         let tracksToPin = preloadedTracks;
         if (!tracksToPin || tracksToPin.length === 0) {
-          const resp = await fetch(`/api/ia/item?id=${encodeURIComponent(item.identifier)}`);
+          const resp = await fetch(
+            resolveDaemonUrl(`/api/ia/item?id=${encodeURIComponent(item.identifier)}`)
+          );
           const d = await resp.json();
-          tracksToPin = d?.detail?.tracks || [];
+          const detail: ArchiveItemDetail | undefined = d?.detail || d?.data;
+          tracksToPin = detail?.tracks || [];
         }
         if (!tracksToPin || tracksToPin.length === 0) {
           showToast('Only audio collections can be pinned as playlists');
@@ -1251,16 +1304,19 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         setIaLoading(false);
       }
     },
-    [showToast]
+    [resolveDaemonUrl, showToast]
   );
 
   const handleAddArchiveItemToHybrid = useCallback(
     async (item: ArchiveItemSummary) => {
       setIaLoading(true);
       try {
-        const resp = await fetch(`/api/ia/item?id=${encodeURIComponent(item.identifier)}`);
+        const resp = await fetch(
+          resolveDaemonUrl(`/api/ia/item?id=${encodeURIComponent(item.identifier)}`)
+        );
         const d = await resp.json();
-        const tracks: TrackMetadata[] = d?.detail?.tracks || [];
+        const detail: ArchiveItemDetail | undefined = d?.detail || d?.data;
+        const tracks: TrackMetadata[] = detail?.tracks || [];
         if (tracks.length > 0) {
           await handleAddTracksToPlaylist(
             tracks.map((t) => t.uri),
@@ -1276,7 +1332,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         setIaLoading(false);
       }
     },
-    [handleAddTracksToPlaylist, showToast]
+    [resolveDaemonUrl, handleAddTracksToPlaylist, showToast]
   );
 
   const activeHubLabel = browserSearch.trim()
