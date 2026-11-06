@@ -1,10 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArchiveItemDetail,
   defaultSimpClient,
+  DvdTitleInfo,
   OpticalDiscStatus,
   SimpStateSnapshot,
   SoundCloudComment,
   TrackMetadata,
+  VideoQualityVariant,
+  VideoSubtitleVariant,
 } from '@simp/client';
 import { ProgressBarRaf } from '../components/ProgressBarRaf';
 import {
@@ -62,6 +66,21 @@ interface ActiveCommentBubble {
   expiresAt: number;
 }
 
+const iaDetailMemoryCache = new Map<string, ArchiveItemDetail>();
+
+export function isUiVideoTrack(track: TrackMetadata | null | undefined): boolean {
+  if (!track) return false;
+  return (
+    track.source === 'ia_video' ||
+    track.source === 'local_video' ||
+    track.source === 'dvd' ||
+    track.uri.startsWith('ia:video:') ||
+    track.uri.startsWith('ia://video/') ||
+    track.uri.startsWith('video://local/') ||
+    track.uri.startsWith('dvd://')
+  );
+}
+
 function formatCommentTs(ms: number | null): string {
   if (ms === null || !Number.isFinite(ms) || ms < 0) return '💬';
   const totalSec = Math.floor(ms / 1000);
@@ -85,7 +104,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   track,
   isPlaying,
   opticalDisc,
-  browserTarget,
   playingContextId,
   setBrowserTarget,
   setView,
@@ -98,6 +116,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   showToast,
 }) => {
   const isSoundCloudTrack = track?.source === 'soundcloud';
+  const isVideoTrack = isUiVideoTrack(track);
 
   const [scCommentsEnabled, setScCommentsEnabled] = useState<boolean>(() => {
     try {
@@ -114,6 +133,24 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const shownCommentIdsRef = useRef<Set<string>>(new Set());
   const lastPlayheadMsRef = useRef<number>(0);
 
+  // Unified Video Modality State (`ia_video`, `local_video`, `dvd`)
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [videoTheatreExpanded, setVideoTheatreExpanded] = useState<boolean>(false);
+  const [hudVisible, setHudVisible] = useState<boolean>(true);
+  const hudTimerRef = useRef<number | null>(null);
+  const lastTimeReportMsRef = useRef<number>(0);
+  const pendingResumeTimeSecRef = useRef<number>(0);
+
+  const [videoQualities, setVideoQualities] = useState<VideoQualityVariant[]>([]);
+  const [selectedQualityIdx, setSelectedQualityIdx] = useState<number>(0);
+  const [videoSubtitles, setVideoSubtitles] = useState<VideoSubtitleVariant[]>([]);
+  const [selectedSubtitleIdx, setSelectedSubtitleIdx] = useState<number>(-1);
+  const [resolvedSubtitleBlobUrl, setResolvedSubtitleBlobUrl] = useState<string | null>(null);
+  const [videoErrorMsg, setVideoErrorMsg] = useState<string | null>(null);
+  const [iaDetail, setIaDetail] = useState<ArchiveItemDetail | null>(null);
+  const [dvdTitles, setDvdTitles] = useState<DvdTitleInfo[]>([]);
+  const [dvdSeekOffsetSec, setDvdSeekOffsetSec] = useState<number>(0);
+
   useEffect(() => {
     const onResize = () => setPlayerScale(computePlayerViewportScale());
     window.addEventListener('resize', onResize);
@@ -127,6 +164,317 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     };
     window.addEventListener('simp-player-actions-toggle', onToggleActions);
     return () => window.removeEventListener('simp-player-actions-toggle', onToggleActions);
+  }, []);
+
+  // 4-Second (`4000ms`) Floating Controls & Scrub Bar Auto-Hide Timer in Expanded Theatre Mode
+  const wakeFloatingHud = useCallback(() => {
+    setHudVisible(true);
+    if (hudTimerRef.current) {
+      window.clearTimeout(hudTimerRef.current);
+      hudTimerRef.current = null;
+    }
+    if (videoTheatreExpanded && isPlaying && !playerActionsOpen) {
+      hudTimerRef.current = window.setTimeout(() => {
+        setHudVisible(false);
+      }, 4000);
+    }
+  }, [videoTheatreExpanded, isPlaying, playerActionsOpen]);
+
+  useEffect(() => {
+    if (!videoTheatreExpanded || !isPlaying || playerActionsOpen) {
+      setHudVisible(true);
+      if (hudTimerRef.current) {
+        window.clearTimeout(hudTimerRef.current);
+        hudTimerRef.current = null;
+      }
+      return;
+    }
+    wakeFloatingHud();
+    const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'wheel'];
+    events.forEach((ev) => window.addEventListener(ev, wakeFloatingHud, { passive: true }));
+
+    // Also poll gamepad buttons/axes lightly while in Expanded Theatre so D-pad/stick wakes the HUD
+    let lastGpSignature = '';
+    const gpPoll = window.setInterval(() => {
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      for (const p of pads) {
+        if (!p) continue;
+        const pressed = p.buttons.map((b) => (b.pressed ? '1' : '0')).join('');
+        const axes = p.axes.map((a) => (Math.abs(a) > 0.35 ? a.toFixed(1) : '0')).join(',');
+        const sig = `${pressed}|${axes}`;
+        if (lastGpSignature && sig !== lastGpSignature) {
+          wakeFloatingHud();
+        }
+        lastGpSignature = sig;
+        break;
+      }
+    }, 150);
+
+    return () => {
+      events.forEach((ev) => window.removeEventListener(ev, wakeFloatingHud));
+      window.clearInterval(gpPoll);
+      if (hudTimerRef.current) {
+        window.clearTimeout(hudTimerRef.current);
+        hudTimerRef.current = null;
+      }
+    };
+  }, [videoTheatreExpanded, isPlaying, playerActionsOpen, wakeFloatingHud]);
+
+  // Allow `B` / `Escape` to exit Expanded Theatre back to Card View when Track Actions modal is closed
+  useEffect(() => {
+    if (!videoTheatreExpanded || playerActionsOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' || e.key === 'Backspace') {
+        e.preventDefault();
+        e.stopPropagation();
+        setVideoTheatreExpanded(false);
+        if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [videoTheatreExpanded, playerActionsOpen]);
+
+  // Resolve video stream qualities, subtitles, and metadata when `track.uri` changes
+  useEffect(() => {
+    setVideoErrorMsg(null);
+    setSelectedQualityIdx(0);
+    setSelectedSubtitleIdx(-1);
+    setDvdSeekOffsetSec(0);
+    pendingResumeTimeSecRef.current = 0;
+
+    if (!isVideoTrack || !track?.uri) {
+      setVideoQualities([]);
+      setVideoSubtitles([]);
+      setIaDetail(null);
+      setDvdTitles([]);
+      setVideoTheatreExpanded(false);
+      return;
+    }
+
+    let cancelled = false;
+    const uri = track.uri;
+
+    if (uri.startsWith('ia:video:') || uri.startsWith('ia://video/')) {
+      const cleaned = uri.replace(/^ia:video:/, '').replace(/^ia:\/\/video\//, '');
+      const parts = cleaned.split('/');
+      const identifier = decodeURIComponent(parts[0] || '');
+      const epIdx = Math.max(0, parseInt(parts[1] || '0', 10) || 0);
+
+      const applyDetail = (detail: ArchiveItemDetail) => {
+        if (cancelled) return;
+        setIaDetail(detail);
+        const ep = detail.episodes[epIdx] || detail.episodes[0];
+        if (ep) {
+          setVideoQualities(ep.qualities || []);
+          setVideoSubtitles(ep.subtitles || []);
+        } else {
+          setVideoQualities([]);
+          setVideoSubtitles([]);
+        }
+      };
+
+      const cached = iaDetailMemoryCache.get(identifier);
+      if (cached) {
+        applyDetail(cached);
+      } else {
+        fetch(`/api/ia/item?id=${encodeURIComponent(identifier)}`)
+          .then((r) => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+          })
+          .then((d) => {
+            const detail: ArchiveItemDetail | undefined = d?.detail || d?.data;
+            if (!detail) throw new Error(d?.error || 'Missing detail');
+            iaDetailMemoryCache.set(identifier, detail);
+            applyDetail(detail);
+          })
+          .catch((err) => {
+            if (!cancelled) {
+              setVideoErrorMsg(`Failed to load Internet Archive video metadata: ${err}`);
+            }
+          });
+      }
+    } else if (uri.startsWith('video://local/')) {
+      const rawPath = decodeURIComponent(uri.replace(/^video:\/\/local\//, ''));
+      setVideoQualities([
+        {
+          label: 'Direct Play (Original)',
+          format: 'mp4',
+          stream_url: `/api/video/local?path=${encodeURIComponent(rawPath)}`,
+          size_bytes: null,
+        },
+        {
+          label: 'Compatibility MP4 (ffmpeg)',
+          format: 'mp4',
+          stream_url: `/api/video/local?path=${encodeURIComponent(rawPath)}&transcode=1`,
+          size_bytes: null,
+        },
+      ]);
+      setVideoSubtitles([]);
+    } else if (uri.startsWith('dvd://')) {
+      // Format: `dvd:///dev/sr0/1` or `dvd:///dev/sr0`
+      const withoutScheme = uri.replace(/^dvd:\/\//, '');
+      const lastSlash = withoutScheme.lastIndexOf('/');
+      let devicePath = opticalDisc?.device_path || '/dev/sr0';
+      let titleNum = 1;
+      if (lastSlash > 0 && /^\d+$/.test(withoutScheme.slice(lastSlash + 1))) {
+        devicePath = withoutScheme.slice(0, lastSlash);
+        titleNum = parseInt(withoutScheme.slice(lastSlash + 1), 10) || 1;
+      } else if (withoutScheme) {
+        devicePath = withoutScheme;
+      }
+      const titles = opticalDisc?.dvd_titles || [];
+      setDvdTitles(titles);
+      const chosenTitle =
+        titles.find((t: DvdTitleInfo) => t.title_number === titleNum) || titles[0];
+      const tNum = chosenTitle?.title_number || titleNum;
+      const audioVariants: VideoQualityVariant[] =
+        chosenTitle && chosenTitle.audio_tracks.length > 0
+          ? chosenTitle.audio_tracks.map((a, idx) => ({
+              label: `Audio ${idx + 1}: ${a.lang_name || a.lang_code.toUpperCase()} (${a.codec.toUpperCase()} ${a.channels}ch)`,
+              format: 'mp4',
+              stream_url: `/api/dvd/stream?device=${encodeURIComponent(devicePath)}&title=${tNum}&audio=${a.stream_index ?? idx}`,
+              size_bytes: null,
+            }))
+          : [
+              {
+                label: 'DVD Main Audio (MP4 Stream)',
+                format: 'mp4',
+                stream_url: `/api/dvd/stream?device=${encodeURIComponent(devicePath)}&title=${tNum}&audio=0`,
+                size_bytes: null,
+              },
+            ];
+      setVideoQualities(audioVariants);
+      setVideoSubtitles([]);
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isVideoTrack, track?.uri, opticalDisc?.device_path, opticalDisc?.dvd_titles]);
+
+  // Load selected `.vtt` subtitle track into a same-origin Blob URL so `<video>` never needs `crossOrigin="anonymous"`
+  const activeSubtitle =
+    selectedSubtitleIdx >= 0 && selectedSubtitleIdx < videoSubtitles.length
+      ? videoSubtitles[selectedSubtitleIdx]
+      : null;
+
+  useEffect(() => {
+    let activeBlobUrl: string | null = null;
+    let cancelled = false;
+
+    if (!activeSubtitle?.vtt_url) {
+      setResolvedSubtitleBlobUrl(null);
+      return;
+    }
+
+    fetch(activeSubtitle.vtt_url)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      })
+      .then((vttText) => {
+        if (cancelled) return;
+        const blob = new Blob([vttText], { type: 'text/vtt;charset=utf-8' });
+        activeBlobUrl = URL.createObjectURL(blob);
+        setResolvedSubtitleBlobUrl(activeBlobUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setResolvedSubtitleBlobUrl(null);
+      });
+
+    return () => {
+      cancelled = true;
+      if (activeBlobUrl) URL.revokeObjectURL(activeBlobUrl);
+    };
+  }, [activeSubtitle?.vtt_url]);
+
+  // Compute active video stream URL
+  const activeQuality = videoQualities[selectedQualityIdx] || videoQualities[0] || null;
+  const activeStreamUrl = useMemo(() => {
+    if (!activeQuality) return '';
+    if (track?.uri?.startsWith('dvd://') && dvdSeekOffsetSec > 0) {
+      return `${activeQuality.stream_url}&seek_ms=${Math.round(dvdSeekOffsetSec * 1000)}`;
+    }
+    return activeQuality.stream_url;
+  }, [activeQuality, track?.uri, dvdSeekOffsetSec]);
+
+  // Sync `isPlaying` and `snap.volume` from Orchestrator to `<video>`
+  useEffect(() => {
+    const vid = videoRef.current;
+    if (!vid || !isVideoTrack || !activeStreamUrl) return;
+    if (typeof snap?.volume === 'number') {
+      vid.volume = Math.max(0, Math.min(1, snap.volume));
+    }
+    if (isPlaying) {
+      if (vid.paused) {
+        vid.play().catch(() => {});
+      }
+    } else {
+      if (!vid.paused) {
+        vid.pause();
+      }
+    }
+  }, [isPlaying, snap?.volume, isVideoTrack, activeStreamUrl]);
+
+  // Listen for `AppleSinkCommand` (`action === 'seek'`) from Orchestrator so scrub bar & L2/R2 seek `<video>`
+  useEffect(() => {
+    if (!isVideoTrack) return;
+    const unsub = defaultSimpClient.subscribeAppleSink((cmd) => {
+      if (cmd.action === 'seek' && typeof cmd.position_ms === 'number') {
+        const targetSec = cmd.position_ms / 1000;
+        if (track?.uri?.startsWith('dvd://')) {
+          setDvdSeekOffsetSec(targetSec);
+        } else if (videoRef.current) {
+          videoRef.current.currentTime = targetSec;
+        }
+      }
+    });
+    return unsub;
+  }, [isVideoTrack, track?.uri]);
+
+  const cycleVideoQuality = useCallback(() => {
+    if (videoQualities.length <= 1) {
+      showToast?.(
+        videoQualities.length === 1
+          ? `🎞️ Only 1 stream format available (${videoQualities[0].label})`
+          : '🎞️ No alternative stream formats available'
+      );
+      return;
+    }
+    if (videoRef.current) {
+      pendingResumeTimeSecRef.current = videoRef.current.currentTime || 0;
+    }
+    const nextIdx = (selectedQualityIdx + 1) % videoQualities.length;
+    setSelectedQualityIdx(nextIdx);
+    setVideoErrorMsg(null);
+    showToast?.(`🎞️ Stream Quality: ${videoQualities[nextIdx].label}`);
+  }, [videoQualities, selectedQualityIdx, showToast]);
+
+  const cycleVideoSubtitles = useCallback(() => {
+    if (videoSubtitles.length === 0) {
+      showToast?.('💬 No subtitle tracks available for this video');
+      return;
+    }
+    const nextIdx = selectedSubtitleIdx + 1 >= videoSubtitles.length ? -1 : selectedSubtitleIdx + 1;
+    setSelectedSubtitleIdx(nextIdx);
+    showToast?.(
+      nextIdx === -1 ? '💬 Subtitles: Off' : `💬 Subtitles: ${videoSubtitles[nextIdx].label}`
+    );
+  }, [videoSubtitles, selectedSubtitleIdx, showToast]);
+
+  const toggleTheatreFullscreen = useCallback(() => {
+    setVideoTheatreExpanded((prev) => {
+      const next = !prev;
+      if (!next && document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      }
+      return next;
+    });
+    setPlayerActionsOpen(false);
   }, []);
 
   // Focus first item when Player Track Actions Overlay opens
@@ -254,6 +602,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 
   const handleOpenCurrentCollection = useCallback(() => {
     setPlayerActionsOpen(false);
+    setVideoTheatreExpanded(false);
     if (playingContextId) {
       const sep = playingContextId.indexOf(':');
       if (sep > 0) {
@@ -275,10 +624,13 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         }
       }
     }
-    if (track?.source === 'internet_archive') {
+    if (track?.source === 'internet_archive' || track?.source === 'ia_video') {
       const rawId =
         track.album_id?.replace(/^ia:/, '') ||
-        track.uri.replace(/^ia:audio:/, '').split('/')[0];
+        track.uri
+          .replace(/^ia:audio:/, '')
+          .replace(/^ia:video:/, '')
+          .split('/')[0];
       if (rawId) {
         setBrowserTarget({
           kind: 'ia_item',
@@ -343,17 +695,18 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '260px 1fr',
+          gridTemplateColumns: isVideoTrack ? '420px 1fr' : '260px 1fr',
           alignItems: 'center',
           gap: 36,
-          maxWidth: 1060,
+          maxWidth: isVideoTrack ? 1140 : 1060,
           width: '100%',
           margin: '0 auto',
-          transform: playerScale > 1.02 ? `scale(${playerScale})` : undefined,
+          transform:
+            !videoTheatreExpanded && playerScale > 1.02 ? `scale(${playerScale})` : undefined,
           transformOrigin: 'center center',
         }}
       >
-        {/* Left Column: Clean 240x240 Album Art + Shuffle (X), Repeat (Y), & Track Actions (SELECT) Below */}
+        {/* Left Column: Clean 240x240 Album Art OR 16:9 Live Video Stage + Transport/Mode Controls Below */}
         <div
           style={{
             display: 'flex',
@@ -364,22 +717,417 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           }}
         >
           <div
-            style={{
-              width: 240,
-              height: 240,
-              borderRadius: 20,
-              background: '#0a0a0e',
-              border: '1px solid #1e1e28',
-              overflow: 'hidden',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              position: 'relative',
-              boxShadow: '0 14px 34px rgba(0, 0, 0, 0.65)',
+            onClick={() => {
+              if (isVideoTrack && !videoTheatreExpanded) {
+                setVideoTheatreExpanded(true);
+              }
             }}
+            style={
+              isVideoTrack && videoTheatreExpanded
+                ? {
+                    position: 'fixed',
+                    inset: 0,
+                    zIndex: 48,
+                    background: '#000',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: hudVisible ? 'default' : 'none',
+                  }
+                : {
+                    width: isVideoTrack ? 420 : 240,
+                    height: isVideoTrack ? 236 : 240,
+                    borderRadius: 20,
+                    background: '#050508',
+                    border: isVideoTrack ? '2px solid #2aa3c4' : '1px solid #1e1e28',
+                    overflow: 'hidden',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    position: 'relative',
+                    boxShadow: '0 14px 34px rgba(0, 0, 0, 0.65)',
+                    cursor: isVideoTrack ? 'pointer' : 'default',
+                  }
+            }
           >
-            {track?.art_url ? (
+            {isVideoTrack ? (
+              <>
+                {activeStreamUrl ? (
+                  <video
+                    ref={videoRef}
+                    src={activeStreamUrl}
+                    poster={track?.art_url || undefined}
+                    autoPlay={isPlaying}
+                    playsInline
+                    onLoadedMetadata={(e) => {
+                      const vid = e.currentTarget;
+                      setVideoErrorMsg(null);
+                      if (pendingResumeTimeSecRef.current > 0) {
+                        vid.currentTime = pendingResumeTimeSecRef.current;
+                        pendingResumeTimeSecRef.current = 0;
+                      }
+                      const rawDur =
+                        Number.isFinite(vid.duration) && vid.duration > 0
+                          ? Math.round(vid.duration * 1000)
+                          : track?.duration_ms || 0;
+                      const posMs = Math.round((dvdSeekOffsetSec + vid.currentTime) * 1000);
+                      defaultSimpClient.reportAppleWorkerEvent(
+                        vid.paused ? 'paused' : 'playing',
+                        posMs,
+                        undefined,
+                        rawDur > 0 ? rawDur : undefined
+                      );
+                    }}
+                    onPlay={(e) => {
+                      const posMs = Math.round(
+                        (dvdSeekOffsetSec + e.currentTarget.currentTime) * 1000
+                      );
+                      defaultSimpClient.reportAppleWorkerEvent('playing', posMs);
+                    }}
+                    onPause={(e) => {
+                      if (e.currentTarget.ended) return;
+                      const posMs = Math.round(
+                        (dvdSeekOffsetSec + e.currentTarget.currentTime) * 1000
+                      );
+                      defaultSimpClient.reportAppleWorkerEvent('paused', posMs);
+                    }}
+                    onTimeUpdate={(e) => {
+                      const now = performance.now();
+                      if (now - lastTimeReportMsRef.current < 400) return;
+                      lastTimeReportMsRef.current = now;
+                      const vid = e.currentTarget;
+                      const posMs = Math.round((dvdSeekOffsetSec + vid.currentTime) * 1000);
+                      const rawDur =
+                        Number.isFinite(vid.duration) && vid.duration > 0
+                          ? Math.round(vid.duration * 1000)
+                          : undefined;
+                      defaultSimpClient.reportAppleWorkerEvent(
+                        'time_update',
+                        posMs,
+                        undefined,
+                        rawDur
+                      );
+                    }}
+                    onEnded={(e) => {
+                      const posMs = Math.round(
+                        (dvdSeekOffsetSec + e.currentTarget.currentTime) * 1000
+                      );
+                      const hasNextTrack = Boolean(
+                        (snap?.up_next && snap.up_next.length > 0) ||
+                          snap?.repeat_mode === 'track' ||
+                          snap?.repeat_mode === 'queue'
+                      );
+                      // When video concludes and no next track is queued, exit Fullscreen Theatre so OLED dimming can engage
+                      if (!hasNextTrack) {
+                        setVideoTheatreExpanded(false);
+                        if (document.fullscreenElement) {
+                          document.exitFullscreen().catch(() => {});
+                        }
+                      }
+                      defaultSimpClient.reportAppleWorkerEvent('ended', posMs);
+                    }}
+                    onError={() => {
+                      // Automatically try the next quality variant (e.g. falling back to Compatibility MP4 ffmpeg)
+                      if (selectedQualityIdx + 1 < videoQualities.length) {
+                        const nextIdx = selectedQualityIdx + 1;
+                        setSelectedQualityIdx(nextIdx);
+                        showToast?.(
+                          `🎬 Switching stream format to ${videoQualities[nextIdx].label}…`
+                        );
+                      } else {
+                        setVideoErrorMsg(
+                          'Video stream unavailable for this format. Open SELECT menu to switch quality.'
+                        );
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'contain',
+                      background: '#000',
+                    }}
+                  >
+                    {activeSubtitle && resolvedSubtitleBlobUrl && (
+                      <track
+                        key={activeSubtitle.vtt_url}
+                        kind="subtitles"
+                        src={resolvedSubtitleBlobUrl}
+                        srcLang={activeSubtitle.lang_code}
+                        label={activeSubtitle.label}
+                        default
+                      />
+                    )}
+                  </video>
+                ) : (
+                  <div style={{ color: '#9ca3af', fontSize: 13, fontFamily: 'monospace' }}>
+                    ⏳ Resolving video stream…
+                  </div>
+                )}
+
+                {videoErrorMsg && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      inset: 12,
+                      background: 'rgba(10, 10, 16, 0.92)',
+                      border: '1px solid #ef4444',
+                      borderRadius: 12,
+                      padding: 14,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 10,
+                      textAlign: 'center',
+                    }}
+                  >
+                    <span style={{ color: '#fca5a5', fontSize: 12.5, fontWeight: 700 }}>
+                      ⚠️ {videoErrorMsg}
+                    </span>
+                    {videoQualities.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          cycleVideoQuality();
+                        }}
+                        style={{
+                          padding: '6px 12px',
+                          borderRadius: 8,
+                          background: '#1e293b',
+                          border: '1px solid #38bdf8',
+                          color: '#e0f2fe',
+                          fontSize: 12,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        🎞️ Switch Quality ({activeQuality?.label || 'Next'})
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Corner badge in Card View hinting click/button to expand */}
+                {!videoTheatreExpanded && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      bottom: 10,
+                      right: 10,
+                      padding: '4px 9px',
+                      borderRadius: 8,
+                      background: 'rgba(10, 10, 16, 0.82)',
+                      border: '1px solid rgba(42, 163, 196, 0.55)',
+                      color: '#bfeaf5',
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      fontWeight: 700,
+                      pointerEvents: 'none',
+                    }}
+                  >
+                    ⛶ Theatre
+                  </div>
+                )}
+
+                {/* Floating 4-Second Auto-Hide Theatre HUD & Scrub Bar when in Expanded Theatre Mode */}
+                {videoTheatreExpanded && (
+                  <div
+                    onClick={(ev) => ev.stopPropagation()}
+                    style={{
+                      position: 'absolute',
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      padding: '28px 36px 24px',
+                      background:
+                        'linear-gradient(to top, rgba(4, 4, 8, 0.95) 0%, rgba(4, 4, 8, 0.78) 65%, rgba(4, 4, 8, 0) 100%)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 14,
+                      opacity: hudVisible ? 1 : 0,
+                      pointerEvents: hudVisible ? 'auto' : 'none',
+                      transition: 'opacity 0.28s ease',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 16,
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div
+                          style={{
+                            fontSize: 22,
+                            fontWeight: 800,
+                            color: '#f4f4f6',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {track?.title || 'Video Playback'}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 13,
+                            color: '#9ca3af',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            marginTop: 2,
+                          }}
+                        >
+                          {track?.artists?.join(', ')}
+                          {activeQuality ? ` • ${activeQuality.label}` : ''}
+                          {activeSubtitle ? ` • CC: ${activeSubtitle.label}` : ''}
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        {videoQualities.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={cycleVideoQuality}
+                            style={{
+                              minHeight: 40,
+                              padding: '0 12px',
+                              borderRadius: 10,
+                              background: '#12121c',
+                              border: '1px solid #2aa3c4',
+                              color: '#bfeaf5',
+                              fontSize: 12,
+                              fontFamily: 'monospace',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            🎞️ {activeQuality?.label || 'Quality'}
+                          </button>
+                        )}
+                        {videoSubtitles.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={cycleVideoSubtitles}
+                            style={{
+                              minHeight: 40,
+                              padding: '0 12px',
+                              borderRadius: 10,
+                              background: activeSubtitle ? '#0f222a' : '#12121c',
+                              border: activeSubtitle ? '1px solid #2aa3c4' : '1px solid #2e2e3a',
+                              color: activeSubtitle ? '#7dd3fc' : '#a1a1aa',
+                              fontSize: 12,
+                              fontFamily: 'monospace',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            💬 CC: {activeSubtitle ? activeSubtitle.label : 'Off'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setVideoTheatreExpanded(false);
+                            if (document.fullscreenElement) {
+                              document.exitFullscreen().catch(() => {});
+                            }
+                          }}
+                          style={{
+                            minHeight: 40,
+                            padding: '0 14px',
+                            borderRadius: 10,
+                            background: '#181824',
+                            border: '1px solid #3f3f4e',
+                            color: '#f4f4f6',
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          🗗 Card View<span className="simp-gp-badge"> B</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <ProgressBarRaf durationMs={track?.duration_ms ?? 0} trackUri={track?.uri} />
+
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 14,
+                      }}
+                    >
+                      <TransportIconButton
+                        icon="⏪"
+                        badge="L2"
+                        onClick={() => defaultSimpClient.seekRelative(-10_000)}
+                      />
+                      <TransportIconButton
+                        icon="⏮"
+                        badge="◄"
+                        onClick={() => defaultSimpClient.previous()}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => defaultSimpClient.togglePlayPause()}
+                        style={{
+                          width: 88,
+                          height: 76,
+                          borderRadius: 20,
+                          background: isPlaying ? '#0f222a' : '#12121a',
+                          color: isPlaying ? '#bfeaf5' : '#d4d4dc',
+                          border: isPlaying ? '2px solid #2aa3c4' : '2px solid #3f3f4e',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 4,
+                          cursor: 'pointer',
+                          fontWeight: 900,
+                        }}
+                      >
+                        <span style={{ fontSize: 26 }}>{isPlaying ? '⏸' : '▶'}</span>
+                        <span
+                          className="simp-gp-badge"
+                          style={{
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            color: isPlaying ? '#7dd3fc' : '#a1a1aa',
+                          }}
+                        >
+                          A
+                        </span>
+                      </button>
+                      <TransportIconButton
+                        icon="⏭"
+                        badge="►"
+                        onClick={() => defaultSimpClient.next()}
+                      />
+                      <TransportIconButton
+                        icon="⏩"
+                        badge="R2"
+                        onClick={() => defaultSimpClient.seekRelative(10_000)}
+                      />
+                      <TransportIconButton
+                        icon="⋯"
+                        badge="SELECT"
+                        active={playerActionsOpen}
+                        onClick={() => setPlayerActionsOpen((v) => !v)}
+                      />
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : track?.art_url ? (
               <img
                 src={track.art_url}
                 alt={track.album}
@@ -404,7 +1152,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             )}
           </div>
 
-          {/* Queue Mode & Track Actions Controls: Shuffle (X), Loop/Repeat (Y), & Track Actions (SELECT) */}
+          {/* Queue Mode & Track Actions Controls: Shuffle (X), Loop/Repeat (Y), Theatre Expand (if video), & Track Actions (SELECT) */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <TransportIconButton
               icon="🔀"
@@ -424,6 +1172,14 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               active={snap?.repeat_mode !== 'off'}
               onClick={() => defaultSimpClient.cycleRepeat()}
             />
+            {isVideoTrack && (
+              <TransportIconButton
+                icon="⛶"
+                badge="THEATRE"
+                active={videoTheatreExpanded}
+                onClick={() => setVideoTheatreExpanded((v) => !v)}
+              />
+            )}
             <TransportIconButton
               icon="⋯"
               badge="SELECT"
@@ -475,6 +1231,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 </>
               )}
               {track?.album ? ` • ${track.album}` : ''}
+              {isVideoTrack && activeQuality ? ` • ${activeQuality.label}` : ''}
             </p>
           </div>
 
@@ -745,6 +1502,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             style={{
               width: '100%',
               maxWidth: 460,
+              maxHeight: '90vh',
+              overflowY: 'auto',
               background: '#0a0a10',
               border: '2px solid #2aa3c4',
               borderRadius: 20,
@@ -767,7 +1526,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             >
               <div style={{ minWidth: 0, flex: 1, marginRight: 10 }}>
                 <div style={{ fontSize: 14, fontWeight: 800, color: '#bfeaf5' }}>
-                  🎵 Track & Player Actions
+                  {isVideoTrack ? '🎬 Video & Track Actions' : '🎵 Track & Player Actions'}
                 </div>
                 <div
                   style={{
@@ -803,10 +1562,213 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               </button>
             </div>
 
+            {/* Video-Specific Modality Controls when playing a Video Track */}
+            {isVideoTrack && (
+              <>
+                <button
+                  type="button"
+                  data-default-focus="true"
+                  onClick={toggleTheatreFullscreen}
+                  style={{
+                    ...actionRowBtnStyle,
+                    background: videoTheatreExpanded ? '#0f222a' : '#101018',
+                    border: videoTheatreExpanded ? '1px solid #2aa3c4' : '1px solid #222230',
+                  }}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
+                      {videoTheatreExpanded
+                        ? '🗗 Exit Fullscreen Theatre to Card View'
+                        : '⛶ Expand to Fullscreen Theatre'}
+                    </span>
+                    <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                      {videoTheatreExpanded
+                        ? 'Return to split-card player layout'
+                        : 'Fill screen with video stage and 4-second auto-hiding HUD'}
+                    </span>
+                  </div>
+                  <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9' }}>
+                    {videoTheatreExpanded ? 'CARD' : 'THEATRE'}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={cycleVideoQuality}
+                  style={actionRowBtnStyle}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
+                      🎞️ Stream Quality / Audio: {activeQuality?.label || 'Default'}
+                    </span>
+                    <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                      {videoQualities.length > 1
+                        ? `Cycle across ${videoQualities.length} available formats (includes ffmpeg compatibility)`
+                        : 'Single stream format available'}
+                    </span>
+                  </div>
+                  <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>
+                    {selectedQualityIdx + 1}/{Math.max(1, videoQualities.length)}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={cycleVideoSubtitles}
+                  style={actionRowBtnStyle}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
+                      💬 Subtitles / CC: {activeSubtitle ? activeSubtitle.label : 'Off'}
+                    </span>
+                    <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                      {videoSubtitles.length > 0
+                        ? `${videoSubtitles.length} subtitle track(s) available`
+                        : 'No subtitle tracks attached to this item'}
+                    </span>
+                  </div>
+                  <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>
+                    {activeSubtitle ? 'ON' : 'OFF'}
+                  </span>
+                </button>
+
+                {iaDetail && iaDetail.episodes.length > 1 && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6,
+                      padding: 10,
+                      borderRadius: 12,
+                      background: '#0d0d14',
+                      border: '1px solid #1e1e2a',
+                    }}
+                  >
+                    <span style={{ fontSize: 11, fontWeight: 800, color: '#9ca3af' }}>
+                      📑 EPISODES / PARTS ({iaDetail.episodes.length})
+                    </span>
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: 6,
+                        maxHeight: 110,
+                        overflowY: 'auto',
+                      }}
+                    >
+                      {iaDetail.episodes.map((ep, idx) => {
+                        const epUri = `ia:video:${encodeURIComponent(iaDetail.summary.identifier)}/${idx}`;
+                        const isCur = track?.uri === epUri;
+                        return (
+                          <button
+                            key={epUri}
+                            type="button"
+                            onClick={() => {
+                              setPlayerActionsOpen(false);
+                              const allTracks: TrackMetadata[] = iaDetail.episodes.map(
+                                (itemEp, i) => ({
+                                  uri: `ia:video:${encodeURIComponent(iaDetail.summary.identifier)}/${i}`,
+                                  title: itemEp.label,
+                                  artists: [iaDetail.summary.creator],
+                                  album: iaDetail.summary.title,
+                                  album_id: `ia:${iaDetail.summary.identifier}`,
+                                  track_number: itemEp.episode_number,
+                                  disc_number: 1,
+                                  art_url: iaDetail.summary.art_url,
+                                  duration_ms: itemEp.duration_ms,
+                                  source: 'ia_video',
+                                })
+                              );
+                              defaultSimpClient.loadQueue(
+                                allTracks.map((t) => t.uri),
+                                idx,
+                                allTracks
+                              );
+                            }}
+                            style={{
+                              padding: '5px 10px',
+                              borderRadius: 8,
+                              background: isCur ? '#0f222a' : '#161622',
+                              border: isCur ? '1px solid #2aa3c4' : '1px solid #2a2a38',
+                              color: isCur ? '#7dd3fc' : '#d4d4dc',
+                              fontSize: 11.5,
+                              fontWeight: isCur ? 800 : 600,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {idx + 1}. {ep.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {dvdTitles.length > 0 && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6,
+                      padding: 10,
+                      borderRadius: 12,
+                      background: '#0d0d14',
+                      border: '1px solid #1e1e2a',
+                    }}
+                  >
+                    <span style={{ fontSize: 11, fontWeight: 800, color: '#9ca3af' }}>
+                      💿 DVD TITLES ({dvdTitles.length})
+                    </span>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {dvdTitles.map((t: DvdTitleInfo) => {
+                        const dev = opticalDisc?.device_path || '/dev/sr0';
+                        const dvdUri = `dvd://${dev}/${t.title_number}`;
+                        const isCur = track?.uri === dvdUri;
+                        return (
+                          <button
+                            key={dvdUri}
+                            type="button"
+                            onClick={() => {
+                              setPlayerActionsOpen(false);
+                              const meta: TrackMetadata = {
+                                uri: dvdUri,
+                                title: `${opticalDisc?.album_title || 'DVD'} — Title ${t.title_number}`,
+                                artists: ['Optical DVD Video'],
+                                album: opticalDisc?.album_title || 'DVD Video',
+                                album_id: null,
+                                track_number: t.title_number,
+                                disc_number: 1,
+                                art_url: opticalDisc?.art_url || null,
+                                duration_ms: t.duration_ms,
+                                source: 'dvd',
+                              };
+                              defaultSimpClient.loadQueue([dvdUri], 0, [meta]);
+                            }}
+                            style={{
+                              padding: '5px 10px',
+                              borderRadius: 8,
+                              background: isCur ? '#0f222a' : '#161622',
+                              border: isCur ? '1px solid #2aa3c4' : '1px solid #2a2a38',
+                              color: isCur ? '#7dd3fc' : '#d4d4dc',
+                              fontSize: 11.5,
+                              fontWeight: isCur ? 800 : 600,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Title {t.title_number} ({Math.round(t.duration_ms / 60000)}m)
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
             {/* 1. Open Collection / Album / Playlist in Library */}
             <button
               type="button"
-              data-default-focus="true"
+              data-default-focus={!isVideoTrack ? 'true' : undefined}
               onClick={handleOpenCurrentCollection}
               style={actionRowBtnStyle}
             >
@@ -815,7 +1777,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                   💿 Open Collection in Library
                 </span>
                 <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                  Jump to the active album, playlist, or queue in the Right Pane
+                  Jump to the active album, archive item, playlist, or queue in the Right Pane
                 </span>
               </div>
               <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>→</span>
@@ -838,7 +1800,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               >
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                   <span style={{ fontSize: 13, fontWeight: 800, color: '#fda4af' }}>
-                    ❤️ Favorite Track
+                    ❤️ Favorite {isVideoTrack ? 'Video / Episode' : 'Track'}
                   </span>
                   <span style={{ fontSize: 11, color: '#8e8e99' }}>
                     {track.source === 'soundcloud'
@@ -865,7 +1827,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     ★ Add to Hybrid Playlist…
                   </span>
                   <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                    Mix Local, Apple Music & SoundCloud tracks in any SIMP playlist
+                    Mix movies, episodes, Local, Apple Music & SoundCloud tracks in any SIMP playlist
                   </span>
                 </div>
                 <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9' }}>+ ★</span>
@@ -873,7 +1835,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             )}
 
             {/* 4. Start Track Radio / Station */}
-            {track && (track.source === 'soundcloud' || primaryArtist) && (
+            {track && !isVideoTrack && (track.source === 'soundcloud' || primaryArtist) && (
               <button
                 type="button"
                 onClick={() => {
@@ -900,12 +1862,13 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               </button>
             )}
 
-            {/* 5. More by Artist */}
+            {/* 5. More by Artist / Creator */}
             {primaryArtist && handleMoreByArtist && (
               <button
                 type="button"
                 onClick={() => {
                   setPlayerActionsOpen(false);
+                  setVideoTheatreExpanded(false);
                   handleMoreByArtist(primaryArtist);
                 }}
                 style={actionRowBtnStyle}
@@ -915,7 +1878,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     👤 More by {primaryArtist}
                   </span>
                   <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                    Search Library & connected catalogs for {primaryArtist}
+                    Search active source for {primaryArtist}
                   </span>
                 </div>
                 <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#9ca3af' }}>🔍</span>

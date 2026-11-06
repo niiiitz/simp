@@ -17,6 +17,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
+/// Returns `true` if `uri` represents a video track rendered by the `<video>` element in `PlayerView.tsx`
+/// (`ia:video:...`, `ia://video/...`, `video://local/...`, or `dvd://...`).
+pub fn is_ui_video_track_uri(uri: &str) -> bool {
+    uri.starts_with("ia:video:")
+        || uri.starts_with("ia://video/")
+        || uri.starts_with("video://local/")
+        || uri.starts_with("dvd://")
+}
+
 pub struct OrchestratorSnapshot {
     pub active_engine: ActiveEngine,
     pub is_playing: bool,
@@ -203,6 +212,10 @@ impl AudioOrchestrator {
                     if clean.source == "apple_music"
                         || clean.source == "soundcloud"
                         || clean.source == "internet_archive"
+                        || clean.source == "ia_video"
+                        || clean.source == "local_video"
+                        || clean.source == "dvd"
+                        || is_ui_video_track_uri(&clean.uri)
                     {
                         // Do not attach unpinned streaming tracks to an album_id unless already pinned
                         let existing = self.db.get_track_by_uri(&clean.uri).ok().flatten();
@@ -293,19 +306,26 @@ impl AudioOrchestrator {
                 }
             }
             AudioCommand::Play => {
-                let engine = self.state.lock().unwrap().active_engine;
+                let (engine, is_ui_video, has_queue, idx) = {
+                    let st = self.state.lock().unwrap();
+                    let ui_vid = st
+                        .current_track
+                        .as_ref()
+                        .map(|t| is_ui_video_track_uri(&t.uri))
+                        .unwrap_or(false);
+                    (st.active_engine, ui_vid, !st.queue.is_empty(), st.queue_index)
+                };
                 if let Some((sink, internal_tx, broadcast_tx, epoch)) =
                     self.sink_and_channels_mut(engine)
                 {
                     let _ = sink.resume_playback(epoch, internal_tx, broadcast_tx);
                     let pos = self.get_live_position_ms();
                     self.set_playing_state(true, pos);
-                } else {
-                    let has_queue = !self.state.lock().unwrap().queue.is_empty();
-                    if has_queue {
-                        let idx = self.state.lock().unwrap().queue_index;
-                        self.transition_to_index(idx);
-                    }
+                } else if is_ui_video {
+                    let pos = self.get_live_position_ms();
+                    self.set_playing_state(true, pos);
+                } else if has_queue {
+                    self.transition_to_index(idx);
                 }
             }
             AudioCommand::Pause => {
@@ -342,10 +362,15 @@ impl AudioOrchestrator {
                 }
             }
             AudioCommand::Seek { position_ms } => {
-                let (engine, duration_ms) = {
+                let (engine, duration_ms, is_ui_video) = {
                     let st = self.state.lock().unwrap();
                     let dur = st.current_track.as_ref().map(|t| t.duration_ms).unwrap_or(0);
-                    (st.active_engine, dur)
+                    let ui_vid = st
+                        .current_track
+                        .as_ref()
+                        .map(|t| is_ui_video_track_uri(&t.uri))
+                        .unwrap_or(false);
+                    (st.active_engine, dur, ui_vid)
                 };
                 let clamped_pos = if duration_ms > 0 {
                     position_ms.min(duration_ms.saturating_sub(250))
@@ -356,6 +381,13 @@ impl AudioOrchestrator {
                     self.sink_and_channels_mut(engine)
                 {
                     let _ = sink.seek_playback(clamped_pos, epoch, internal_tx, broadcast_tx);
+                } else if is_ui_video {
+                    let _ = self.broadcast_tx.send(PlaybackEvent::AppleSinkCommand {
+                        action: "seek".to_string(),
+                        uri: None,
+                        position_ms: Some(clamped_pos),
+                        volume: None,
+                    });
                 }
                 let is_playing = self.state.lock().unwrap().is_playing;
                 self.state.lock().unwrap().position_ms = clamped_pos;
@@ -798,9 +830,16 @@ impl AudioOrchestrator {
                 position_ms,
                 duration_ms,
             } => {
-                let is_apple_active =
-                    self.state.lock().unwrap().active_engine == ActiveEngine::AppleMusic;
-                if !is_apple_active && state != "authorized" {
+                let is_worker_or_video_active = {
+                    let st = self.state.lock().unwrap();
+                    st.active_engine == ActiveEngine::AppleMusic
+                        || st
+                            .current_track
+                            .as_ref()
+                            .map(|t| is_ui_video_track_uri(&t.uri))
+                            .unwrap_or(false)
+                };
+                if !is_worker_or_video_active && state != "authorized" {
                     return;
                 }
 
@@ -1327,7 +1366,13 @@ impl AudioOrchestrator {
             crate::sinks::apple_api::remember_track_metadata_hint(&track);
         }
 
-        let target_engine = if self.apple_sink.supports_uri(&track.uri) {
+        let target_engine = if is_ui_video_track_uri(&track.uri)
+            || track.source == "ia_video"
+            || track.source == "local_video"
+            || track.source == "dvd"
+        {
+            ActiveEngine::None
+        } else if self.apple_sink.supports_uri(&track.uri) {
             self.apple_sink.engine_kind()
         } else if self.soundcloud_sink.supports_uri(&track.uri) {
             self.soundcloud_sink.engine_kind()
@@ -1558,6 +1603,12 @@ impl AudioOrchestrator {
                 "apple_music".to_string()
             } else if uri.starts_with("soundcloud:") {
                 "soundcloud".to_string()
+            } else if uri.starts_with("ia:video:") || uri.starts_with("ia://video/") {
+                "ia_video".to_string()
+            } else if uri.starts_with("video://local/") {
+                "local_video".to_string()
+            } else if uri.starts_with("dvd://") {
+                "dvd".to_string()
             } else if uri.starts_with("ia:audio:") || uri.starts_with("ia://audio/") {
                 "internet_archive".to_string()
             } else if uri.starts_with("cdda://") {
@@ -1637,7 +1688,9 @@ impl AudioOrchestrator {
             return;
         };
 
-        let engine = if track.uri.starts_with("applemusic:") {
+        let engine = if is_ui_video_track_uri(&track.uri) {
+            ActiveEngine::None
+        } else if track.uri.starts_with("applemusic:") {
             ActiveEngine::AppleMusic
         } else if track.uri.starts_with("soundcloud:") {
             ActiveEngine::SoundCloud

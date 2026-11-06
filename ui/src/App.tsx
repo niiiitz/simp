@@ -37,7 +37,7 @@ import {
   startSoundCloudTrackRadio,
 } from './drivers/SoundCloudDriver';
 import { OskTargetKind, useGamepadNavigation } from './hooks/useGamepadNavigation';
-import { BrowserTarget, PlayerView } from './views/PlayerView';
+import { BrowserTarget, isUiVideoTrack, PlayerView } from './views/PlayerView';
 import { LibraryBrowserView } from './views/LibraryBrowserView';
 import { SettingsModal } from './views/SettingsModal';
 import { PowerModal, SimpUpdateStatus } from './views/PowerModal';
@@ -759,7 +759,10 @@ const ConsoleMainApp: React.FC = () => {
     }
     const timer = window.setTimeout(() => {
       const promises: Promise<any>[] = [];
-      if (browserSourceFilter !== 'soundcloud' && snap?.apple_authenticated) {
+      if (
+        (browserSourceFilter === 'all' || browserSourceFilter === 'apple_music') &&
+        snap?.apple_authenticated
+      ) {
         promises.push(
           searchAppleMusicCatalog(term)
             .then((res) => setCatalogSearchResults(res))
@@ -769,7 +772,7 @@ const ConsoleMainApp: React.FC = () => {
         setCatalogSearchResults({ songs: [], albums: [], playlists: [], stations: [] });
       }
       if (
-        browserSourceFilter !== 'apple_music' &&
+        (browserSourceFilter === 'all' || browserSourceFilter === 'soundcloud') &&
         (snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated)
       ) {
         promises.push(
@@ -948,12 +951,20 @@ const ConsoleMainApp: React.FC = () => {
     return () => window.clearInterval(orbitTimer);
   }, []);
 
+  const isActiveVideoPlayback = Boolean(
+    isUiVideoTrack(snap?.current_track) && snap?.is_playing && view === 'lock'
+  );
+
   useEffect(() => {
     let timerId: number | undefined;
     const resetIdleTimer = () => {
       setIsDimmed(false);
       if (timerId) window.clearTimeout(timerId);
-      timerId = window.setTimeout(() => setIsDimmed(true), 30_000);
+      // Do not engage 30s OLED screen dimming while a video is actively playing;
+      // when video is paused or concludes, the 30s timer runs normally so dimming engages.
+      if (!isActiveVideoPlayback) {
+        timerId = window.setTimeout(() => setIsDimmed(true), 30_000);
+      }
     };
 
     resetIdleTimer();
@@ -968,7 +979,7 @@ const ConsoleMainApp: React.FC = () => {
       window.removeEventListener('wheel', resetIdleTimer);
       window.removeEventListener('keydown', resetIdleTimer);
     };
-  }, []);
+  }, [isActiveVideoPlayback]);
 
   // 6 & 7. Gamepad / Spatial Focus Navigation Hook
   const { applyFocusMarker } = useGamepadNavigation({
@@ -1057,7 +1068,12 @@ const ConsoleMainApp: React.FC = () => {
         });
       }
       const iaTracks = (trackMetadata || browserTracks).filter(
-        (t) => t.source === 'internet_archive' && uris.includes(t.uri)
+        (t) =>
+          (t.source === 'internet_archive' ||
+            t.source === 'ia_video' ||
+            t.source === 'local_video' ||
+            t.source === 'dvd') &&
+          uris.includes(t.uri)
       );
       if (iaTracks.length > 0) {
         defaultSimpClient.importCatalogTracks({
@@ -1318,6 +1334,7 @@ const ConsoleMainApp: React.FC = () => {
   };
 
   const track = snap?.current_track;
+  const effectiveDimmed = isDimmed && !isActiveVideoPlayback;
 
   return (
     <div
@@ -1332,8 +1349,8 @@ const ConsoleMainApp: React.FC = () => {
         color: '#d4d4dc',
         display: 'flex',
         flexDirection: 'column',
-        opacity: isDimmed ? idleOpacity : activeOpacity,
-        transform: `translate3d(${orbitX}px, ${orbitY}px, 0)`,
+        opacity: effectiveDimmed ? idleOpacity : activeOpacity,
+        transform: isActiveVideoPlayback ? undefined : `translate3d(${orbitX}px, ${orbitY}px, 0)`,
         transition: 'opacity 350ms ease, transform 4000ms linear',
         position: 'relative',
       }}
@@ -1367,7 +1384,7 @@ const ConsoleMainApp: React.FC = () => {
       `}</style>
 
       {/* Wake-Tap Guard: intercepts the first tap when dimmed so no button is misfired */}
-      {isDimmed && !isSleeping && (
+      {effectiveDimmed && !isSleeping && (
         <div
           onPointerDown={(e) => {
             e.stopPropagation();
@@ -1856,8 +1873,15 @@ const ConsoleMainApp: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Viewport: Lock Screen (PlayerView) + Persistent Split Browser (LibraryBrowserView stays mounted to preserve scroll & selection state) */}
-      {view === 'lock' && (
+      {/* Main Viewport: Lock Screen (PlayerView stays mounted across L1/R1 so video audio continues in background) + Persistent Split Browser */}
+      <div
+        style={{
+          display: view === 'lock' ? 'flex' : 'none',
+          flex: 1,
+          width: '100%',
+          overflow: 'hidden',
+        }}
+      >
         <PlayerView
           snap={snap}
           track={track}
@@ -1875,7 +1899,7 @@ const ConsoleMainApp: React.FC = () => {
           applyFocusMarker={applyFocusMarker}
           showToast={showToast}
         />
-      )}
+      </div>
       <LibraryBrowserView
         hidden={view !== 'browser'}
         snap={snap}
