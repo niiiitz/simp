@@ -182,6 +182,13 @@ PY
     export SIMP_EMBEDDED_APPLE_DEV_TOKEN="${EMBEDDED_JWT}"
     echo "   • Baked 150-day ES256 Apple Developer Token into binary (no .p8 key required on target devices)"
   fi
+  SC_ID="$(python3 -c 'import os; env=dict(l.strip().split("=",1) for l in open(".env") if l.strip() and not l.strip().startswith("#") and "=" in l); print(env.get("SOUNDCLOUD_CLIENT_ID","").strip().strip("\x27\x22"), end="")' 2>/dev/null || true)"
+  SC_SEC="$(python3 -c 'import os; env=dict(l.strip().split("=",1) for l in open(".env") for _ in [0] if l.strip() and not l.strip().startswith("#") and "=" in l); print(env.get("SOUNDCLOUD_CLIENT_SECRET","").strip().strip("\x27\x22"), end="")' 2>/dev/null || true)"
+  if [[ -n "${SC_ID}" && -n "${SC_SEC}" ]]; then
+    export SOUNDCLOUD_CLIENT_ID="${SC_ID}"
+    export SOUNDCLOUD_CLIENT_SECRET="${SC_SEC}"
+    echo "   • Baked SoundCloud Client Credentials into binary (Public Discovery & 160kbps AAC streaming enabled out-of-the-box)"
+  fi
 fi
 if [[ -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
   echo "   ❌ ERROR: SIMP_EMBEDDED_APPLE_DEV_TOKEN was not generated (check APPLE_PRIVATE_KEY_PATH accessibility; run outside sandbox if key is on /mnt/c)." >&2
