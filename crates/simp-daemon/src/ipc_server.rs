@@ -47,6 +47,7 @@ pub fn resolve_ui_dir() -> Option<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("ui"));
             candidates.push(exe_dir.join("../ui"));
             candidates.push(exe_dir.join("../../ui/dist"));
         }
@@ -74,6 +75,7 @@ pub fn detect_lan_ips() -> Vec<String> {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     if let Ok(out) = std::process::Command::new("hostname").arg("-I").output() {
         let text = String::from_utf8_lossy(&out.stdout);
         for token in text.split_whitespace() {
@@ -111,14 +113,13 @@ async fn no_cache_headers_middleware(
 }
 
 pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
-    let art_cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("simp")
-        .join("art");
+    let art_cache_dir = simp_core::simp_art_cache_dir();
     let _ = std::fs::create_dir_all(&art_cache_dir);
 
     let mut app = Router::new()
         .route("/health", get(health_handler))
+        .route("/api/v1/system/perf", get(system_perf_handler))
+        .route("/api/system/perf", get(system_perf_handler))
         .route("/api/update/check", get(update_check_handler))
         .route("/api/update/apply", post(update_apply_handler))
         .route("/api/apple/playlists", get(apple_playlists_handler))
@@ -171,12 +172,33 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
     } else {
         tracing::info!("SIMP Daemon IPC, Art & UI Server listening on http://{addr}");
     }
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let mut bind_err = None;
+    let mut listener_opt = None;
+    for attempt in 0..25 {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => {
+                listener_opt = Some(l);
+                break;
+            }
+            Err(e) => {
+                bind_err = Some(e);
+                if attempt < 24 {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                }
+            }
+        }
+    }
+    let listener = match listener_opt {
+        Some(l) => l,
+        None => return Err(bind_err.unwrap().into()),
+    };
     if initial_apple_auth {
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            // Stage libwidevinecdm.so into ~/.local/share/simp/lib/ if present on disk
-            let _ = simp_core::sinks::apple_native::cdm_host::discover_widevine_cdm_library();
+            if simp_core::sinks::apple::is_native_apple_cdm_preferred() {
+                // Stage libwidevinecdm.so into ~/.local/share/simp/lib/ if present on disk
+                let _ = simp_core::sinks::apple_native::cdm_host::discover_widevine_cdm_library();
+            }
             simp_core::sinks::apple::AppleMusicSink::ensure_headless_widevine_worker();
         });
     }
@@ -194,6 +216,11 @@ async fn health_handler() -> impl IntoResponse {
         "ui_served": ui_dir.is_some(),
         "ui_dir": ui_dir,
     }))
+}
+
+async fn system_perf_handler() -> impl IntoResponse {
+    let snap = simp_core::sample_daemon_perf();
+    Json(snap)
 }
 
 async fn update_check_handler() -> impl IntoResponse {
@@ -506,9 +533,13 @@ async fn dvd_stream_handler(
         .get("sub")
         .filter(|v| !v.is_empty() && *v != "off")
         .and_then(|v| v.parse::<u8>().ok());
+    let seek_ms = params
+        .get("seek_ms")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&ms| ms > 0);
 
     let mut child = match simp_core::sinks::dvd::spawn_dvd_title_mp4_stream(
-        &device, title, chapter, audio, sub,
+        &device, title, chapter, audio, sub, seek_ms,
     ) {
         Ok(c) => c,
         Err(e) => {

@@ -31,52 +31,11 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
   const lastDragSeekSentRef = useRef(0);
 
   useEffect(() => {
-    const unsub = defaultSimpClient.subscribeProgress((posMs, perfNow, playing) => {
-      const wasPlaying = isPlayingRef.current;
-      isPlayingRef.current = playing;
-
-      if (!playing) {
-        anchorPosRef.current = posMs;
-        anchorPerfRef.current = perfNow;
-        lastRenderedMsRef.current = posMs;
-        return;
-      }
-
-      // Compute our current smooth rAF-extrapolated playhead position
-      const predictedMs = wasPlaying
-        ? anchorPosRef.current + (perfNow - anchorPerfRef.current)
-        : anchorPosRef.current;
-      const driftMs = posMs - predictedMs;
-
-      // Track restart or explicit backward seek (> 2.2s backward jump, or reset near 0:00)
-      if (posMs <= 400 && predictedMs > 1200) {
-        anchorPosRef.current = posMs;
-        anchorPerfRef.current = perfNow;
-        lastRenderedMsRef.current = posMs;
-        return;
-      }
-      if (driftMs < -2200 || driftMs > 2200) {
-        // Explicit seek or major buffer resync: snap immediately
-        anchorPosRef.current = posMs;
-        anchorPerfRef.current = perfNow;
-        lastRenderedMsRef.current = posMs;
-        return;
-      }
-
-      // Normal streaming / playback tick (`|driftMs| <= 2200ms`):
-      // Apple MusicKit v3 `playbackTimeDidChange` often reports coarse/truncated timestamps or
-      // fires from a throttled headless Chromium worker, arriving 200ms–1100ms behind or ahead
-      // of our smooth rAF clock. Never allow a normal tick to pull the playhead backward!
-      const nextAnchorMs = Math.max(
-        lastRenderedMsRef.current,
-        predictedMs + driftMs * 0.25
-      );
-      anchorPosRef.current = nextAnchorMs;
-      anchorPerfRef.current = perfNow;
-    });
-
     let rafId = 0;
-    const renderLoop = () => {
+    let lastDomPct = -1;
+    let lastDomTimeText = '';
+
+    const updateDom = () => {
       let currentMs = anchorPosRef.current;
       if (isDraggingRef.current) {
         currentMs = dragPreviewMsRef.current;
@@ -92,19 +51,81 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
       }
 
       const pct = durationMs > 0 ? Math.max(0, Math.min((currentMs / durationMs) * 100, 100)) : 0;
+      const roundedPct = Math.round(pct * 1000) / 1000;
 
-      if (barRef.current) {
-        barRef.current.style.transform = `scaleX(${pct / 100})`;
+      if (roundedPct !== lastDomPct) {
+        lastDomPct = roundedPct;
+        if (barRef.current) {
+          barRef.current.style.transform = `scaleX(${roundedPct / 100})`;
+        }
+        if (thumbRef.current) {
+          thumbRef.current.style.left = `${roundedPct}%`;
+        }
       }
-      if (thumbRef.current) {
-        thumbRef.current.style.left = `${pct}%`;
+      const nextTimeText = formatTime(currentMs);
+      if (nextTimeText !== lastDomTimeText) {
+        lastDomTimeText = nextTimeText;
+        if (timeTextRef.current) {
+          timeTextRef.current.textContent = nextTimeText;
+        }
       }
-      if (timeTextRef.current) {
-        timeTextRef.current.textContent = formatTime(currentMs);
+    };
+
+    const unsub = defaultSimpClient.subscribeProgress((posMs, perfNow, playing) => {
+      const wasPlaying = isPlayingRef.current;
+      isPlayingRef.current = playing;
+
+      if (!playing) {
+        anchorPosRef.current = posMs;
+        anchorPerfRef.current = perfNow;
+        lastRenderedMsRef.current = posMs;
+        updateDom();
+        return;
+      }
+
+      // Compute our current smooth rAF-extrapolated playhead position
+      const predictedMs = wasPlaying
+        ? anchorPosRef.current + (perfNow - anchorPerfRef.current)
+        : anchorPosRef.current;
+      const driftMs = posMs - predictedMs;
+
+      // Track restart or explicit backward seek (> 2.2s backward jump, or reset near 0:00)
+      if (posMs <= 400 && predictedMs > 1200) {
+        anchorPosRef.current = posMs;
+        anchorPerfRef.current = perfNow;
+        lastRenderedMsRef.current = posMs;
+        updateDom();
+        return;
+      }
+      if (driftMs < -2200 || driftMs > 2200) {
+        // Explicit seek or major buffer resync: snap immediately
+        anchorPosRef.current = posMs;
+        anchorPerfRef.current = perfNow;
+        lastRenderedMsRef.current = posMs;
+        updateDom();
+        return;
+      }
+
+      // Normal streaming / playback tick (`|driftMs| <= 2200ms`):
+      // Apple MusicKit v3 `playbackTimeDidChange` often reports coarse/truncated timestamps or
+      // fires from a throttled headless Chromium worker, arriving 200ms–1100ms behind or ahead
+      // of our smooth rAF clock. Never allow a normal tick to pull the playhead backward!
+      const nextAnchorMs = Math.max(
+        lastRenderedMsRef.current,
+        predictedMs + driftMs * 0.25
+      );
+      anchorPosRef.current = nextAnchorMs;
+      anchorPerfRef.current = perfNow;
+    });
+
+    const renderLoop = () => {
+      if (document.visibilityState !== 'hidden' && (isPlayingRef.current || isDraggingRef.current)) {
+        updateDom();
       }
       rafId = requestAnimationFrame(renderLoop);
     };
 
+    updateDom();
     rafId = requestAnimationFrame(renderLoop);
     return () => {
       cancelAnimationFrame(rafId);

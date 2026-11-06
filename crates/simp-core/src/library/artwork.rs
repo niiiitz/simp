@@ -3,7 +3,7 @@ use lofty::picture::{MimeType, PictureType};
 use lofty::probe::Probe;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Artwork Fallback Cascade:
 /// 1. Embedded ID3v2 APIC / Vorbis PICTURE (`lofty`) -> `simp_art_emb_{hash}.{ext}`
@@ -140,19 +140,16 @@ fn write_art_bytes(bytes: &[u8], ext: &str, kind: &str) -> Option<ExtractedArtwo
     let short_hash = &hash.as_str()[..16];
     let filename = format!("simp_art_{kind}_{short_hash}.{ext}");
 
-    // 1. Write to /tmp RAM disk for SteamOS MPRIS2 QAM (cache-busted by content hash)
-    let tmp_path = PathBuf::from("/tmp").join(&filename);
+    // 1. Write to system temp directory (/tmp RAM disk on Linux, %TEMP% on Windows) for MPRIS2 / SMTC
+    let tmp_path = std::env::temp_dir().join(&filename);
     if !tmp_path.exists() {
         if let Ok(mut f) = File::create(&tmp_path) {
             let _ = f.write_all(bytes);
         }
     }
 
-    // 2. Write to ~/.cache/simp/art/ for local HTTP server (:18888/art/...)
-    let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("simp")
-        .join("art");
+    // 2. Write to SIMP art cache directory for local HTTP server (:18888/art/...)
+    let cache_dir = crate::simp_art_cache_dir();
     let _ = fs::create_dir_all(&cache_dir);
     let cache_path = cache_dir.join(&filename);
     if !cache_path.exists() {
@@ -268,10 +265,7 @@ pub fn fetch_musicbrainz_cover_for_album(
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let filename = format!("mb_{safe_id}.jpg");
-    let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("simp")
-        .join("art");
+    let cache_dir = crate::simp_art_cache_dir();
     let _ = fs::create_dir_all(&cache_dir);
     let dest_path = cache_dir.join(&filename);
 
@@ -360,7 +354,7 @@ pub fn fetch_musicbrainz_cover_for_album(
         if let Some(rg_id) = rel.pointer("/release-group/id").and_then(|v| v.as_str()) {
             let rg_url = format!("https://coverartarchive.org/release-group/{rg_id}/front-500");
             if download_cover_art_to(&rg_url, &dest_path) {
-                let tmp_path = PathBuf::from("/tmp").join(&filename);
+                let tmp_path = std::env::temp_dir().join(&filename);
                 let _ = fs::copy(&dest_path, &tmp_path);
                 return MusicBrainzArtOutcome::Found(format!("http://127.0.0.1:18888/art/{filename}"));
             }
@@ -370,7 +364,7 @@ pub fn fetch_musicbrainz_cover_for_album(
         if let Some(rel_id) = rel.get("id").and_then(|v| v.as_str()) {
             let rel_url = format!("https://coverartarchive.org/release/{rel_id}/front-500");
             if download_cover_art_to(&rel_url, &dest_path) {
-                let tmp_path = PathBuf::from("/tmp").join(&filename);
+                let tmp_path = std::env::temp_dir().join(&filename);
                 let _ = fs::copy(&dest_path, &tmp_path);
                 return MusicBrainzArtOutcome::Found(format!("http://127.0.0.1:18888/art/{filename}"));
             }
@@ -381,26 +375,44 @@ pub fn fetch_musicbrainz_cover_for_album(
 }
 
 fn query_mb_releases(url: &str) -> Option<Vec<serde_json::Value>> {
-    let out = std::process::Command::new("curl")
-        .args([
-            "-4",
-            "--http1.1",
-            "-sL",
-            "--fail",
-            "--retry",
-            "3",
-            "--retry-delay",
-            "2",
-            "--max-time",
-            "15",
-            "-H",
-            "User-Agent: SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)",
-            "-H",
-            "Accept: application/json",
-            url,
-        ])
-        .output()
-        .ok()?;
+    if let Ok(bytes) = crate::http_pool::http_get_bytes(
+        url,
+        &[
+            ("User-Agent", "SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)"),
+            ("Accept", "application/json"),
+        ],
+        None,
+        15,
+    ) {
+        if !bytes.is_empty() {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(arr) = json.get("releases").and_then(|v| v.as_array()) {
+                    return Some(arr.clone());
+                }
+            }
+        }
+    }
+
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-4",
+        "--http1.1",
+        "-sL",
+        "--fail",
+        "--retry",
+        "3",
+        "--retry-delay",
+        "2",
+        "--max-time",
+        "15",
+        "-H",
+        "User-Agent: SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)",
+        "-H",
+        "Accept: application/json",
+        url,
+    ]);
+    crate::configure_background_command(&mut cmd);
+    let out = cmd.output().ok()?;
     if !out.status.success() || out.stdout.is_empty() {
         return None;
     }
@@ -411,21 +423,33 @@ fn query_mb_releases(url: &str) -> Option<Vec<serde_json::Value>> {
 }
 
 fn download_cover_art_to(url: &str, dest_path: &Path) -> bool {
-    let status = std::process::Command::new("curl")
-        .args([
-            "-4",
-            "--http1.1",
-            "-sL",
-            "--fail",
-            "--max-time",
-            "10",
-            "-H",
-            "User-Agent: SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)",
-            "-o",
-            &dest_path.to_string_lossy(),
-            url,
-        ])
-        .status();
+    if let Ok(bytes) = crate::http_pool::http_get_bytes(
+        url,
+        &[("User-Agent", "SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)")],
+        None,
+        10,
+    ) {
+        if bytes.len() > 512 && fs::write(dest_path, &bytes).is_ok() {
+            return true;
+        }
+    }
+
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-4",
+        "--http1.1",
+        "-sL",
+        "--fail",
+        "--max-time",
+        "10",
+        "-H",
+        "User-Agent: SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)",
+        "-o",
+        &dest_path.to_string_lossy(),
+        url,
+    ]);
+    crate::configure_background_command(&mut cmd);
+    let status = cmd.status();
     if status.map(|s| s.success()).unwrap_or(false)
         && dest_path.metadata().map(|m| m.len() > 512).unwrap_or(false)
     {

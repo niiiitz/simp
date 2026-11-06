@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context, Result};
+#[cfg(unix)]
 use std::ffi::{c_char, c_int, c_long, c_void, CStr, CString};
 use std::io::Write;
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(unix)]
@@ -277,13 +279,332 @@ mod libcurl_ffi {
     }
 }
 
-/// Returns `true` when in-process `libcurl` connection pooling is active.
+#[cfg(target_os = "windows")]
+mod winhttp_ffi {
+    use super::*;
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+
+    type HINTERNET = *mut c_void;
+    type BOOL = i32;
+    type DWORD = u32;
+    type WORD = u16;
+    type LPCWSTR = *const u16;
+    type LPVOID = *mut c_void;
+    type LPCVOID = *const c_void;
+
+    const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: DWORD = 0;
+    const WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY: DWORD = 4;
+    const WINHTTP_FLAG_SECURE: DWORD = 0x00800000;
+    const WINHTTP_ADDREQ_FLAG_ADD: DWORD = 0x20000000;
+    const WINHTTP_ADDREQ_FLAG_REPLACE: DWORD = 0x80000000;
+    const WINHTTP_QUERY_STATUS_CODE: DWORD = 19;
+    const WINHTTP_QUERY_FLAG_NUMBER: DWORD = 0x20000000;
+    const WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL: DWORD = 133;
+    const WINHTTP_PROTOCOL_FLAG_HTTP2: DWORD = 0x1;
+
+    #[link(name = "winhttp")]
+    extern "system" {
+        fn WinHttpOpen(
+            psz_agent_w: LPCWSTR,
+            dw_access_type: DWORD,
+            psz_proxy_w: LPCWSTR,
+            psz_proxy_bypass_w: LPCWSTR,
+            dw_flags: DWORD,
+        ) -> HINTERNET;
+        fn WinHttpConnect(
+            h_session: HINTERNET,
+            pswz_server_name: LPCWSTR,
+            n_server_port: WORD,
+            dw_reserved: DWORD,
+        ) -> HINTERNET;
+        fn WinHttpOpenRequest(
+            h_connect: HINTERNET,
+            pwsz_verb: LPCWSTR,
+            pwsz_object_name: LPCWSTR,
+            pwsz_version: LPCWSTR,
+            pwsz_referrer: LPCWSTR,
+            ppwsz_accept_types: *const LPCWSTR,
+            dw_flags: DWORD,
+        ) -> HINTERNET;
+        fn WinHttpSetTimeouts(
+            h_internet: HINTERNET,
+            n_resolve_timeout: i32,
+            n_connect_timeout: i32,
+            n_send_timeout: i32,
+            n_receive_timeout: i32,
+        ) -> BOOL;
+        fn WinHttpSetOption(
+            h_internet: HINTERNET,
+            dw_option: DWORD,
+            lp_buffer: LPVOID,
+            dw_buffer_length: DWORD,
+        ) -> BOOL;
+        fn WinHttpAddRequestHeaders(
+            h_request: HINTERNET,
+            lpsz_headers: LPCWSTR,
+            dw_headers_length: DWORD,
+            dw_modifiers: DWORD,
+        ) -> BOOL;
+        fn WinHttpSendRequest(
+            h_request: HINTERNET,
+            lpsz_headers: LPCWSTR,
+            dw_headers_length: DWORD,
+            lp_optional: LPCVOID,
+            dw_optional_length: DWORD,
+            dw_total_length: DWORD,
+            dw_context: usize,
+        ) -> BOOL;
+        fn WinHttpReceiveResponse(h_request: HINTERNET, lp_reserved: LPVOID) -> BOOL;
+        fn WinHttpQueryHeaders(
+            h_request: HINTERNET,
+            dw_info_level: DWORD,
+            pwsz_name: LPCWSTR,
+            lp_buffer: LPVOID,
+            lpdw_buffer_length: *mut DWORD,
+            lpdw_index: *mut DWORD,
+        ) -> BOOL;
+        fn WinHttpReadData(
+            h_request: HINTERNET,
+            lp_buffer: LPVOID,
+            dw_number_of_bytes_to_read: DWORD,
+            lpdw_number_of_bytes_read: *mut DWORD,
+        ) -> BOOL;
+        fn WinHttpCloseHandle(h_internet: HINTERNET) -> BOOL;
+    }
+
+    struct WinHttpSession(HINTERNET);
+    unsafe impl Send for WinHttpSession {}
+    unsafe impl Sync for WinHttpSession {}
+
+    static SESSION: OnceLock<Option<WinHttpSession>> = OnceLock::new();
+
+    fn to_wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn get_session() -> Option<HINTERNET> {
+        SESSION
+            .get_or_init(|| unsafe {
+                let ua = to_wide("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+                let mut h = WinHttpOpen(
+                    ua.as_ptr(),
+                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                );
+                if h.is_null() {
+                    h = WinHttpOpen(
+                        ua.as_ptr(),
+                        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+                if h.is_null() {
+                    None
+                } else {
+                    let mut proto = WINHTTP_PROTOCOL_FLAG_HTTP2;
+                    let _ = WinHttpSetOption(
+                        h,
+                        WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL,
+                        (&mut proto as *mut DWORD) as LPVOID,
+                        std::mem::size_of::<DWORD>() as DWORD,
+                    );
+                    Some(WinHttpSession(h))
+                }
+            })
+            .as_ref()
+            .map(|s| s.0)
+    }
+
+    struct HandleGuard(HINTERNET);
+    impl Drop for HandleGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    let _ = WinHttpCloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    fn parse_url_parts(url: &str) -> Option<(bool, String, u16, String)> {
+        let (https, rest) = if let Some(r) = url.strip_prefix("https://") {
+            (true, r)
+        } else if let Some(r) = url.strip_prefix("http://") {
+            (false, r)
+        } else {
+            return None;
+        };
+        let (host_port, path) = match rest.find('/') {
+            Some(idx) => (&rest[..idx], &rest[idx..]),
+            None => (rest, "/"),
+        };
+        let default_port = if https { 443 } else { 80 };
+        let (host, port) = match host_port.rfind(':') {
+            Some(colon_idx) => {
+                let p = host_port[colon_idx + 1..]
+                    .parse::<u16>()
+                    .unwrap_or(default_port);
+                (&host_port[..colon_idx], p)
+            }
+            None => (host_port, default_port),
+        };
+        if host.is_empty() {
+            return None;
+        }
+        Some((https, host.to_string(), port, path.to_string()))
+    }
+
+    pub fn execute_winhttp_request(
+        url: &str,
+        headers: &[(&str, &str)],
+        post_body: Option<&[u8]>,
+        byte_range: Option<(u64, u64)>,
+        timeout_secs: u64,
+    ) -> Option<Result<Vec<u8>>> {
+        let session = get_session()?;
+        let (https, host, port, path) = parse_url_parts(url)?;
+
+        unsafe {
+            let host_w = to_wide(&host);
+            let h_conn = WinHttpConnect(session, host_w.as_ptr(), port, 0);
+            if h_conn.is_null() {
+                return Some(Err(anyhow!("WinHttpConnect failed for {host}:{port}")));
+            }
+            let _conn_guard = HandleGuard(h_conn);
+
+            let verb_w = to_wide(if post_body.is_some() { "POST" } else { "GET" });
+            let path_w = to_wide(&path);
+            let flags = if https { WINHTTP_FLAG_SECURE } else { 0 };
+            let h_req = WinHttpOpenRequest(
+                h_conn,
+                verb_w.as_ptr(),
+                path_w.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                flags,
+            );
+            if h_req.is_null() {
+                return Some(Err(anyhow!("WinHttpOpenRequest failed for {url}")));
+            }
+            let _req_guard = HandleGuard(h_req);
+
+            let timeout_ms = (timeout_secs.max(5) as i32).saturating_mul(1000);
+            let _ = WinHttpSetTimeouts(h_req, 8000, 10000, timeout_ms, timeout_ms);
+
+            let mut hdr_buf = String::new();
+            for (k, v) in headers {
+                hdr_buf.push_str(k.trim());
+                hdr_buf.push_str(": ");
+                hdr_buf.push_str(v.trim());
+                hdr_buf.push_str("\r\n");
+            }
+            if let Some((start, end)) = byte_range {
+                hdr_buf.push_str(&format!("Range: bytes={start}-{end}\r\n"));
+            }
+            if !hdr_buf.is_empty() {
+                let hdr_w = to_wide(&hdr_buf);
+                let _ = WinHttpAddRequestHeaders(
+                    h_req,
+                    hdr_w.as_ptr(),
+                    u32::MAX,
+                    WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE,
+                );
+            }
+
+            let (opt_ptr, opt_len) = match post_body {
+                Some(b) if !b.is_empty() => (b.as_ptr() as LPCVOID, b.len() as DWORD),
+                _ => (std::ptr::null(), 0),
+            };
+
+            if WinHttpSendRequest(
+                h_req,
+                std::ptr::null(),
+                0,
+                opt_ptr,
+                opt_len,
+                opt_len,
+                0,
+            ) == 0
+            {
+                return Some(Err(anyhow!(
+                    "WinHttpSendRequest failed for {url}: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+
+            if WinHttpReceiveResponse(h_req, std::ptr::null_mut()) == 0 {
+                return Some(Err(anyhow!(
+                    "WinHttpReceiveResponse failed for {url}: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+
+            let mut status_code: DWORD = 0;
+            let mut status_size = std::mem::size_of::<DWORD>() as DWORD;
+            let _ = WinHttpQueryHeaders(
+                h_req,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                std::ptr::null(),
+                (&mut status_code as *mut DWORD) as LPVOID,
+                &mut status_size,
+                std::ptr::null_mut(),
+            );
+
+            let mut out = Vec::with_capacity(16 * 1024);
+            let mut chunk = [0u8; 32 * 1024];
+            loop {
+                let mut bytes_read: DWORD = 0;
+                if WinHttpReadData(
+                    h_req,
+                    chunk.as_mut_ptr() as LPVOID,
+                    chunk.len() as DWORD,
+                    &mut bytes_read,
+                ) == 0
+                {
+                    break;
+                }
+                if bytes_read == 0 {
+                    break;
+                }
+                out.extend_from_slice(&chunk[..bytes_read as usize]);
+            }
+
+            if status_code >= 400 {
+                let snippet = String::from_utf8_lossy(&out[..out.len().min(240)])
+                    .trim()
+                    .to_string();
+                return Some(Err(anyhow!(
+                    "HTTP {status_code} for {url}{}",
+                    if snippet.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {snippet}")
+                    }
+                )));
+            }
+
+            Some(Ok(out))
+        }
+    }
+}
+
+/// Returns `true` when in-process `libcurl` or `WinHTTP` connection pooling is active.
 pub fn is_inprocess_http_pool_available() -> bool {
     #[cfg(unix)]
     {
         libcurl_ffi::api().is_some()
     }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    {
+        true
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
     {
         false
     }
@@ -295,15 +616,18 @@ pub fn warm_handle_count() -> usize {
     {
         libcurl_ffi::pooled_handle_count()
     }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    {
+        1
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
     {
         0
     }
 }
 
-/// Performs an HTTP/2 connection-pooled `GET` request in-process via `libcurl.so.4` (preserving
-/// live TLS sessions, HTTP/2 multiplex streams, and DNS cache across calls), falling back to
-/// `curl --config -` subprocess execution if `libcurl.so.4` is unavailable.
+/// Performs an HTTP/2 connection-pooled `GET` request in-process via `libcurl.so.4` (Unix)
+/// or `winhttp.dll` (Windows), falling back to `curl --config -` subprocess execution if needed.
 pub fn http_get_bytes(
     url: &str,
     headers: &[(&str, &str)],
@@ -318,12 +642,19 @@ pub fn http_get_bytes(
             return res;
         }
     }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(res) =
+            winhttp_ffi::execute_winhttp_request(url, headers, None, byte_range, timeout_secs)
+        {
+            return res;
+        }
+    }
     fallback_curl_subprocess(url, headers, None, byte_range, timeout_secs)
 }
 
-/// Performs an HTTP/2 connection-pooled `POST` request in-process via `libcurl.so.4` (preserving
-/// live TLS sessions, HTTP/2 multiplex streams, and DNS cache across calls), falling back to
-/// `curl --config -` subprocess execution if `libcurl.so.4` is unavailable.
+/// Performs an HTTP/2 connection-pooled `POST` request in-process via `libcurl.so.4` (Unix)
+/// or `winhttp.dll` (Windows), falling back to `curl --config -` subprocess execution if needed.
 pub fn http_post_bytes(
     url: &str,
     headers: &[(&str, &str)],
@@ -334,6 +665,14 @@ pub fn http_post_bytes(
     {
         if let Some(res) =
             libcurl_ffi::execute_pooled_request(url, headers, Some(body), None, timeout_secs)
+        {
+            return res;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(res) =
+            winhttp_ffi::execute_winhttp_request(url, headers, Some(body), None, timeout_secs)
         {
             return res;
         }
@@ -368,11 +707,13 @@ fn fallback_curl_subprocess(
     }
 
     let timeout_str = timeout_secs.max(5).to_string();
-    let mut child = Command::new("curl")
-        .args(["-fsSL", "--max-time", &timeout_str, "--config", "-"])
+    let mut cmd = Command::new("curl");
+    cmd.args(["-fsSL", "--max-time", &timeout_str, "--config", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::configure_background_command(&mut cmd);
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("Failed to spawn curl subprocess for {url}"))?;
 

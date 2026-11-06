@@ -1,8 +1,10 @@
 use crate::orchestrator::OrchestratorSnapshot;
 use simp_protocol::AudioCommand;
+#[cfg(target_os = "linux")]
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -19,6 +21,7 @@ pub fn build_vrmanifest_json(bin_path: &Path, icon_path: &Path) -> String {
                 "app_key": "org.simp.player",
                 "launch_type": "binary",
                 "binary_path_linux": bin_path.to_string_lossy(),
+                "binary_path_windows": bin_path.to_string_lossy(),
                 "is_dashboard_overlay": true,
                 "image_path": icon_path.to_string_lossy(),
                 "strings": {
@@ -33,23 +36,42 @@ pub fn build_vrmanifest_json(bin_path: &Path, icon_path: &Path) -> String {
     serde_json::to_string_pretty(&manifest).unwrap_or_default()
 }
 
-/// Writes `~/.local/share/simp/openvr/org.simp.player.vrmanifest` and non-destructively
+/// Writes `org.simp.player.vrmanifest` and non-destructively
 /// registers its path inside SteamVR's `config/appconfig.json` if a Steam installation is present.
 pub fn ensure_vrmanifest_installed() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
-    let install_root = home.join(".local/share/simp");
+    let install_root = if cfg!(target_os = "windows") || crate::portable_data_dir().is_some() {
+        crate::simp_data_dir()
+    } else {
+        home.join(".local/share/simp")
+    };
     let openvr_dir = install_root.join("openvr");
     let _ = std::fs::create_dir_all(&openvr_dir);
 
     let bin_path = {
-        let candidate = install_root.join("bin/simp");
+        let candidate = install_root.join(if cfg!(target_os = "windows") {
+            "bin/simp.exe"
+        } else {
+            "bin/simp"
+        });
         if candidate.is_file() {
             candidate
         } else {
             std::env::current_exe().unwrap_or(candidate)
         }
     };
-    let icon_path = install_root.join("ui/simp-icon-dark.png");
+    let icon_path = {
+        let primary = install_root.join("ui/simp-icon-dark.png");
+        if primary.is_file() {
+            primary
+        } else if let Ok(exe) = std::env::current_exe() {
+            exe.parent()
+                .map(|p| p.join("ui/simp-icon-dark.png"))
+                .unwrap_or(primary)
+        } else {
+            primary
+        }
+    };
     let local_openvr_icon = openvr_dir.join("simp-icon-dark.png");
     if icon_path.is_file() {
         let _ = std::fs::copy(&icon_path, &local_openvr_icon);
@@ -69,6 +91,8 @@ pub fn ensure_vrmanifest_installed() -> Option<PathBuf> {
         home.join(".local/share/Steam/config"),
         home.join(".steam/steam/config"),
         home.join(".steam/root/config"),
+        PathBuf::from(r"C:\Program Files (x86)\Steam\config"),
+        PathBuf::from(r"C:\Program Files\Steam\config"),
     ] {
         if steam_cfg_dir.is_dir() {
             let appconfig_path = steam_cfg_dir.join("appconfig.json");

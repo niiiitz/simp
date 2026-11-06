@@ -120,7 +120,7 @@ export function useAppleMusicWorker(): void {
       if (mkRef.current) return mkRef.current;
 
       const hasWidevine = await checkWidevineDrm();
-      if (!hasWidevine && !isDedicatedWorker) {
+      if (!hasWidevine && !isDedicatedWorker && cfg.headless_worker_active) {
         console.info(
           '[SIMP AppleMusicDriver] Browser lacks Widevine CDM (steamwebhelper); delegating audio to headless Widevine worker.'
         );

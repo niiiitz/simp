@@ -428,10 +428,111 @@ export function useGamepadNavigation({
         return;
       }
 
+      const isDvdModalOpen = Boolean(document.querySelector('[data-dvd-modal="true"]'));
+
       // In the `🎵 Player` (`lock`) view (when modals and OSK are closed), D-Pad maps directly
       // to the on-screen transport badges (`◄` Previous, `►` Next, `▲/▼` Volume, `A` Play/Pause)!
       const isDirectTransportView =
-        view === 'lock' && !sourceModalOpen && !powerModalOpen && !oskTarget;
+        view === 'lock' && !sourceModalOpen && !powerModalOpen && !oskTarget && !isDvdModalOpen;
+
+      if (isDvdModalOpen) {
+        const activeDvdEl =
+          (document.querySelector<HTMLElement>(
+            '[data-simp-active-focus="true"]'
+          ) as HTMLElement | null) || (document.activeElement as HTMLElement | null);
+        const isScrubberFocused = Boolean(activeDvdEl?.dataset.dvdScrubber === 'true');
+
+        switch (action) {
+          case 'left':
+            if (isScrubberFocused) {
+              window.dispatchEvent(
+                new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'scrub-left' } })
+              );
+            } else {
+              moveSpatialFocus('left');
+            }
+            return;
+          case 'right':
+            if (isScrubberFocused) {
+              window.dispatchEvent(
+                new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'scrub-right' } })
+              );
+            } else {
+              moveSpatialFocus('right');
+            }
+            return;
+          case 'up':
+            moveSpatialFocus('up');
+            return;
+          case 'down':
+            moveSpatialFocus('down');
+            return;
+          case 'activate':
+            if (isScrubberFocused) {
+              window.dispatchEvent(
+                new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'scrub-commit' } })
+              );
+            } else if (
+              activeDvdEl &&
+              activeDvdEl !== document.body &&
+              activeDvdEl.closest('[data-dvd-modal="true"]') &&
+              typeof activeDvdEl.click === 'function'
+            ) {
+              activeDvdEl.click();
+            } else {
+              window.dispatchEvent(
+                new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'toggle-play' } })
+              );
+            }
+            return;
+          case 'back':
+            window.dispatchEvent(
+              new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'close' } })
+            );
+            return;
+          case 'shuffle':
+            window.dispatchEvent(
+              new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'cycle-audio' } })
+            );
+            return;
+          case 'repeat':
+            window.dispatchEvent(
+              new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'cycle-subtitles' } })
+            );
+            return;
+          case 'l1':
+            window.dispatchEvent(
+              new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'prev-chapter' } })
+            );
+            return;
+          case 'r1':
+            window.dispatchEvent(
+              new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'next-chapter' } })
+            );
+            return;
+          case 'l2':
+            window.dispatchEvent(
+              new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'seek-back' } })
+            );
+            return;
+          case 'r2':
+            window.dispatchEvent(
+              new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'seek-fwd' } })
+            );
+            return;
+          case 'sources':
+            window.dispatchEvent(
+              new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'fullscreen' } })
+            );
+            return;
+          case 'vol_up':
+            applyVolume(currentVolume + 0.05);
+            return;
+          case 'vol_down':
+            applyVolume(currentVolume - 0.05);
+            return;
+        }
+      }
 
       switch (action) {
         case 'left':
@@ -821,16 +922,55 @@ export function useGamepadNavigation({
   ]);
 
   // HTML5 Gamepad API polling across all connected controllers (D-Pad + Left/Right Sticks + ABXY/Bumpers/Triggers)
+  // Event-driven (`gamepadconnected` / `gamepaddisconnected`) + visibility-gated so Chromium never burns CPU
+  // querying the OS HID subsystem at 20Hz when no controller is plugged in or when the window is minimized.
   useEffect(() => {
     const prevButtonsByPad = new Map<number, boolean[]>();
     const prevAxisDirByPad = new Map<number, string | null>();
     const prevHatDirByPad = new Map<number, string | null>();
 
+    const checkHasPad = () => {
+      if (!navigator.getGamepads) return false;
+      try {
+        const pads = navigator.getGamepads();
+        for (const p of pads) {
+          if (p && p.connected) return true;
+        }
+      } catch {
+        // Ignore security/permissions errors in restricted webviews
+      }
+      return false;
+    };
+
+    let hasConnectedPad = checkHasPad();
+    let lastIdleProbeTs = performance.now();
+
+    const onGamepadConnected = () => {
+      hasConnectedPad = true;
+    };
+    const onGamepadDisconnected = () => {
+      hasConnectedPad = checkHasPad();
+    };
+    window.addEventListener('gamepadconnected', onGamepadConnected);
+    window.addEventListener('gamepaddisconnected', onGamepadDisconnected);
+
     const poll = window.setInterval(() => {
-      const bridgeActive = performance.now() - lastBridgeMsgTsRef.current < 3500;
+      if (document.visibilityState === 'hidden') return;
+      const now = performance.now();
+      if (!hasConnectedPad) {
+        // In browsers that don't fire `gamepadconnected` until a button is pressed, probe once every 1.5s instead of 20Hz
+        if (now - lastIdleProbeTs < 1500) return;
+        lastIdleProbeTs = now;
+        hasConnectedPad = checkHasPad();
+        if (!hasConnectedPad) return;
+      }
+
+      const bridgeActive = now - lastBridgeMsgTsRef.current < 3500;
       const rawPads = navigator.getGamepads ? navigator.getGamepads() : [];
+      let anyStillConnected = false;
       for (const pad of rawPads) {
         if (!pad || !pad.connected) continue;
+        anyStillConnected = true;
 
         const prevButtons = prevButtonsByPad.get(pad.index) || [];
         const pressed = (idx: number) => !!pad.buttons[idx]?.pressed && !prevButtons[idx];
@@ -911,9 +1051,14 @@ export function useGamepadNavigation({
           pad.buttons.map((b) => b.pressed)
         );
       }
+      hasConnectedPad = anyStillConnected;
     }, 50);
 
-    return () => window.clearInterval(poll);
+    return () => {
+      window.clearInterval(poll);
+      window.removeEventListener('gamepadconnected', onGamepadConnected);
+      window.removeEventListener('gamepaddisconnected', onGamepadDisconnected);
+    };
   }, [applyVolume, currentVolume, isSleeping, setIsSleeping, setIsDimmed]);
 
   return { applyFocusMarker, moveSpatialFocus };

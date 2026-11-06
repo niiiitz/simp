@@ -374,14 +374,16 @@ const ConsoleMainApp: React.FC = () => {
     }
   }, [browserTarget, browserSearch, opticalDisc]);
 
-  // 3a. Optical CD-ROM (`cdda://`) Scanner & Eject Handler
+  // 3a. Optical CD-ROM (`cdda://`) & DVD-Video Scanner & Eject Handler
   const handleScanOpticalDisc = useCallback(
     async (forceRefresh = false, silent = false) => {
-      setCdScanning(true);
+      if (!silent) {
+        setCdScanning(true);
+      }
       try {
         const res = await defaultSimpClient.scanOpticalDisc(
           forceRefresh,
-          opticalDisc?.device_path || undefined
+          opticalDisc?.drive_present ? opticalDisc.device_path || undefined : undefined
         );
         setOpticalDisc(res);
         setBrowserTarget((prev) => {
@@ -457,7 +459,7 @@ const ConsoleMainApp: React.FC = () => {
       handleScanOpticalDisc(false, true);
     }
 
-    if (!isCdActiveInView || isStreamingCd) return;
+    if (!isCdActiveInView || isStreamingCd || opticalDisc?.disc_present) return;
     const timer = window.setInterval(() => {
       handleScanOpticalDisc(false, true);
     }, 8000);

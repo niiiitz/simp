@@ -7,17 +7,11 @@ use std::fs;
 use std::path::PathBuf;
 
 pub fn settings_vdf_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("simp")
-        .join("settings.vdf")
+    simp_core::simp_config_dir().join("settings.vdf")
 }
 
 pub fn library_db_path() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("simp")
-        .join("library.db")
+    simp_core::simp_data_dir().join("library.db")
 }
 
 pub fn load_or_create_settings() -> SimpSettings {

@@ -116,6 +116,7 @@ assets = [
     ("dist/simp-steamos-userland-x86_64.tar.gz", "application/gzip"),
     ("dist/simp-steamos-userland.tar.gz", "application/gzip"),
     ("dist/simp-decky.zip", "application/zip"),
+    ("dist/simp-windows-portable-x86_64.zip", "application/zip"),
 ]
 
 for path, ctype in assets:

@@ -15,7 +15,7 @@ ZIG_VER="0.13.0"
 ZIG_DIR="${TOOLCHAIN_DIR}/zig-linux-x86_64-${ZIG_VER}"
 ZIG_BIN="${ZIG_DIR}/zig"
 
-mkdir -p "${BIN_DIR}" "${LIB_DIR}"
+[[ -d "${BIN_DIR}" && -d "${LIB_DIR}" ]] || mkdir -p "${BIN_DIR}" "${LIB_DIR}"
 
 if [[ ! -x "${ZIG_BIN}" ]]; then
   echo "   • Downloading userland Zig ${ZIG_VER} cross-compiler into ${TOOLCHAIN_DIR}..." >&2
@@ -227,8 +227,9 @@ EOF
 fi
 
 # 1b. Generate pkg-config `.pc` files for `alsa-sys` and `libdbus-sys` cross-builds
-mkdir -p "${LIB_DIR}/pkgconfig"
-cat > "${LIB_DIR}/pkgconfig/alsa.pc" <<EOF
+if [[ ! -f "${LIB_DIR}/pkgconfig/alsa.pc" || ! -f "${LIB_DIR}/pkgconfig/dbus-1.pc" ]]; then
+  mkdir -p "${LIB_DIR}/pkgconfig"
+  cat > "${LIB_DIR}/pkgconfig/alsa.pc" <<EOF
 prefix=${TOOLCHAIN_DIR}
 exec_prefix=\${prefix}
 libdir=${LIB_DIR}
@@ -241,7 +242,7 @@ Libs: -L\${libdir} -lasound
 Cflags: -I\${includedir}
 EOF
 
-cat > "${LIB_DIR}/pkgconfig/dbus-1.pc" <<EOF
+  cat > "${LIB_DIR}/pkgconfig/dbus-1.pc" <<EOF
 prefix=${TOOLCHAIN_DIR}
 exec_prefix=\${prefix}
 libdir=${LIB_DIR}
@@ -253,9 +254,11 @@ Version: 1.14.10
 Libs: -L\${libdir} -ldbus-1
 Cflags: -I\${includedir}
 EOF
+fi
 
 # 2. Create `aarch64-linux-gnu-gcc` and `aarch64-linux-gnu-ar` wrappers
-cat > "${BIN_DIR}/aarch64-linux-gnu-gcc" <<EOF
+if [[ ! -x "${BIN_DIR}/aarch64-linux-gnu-gcc" || ! -x "${BIN_DIR}/aarch64-linux-gnu-ar" ]]; then
+  cat > "${BIN_DIR}/aarch64-linux-gnu-gcc" <<EOF
 #!/usr/bin/env bash
 ARGS=()
 for arg in "\$@"; do
@@ -269,12 +272,13 @@ for arg in "\$@"; do
 done
 exec "${ZIG_BIN}" cc -target aarch64-linux-gnu.2.35 -L"${LIB_DIR}" "\${ARGS[@]}"
 EOF
-chmod +x "${BIN_DIR}/aarch64-linux-gnu-gcc"
+  chmod +x "${BIN_DIR}/aarch64-linux-gnu-gcc"
 
-cat > "${BIN_DIR}/aarch64-linux-gnu-ar" <<EOF
+  cat > "${BIN_DIR}/aarch64-linux-gnu-ar" <<EOF
 #!/usr/bin/env bash
 exec "${ZIG_BIN}" ar "\$@"
 EOF
-chmod +x "${BIN_DIR}/aarch64-linux-gnu-ar"
+  chmod +x "${BIN_DIR}/aarch64-linux-gnu-ar"
+fi
 
 echo "${BIN_DIR}"

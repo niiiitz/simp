@@ -228,6 +228,8 @@ pub struct LibrarySettings {
     pub scan_steam_osts: bool,
     pub auto_mount_removable: bool,
     pub custom_paths: BTreeMap<String, String>,
+    #[serde(default)]
+    pub ignored_paths: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -273,6 +275,7 @@ impl Default for SimpSettings {
                 scan_steam_osts: true,
                 auto_mount_removable: true,
                 custom_paths,
+                ignored_paths: BTreeMap::new(),
             },
             services: ServiceSettings {
                 apple_music_enabled: false,

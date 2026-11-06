@@ -1,9 +1,17 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AppleMusicAuthConfig,
   defaultSimpClient,
 } from '@simp/client';
 import { QrCodeSvg } from '../components/QrCodeSvg';
+
+interface DaemonPerfSnapshot {
+  cpu_percent: number;
+  rss_mb: number;
+  platform: string;
+  audio_backend: string;
+  portable_mode?: boolean;
+}
 
 export interface SimpUpdateStatus {
   current_version?: string;
@@ -49,6 +57,29 @@ export const PowerModal: React.FC<PowerModalProps> = ({
   refreshLibraryData,
   showToast,
 }) => {
+  const [perfSnap, setPerfSnap] = useState<DaemonPerfSnapshot | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchPerf = async () => {
+      try {
+        const res = await fetch('http://127.0.0.1:18888/api/v1/system/perf');
+        if (res.ok) {
+          const data = (await res.json()) as DaemonPerfSnapshot;
+          if (!cancelled) setPerfSnap(data);
+        }
+      } catch {
+        // Ignore transient offline error
+      }
+    };
+    fetchPerf();
+    const timer = window.setInterval(fetchPerf, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   return (
     <div
       onClick={() => setPowerModalOpen(false)}
@@ -188,7 +219,7 @@ export const PowerModal: React.FC<PowerModalProps> = ({
           >
             <span style={{ fontSize: 13, fontWeight: 800 }}>📥 Minimize to Tray</span>
             <span style={{ fontSize: 11, color: '#8e8e99' }}>
-              Keep playing in KDE System Tray / Decky QAM
+              Keep playing in System Tray / Background
             </span>
           </button>
 
@@ -398,7 +429,11 @@ export const PowerModal: React.FC<PowerModalProps> = ({
               defaultSimpClient.restartDaemon();
               showToast('Restarting SIMP background services...');
               setPowerModalOpen(false);
-              window.setTimeout(() => dismissConsole(), 300);
+              if (window.parent && window.parent !== window) {
+                window.setTimeout(() => dismissConsole(), 300);
+              } else {
+                window.setTimeout(() => window.location.reload(), 900);
+              }
             }}
             style={{
               minHeight: 62,
@@ -414,9 +449,9 @@ export const PowerModal: React.FC<PowerModalProps> = ({
               cursor: 'pointer',
             }}
           >
-            <span style={{ fontSize: 13, fontWeight: 800 }}>🔄 Reset Services & Dismiss</span>
+            <span style={{ fontSize: 13, fontWeight: 800 }}>🔄 Reset Services</span>
             <span style={{ fontSize: 11, color: '#a1a1aa' }}>
-              Pause, restart BG daemon & Widevine worker, and close screen
+              Restart background audio daemon & reconnect console
             </span>
           </button>
 
@@ -634,6 +669,37 @@ export const PowerModal: React.FC<PowerModalProps> = ({
             )}
           </div>
         </div>
+
+        {/* 5. Live Headless Daemon Telemetry Badge */}
+        {perfSnap && (
+          <div
+            style={{
+              padding: '8px 12px',
+              borderRadius: 10,
+              background: '#08080c',
+              border: '1px solid #1e1e2a',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: 8,
+              fontFamily: 'monospace',
+              fontSize: 11,
+              color: '#8e8e9e',
+            }}
+          >
+            <span>
+              ⚡ Daemon:{' '}
+              <strong style={{ color: '#6ee7b7' }}>{perfSnap.cpu_percent.toFixed(1)}% CPU</strong>
+              {' • '}
+              <strong style={{ color: '#67e8f9' }}>{perfSnap.rss_mb.toFixed(1)} MB RAM</strong>
+            </span>
+            <span>
+              {perfSnap.audio_backend} • {perfSnap.platform}
+              {perfSnap.portable_mode ? ' (Portable)' : ''}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

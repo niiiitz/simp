@@ -611,7 +611,7 @@ fn take_prefetched_track(song_uri: &str) -> Option<PrefetchedAppleTrack> {
 /// pre-decrypts & decodes segment #0 into PCM in the background so pressing Next or auto-advancing
 /// starts audio in **< 5 milliseconds** (`0ms` network + `0ms` DRM wait)!
 pub fn prefetch_apple_music_track(settings: SimpSettings, song_uri: String) {
-    if !song_uri.starts_with("applemusic:") {
+    if !song_uri.starts_with("applemusic:") || !crate::sinks::apple::is_native_apple_cdm_preferred() {
         return;
     }
     let key = clean_apple_uri_key(&song_uri);
@@ -1429,12 +1429,13 @@ pub fn run_isolated_cdm_probe_subprocess(
     let Ok(exe) = std::env::current_exe() else {
         return "ERR: Could not determine current_exe for isolated CDM worker".to_string();
     };
-    let out = std::process::Command::new(exe)
-        .arg("--cdm-worker-test")
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--cdm-worker-test")
         .arg(song_id)
         .env("SIMP_WIDEVINE_CDM_PATH", lib_path)
-        .env("SIMP_CDM_TRACE", "1")
-        .output();
+        .env("SIMP_CDM_TRACE", "1");
+    crate::configure_background_command(&mut cmd);
+    let out = cmd.output();
 
     match out {
         Ok(res) => {

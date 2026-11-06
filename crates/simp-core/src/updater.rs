@@ -103,36 +103,44 @@ fn find_arch_asset_url(release: &GithubReleaseItem, arch: &str) -> Option<String
 }
 
 fn fetch_github_releases_bytes(api_url: &str) -> Result<Vec<u8>> {
-    // Prefer `curl -4 --http1.1` first so machines with slow/unreachable IPv6 routes never stall
-    if let Ok(out) = Command::new("curl")
-        .args([
-            "-4",
-            "--http1.1",
-            "-fsSL",
-            "--connect-timeout",
-            "8",
-            "--max-time",
-            "15",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            "User-Agent: SIMP-Updater",
-            api_url,
-        ])
-        .output()
-    {
+    if let Ok(bytes) = crate::http_pool::http_get_bytes(
+        api_url,
+        &[
+            ("Accept", "application/vnd.github+json"),
+            ("User-Agent", "SIMP-Updater"),
+        ],
+        None,
+        12,
+    ) {
+        if !bytes.is_empty() {
+            return Ok(bytes);
+        }
+    }
+
+    // Fallback: `curl -4 --http1.1`
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-4",
+        "--http1.1",
+        "-fsSL",
+        "--connect-timeout",
+        "8",
+        "--max-time",
+        "15",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        "User-Agent: SIMP-Updater",
+        api_url,
+    ]);
+    crate::configure_background_command(&mut cmd);
+    if let Ok(out) = cmd.output() {
         if out.status.success() && !out.stdout.is_empty() {
             return Ok(out.stdout);
         }
     }
 
-    crate::http_pool::http_get_bytes(
-        api_url,
-        &[("Accept", "application/vnd.github+json")],
-        None,
-        12,
-    )
-    .map_err(|e| anyhow!("GitHub API request failed: {e}"))
+    Err(anyhow!("GitHub API request failed for {api_url}"))
 }
 
 /// Queries GitHub Releases (`niiiitz/simp` or configured `github_releases_api_url` in `settings.vdf`)
@@ -204,40 +212,57 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
 /// Spawns a detached background shell that waits 450ms (allowing the HTTP 200 OK response to flush
 /// to the UI / Decky QAM client) and then cleanly restarts `simp.service` (or the daemon process).
 pub fn spawn_delayed_daemon_restart() {
-    let script = "sleep 0.45; \
-        export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; \
-        pkill -f 'simp-widevine-worker' 2>/dev/null || true; \
-        pkill -f '18888/?worker=apple' 2>/dev/null || true; \
-        if command -v systemctl >/dev/null 2>&1 && [ -f \"$HOME/.config/systemd/user/simp.service\" ]; then \
-          systemctl --user daemon-reload 2>/dev/null || true; \
-          systemctl --user stop simp.service 2>/dev/null || true; \
-        fi; \
-        pkill -TERM -f 'simp --daemon' 2>/dev/null || true; \
-        sleep 0.25; \
-        pkill -9 -f 'simp --daemon' 2>/dev/null || true; \
-        if command -v systemctl >/dev/null 2>&1 && [ -f \"$HOME/.config/systemd/user/simp.service\" ]; then \
-          systemctl --user start simp.service 2>/dev/null || true; \
-          sleep 0.5; \
-        fi; \
-        if ! curl -fsS --max-time 2 http://127.0.0.1:18888/health >/dev/null 2>&1; then \
-          nohup \"$HOME/.local/share/simp/bin/simp\" --daemon >/dev/null 2>&1 & \
-        fi";
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            let mut cmd = Command::new(exe);
+            cmd.arg("--daemon")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::configure_background_command(&mut cmd);
+            let _ = cmd.spawn();
+        }
+        return;
+    }
 
-    // Detach into a new session via `setsid` so `systemctl --user stop simp.service` never kills the restart script
-    let spawned = Command::new("setsid")
-        .args(["sh", "-c", script])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    #[cfg(not(target_os = "windows"))]
+    {
+        let script = "sleep 0.45; \
+            export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; \
+            pkill -f 'simp-widevine-worker' 2>/dev/null || true; \
+            pkill -f '18888/?worker=apple' 2>/dev/null || true; \
+            if command -v systemctl >/dev/null 2>&1 && [ -f \"$HOME/.config/systemd/user/simp.service\" ]; then \
+              systemctl --user daemon-reload 2>/dev/null || true; \
+              systemctl --user stop simp.service 2>/dev/null || true; \
+            fi; \
+            pkill -TERM -f 'simp --daemon' 2>/dev/null || true; \
+            sleep 0.25; \
+            pkill -9 -f 'simp --daemon' 2>/dev/null || true; \
+            if command -v systemctl >/dev/null 2>&1 && [ -f \"$HOME/.config/systemd/user/simp.service\" ]; then \
+              systemctl --user start simp.service 2>/dev/null || true; \
+              sleep 0.5; \
+            fi; \
+            if ! curl -fsS --max-time 2 http://127.0.0.1:18888/health >/dev/null 2>&1; then \
+              nohup \"$HOME/.local/share/simp/bin/simp\" --daemon >/dev/null 2>&1 & \
+            fi";
 
-    if spawned.is_err() {
-        let _ = Command::new("sh")
-            .args(["-c", script])
+        // Detach into a new session via `setsid` so `systemctl --user stop simp.service` never kills the restart script
+        let spawned = Command::new("setsid")
+            .args(["sh", "-c", script])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
+
+        if spawned.is_err() {
+            let _ = Command::new("sh")
+                .args(["-c", script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        }
     }
 }
 

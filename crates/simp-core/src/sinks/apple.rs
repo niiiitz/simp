@@ -17,8 +17,10 @@ fn worker_slot() -> &'static Mutex<Option<Child>> {
 }
 
 /// Returns true when Zero-Browser Native Rust Widevine CDM (`libwidevinecdm.so` FFI) mode is enabled.
-/// Enabled by default on Unix whenever `libwidevinecdm.so` is available (unless `SIMP_NATIVE_APPLE_CDM=0`
-/// or `~/.config/simp/disable-native-cdm` is set), falling back seamlessly to the browser worker if needed.
+/// Enabled by default on Linux/Unix whenever `libwidevinecdm.so` is available (unless `SIMP_NATIVE_APPLE_CDM=0`
+/// or `disable-native-cdm` is set). On Windows, defaults to `false` because Windows `widevinecdm.dll`
+/// enforces Google VMP (`VerifyCdmHost_0` Authenticode + `.sig` verification) which requires the signed
+/// browser host (`brave.exe` / `msedge.exe` / `chrome.exe`).
 pub fn is_native_apple_cdm_preferred() -> bool {
     if let Ok(val) = std::env::var("SIMP_NATIVE_APPLE_CDM") {
         let v = val.trim().to_lowercase();
@@ -29,12 +31,22 @@ pub fn is_native_apple_cdm_preferred() -> bool {
             return true;
         }
     }
-    if let Some(cfg_dir) = dirs::config_dir() {
-        if cfg_dir.join("simp/disable-native-cdm").exists() {
+    #[cfg(target_os = "windows")]
+    {
+        return false;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if crate::simp_config_dir().join("disable-native-cdm").exists() {
             return false;
         }
+        if let Some(cfg_dir) = dirs::config_dir() {
+            if cfg_dir.join("simp/disable-native-cdm").exists() {
+                return false;
+            }
+        }
+        true
     }
-    true
 }
 
 /// Pillar 4: Apple Music Sink Facade, Native Rust Widevine Host & ES256 Developer Token Signer.
@@ -146,16 +158,19 @@ impl AppleMusicSink {
             }
             *guard = None;
         }
-        let _ = Command::new("pkill")
-            .args(["-f", "simp-widevine-worker"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = Command::new("pkill")
-            .args(["-f", "18888/?worker=apple"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = Command::new("pkill")
+                .args(["-f", "simp-widevine-worker"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = Command::new("pkill")
+                .args(["-f", "18888/?worker=apple"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 
     /// Terminates the headless Widevine worker and wipes cached Apple Music / MusicKit auth storage
@@ -217,34 +232,41 @@ impl AppleMusicSink {
     /// is running in the background on Linux / SteamOS (Gamescope + Desktop Mode) so full-length
     /// DRM-protected Apple Music tracks stream via PipeWire even when `steamwebhelper` lacks Widevine.
     pub fn ensure_headless_widevine_worker() -> bool {
-        if is_native_apple_cdm_preferred()
-            && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some()
-        {
-            Self::kill_headless_widevine_worker();
-            return true;
-        }
-        if Self::is_headless_worker_active() {
-            return true;
-        }
-        // On WSL, the user's browser runs on the Windows host, so do not spawn a Linux browser inside WSL
-        if std::env::var("WSL_DISTRO_NAME").is_ok()
-            || Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
+        #[cfg(target_os = "windows")]
         {
             return false;
         }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if is_native_apple_cdm_preferred()
+                && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some()
+            {
+                Self::kill_headless_widevine_worker();
+                return true;
+            }
+            if Self::is_headless_worker_active() {
+                return true;
+            }
+            // On WSL, the user's browser runs on the Windows host, so do not spawn a Linux browser inside WSL
+            if std::env::var("WSL_DISTRO_NAME").is_ok()
+                || Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
+            {
+                return false;
+            }
 
-        if let Ok(mut guard) = worker_slot().lock() {
-            if let Some(ref mut child) = *guard {
-                if let Ok(None) = child.try_wait() {
+            if let Ok(mut guard) = worker_slot().lock() {
+                if let Some(ref mut child) = *guard {
+                    if let Ok(None) = child.try_wait() {
+                        return true;
+                    }
+                }
+                if let Some(child) = spawn_headless_widevine_browser() {
+                    *guard = Some(child);
                     return true;
                 }
             }
-            if let Some(child) = spawn_headless_widevine_browser() {
-                *guard = Some(child);
-                return true;
-            }
+            false
         }
-        false
     }
 
     pub fn emit_pause(&self, broadcast_tx: &broadcast::Sender<PlaybackEvent>) {
@@ -703,6 +725,7 @@ fn load_dotenv_candidates() -> HashMap<String, String> {
     map
 }
 
+#[cfg(not(target_os = "windows"))]
 const FIREFOX_WIDEVINE_USER_JS: &str = r#"// Auto-generated by SIMP for headless Widevine EME + PipeWire background playback
 user_pref("media.eme.enabled", true);
 user_pref("media.gmp-widevinecdm.visible", true);
@@ -727,6 +750,7 @@ user_pref("browser.sessionstore.resume_from_crash", false);
 user_pref("browser.shell.checkDefaultBrowser", false);
 "#;
 
+#[cfg(not(target_os = "windows"))]
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     let _ = std::fs::create_dir_all(dst);
     if let Ok(entries) = std::fs::read_dir(src) {
@@ -758,6 +782,7 @@ fn clean_stale_profile_locks(dir: &Path) {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn prepare_firefox_widevine_profile(ff_root: &Path, require_cdm_present: bool) -> Option<PathBuf> {
     if !ff_root.is_dir() {
         return None;
@@ -819,6 +844,7 @@ fn prepare_firefox_widevine_profile(ff_root: &Path, require_cdm_present: bool) -
     Some(worker_dir)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn apply_pipewire_env(cmd: &mut Command) {
     cmd.env("MOZ_NO_REMOTE", "1");
     cmd.env("GTK_USE_PORTAL", "0");
@@ -837,6 +863,7 @@ fn apply_pipewire_env(cmd: &mut Command) {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn spawn_headless_widevine_browser() -> Option<Child> {
     let worker_url = "http://127.0.0.1:18888/?worker=apple";
     let home = dirs::home_dir()?;

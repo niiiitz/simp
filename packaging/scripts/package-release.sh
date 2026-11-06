@@ -193,6 +193,9 @@ if [[ "${ARCH}" != "${HOST_ARCH}" ]]; then
     chmod +x "${REPO_ROOT}/packaging/scripts/setup-aarch64-toolchain.sh"
     TOOLCHAIN_BIN="$("${REPO_ROOT}/packaging/scripts/setup-aarch64-toolchain.sh")"
     TOOLCHAIN_LIB="${HOME}/.cache/simp-toolchain/lib-aarch64"
+    mkdir -p /tmp/simp-zig-cache
+    export ZIG_GLOBAL_CACHE_DIR=/tmp/simp-zig-cache
+    export ZIG_LOCAL_CACHE_DIR=/tmp/simp-zig-cache
     export PATH="${TOOLCHAIN_BIN}:${PATH}"
     export CC_aarch64_unknown_linux_gnu="${TOOLCHAIN_BIN}/aarch64-linux-gnu-gcc"
     export AR_aarch64_unknown_linux_gnu="${TOOLCHAIN_BIN}/aarch64-linux-gnu-ar"

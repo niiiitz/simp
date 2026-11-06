@@ -298,13 +298,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>Browse</span>
         </div>
 
-        {/* External USB / Optical CD-ROM Drive (Red Book CD-DA + MusicBrainz DiscID) */}
+        {/* External USB / Optical CD-ROM Drive (Red Book CD-DA + DVD-Video) */}
         <div
           style={{
             padding: '12px 14px',
             borderRadius: 12,
-            background: opticalDisc?.is_audio_cd ? '#1b140c' : '#101016',
-            border: opticalDisc?.is_audio_cd ? '1px solid #f59e0b' : '1px solid #24242e',
+            background:
+              opticalDisc?.is_audio_cd || opticalDisc?.is_dvd_video
+                ? '#1b140c'
+                : '#101016',
+            border:
+              opticalDisc?.is_audio_cd || opticalDisc?.is_dvd_video
+                ? '1px solid #f59e0b'
+                : '1px solid #24242e',
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
@@ -314,13 +320,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         >
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: '#fcd34d' }}>
-              💿 Optical CD-ROM Audio (Red Book CD-DA + MusicBrainz)
+              💿 Optical CD-ROM & DVD-Video Drive
             </div>
             <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
               {cdScanning
-                ? '⏳ Reading CD TOC & MusicBrainz DiscID...'
+                ? '⏳ Reading Optical Disc (CD TOC / DVD-Video)...'
                 : opticalDisc?.status_message ||
-                  'Connect an external USB CD/DVD drive (/dev/sr0) — no sudo required'}
+                  'Connect an external USB CD/DVD drive — no sudo required'}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -339,21 +345,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 cursor: 'pointer',
               }}
             >
-              {cdScanning ? 'Scanning...' : '🔄 Scan CD'}
+              {cdScanning ? 'Scanning...' : '🔄 Scan Disc'}
             </button>
-            {opticalDisc?.is_audio_cd && (
+            {(opticalDisc?.is_audio_cd || opticalDisc?.is_dvd_video) && (
               <button
                 onClick={() => {
-                  setBrowserTarget({
-                    kind: 'cdda',
-                    id: opticalDisc.disc_id || opticalDisc.device_path || '/dev/sr0',
-                    title: `💿 ${opticalDisc.album_title || 'Audio CD'}`,
-                    subtitle: `${opticalDisc.artist_name || 'Unknown Artist'}${
-                      opticalDisc.release_year ? ` • ${opticalDisc.release_year}` : ''
-                    }`,
-                    art_url: opticalDisc.art_url,
-                  });
-                  setBrowserTracks(opticalDisc.tracks);
+                  if (opticalDisc.is_dvd_video) {
+                    setBrowserTarget({
+                      kind: 'cdda',
+                      id: opticalDisc.disc_id || opticalDisc.device_path || '/dev/sr0',
+                      title: `📀 ${opticalDisc.album_title || 'DVD Video'}`,
+                      subtitle: `${opticalDisc.artist_name || 'DVD-Video'}${
+                        opticalDisc.release_year ? ` • ${opticalDisc.release_year}` : ''
+                      }`,
+                      art_url: opticalDisc.art_url,
+                    });
+                    setBrowserTracks([]);
+                  } else {
+                    setBrowserTarget({
+                      kind: 'cdda',
+                      id: opticalDisc.disc_id || opticalDisc.device_path || '/dev/sr0',
+                      title: `💿 ${opticalDisc.album_title || 'Audio CD'}`,
+                      subtitle: `${opticalDisc.artist_name || 'Unknown Artist'}${
+                        opticalDisc.release_year ? ` • ${opticalDisc.release_year}` : ''
+                      }`,
+                      art_url: opticalDisc.art_url,
+                    });
+                    setBrowserTracks(opticalDisc.tracks);
+                  }
                   setView('browser');
                   setSourceModalOpen(false);
                 }}
@@ -369,7 +388,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   cursor: 'pointer',
                 }}
               >
-                ▶ Open CD ({opticalDisc.tracks.length})
+                {opticalDisc.is_dvd_video
+                  ? `▶ Open DVD (${opticalDisc.dvd_titles?.length || 0})`
+                  : `▶ Open CD (${opticalDisc.tracks.length})`}
               </button>
             )}
             {opticalDisc?.drive_present && (

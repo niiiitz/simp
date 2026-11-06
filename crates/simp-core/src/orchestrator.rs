@@ -395,11 +395,25 @@ impl AudioOrchestrator {
                         }
                     }
                     if !unique_paths.contains(&normalized) {
-                        unique_paths.push(normalized);
+                        unique_paths.push(normalized.clone());
                     }
                     cfg.library.custom_paths.clear();
                     for (idx, p) in unique_paths.into_iter().enumerate() {
                         cfg.library.custom_paths.insert(idx.to_string(), p);
+                    }
+                    // Un-ignore if the user explicitly adds this path back
+                    let mut remaining_ignored: Vec<String> = Vec::new();
+                    for ig in cfg.library.ignored_paths.values() {
+                        let norm_ig = crate::library::vdf::normalize_platform_path(ig)
+                            .to_string_lossy()
+                            .to_string();
+                        if ig != &path && norm_ig != normalized && !remaining_ignored.contains(&norm_ig) {
+                            remaining_ignored.push(norm_ig);
+                        }
+                    }
+                    cfg.library.ignored_paths.clear();
+                    for (idx, p) in remaining_ignored.into_iter().enumerate() {
+                        cfg.library.ignored_paths.insert(idx.to_string(), p);
                     }
                 }
                 self.handle_command(AudioCommand::RescanStorage);
@@ -411,20 +425,41 @@ impl AudioOrchestrator {
                 {
                     let mut cfg = self.settings.lock().unwrap();
                     let mut remaining: Vec<String> = Vec::new();
+                    let mut was_custom = false;
                     for existing in cfg.library.custom_paths.values() {
                         let norm_existing = crate::library::vdf::normalize_platform_path(existing)
                             .to_string_lossy()
                             .to_string();
-                        if existing != &path
-                            && norm_existing != target_norm
-                            && !remaining.contains(&norm_existing)
-                        {
+                        if existing == &path || norm_existing == target_norm {
+                            was_custom = true;
+                        } else if !remaining.contains(&norm_existing) {
                             remaining.push(norm_existing);
                         }
                     }
                     cfg.library.custom_paths.clear();
                     for (idx, p) in remaining.into_iter().enumerate() {
                         cfg.library.custom_paths.insert(idx.to_string(), p);
+                    }
+                    // If this was an auto-discovered mount (e.g., removable drive or Steam OST),
+                    // remember it in `ignored_paths` so `RescanStorage` on restart never re-adds it.
+                    if !was_custom && !target_norm.is_empty() {
+                        let mut ignored_list: Vec<String> = cfg
+                            .library
+                            .ignored_paths
+                            .values()
+                            .map(|s| {
+                                crate::library::vdf::normalize_platform_path(s)
+                                    .to_string_lossy()
+                                    .to_string()
+                            })
+                            .collect();
+                        if !ignored_list.contains(&target_norm) {
+                            ignored_list.push(target_norm.clone());
+                        }
+                        cfg.library.ignored_paths.clear();
+                        for (idx, p) in ignored_list.into_iter().enumerate() {
+                            cfg.library.ignored_paths.insert(idx.to_string(), p);
+                        }
                     }
                 }
                 let _ = self.db.remove_mount(&path);
@@ -674,15 +709,32 @@ impl AudioOrchestrator {
                 self.shutdown_all_sinks();
                 if let Ok(exe) = std::env::current_exe() {
                     let args: Vec<String> = std::env::args().skip(1).collect();
-                    let _ = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg("sleep 0.35 && exec \"$0\" \"$@\"")
-                        .arg(exe)
-                        .args(args)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn();
+                    #[cfg(target_os = "windows")]
+                    {
+                        let mut cmd = std::process::Command::new(exe);
+                        if args.is_empty() {
+                            cmd.arg("--daemon");
+                        } else {
+                            cmd.args(args);
+                        }
+                        cmd.stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null());
+                        crate::configure_background_command(&mut cmd);
+                        let _ = cmd.spawn();
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let _ = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg("sleep 0.35 && exec \"$0\" \"$@\"")
+                            .arg(exe)
+                            .args(args)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn();
+                    }
                 }
                 std::process::exit(0);
             }
@@ -760,6 +812,7 @@ impl AudioOrchestrator {
                 self.pause_active_engine();
                 self.shutdown_all_sinks();
                 // Also stop the systemd user service if running under systemd so `Restart=always` doesn't respawn
+                #[cfg(not(target_os = "windows"))]
                 let _ = std::process::Command::new("systemctl")
                     .args(["--user", "stop", "simp.service"])
                     .stdin(std::process::Stdio::null())

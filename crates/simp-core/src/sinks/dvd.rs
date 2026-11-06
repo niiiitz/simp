@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
 const DVD_SECTOR_SIZE: usize = 2048;
-const DVDCSS_SEEK_KEY: libc::c_int = 1 << 0;
+const DVDCSS_SEEK_MPEG: libc::c_int = 1 << 0;
+const DVDCSS_SEEK_KEY: libc::c_int = 1 << 1;
 const DVDCSS_READ_DECRYPT: libc::c_int = 1 << 0;
 
 /// Contiguous sector range inside a Title Set's `VTS_XX_1..9.VOB` span.
@@ -76,7 +77,7 @@ impl Drop for DvdCssSession {
     }
 }
 
-/// Returns candidate paths where a user may have placed `libdvdcss.so.2`.
+/// Returns candidate paths where a user may have placed `libdvdcss.so.2` (Linux) or `libdvdcss-2.dll` (Windows).
 pub fn candidate_libdvdcss_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(env_path) = std::env::var("SIMP_DVDCSS_PATH") {
@@ -84,40 +85,168 @@ pub fn candidate_libdvdcss_paths() -> Vec<PathBuf> {
             paths.push(PathBuf::from(env_path.trim()));
         }
     }
-    if let Some(data_dir) = dirs::data_local_dir() {
-        paths.push(data_dir.join("simp").join("lib").join("libdvdcss.so.2"));
+    let data_dir = crate::simp_data_dir();
+    let data_lib = data_dir.join("lib");
+    #[cfg(target_os = "windows")]
+    {
+        for name in ["libdvdcss-2.dll", "libdvdcss.dll", "dvdcss.dll"] {
+            paths.push(data_lib.join(name));
+            paths.push(data_dir.join(name));
+            paths.push(data_dir.join("bin").join(name));
+        }
+        let mut search_roots = vec![data_dir.clone()];
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                for name in ["libdvdcss-2.dll", "libdvdcss.dll", "dvdcss.dll"] {
+                    paths.push(exe_dir.join(name));
+                }
+                search_roots.push(exe_dir.to_path_buf());
+                if let Some(parent_dir) = exe_dir.parent() {
+                    search_roots.push(parent_dir.to_path_buf());
+                }
+            }
+        }
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            let up = PathBuf::from(user_profile);
+            search_roots.push(up.join("Downloads"));
+            search_roots.push(up.join("Desktop"));
+            search_roots.push(up.join("OneDrive").join("Desktop"));
+        }
+        for root in search_roots {
+            if root.is_dir() {
+                for entry in walkdir::WalkDir::new(&root)
+                    .max_depth(3)
+                    .into_iter()
+                    .flatten()
+                {
+                    if entry.path().is_file() {
+                        let fname = entry.file_name().to_string_lossy().to_lowercase();
+                        if fname.contains("dvdcss") && fname.ends_with(".dll") {
+                            let p = entry.path().to_path_buf();
+                            if !paths.contains(&p) {
+                                paths.push(p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        paths.push(PathBuf::from(r"C:\Program Files\VideoLAN\VLC\libdvdcss-2.dll"));
+        paths.push(PathBuf::from(r"C:\Program Files (x86)\VideoLAN\VLC\libdvdcss-2.dll"));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(
-            PathBuf::from(home)
-                .join(".local/share/simp/lib/libdvdcss.so.2"),
-        );
-    }
-    for sys in [
-        "/usr/lib/libdvdcss.so.2",
-        "/usr/lib64/libdvdcss.so.2",
-        "/usr/local/lib/libdvdcss.so.2",
-        "/usr/lib/x86_64-linux-gnu/libdvdcss.so.2",
-        "/usr/lib/aarch64-linux-gnu/libdvdcss.so.2",
-    ] {
-        paths.push(PathBuf::from(sys));
+    #[cfg(not(target_os = "windows"))]
+    {
+        paths.push(data_lib.join("libdvdcss.so.2"));
+        if let Some(data_dir) = dirs::data_local_dir() {
+            paths.push(data_dir.join("simp").join("lib").join("libdvdcss.so.2"));
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            paths.push(
+                PathBuf::from(home)
+                    .join(".local/share/simp/lib/libdvdcss.so.2"),
+            );
+        }
+        for sys in [
+            "/usr/lib/libdvdcss.so.2",
+            "/usr/lib64/libdvdcss.so.2",
+            "/usr/local/lib/libdvdcss.so.2",
+            "/usr/lib/x86_64-linux-gnu/libdvdcss.so.2",
+            "/usr/lib/aarch64-linux-gnu/libdvdcss.so.2",
+        ] {
+            paths.push(PathBuf::from(sys));
+        }
     }
     paths
 }
 
 pub fn find_libdvdcss_path() -> Option<PathBuf> {
-    candidate_libdvdcss_paths()
-        .into_iter()
-        .find(|p| p.is_file())
+    for p in candidate_libdvdcss_paths() {
+        if !p.is_file() {
+            continue;
+        }
+        #[cfg(windows)]
+        unsafe {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn LoadLibraryW(lp_lib_file_name: *const u16) -> *mut libc::c_void;
+                fn GetProcAddress(
+                    h_module: *mut libc::c_void,
+                    lp_proc_name: *const libc::c_char,
+                ) -> *mut libc::c_void;
+                fn FreeLibrary(h_lib_module: *mut libc::c_void) -> i32;
+            }
+            let wide_path: Vec<u16> = p
+                .to_string_lossy()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let h = LoadLibraryW(wide_path.as_ptr());
+            if h.is_null() {
+                continue;
+            }
+            let sym = GetProcAddress(h, b"dvdcss_open\0".as_ptr() as *const _);
+            FreeLibrary(h);
+            if sym.is_null() {
+                continue;
+            }
+        }
+        return Some(p);
+    }
+    None
+}
+
+/// Discovers an installed VLC binary (`vlc.exe` on Windows or `vlc` on Linux), which embeds `libdvdcss`
+/// statically inside its `dvdread` / `dvdnav` access plugins on Windows.
+pub fn find_vlc_binary() -> Option<PathBuf> {
+    if let Ok(env_vlc) = std::env::var("SIMP_VLC_PATH") {
+        let p = PathBuf::from(env_vlc.trim());
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        for candidate in [
+            r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+            r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+        ] {
+            let p = PathBuf::from(candidate);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            let scoop = PathBuf::from(user_profile)
+                .join("scoop")
+                .join("apps")
+                .join("vlc")
+                .join("current")
+                .join("vlc.exe");
+            if scoop.is_file() {
+                return Some(scoop);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        for candidate in ["/usr/bin/vlc", "/usr/local/bin/vlc"] {
+            let p = PathBuf::from(candidate);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 impl DvdCssSession {
     pub fn open(device_path: &str) -> Option<Self> {
         let so_path = find_libdvdcss_path()?;
-        let c_so = std::ffi::CString::new(so_path.to_string_lossy().as_bytes()).ok()?;
-        let c_dev = std::ffi::CString::new(device_path.as_bytes()).ok()?;
 
+        #[cfg(unix)]
         unsafe {
+            let c_dev = std::ffi::CString::new(device_path.as_bytes()).ok()?;
+            let c_so = std::ffi::CString::new(so_path.to_string_lossy().as_bytes()).ok()?;
             let lib_handle = libc::dlopen(c_so.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
             if lib_handle.is_null() {
                 return None;
@@ -154,10 +283,79 @@ impl DvdCssSession {
                 fn_read,
             })
         }
+
+        #[cfg(windows)]
+        unsafe {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn LoadLibraryW(lp_lib_file_name: *const u16) -> *mut libc::c_void;
+                fn GetProcAddress(
+                    h_module: *mut libc::c_void,
+                    lp_proc_name: *const libc::c_char,
+                ) -> *mut libc::c_void;
+                fn FreeLibrary(h_lib_module: *mut libc::c_void) -> i32;
+            }
+            let wide_path: Vec<u16> = so_path
+                .to_string_lossy()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let lib_handle = LoadLibraryW(wide_path.as_ptr());
+            if lib_handle.is_null() {
+                return None;
+            }
+            let sym_open = GetProcAddress(lib_handle, b"dvdcss_open\0".as_ptr() as *const _);
+            let sym_close = GetProcAddress(lib_handle, b"dvdcss_close\0".as_ptr() as *const _);
+            let sym_seek = GetProcAddress(lib_handle, b"dvdcss_seek\0".as_ptr() as *const _);
+            let sym_read = GetProcAddress(lib_handle, b"dvdcss_read\0".as_ptr() as *const _);
+            if sym_open.is_null()
+                || sym_close.is_null()
+                || sym_seek.is_null()
+                || sym_read.is_null()
+            {
+                FreeLibrary(lib_handle);
+                return None;
+            }
+
+            let fn_open: DvdCssOpenFn = std::mem::transmute(sym_open);
+            let fn_close: DvdCssCloseFn = std::mem::transmute(sym_close);
+            let fn_seek: DvdCssSeekFn = std::mem::transmute(sym_seek);
+            let fn_read: DvdCssReadFn = std::mem::transmute(sym_read);
+
+            // VideoLAN's `libdvdcss` on Windows (`win2k_open`) expects `"D:"` (2 chars)
+            // and prepends `"\\.\"` internally when enabling Win32 SCSI pass-through ioctls.
+            let win_drive_spec = device_path
+                .strip_prefix(r"\\.\")
+                .unwrap_or(device_path)
+                .trim_end_matches('\\');
+            let c_short = std::ffi::CString::new(win_drive_spec.as_bytes()).ok()?;
+            let mut css_handle = fn_open(c_short.as_ptr());
+            if css_handle.is_null() {
+                if let Ok(c_raw) = std::ffi::CString::new(device_path.as_bytes()) {
+                    css_handle = fn_open(c_raw.as_ptr());
+                }
+            }
+            if css_handle.is_null() {
+                FreeLibrary(lib_handle);
+                return None;
+            }
+
+            Some(Self {
+                _lib_handle: lib_handle,
+                css_handle,
+                fn_close,
+                fn_seek,
+                fn_read,
+            })
+        }
     }
 
     pub fn seek_sector(&mut self, lba: u32, unlock_key: bool) -> Result<()> {
-        let flags = if unlock_key { DVDCSS_SEEK_KEY } else { 0 };
+        let flags = if unlock_key {
+            DVDCSS_SEEK_KEY
+        } else {
+            DVDCSS_SEEK_MPEG
+        };
         let res = unsafe { (self.fn_seek)(self.css_handle, lba as libc::c_int, flags) };
         if res < 0 {
             return Err(anyhow!("dvdcss_seek failed at sector {lba}"));
@@ -182,7 +380,7 @@ impl DvdCssSession {
     }
 }
 
-/// Discovers an available `ffmpeg` binary (`~/.local/share/simp/bin/ffmpeg` or system `PATH`).
+/// Discovers an available `ffmpeg` binary (`~/.local/share/simp/bin/ffmpeg`, `<portable_dir>/data/bin/ffmpeg.exe`, or system `PATH`).
 pub fn find_ffmpeg_binary() -> Option<PathBuf> {
     if let Ok(env_bin) = std::env::var("SIMP_FFMPEG_PATH") {
         let p = PathBuf::from(env_bin.trim());
@@ -190,10 +388,21 @@ pub fn find_ffmpeg_binary() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    if let Some(data_dir) = dirs::data_local_dir() {
-        let p = data_dir.join("simp").join("bin").join("ffmpeg");
-        if p.is_file() {
-            return Some(p);
+    let bin_name = if cfg!(target_os = "windows") {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let data_bin = crate::simp_data_dir().join("bin").join(bin_name);
+    if data_bin.is_file() {
+        return Some(data_bin);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let sibling = exe_dir.join(bin_name);
+            if sibling.is_file() {
+                return Some(sibling);
+            }
         }
     }
     if let Some(home) = std::env::var_os("HOME") {
@@ -202,21 +411,98 @@ pub fn find_ffmpeg_binary() -> Option<PathBuf> {
             return Some(p);
         }
     }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let base = PathBuf::from(local_app_data).join("Microsoft").join("WinGet");
+            let link = base.join("Links").join("ffmpeg.exe");
+            if link.is_file() {
+                return Some(link);
+            }
+            let pkgs = base.join("Packages");
+            if let Ok(entries) = fs::read_dir(&pkgs) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_lowercase();
+                    if name.contains("ffmpeg") {
+                        for sub in walkdir::WalkDir::new(entry.path())
+                            .max_depth(4)
+                            .into_iter()
+                            .flatten()
+                        {
+                            if sub.file_name().eq_ignore_ascii_case("ffmpeg.exe")
+                                && sub.path().is_file()
+                            {
+                                return Some(sub.path().to_path_buf());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            let scoop = PathBuf::from(user_profile)
+                .join("scoop")
+                .join("shims")
+                .join("ffmpeg.exe");
+            if scoop.is_file() {
+                return Some(scoop);
+            }
+        }
+        let choco = PathBuf::from(r"C:\ProgramData\chocolatey\bin\ffmpeg.exe");
+        if choco.is_file() {
+            return Some(choco);
+        }
+        for fixed in [r"C:\ffmpeg\bin\ffmpeg.exe", r"C:\Program Files\ffmpeg\bin\ffmpeg.exe"] {
+            let p = PathBuf::from(fixed);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        let mut search_roots = vec![crate::simp_data_dir()];
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                search_roots.push(exe_dir.to_path_buf());
+                if let Some(parent_dir) = exe_dir.parent() {
+                    search_roots.push(parent_dir.to_path_buf());
+                }
+            }
+        }
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            let up = PathBuf::from(user_profile);
+            search_roots.push(up.join("Downloads"));
+            search_roots.push(up.join("Desktop"));
+            search_roots.push(up.join("OneDrive").join("Desktop"));
+        }
+        for root in search_roots {
+            if root.is_dir() {
+                for entry in walkdir::WalkDir::new(&root)
+                    .max_depth(4)
+                    .into_iter()
+                    .flatten()
+                {
+                    if entry.file_name().eq_ignore_ascii_case("ffmpeg.exe")
+                        && entry.path().is_file()
+                    {
+                        return Some(entry.path().to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
     for sys in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"] {
         let p = PathBuf::from(sys);
         if p.is_file() {
             return Some(p);
         }
     }
-    if Command::new("ffmpeg")
-        .arg("-version")
+    let mut cmd = Command::new(bin_name);
+    cmd.arg("-version")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        return Some(PathBuf::from("ffmpeg"));
+        .stderr(Stdio::null());
+    crate::configure_background_command(&mut cmd);
+    if cmd.status().map(|s| s.success()).unwrap_or(false) {
+        return Some(PathBuf::from(bin_name));
     }
     None
 }
@@ -294,66 +580,225 @@ fn parse_iso9660_directory_entries(dir_bytes: &[u8]) -> HashMap<String, (IsoFile
     entries
 }
 
-/// Parses a DVD-Video disc from an optical device (`/dev/sr0`) or ISO file.
-pub fn parse_dvd_device(device_path: &str) -> Result<ParsedDvdDisc> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(device_path)
-        .map_err(|e| anyhow!("Cannot open {device_path}: {e}"))?;
-
-    // Read ISO-9660 Primary Volume Descriptor at Sector 16
-    let pvd = read_sectors_raw(&mut file, 16, DVD_SECTOR_SIZE)?;
-    if pvd.len() < 2048 || pvd[0] != 0x01 || &pvd[1..6] != b"CD001" {
-        return Err(anyhow!("Not an ISO-9660 / UDF bridge DVD volume"));
+/// Resolves a Windows optical device path (`\\.\E:` or `E:`) to its mounted drive root (`E:\`) if present.
+fn windows_mounted_drive_root(device_path: &str) -> Option<PathBuf> {
+    let trimmed = device_path.trim().strip_prefix(r"\\.\").unwrap_or(device_path.trim());
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let ch = (bytes[0] as char).to_ascii_uppercase();
+        let root = PathBuf::from(format!("{ch}:\\"));
+        if root.is_dir() {
+            return Some(root);
+        }
     }
-
-    let volume_label = String::from_utf8_lossy(&pvd[40..72]).trim().to_string();
-    let root_lba = u32::from_le_bytes([pvd[158], pvd[159], pvd[160], pvd[161]]);
-    let root_len = u32::from_le_bytes([pvd[166], pvd[167], pvd[168], pvd[169]]);
-    if root_lba == 0 || root_len == 0 || root_len > 1024 * 1024 {
-        return Err(anyhow!("Invalid ISO-9660 root directory record"));
+    let p = PathBuf::from(trimmed);
+    if p.is_dir() {
+        return Some(p);
     }
+    None
+}
 
-    let root_bytes = read_sectors_raw(&mut file, root_lba, root_len as usize)?;
-    let root_entries = parse_iso9660_directory_entries(&root_bytes);
+/// Queries the physical starting LBA sector of a file (`VTS_XX_1.VOB`) on a mounted Windows UDF/ISO-9660 volume
+/// via `FSCTL_GET_RETRIEVAL_POINTERS` so `libdvdcss-2.dll` can unlock and decrypt pure-UDF DVDs.
+#[cfg(target_os = "windows")]
+fn query_windows_file_starting_lba(file_path: & std::path::Path) -> Option<u32> {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn DeviceIoControl(
+            h_device: *mut c_void,
+            dw_io_control_code: u32,
+            lp_in_buffer: *const c_void,
+            n_in_buffer_size: u32,
+            lp_out_buffer: *mut c_void,
+            n_out_buffer_size: u32,
+            lp_bytes_returned: *mut u32,
+            lp_overlapped: *mut c_void,
+        ) -> i32;
+    }
+    const FSCTL_GET_RETRIEVAL_POINTERS: u32 = 0x00090073;
+    #[repr(C)]
+    struct StartingVcnInput {
+        starting_vcn: i64,
+    }
+    #[repr(C)]
+    struct RetrievalPointersBuffer {
+        extent_count: u32,
+        _pad: u32,
+        starting_vcn: i64,
+        next_vcn: i64,
+        lcn: i64,
+    }
+    let f = File::open(file_path).ok()?;
+    let handle = f.as_raw_handle() as *mut c_void;
+    let input = StartingVcnInput { starting_vcn: 0 };
+    let mut out: RetrievalPointersBuffer = unsafe { std::mem::zeroed() };
+    let mut bytes_ret = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_GET_RETRIEVAL_POINTERS,
+            &input as *const StartingVcnInput as *const c_void,
+            std::mem::size_of::<StartingVcnInput>() as u32,
+            &mut out as *mut RetrievalPointersBuffer as *mut c_void,
+            std::mem::size_of::<RetrievalPointersBuffer>() as u32,
+            &mut bytes_ret,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok != 0 && out.extent_count > 0 && out.lcn > 0 {
+        return Some(out.lcn as u32);
+    }
+    None
+}
 
-    let Some((video_ts_dir, true)) = root_entries.get("VIDEO_TS").copied() else {
-        return Err(anyhow!("No /VIDEO_TS directory found on disc"));
+#[cfg(not(target_os = "windows"))]
+fn query_windows_file_starting_lba(_file_path: &std::path::Path) -> Option<u32> {
+    None
+}
+
+fn parse_mounted_dvd_directory(mount_root: &std::path::Path) -> Result<ParsedDvdDisc> {
+    let video_ts_dir = if mount_root.join("VIDEO_TS").is_dir() {
+        mount_root.join("VIDEO_TS")
+    } else if mount_root.join("VIDEO_TS.IFO").is_file() {
+        mount_root.to_path_buf()
+    } else {
+        return Err(anyhow!("No VIDEO_TS directory found in {}", mount_root.display()));
     };
 
-    let video_ts_bytes = read_sectors_raw(
-        &mut file,
-        video_ts_dir.extent_lba,
-        video_ts_dir.data_len.min(2 * 1024 * 1024) as usize,
-    )?;
-    let vts_files = parse_iso9660_directory_entries(&video_ts_bytes);
+    let vmg_path = video_ts_dir.join("VIDEO_TS.IFO");
+    let vmg_bytes = fs::read(&vmg_path)
+        .map_err(|e| anyhow!("Failed to read {}: {e}", vmg_path.display()))?;
 
-    let Some((vmg_entry, false)) = vts_files.get("VIDEO_TS.IFO").copied() else {
-        return Err(anyhow!("No /VIDEO_TS/VIDEO_TS.IFO found on disc"));
-    };
-
-    let vmg_bytes = read_sectors_raw(
-        &mut file,
-        vmg_entry.extent_lba,
-        vmg_entry.data_len.min(512 * 1024) as usize,
-    )?;
+    let mut volume_label = String::new();
+    #[cfg(target_os = "windows")]
+    {
+        extern "system" {
+            fn GetVolumeInformationW(
+                lp_root_path_name: *const u16,
+                lp_volume_name_buffer: *mut u16,
+                n_volume_name_size: u32,
+                lp_volume_serial_number: *mut u32,
+                lp_maximum_component_length: *mut u32,
+                lp_file_system_flags: *mut u32,
+                lp_file_system_name_buffer: *mut u16,
+                n_file_system_name_size: u32,
+            ) -> i32;
+        }
+        let s = mount_root.to_string_lossy();
+        if s.len() >= 2 && s.as_bytes()[1] == b':' {
+            let ch = (s.as_bytes()[0] as char).to_ascii_uppercase();
+            let root_wide: [u16; 4] = [ch as u16, b':' as u16, b'\\' as u16, 0];
+            let mut vol_buf = [0u16; 128];
+            let ok = unsafe {
+                GetVolumeInformationW(
+                    root_wide.as_ptr(),
+                    vol_buf.as_mut_ptr(),
+                    vol_buf.len() as u32,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if ok != 0 {
+                let len = vol_buf.iter().position(|&c| c == 0).unwrap_or(0);
+                volume_label = String::from_utf16_lossy(&vol_buf[..len]).trim().to_string();
+            }
+        }
+    }
+    if volume_label.is_empty() {
+        volume_label = mount_root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "DVD_VIDEO".to_string());
+    }
 
     parse_dvd_ifo_tables(&volume_label, &vmg_bytes, |vts_num| {
-        let ifo_name = format!("VTS_{:02}_0.IFO", vts_num);
-        let vob_name = format!("VTS_{:02}_1.VOB", vts_num);
-        let (ifo_entry, _) = vts_files.get(&ifo_name).copied()?;
-        let vob_lba = vts_files
-            .get(&vob_name)
-            .map(|(e, _)| e.extent_lba)
-            .unwrap_or(0);
-        let ifo_bytes = read_sectors_raw(
-            &mut file,
-            ifo_entry.extent_lba,
-            ifo_entry.data_len.min(2 * 1024 * 1024) as usize,
-        )
-        .ok()?;
+        let ifo_path = video_ts_dir.join(format!("VTS_{:02}_0.IFO", vts_num));
+        let vob_path = video_ts_dir.join(format!("VTS_{:02}_1.VOB", vts_num));
+        let ifo_bytes = fs::read(&ifo_path).ok()?;
+        let vob_lba = query_windows_file_starting_lba(&vob_path).unwrap_or(0);
         Some((ifo_bytes, vob_lba))
     })
+}
+
+/// Parses a DVD-Video disc from an optical device (`/dev/sr0`, `\\.\E:`), mounted drive (`E:\`), or ISO file.
+pub fn parse_dvd_device(device_path: &str) -> Result<ParsedDvdDisc> {
+    let raw_res = (|| -> Result<ParsedDvdDisc> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(device_path)
+            .map_err(|e| anyhow!("Cannot open {device_path}: {e}"))?;
+
+        // Read ISO-9660 Primary Volume Descriptor at Sector 16
+        let pvd = read_sectors_raw(&mut file, 16, DVD_SECTOR_SIZE)?;
+        if pvd.len() < 2048 || pvd[0] != 0x01 || &pvd[1..6] != b"CD001" {
+            return Err(anyhow!("Not an ISO-9660 / UDF bridge DVD volume"));
+        }
+
+        let volume_label = String::from_utf8_lossy(&pvd[40..72]).trim().to_string();
+        let root_lba = u32::from_le_bytes([pvd[158], pvd[159], pvd[160], pvd[161]]);
+        let root_len = u32::from_le_bytes([pvd[166], pvd[167], pvd[168], pvd[169]]);
+        if root_lba == 0 || root_len == 0 || root_len > 1024 * 1024 {
+            return Err(anyhow!("Invalid ISO-9660 root directory record"));
+        }
+
+        let root_bytes = read_sectors_raw(&mut file, root_lba, root_len as usize)?;
+        let root_entries = parse_iso9660_directory_entries(&root_bytes);
+
+        let Some((video_ts_dir, true)) = root_entries.get("VIDEO_TS").copied() else {
+            return Err(anyhow!("No /VIDEO_TS directory found on disc"));
+        };
+
+        let video_ts_bytes = read_sectors_raw(
+            &mut file,
+            video_ts_dir.extent_lba,
+            video_ts_dir.data_len.min(2 * 1024 * 1024) as usize,
+        )?;
+        let vts_files = parse_iso9660_directory_entries(&video_ts_bytes);
+
+        let Some((vmg_entry, false)) = vts_files.get("VIDEO_TS.IFO").copied() else {
+            return Err(anyhow!("No /VIDEO_TS/VIDEO_TS.IFO found on disc"));
+        };
+
+        let vmg_bytes = read_sectors_raw(
+            &mut file,
+            vmg_entry.extent_lba,
+            vmg_entry.data_len.min(512 * 1024) as usize,
+        )?;
+
+        parse_dvd_ifo_tables(&volume_label, &vmg_bytes, |vts_num| {
+            let ifo_name = format!("VTS_{:02}_0.IFO", vts_num);
+            let vob_name = format!("VTS_{:02}_1.VOB", vts_num);
+            let (ifo_entry, _) = vts_files.get(&ifo_name).copied()?;
+            let vob_lba = vts_files
+                .get(&vob_name)
+                .map(|(e, _)| e.extent_lba)
+                .unwrap_or(0);
+            let ifo_bytes = read_sectors_raw(
+                &mut file,
+                ifo_entry.extent_lba,
+                ifo_entry.data_len.min(2 * 1024 * 1024) as usize,
+            )
+            .ok()?;
+            Some((ifo_bytes, vob_lba))
+        })
+    })();
+
+    if raw_res.is_ok() {
+        return raw_res;
+    }
+
+    if let Some(mount_root) = windows_mounted_drive_root(device_path) {
+        if let Ok(mounted_disc) = parse_mounted_dvd_directory(&mount_root) {
+            return Ok(mounted_disc);
+        }
+    }
+
+    raw_res
 }
 
 pub fn parse_dvd_ifo_tables<F>(
@@ -631,6 +1076,28 @@ fn parse_vts_title(
 
         if let Some(pgc_off) = target_pgc_offset {
             if pgc_off + 0xEC <= vts_bytes.len() {
+                // Map logical Audio Tracks (`0..8`) via PGC Audio Stream Control Table (`pgc_off + 0x0C`)
+                for (idx, track) in audio_tracks.iter_mut().enumerate() {
+                    let ctl_off = pgc_off + 0x0C + idx * 2;
+                    if ctl_off + 2 <= vts_bytes.len() && (vts_bytes[ctl_off] & 0x80) != 0 {
+                        track.stream_index = vts_bytes[ctl_off] & 0x07;
+                    }
+                }
+                // Map logical Subtitle Tracks (`0..32`) via PGC Subpicture Stream Control Table (`pgc_off + 0x1C`)
+                let is_wide = aspect_ratio == "16:9";
+                for (idx, sub) in subtitle_tracks.iter_mut().enumerate() {
+                    let ctl_off = pgc_off + 0x1C + idx * 4;
+                    if ctl_off + 4 <= vts_bytes.len() && (vts_bytes[ctl_off] & 0x80) != 0 {
+                        let s_43 = vts_bytes[ctl_off] & 0x1F;
+                        let s_wide = vts_bytes[ctl_off + 1] & 0x1F;
+                        sub.stream_index = if is_wide && (s_wide != 0 || idx == 0) {
+                            s_wide
+                        } else {
+                            s_43
+                        };
+                    }
+                }
+
                 let num_programs = vts_bytes[pgc_off + 2] as usize;
                 let num_cells = vts_bytes[pgc_off + 3] as usize;
                 duration_ms = decode_dvd_bcd_time(&vts_bytes[pgc_off + 4..pgc_off + 8]);
@@ -829,10 +1296,7 @@ struct DvdArtCacheEntry {
 }
 
 fn dvd_cache_file_path() -> PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("simp")
-        .join("dvd_cache.json")
+    crate::simp_data_dir().join("dvd_cache.json")
 }
 
 fn lookup_or_fetch_dvd_poster(disc: &mut ParsedDvdDisc, force_refresh: bool) {
@@ -887,12 +1351,10 @@ fn lookup_or_fetch_dvd_poster(disc: &mut ParsedDvdDisc, force_refresh: bool) {
     let url = format!(
         "https://itunes.apple.com/search?term={encoded}&media=movie&limit=3"
     );
-    if let Ok(out) = Command::new("curl")
-        .args(["-4", "--http1.1", "-sL", "--max-time", "5", &url])
-        .output()
+    if let Ok(bytes) = crate::http_pool::http_get_bytes(&url, &[], None, 5)
     {
-        if out.status.success() {
-            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+        if !bytes.is_empty() {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                 if let Some(first) = json
                     .get("results")
                     .and_then(|v| v.as_array())
@@ -932,20 +1394,34 @@ pub fn scan_dvd_disc(device_path: &str, force_refresh: bool) -> Option<OpticalDi
     let mut parsed = parse_dvd_device(device_path).ok()?;
     lookup_or_fetch_dvd_poster(&mut parsed, force_refresh);
 
-    let css_available = find_libdvdcss_path().is_some();
+    let css_dll_available = find_libdvdcss_path().is_some();
+    let vlc_available = find_vlc_binary().is_some();
+    let css_available = css_dll_available || vlc_available;
     let ffmpeg_available = find_ffmpeg_binary().is_some();
     let dvd_titles: Vec<DvdTitleInfo> = parsed.titles.iter().map(|t| t.info.clone()).collect();
 
+    let css_lib_hint = if cfg!(target_os = "windows") {
+        "install VLC or place libdvdcss-2.dll in data\\lib\\"
+    } else {
+        "place libdvdcss.so.2 in ~/.local/share/simp/lib/"
+    };
+    let css_label = if css_dll_available {
+        "CSS"
+    } else {
+        "VLC CSS"
+    };
     let status_message = match (css_available, ffmpeg_available) {
         (true, true) => format!(
-            "DVD-Video ready ({} title{}, CSS + ffmpeg active)",
+            "DVD-Video ready ({} title{}, {} + ffmpeg active)",
             dvd_titles.len(),
-            if dvd_titles.len() == 1 { "" } else { "s" }
+            if dvd_titles.len() == 1 { "" } else { "s" },
+            css_label
         ),
         (false, true) => format!(
-            "DVD-Video detected ({} title{}) — place libdvdcss.so.2 in ~/.local/share/simp/lib/ for encrypted discs",
+            "DVD-Video detected ({} title{}) — {} for encrypted discs",
             dvd_titles.len(),
-            if dvd_titles.len() == 1 { "" } else { "s" }
+            if dvd_titles.len() == 1 { "" } else { "s" },
+            css_lib_hint
         ),
         (_, false) => "DVD-Video detected — install ffmpeg to enable video transcoding".to_string(),
     };
@@ -973,14 +1449,323 @@ pub fn scan_dvd_disc(device_path: &str, force_refresh: bool) -> Option<OpticalDi
 // 4. Live PGC Sector Streamer + `ffmpeg` Fragmented MP4 Transcode Pipeline
 // ============================================================================
 
+/// Extracts the 6-byte MPEG-2 Pack `SCR` and 5-byte PES `PTS` from the first video (`0xE0`)
+/// or audio (`0xBD` / `0xC0`) packet in `buf` that carries a valid PTS.
+/// Falls back to `PTS = 0` (`[0x21, 0x00, 0x01, 0x00, 0x01]`) if none is found.
+fn extract_first_pes_scr_and_pts(buf: &[u8]) -> ([u8; 6], [u8; 5]) {
+    let mut fallback_scr = [0x44, 0x00, 0x04, 0x00, 0x04, 0x01];
+    for sector in buf.chunks_exact(DVD_SECTOR_SIZE) {
+        if sector[0..4] != [0x00, 0x00, 0x01, 0xBA] {
+            continue;
+        }
+        let mut scr = [0u8; 6];
+        scr.copy_from_slice(&sector[4..10]);
+        fallback_scr = scr;
+        let stuffing = (sector[13] & 0x07) as usize;
+        let mut pos = 14 + stuffing;
+        while pos + 14 <= DVD_SECTOR_SIZE {
+            if sector[pos] != 0x00 || sector[pos + 1] != 0x00 || sector[pos + 2] != 0x01 {
+                break;
+            }
+            let stream_id = sector[pos + 3];
+            let pes_len = u16::from_be_bytes([sector[pos + 4], sector[pos + 5]]) as usize;
+            if pes_len == 0 {
+                break;
+            }
+            if ((0xE0..=0xEF).contains(&stream_id)
+                || stream_id == 0xBD
+                || (0xC0..=0xDF).contains(&stream_id))
+                && (sector[pos + 6] & 0xC0) == 0x80
+                && (sector[pos + 7] & 0x80) != 0
+                && sector[pos + 8] >= 5
+            {
+                let mut pts = [0u8; 5];
+                pts.copy_from_slice(&sector[pos + 9..pos + 14]);
+                return (scr, pts);
+            }
+            pos += 6 + pes_len;
+        }
+    }
+    (fallback_scr, [0x21, 0x00, 0x01, 0x00, 0x01])
+}
+
+/// Builds a synthetic 2048-byte MPEG-2 Pack containing a `PRIVATE_STREAM_1` (`0xBD`) PES packet
+/// for DVD subtitle substream `0x20` (`0:s:0`) stamped with the exact `SCR` and 5-byte `PTS`
+/// of the first VOBU in the stream.
+///
+/// Why a valid `PTS` (`PTS_DTS_flags = 0x80`) is required:
+/// `fftools/ffmpeg_dec.c` (`process_subtitle`) discards any subtitle packet with `PTS == AV_NOPTS_VALUE`
+/// ("Subtitle packets must have a pts"), which otherwise prevents `sub2video` from initializing pad 1
+/// of `vf_overlay` when seeking or switching subtitles mid-chapter.
+pub fn build_bootstrap_spu_sector(scr: [u8; 6], pts: [u8; 5]) -> [u8; DVD_SECTOR_SIZE] {
+    let mut sector = [0u8; DVD_SECTOR_SIZE];
+    // 14-byte MPEG-2 Pack Header (`00 00 01 BA`, matching VOBU SCR, mux_rate = 25200, stuffing = 0)
+    sector[0..4].copy_from_slice(&[0x00, 0x00, 0x01, 0xBA]);
+    sector[4..10].copy_from_slice(&scr);
+    sector[10..14].copy_from_slice(&[0x01, 0x89, 0xC3, 0xF8]);
+
+    // 25-byte `PRIVATE_STREAM_1` (`00 00 01 BD`) PES packet at offset 14:
+    // - pes_len = 19 (`0x0013`: 3 bytes PES flags/hdr_len + 5 bytes PTS + 1 byte substream `0x20` + 10 bytes SPU)
+    // - flags: `0x80, 0x80, 0x05` (MPEG-2 PES, PTS present, 5-byte header data)
+    sector[14..23].copy_from_slice(&[0x00, 0x00, 0x01, 0xBD, 0x00, 0x13, 0x80, 0x80, 0x05]);
+    sector[23..28].copy_from_slice(&pts);
+    sector[28] = 0x20; // DVD subtitle substream 0 (`0:s:0`)
+    // Valid 10-byte stop-display SPU (`spu_size = 10`, `dcsq_offset = 4`, `stm = 0`, `next = 4`, `STP_DSP = 0x02`, `END = 0xFF`)
+    sector[29..39]
+        .copy_from_slice(&[0x00, 0x0A, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x02, 0xFF]);
+
+    // Fill remaining 2009 bytes (`39..2048`) with a standard MPEG-2 Padding Stream (`00 00 01 BE`)
+    let pad_len = (DVD_SECTOR_SIZE - 39 - 6) as u16;
+    sector[39..43].copy_from_slice(&[0x00, 0x00, 0x01, 0xBE]);
+    sector[43..45].copy_from_slice(&pad_len.to_be_bytes());
+    sector[45..].fill(0xFF);
+    sector
+}
+
+/// Returns true if `sector` is a DVD VOBU NAV Pack (`00 00 01 BA` + `00 00 01 BB` System Header at offset 14)
+/// or starts an MPEG-2 Video Sequence Header (`00 00 01 B3`).
+fn is_vobu_nav_or_seq_sector(sector: &[u8]) -> bool {
+    if sector.len() < DVD_SECTOR_SIZE || sector[0..4] != [0x00, 0x00, 0x01, 0xBA] {
+        return false;
+    }
+    if sector[14..18] == [0x00, 0x00, 0x01, 0xBB] {
+        return true;
+    }
+    sector[14..256].windows(4).any(|w| w == [0x00, 0x00, 0x01, 0xB3])
+}
+
+/// Normalizes 2048-byte DVD `.VOB` sectors in-place before writing to `ffmpeg_stdin`:
+/// 1. Clears any residual PES scrambling flags (`sector[0x14] &= !0x30`) if a drive/library left bits set.
+/// 2. Maps the user's selected DVD subtitle substream (`0x20 + sub_idx`, or its 4:3/16:9 pair) to `0x20` (`0:s:0`)
+///    and converts all other subtitle substreams (`0x20..=0x3F`) into `0xBE` Padding Stream packets.
+/// 3. Converts unselected audio substreams (`0x80..=0x8F`, `0xA0..=0xA7`) into `0xBE` Padding Stream
+///    packets so the selected `audio_idx` is deterministically exposed as `0:a:0`.
+pub fn normalize_dvd_sector_streams(
+    buf: &mut [u8],
+    audio_idx: u8,
+    sub_candidates: &[u8],
+    locked_sub_id: &mut Option<u8>,
+) {
+    for sector in buf.chunks_exact_mut(DVD_SECTOR_SIZE) {
+        if sector[0..4] != [0x00, 0x00, 0x01, 0xBA] {
+            continue;
+        }
+        sector[0x14] &= !0x30;
+        let stuffing = (sector[13] & 0x07) as usize;
+        let mut pos = 14 + stuffing;
+        while pos + 6 <= DVD_SECTOR_SIZE {
+            if sector[pos] != 0x00 || sector[pos + 1] != 0x00 || sector[pos + 2] != 0x01 {
+                break;
+            }
+            let stream_id = sector[pos + 3];
+            let pes_len = u16::from_be_bytes([sector[pos + 4], sector[pos + 5]]) as usize;
+            if pes_len == 0 {
+                break;
+            }
+            let next_pos = pos + 6 + pes_len;
+            if stream_id == 0xBD {
+                if pos + 9 < DVD_SECTOR_SIZE && (sector[pos + 6] & 0xC0) == 0x80 {
+                    sector[pos + 6] &= !0x30;
+                    let hdr_len = sector[pos + 8] as usize;
+                    let sub_pos = pos + 9 + hdr_len;
+                    if sub_pos < DVD_SECTOR_SIZE && sub_pos < next_pos {
+                        let sub_id = sector[sub_pos];
+                        if (0x20..=0x3F).contains(&sub_id) {
+                            let phys_idx = sub_id & 0x1F;
+                            if !sub_candidates.is_empty() {
+                                let matches = if let Some(locked) = *locked_sub_id {
+                                    phys_idx == locked
+                                } else if sub_candidates.contains(&phys_idx) {
+                                    *locked_sub_id = Some(phys_idx);
+                                    true
+                                } else {
+                                    false
+                                };
+                                if matches {
+                                    sector[sub_pos] = 0x20;
+                                } else {
+                                    sector[pos + 3] = 0xBE;
+                                }
+                            } else {
+                                sector[pos + 3] = 0xBE;
+                            }
+                        } else if (0x80..=0x8F).contains(&sub_id)
+                            || (0xA0..=0xA7).contains(&sub_id)
+                        {
+                            if (sub_id & 0x07) != (audio_idx & 0x07) {
+                                sector[pos + 3] = 0xBE;
+                            }
+                        }
+                    }
+                }
+            } else if (0xE0..=0xEF).contains(&stream_id) || (0xC0..=0xDF).contains(&stream_id) {
+                if pos + 6 < DVD_SECTOR_SIZE {
+                    sector[pos + 6] &= !0x30;
+                }
+                if (0xC0..=0xC7).contains(&stream_id) && (stream_id & 0x07) != (audio_idx & 0x07) {
+                    sector[pos + 3] = 0xBE;
+                }
+            }
+            pos = next_pos;
+        }
+    }
+}
+
+/// Uses an installed VLC binary (`vlc.exe` / `vlc`) in headless `dummy` mode to CSS-decrypt
+/// `(device_path, title_number, start_chapter, seek_ms)` via `dvdsimple://` and relay the MPEG-PS
+/// stream over a local loopback socket into `ffmpeg_stdin`.
+fn stream_via_vlc_decryptor(
+    vlc_bin: &std::path::Path,
+    device_path: &str,
+    title_number: u16,
+    start_chapter: u16,
+    seek_ms: Option<u32>,
+    audio_stream_index: u8,
+    subtitle_stream_index: Option<u8>,
+    ffmpeg_stdin: &mut std::process::ChildStdin,
+) -> bool {
+    let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else {
+        return false;
+    };
+    let Ok(addr) = listener.local_addr() else {
+        return false;
+    };
+    let port = addr.port();
+    drop(listener);
+
+    let ch_num = if seek_ms.unwrap_or(0) > 0 {
+        1
+    } else {
+        start_chapter.max(1)
+    };
+    let mrl = if let Some(rest) = device_path.strip_prefix(r"\\.\") {
+        let drive = rest.trim_end_matches('\\');
+        format!("dvdsimple:///{drive}/#{title_number}:{ch_num}")
+    } else if device_path.len() >= 2 && device_path.as_bytes()[1] == b':' {
+        let drive = &device_path[..2];
+        format!("dvdsimple:///{drive}/#{title_number}:{ch_num}")
+    } else {
+        format!("dvdsimple://{device_path}#{title_number}:{ch_num}")
+    };
+
+    let sout_arg = format!(
+        "--sout=#standard{{access=http,mux=ps,dst=127.0.0.1:{port}/stream.mpg}}"
+    );
+    let mut vlc_args: Vec<String> = vec![
+        "-I".to_string(),
+        "dummy".to_string(),
+        "--dummy-quiet".to_string(),
+        "--no-video-title-show".to_string(),
+        "--no-repeat".to_string(),
+        "--play-and-exit".to_string(),
+        format!("--audio-track={audio_stream_index}"),
+    ];
+    if let Some(sub_idx) = subtitle_stream_index {
+        vlc_args.push(format!("--sub-track={sub_idx}"));
+        vlc_args.push("--sout-spu".to_string());
+    } else {
+        vlc_args.push("--no-spu".to_string());
+    }
+    if let Some(ms) = seek_ms.filter(|&ms| ms > 0) {
+        vlc_args.push(format!("--start-time={:.2}", (ms as f64) / 1000.0));
+    }
+    vlc_args.push(mrl);
+    vlc_args.push(sout_arg);
+
+    let mut vlc_cmd = Command::new(vlc_bin);
+    vlc_cmd
+        .args(&vlc_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::configure_background_command(&mut vlc_cmd);
+
+    let Ok(mut vlc_child) = vlc_cmd.spawn() else {
+        return false;
+    };
+
+    let mut spu_bootstrapped = false;
+    let mut streamed_bytes = 0usize;
+    let mut tcp_opt: Option<std::net::TcpStream> = None;
+    for _ in 0..80 {
+        if let Ok(Some(_)) = vlc_child.try_wait() {
+            break;
+        }
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(12)));
+            if stream
+                .write_all(b"GET /stream.mpg HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .is_ok()
+            {
+                let mut hdr_buf = [0u8; 4096];
+                if let Ok(n) = stream.read(&mut hdr_buf) {
+                    if n > 0 && hdr_buf[..n].starts_with(b"HTTP/1.") {
+                        if let Some(pos) = hdr_buf[..n]
+                            .windows(4)
+                            .position(|w| w == b"\r\n\r\n")
+                        {
+                            let body_start = pos + 4;
+                            if body_start < n {
+                                let payload = &hdr_buf[body_start..n];
+                                if subtitle_stream_index.is_some() && !spu_bootstrapped {
+                                    let (scr, pts) = extract_first_pes_scr_and_pts(payload);
+                                    let spu_sec = build_bootstrap_spu_sector(scr, pts);
+                                    let _ = ffmpeg_stdin.write_all(&spu_sec);
+                                    spu_bootstrapped = true;
+                                }
+                                if ffmpeg_stdin.write_all(payload).is_err() {
+                                    let _ = vlc_child.kill();
+                                    let _ = vlc_child.wait();
+                                    return true;
+                                }
+                                streamed_bytes += payload.len();
+                            }
+                            tcp_opt = Some(stream);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+
+    if let Some(mut stream) = tcp_opt {
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if subtitle_stream_index.is_some() && !spu_bootstrapped {
+                        let (scr, pts) = extract_first_pes_scr_and_pts(&chunk[..n]);
+                        let spu_sec = build_bootstrap_spu_sector(scr, pts);
+                        let _ = ffmpeg_stdin.write_all(&spu_sec);
+                        spu_bootstrapped = true;
+                    }
+                    streamed_bytes += n;
+                    if ffmpeg_stdin.write_all(&chunk[..n]).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    let _ = vlc_child.kill();
+    let _ = vlc_child.wait();
+    streamed_bytes > 0
+}
+
 /// Spawns an `ffmpeg` fragmented MP4 (`video/mp4`) child process fed by a background thread
-/// reading and CSS-decrypting the exact PGC sector spans for `(title_number, chapter_number)`.
+/// reading and CSS-decrypting the exact PGC sector spans for `(title_number, chapter_number, seek_ms)`.
 pub fn spawn_dvd_title_mp4_stream(
     device_path: &str,
     title_number: u16,
     start_chapter: u16,
     audio_stream_index: u8,
     subtitle_stream_index: Option<u8>,
+    seek_ms: Option<u32>,
 ) -> Result<Child> {
     let ffmpeg_bin = find_ffmpeg_binary()
         .ok_or_else(|| anyhow!("ffmpeg not found in ~/.local/share/simp/bin/ or PATH"))?;
@@ -991,7 +1776,19 @@ pub fn spawn_dvd_title_mp4_stream(
         .find(|t| t.info.title_number == title_number)
         .ok_or_else(|| anyhow!("DVD Title {title_number} not found on disc"))?;
 
-    if target_title.vob_base_lba == 0 || target_title.cell_spans.is_empty() {
+    let mounted_vts_root = windows_mounted_drive_root(device_path).and_then(|r| {
+        if r.join("VIDEO_TS").is_dir() {
+            Some(r.join("VIDEO_TS"))
+        } else if r.join("VIDEO_TS.IFO").is_file() {
+            Some(r)
+        } else {
+            None
+        }
+    });
+
+    if (target_title.vob_base_lba == 0 && mounted_vts_root.is_none())
+        || target_title.cell_spans.is_empty()
+    {
         return Err(anyhow!(
             "DVD Title {title_number} has no readable VTS VOB sector spans"
         ));
@@ -1002,38 +1799,51 @@ pub fn spawn_dvd_title_mp4_stream(
         "-loglevel".to_string(),
         "error".to_string(),
         "-fflags".to_string(),
-        "+genpts+igndts".to_string(),
+        "+genpts+discardcorrupt".to_string(),
+        "-probesize".to_string(),
+        "10M".to_string(),
+        "-analyzeduration".to_string(),
+        "10M".to_string(),
         "-f".to_string(),
         "mpeg".to_string(),
         "-i".to_string(),
         "pipe:0".to_string(),
+        // Trim the ~350ms DVD VBV audio preload lead-in at the start of VOBUs so both
+        // video and audio start at `tfdt = 0` in perfect lip-sync inside `empty_moov` fMP4
+        "-ss".to_string(),
+        "0.35".to_string(),
     ];
 
-    if let Some(sub_idx) = subtitle_stream_index {
+    if subtitle_stream_index.is_some() {
         args.push("-filter_complex".to_string());
-        args.push(format!(
-            "[0:v:0]yadif[v];[v][0:s:{sub_idx}]overlay[outv]"
-        ));
+        args.push(
+            "[0:v:0]yadif=0:-1:1[v];[v][0:s:0]overlay=eof_action=pass:repeatlast=0[outv]"
+                .to_string(),
+        );
         args.push("-map".to_string());
         args.push("[outv]".to_string());
     } else {
         args.push("-vf".to_string());
-        args.push("yadif".to_string());
+        args.push("yadif=0:-1:1".to_string());
         args.push("-map".to_string());
         args.push("0:v:0".to_string());
     }
 
     args.extend([
         "-map".to_string(),
-        format!("0:a:{}?", audio_stream_index),
+        "0:a:0?".to_string(),
+        "-af".to_string(),
+        "aresample=async=1000".to_string(),
         "-c:v".to_string(),
         "libx264".to_string(),
         "-preset".to_string(),
         "ultrafast".to_string(),
         "-tune".to_string(),
         "zerolatency".to_string(),
+        "-g".to_string(),
+        "48".to_string(),
         "-crf".to_string(),
-        "21".to_string(),
+        "20".to_string(),
         "-pix_fmt".to_string(),
         "yuv420p".to_string(),
         "-c:a".to_string(),
@@ -1049,11 +1859,13 @@ pub fn spawn_dvd_title_mp4_stream(
         "pipe:1".to_string(),
     ]);
 
-    let mut child = Command::new(ffmpeg_bin)
-        .args(&args)
+    let mut cmd = Command::new(ffmpeg_bin);
+    cmd.args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    crate::configure_background_command(&mut cmd);
+    let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("Failed to spawn ffmpeg: {e}"))?;
 
@@ -1063,61 +1875,354 @@ pub fn spawn_dvd_title_mp4_stream(
 
     let dev_owned = device_path.to_string();
     let vob_base = target_title.vob_base_lba;
-    let spans: Vec<DvdCellSectorSpan> = target_title
-        .cell_spans
-        .into_iter()
-        .filter(|s| s.chapter_number >= start_chapter.max(1))
-        .collect();
+    let vts_num = target_title.info.vts_number;
+    // Build candidate physical subtitle substreams (`sub_idx`, `sub_idx ^ 1` for 4:3/16:9 pairs)
+    let sub_candidates: Vec<u8> = if let Some(s) = subtitle_stream_index {
+        let base = s & 0x1F;
+        let mut c = vec![base];
+        // On 16:9 DVDs where each language has a 4:3 + 16:9 substream pair, allow adjacent pair fallback
+        if target_title.info.subtitle_tracks.len() <= 8 {
+            let alt = base ^ 1;
+            if !target_title
+                .info
+                .subtitle_tracks
+                .iter()
+                .any(|t| t.stream_index == alt)
+            {
+                c.push(alt);
+            }
+        }
+        c
+    } else {
+        Vec::new()
+    };
+
+    let mut spans: Vec<DvdCellSectorSpan> = if let Some(target_ms) = seek_ms.filter(|&ms| ms > 0) {
+        let mut matched: Vec<DvdCellSectorSpan> = target_title
+            .cell_spans
+            .iter()
+            .filter(|s| s.start_ms.saturating_add(s.duration_ms.max(1)) > target_ms)
+            .cloned()
+            .collect();
+        if matched.is_empty() {
+            if let Some(last) = target_title.cell_spans.last() {
+                matched.push(last.clone());
+            }
+        }
+        if let Some(first) = matched.first_mut() {
+            let cell_offset_ms = target_ms.saturating_sub(first.start_ms);
+            if cell_offset_ms > 0
+                && first.duration_ms > 0
+                && first.last_sector > first.first_sector
+            {
+                let total_sectors = (first.last_sector - first.first_sector) as u64;
+                let skip_sectors =
+                    ((cell_offset_ms as u64) * total_sectors) / (first.duration_ms as u64);
+                first.first_sector = first
+                    .first_sector
+                    .saturating_add(skip_sectors as u32)
+                    .min(first.last_sector);
+            }
+        }
+        matched
+    } else {
+        target_title
+            .cell_spans
+            .into_iter()
+            .filter(|s| s.chapter_number >= start_chapter.max(1))
+            .collect()
+    };
+    if spans.is_empty() {
+        return Err(anyhow!("No playable DVD cells matched the requested position"));
+    }
 
     std::thread::spawn(move || {
         const CHUNK_SECTORS: usize = 32; // 64 KB per read
         let mut buf = vec![0u8; CHUNK_SECTORS * DVD_SECTOR_SIZE];
+        let mut locked_sub_id: Option<u8> = None;
 
-        if let Some(mut css) = DvdCssSession::open(&dev_owned) {
-            // Unlock title CSS key at the start of the VTS VOB
-            let _ = css.seek_sector(vob_base, true);
-            for (idx, span) in spans.iter().enumerate() {
-                let start_lba = vob_base.saturating_add(span.first_sector);
-                let end_lba = vob_base.saturating_add(span.last_sector);
-                if css.seek_sector(start_lba, idx == 0).is_err() {
-                    break;
+        if vob_base > 0 {
+            if let Some(mut css) = DvdCssSession::open(&dev_owned) {
+                let first_span_lba = vob_base.saturating_add(spans[0].first_sector);
+                // Unlock VTS title CSS key ONCE at `vob_base` (with fallback to `first_span_lba`)
+                if css.seek_sector(vob_base, true).is_err() {
+                    let _ = css.seek_sector(first_span_lba, true);
                 }
-                let mut cur = start_lba;
-                while cur <= end_lba {
-                    let count = ((end_lba - cur + 1) as usize).min(CHUNK_SECTORS);
-                    match css.read_sectors(&mut buf[..count * DVD_SECTOR_SIZE], count, true) {
-                        Ok(n) if n > 0 => {
-                            if ffmpeg_stdin.write_all(&buf[..n * DVD_SECTOR_SIZE]).is_err() {
-                                return;
-                            }
-                            cur += n as u32;
+                let mut css_streamed_sectors = 0usize;
+                let mut spu_bootstrapped = false;
+                let mut aligned_to_vobu = false;
+                let mut skipped_for_vobu = 0usize;
+                let mut expected_next_lba: Option<u32> = None;
+                let mut css_failed_at_start = false;
+
+                for span in &spans {
+                    let start_lba = vob_base.saturating_add(span.first_sector);
+                    let end_lba = vob_base.saturating_add(span.last_sector);
+                    // Only seek when non-contiguous (`expected_next_lba != Some(start_lba)`),
+                    // and use `DVDCSS_SEEK_MPEG` (`unlock_key = false`) so `libdvdcss` never wipes
+                    // the already-unlocked VTS Title Key during chapter transitions!
+                    if expected_next_lba != Some(start_lba) {
+                        if css.seek_sector(start_lba, false).is_err() {
+                            break;
                         }
-                        _ => break,
                     }
-                }
-            }
-        } else if let Ok(mut raw_file) = OpenOptions::new().read(true).open(&dev_owned) {
-            // Fallback for unencrypted DVDs when libdvdcss.so.2 is not present
-            for span in &spans {
-                let start_lba = vob_base.saturating_add(span.first_sector);
-                let end_lba = vob_base.saturating_add(span.last_sector);
-                if raw_file
-                    .seek(SeekFrom::Start((start_lba as u64) * (DVD_SECTOR_SIZE as u64)))
-                    .is_err()
-                {
-                    break;
-                }
-                let mut cur = start_lba;
-                while cur <= end_lba {
-                    let count = ((end_lba - cur + 1) as usize).min(CHUNK_SECTORS);
-                    let byte_count = count * DVD_SECTOR_SIZE;
-                    if raw_file.read_exact(&mut buf[..byte_count]).is_err() {
+                    let mut cur = start_lba;
+                    while cur <= end_lba {
+                        let count = ((end_lba - cur + 1) as usize).min(CHUNK_SECTORS);
+                        match css.read_sectors(&mut buf[..count * DVD_SECTOR_SIZE], count, true) {
+                            Ok(n) if n > 0 => {
+                                let byte_len = n * DVD_SECTOR_SIZE;
+                                cur += n as u32;
+                                expected_next_lba = Some(cur);
+
+                                // Verify first read chunk isn't still CSS-scrambled (`0x14 & 0x30 != 0`)
+                                if css_streamed_sectors == 0 && skipped_for_vobu == 0 {
+                                    let still_scrambled = buf[..byte_len]
+                                        .chunks_exact(DVD_SECTOR_SIZE)
+                                        .any(|sec| {
+                                            sec[0..4] == [0x00, 0x00, 0x01, 0xBA]
+                                                && (sec[0x14] & 0x30) != 0
+                                        });
+                                    if still_scrambled {
+                                        css_failed_at_start = true;
+                                        break;
+                                    }
+                                }
+
+                                // Align stream start (especially after `seek_ms`) to a DVD VOBU NAV Pack / Sequence Header
+                                let mut write_start_off = 0usize;
+                                if !aligned_to_vobu {
+                                    if let Some(sec_idx) = buf[..byte_len]
+                                        .chunks_exact(DVD_SECTOR_SIZE)
+                                        .position(is_vobu_nav_or_seq_sector)
+                                    {
+                                        write_start_off = sec_idx * DVD_SECTOR_SIZE;
+                                        aligned_to_vobu = true;
+                                    } else if skipped_for_vobu + n < 192 {
+                                        skipped_for_vobu += n;
+                                        continue;
+                                    } else {
+                                        aligned_to_vobu = true;
+                                    }
+                                }
+
+                                let slice = &mut buf[write_start_off..byte_len];
+                                if slice.is_empty() {
+                                    continue;
+                                }
+
+                                if !spu_bootstrapped {
+                                    if !sub_candidates.is_empty() {
+                                        let (scr, pts) = extract_first_pes_scr_and_pts(slice);
+                                        let spu_sec = build_bootstrap_spu_sector(scr, pts);
+                                        if ffmpeg_stdin.write_all(&spu_sec).is_err() {
+                                            return;
+                                        }
+                                    }
+                                    spu_bootstrapped = true;
+                                }
+
+                                normalize_dvd_sector_streams(
+                                    slice,
+                                    audio_stream_index,
+                                    &sub_candidates,
+                                    &mut locked_sub_id,
+                                );
+                                if ffmpeg_stdin.write_all(slice).is_err() {
+                                    return;
+                                }
+                                css_streamed_sectors += slice.len() / DVD_SECTOR_SIZE;
+                            }
+                            _ => {
+                                if css_streamed_sectors == 0 {
+                                    css_failed_at_start = true;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if css_failed_at_start {
                         break;
                     }
-                    if ffmpeg_stdin.write_all(&buf[..byte_count]).is_err() {
-                        return;
+                }
+                if css_streamed_sectors > 0 {
+                    return;
+                }
+            }
+        }
+
+        // Fallback to VLC headless `dvdsimple://` decryptor when VLC is installed and no standalone `libdvdcss-2.dll` is present
+        if let Some(vlc_bin) = find_vlc_binary() {
+            if stream_via_vlc_decryptor(
+                &vlc_bin,
+                &dev_owned,
+                title_number,
+                start_chapter,
+                seek_ms,
+                audio_stream_index,
+                subtitle_stream_index,
+                &mut ffmpeg_stdin,
+            ) {
+                return;
+            }
+        }
+
+        if vob_base > 0 {
+            if let Ok(mut raw_file) = OpenOptions::new().read(true).open(&dev_owned) {
+                // Fallback for unencrypted DVDs when libdvdcss is not present
+                let mut streamed_any = false;
+                let mut spu_bootstrapped = false;
+                let mut aligned_to_vobu = false;
+                let mut skipped_for_vobu = 0usize;
+                for span in &spans {
+                    let start_lba = vob_base.saturating_add(span.first_sector);
+                    let end_lba = vob_base.saturating_add(span.last_sector);
+                    if raw_file
+                        .seek(SeekFrom::Start((start_lba as u64) * (DVD_SECTOR_SIZE as u64)))
+                        .is_err()
+                    {
+                        break;
                     }
-                    cur += count as u32;
+                    let mut cur = start_lba;
+                    while cur <= end_lba {
+                        let count = ((end_lba - cur + 1) as usize).min(CHUNK_SECTORS);
+                        let byte_count = count * DVD_SECTOR_SIZE;
+                        if raw_file.read_exact(&mut buf[..byte_count]).is_err() {
+                            break;
+                        }
+                        cur += count as u32;
+
+                        let mut write_start_off = 0usize;
+                        if !aligned_to_vobu {
+                            if let Some(sec_idx) = buf[..byte_count]
+                                .chunks_exact(DVD_SECTOR_SIZE)
+                                .position(is_vobu_nav_or_seq_sector)
+                            {
+                                write_start_off = sec_idx * DVD_SECTOR_SIZE;
+                                aligned_to_vobu = true;
+                            } else if skipped_for_vobu + count < 192 {
+                                skipped_for_vobu += count;
+                                continue;
+                            } else {
+                                aligned_to_vobu = true;
+                            }
+                        }
+                        let slice = &mut buf[write_start_off..byte_count];
+                        if !spu_bootstrapped {
+                            if !sub_candidates.is_empty() {
+                                let (scr, pts) = extract_first_pes_scr_and_pts(slice);
+                                let spu_sec = build_bootstrap_spu_sector(scr, pts);
+                                if ffmpeg_stdin.write_all(&spu_sec).is_err() {
+                                    return;
+                                }
+                            }
+                            spu_bootstrapped = true;
+                        }
+                        normalize_dvd_sector_streams(
+                            slice,
+                            audio_stream_index,
+                            &sub_candidates,
+                            &mut locked_sub_id,
+                        );
+                        streamed_any = true;
+                        if ffmpeg_stdin.write_all(slice).is_err() {
+                            return;
+                        }
+                    }
+                }
+                if streamed_any {
+                    return;
+                }
+            }
+        }
+
+        // Mounted VIDEO_TS/VTS_XX_1..9.VOB fallback on Windows / mounted folders
+        if let Some(vts_dir) = mounted_vts_root {
+            let mut vob_parts: Vec<(PathBuf, u64, u64)> = Vec::new();
+            let mut running_sectors = 0u64;
+            for part in 1..=9u8 {
+                let p = vts_dir.join(format!("VTS_{:02}_{}.VOB", vts_num, part));
+                if let Ok(meta) = fs::metadata(&p) {
+                    let sectors = meta.len() / (DVD_SECTOR_SIZE as u64);
+                    if sectors > 0 {
+                        vob_parts.push((p, running_sectors, running_sectors + sectors));
+                        running_sectors += sectors;
+                    }
+                } else {
+                    break;
+                }
+            }
+            let mut spu_bootstrapped = false;
+            let mut aligned_to_vobu = false;
+            let mut skipped_for_vobu = 0usize;
+            for span in &mut spans {
+                let mut cur_sec = span.first_sector as u64;
+                let end_sec = span.last_sector as u64;
+                while cur_sec <= end_sec {
+                    let Some((part_path, part_start, part_end)) = vob_parts
+                        .iter()
+                        .find(|(_, s, e)| cur_sec >= *s && cur_sec < *e)
+                    else {
+                        break;
+                    };
+                    let Ok(mut vf) = File::open(part_path) else {
+                        break;
+                    };
+                    let rel_sec = cur_sec - *part_start;
+                    if vf
+                        .seek(SeekFrom::Start(rel_sec * (DVD_SECTOR_SIZE as u64)))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let max_in_part = (*part_end - cur_sec).min(end_sec - cur_sec + 1);
+                    let mut rem_in_part = max_in_part;
+                    while rem_in_part > 0 {
+                        let count = (rem_in_part as usize).min(CHUNK_SECTORS);
+                        let byte_count = count * DVD_SECTOR_SIZE;
+                        if vf.read_exact(&mut buf[..byte_count]).is_err() {
+                            cur_sec = end_sec + 1;
+                            break;
+                        }
+                        cur_sec += count as u64;
+                        rem_in_part -= count as u64;
+
+                        let mut write_start_off = 0usize;
+                        if !aligned_to_vobu {
+                            if let Some(sec_idx) = buf[..byte_count]
+                                .chunks_exact(DVD_SECTOR_SIZE)
+                                .position(is_vobu_nav_or_seq_sector)
+                            {
+                                write_start_off = sec_idx * DVD_SECTOR_SIZE;
+                                aligned_to_vobu = true;
+                            } else if skipped_for_vobu + count < 192 {
+                                skipped_for_vobu += count;
+                                continue;
+                            } else {
+                                aligned_to_vobu = true;
+                            }
+                        }
+                        let slice = &mut buf[write_start_off..byte_count];
+                        if !spu_bootstrapped {
+                            if !sub_candidates.is_empty() {
+                                let (scr, pts) = extract_first_pes_scr_and_pts(slice);
+                                let spu_sec = build_bootstrap_spu_sector(scr, pts);
+                                if ffmpeg_stdin.write_all(&spu_sec).is_err() {
+                                    return;
+                                }
+                            }
+                            spu_bootstrapped = true;
+                        }
+                        normalize_dvd_sector_streams(
+                            slice,
+                            audio_stream_index,
+                            &sub_candidates,
+                            &mut locked_sub_id,
+                        );
+                        if ffmpeg_stdin.write_all(slice).is_err() {
+                            return;
+                        }
+                    }
                 }
             }
         }

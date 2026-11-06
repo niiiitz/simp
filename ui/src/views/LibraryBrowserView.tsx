@@ -4091,7 +4091,11 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       }}
                     >
                       {opticalDisc.dvd_css_available
-                        ? '🔓 libdvdcss.so.2 Active'
+                        ? opticalDisc.device_path?.startsWith('\\\\')
+                          ? '🔓 DVD CSS Active (VLC / libdvdcss)'
+                          : '🔓 libdvdcss.so.2 Active'
+                        : opticalDisc.device_path?.startsWith('\\\\')
+                        ? '🔒 Unencrypted Only (install VLC or place libdvdcss-2.dll in data\\lib\\)'
                         : '🔒 Unencrypted Only (place libdvdcss.so.2 in ~/.local/share/simp/lib/)'}
                     </span>
                     <span

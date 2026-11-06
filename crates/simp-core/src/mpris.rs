@@ -1,6 +1,10 @@
+#[cfg(target_os = "linux")]
 use crate::library::artwork::resolve_and_cache_artwork;
 use crate::orchestrator::OrchestratorSnapshot;
-use simp_protocol::{AudioCommand, RepeatMode, TrackMetadata};
+#[cfg(target_os = "linux")]
+use simp_protocol::RepeatMode;
+use simp_protocol::{AudioCommand, TrackMetadata};
+#[cfg(not(target_os = "windows"))]
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -11,83 +15,108 @@ pub struct MprisHandle;
 /// Discovers `DISPLAY`, `WAYLAND_DISPLAY`, and `XAUTHORITY` from `systemctl --user show-environment`
 /// if the background daemon was started before the KDE Plasma desktop session initialized them.
 pub fn apply_desktop_display_env(cmd: &mut Command) {
-    let mut has_display = std::env::var("DISPLAY").map(|v| !v.is_empty()).unwrap_or(false);
-    let mut has_wayland = std::env::var("WAYLAND_DISPLAY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-
-    if let Ok(out) = Command::new("systemctl")
-        .args(["--user", "show-environment"])
-        .output()
+    #[cfg(target_os = "windows")]
     {
-        if let Ok(text) = String::from_utf8(out.stdout) {
-            for line in text.lines() {
-                if let Some((k, v)) = line.split_once('=') {
-                    match k {
-                        "DISPLAY" | "WAYLAND_DISPLAY" | "XAUTHORITY" | "XDG_CURRENT_DESKTOP"
-                        | "XDG_SESSION_TYPE" | "KDE_FULL_SESSION" => {
-                            if k == "DISPLAY" && !v.is_empty() {
-                                has_display = true;
+        let _ = cmd;
+        return;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut has_display = std::env::var("DISPLAY").map(|v| !v.is_empty()).unwrap_or(false);
+        let mut has_wayland = std::env::var("WAYLAND_DISPLAY")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
+        if let Ok(out) = Command::new("systemctl")
+            .args(["--user", "show-environment"])
+            .output()
+        {
+            if let Ok(text) = String::from_utf8(out.stdout) {
+                for line in text.lines() {
+                    if let Some((k, v)) = line.split_once('=') {
+                        match k {
+                            "DISPLAY" | "WAYLAND_DISPLAY" | "XAUTHORITY" | "XDG_CURRENT_DESKTOP"
+                            | "XDG_SESSION_TYPE" | "KDE_FULL_SESSION" => {
+                                if k == "DISPLAY" && !v.is_empty() {
+                                    has_display = true;
+                                }
+                                if k == "WAYLAND_DISPLAY" && !v.is_empty() {
+                                    has_wayland = true;
+                                }
+                                cmd.env(k, v);
                             }
-                            if k == "WAYLAND_DISPLAY" && !v.is_empty() {
-                                has_wayland = true;
-                            }
-                            cmd.env(k, v);
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
         }
-    }
 
-    if !has_display && Path::new("/tmp/.X11-unix/X0").exists() {
-        cmd.env("DISPLAY", ":0");
-    }
-    if !has_wayland {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
-        if Path::new(&format!("{runtime_dir}/wayland-0")).exists() {
-            cmd.env("WAYLAND_DISPLAY", "wayland-0");
+        if !has_display && Path::new("/tmp/.X11-unix/X0").exists() {
+            cmd.env("DISPLAY", ":0");
+        }
+        if !has_wayland {
+            let runtime_dir =
+                std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
+            if Path::new(&format!("{runtime_dir}/wayland-0")).exists() {
+                cmd.env("WAYLAND_DISPLAY", "wayland-0");
+            }
         }
     }
 }
 
 /// Raises an existing `org.simp.player` window or launches the SIMP Desktop Application via
-/// `org.simp.player.desktop` so KDE Plasma / KWin assigns the proper SIMP taskbar icon.
+/// `org.simp.player.desktop` (Linux) or `simp.exe` (Windows).
 pub fn launch_simp_desktop_window() {
-    // 1. If an `org.simp.player` window is already open on X11/XWayland, raise/activate it immediately
-    let mut wmctrl = Command::new("wmctrl");
-    wmctrl
-        .args(["-xa", "org.simp.player"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    apply_desktop_display_env(&mut wmctrl);
-    if wmctrl.status().map(|s| s.success()).unwrap_or(false) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            let mut cmd = Command::new(exe);
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::configure_background_command(&mut cmd);
+            let _ = cmd.spawn();
+        }
         return;
     }
 
-    // 2. Prefer `gtk-launch org.simp.player.desktop` so KDE Plasma / KWin tags the application scope
-    // with `org.simp.player.desktop` (preserving the SIMP Portal Icon on the taskbar in Wayland & X11).
-    let mut gtk_cmd = Command::new("gtk-launch");
-    gtk_cmd
-        .arg("org.simp.player.desktop")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    apply_desktop_display_env(&mut gtk_cmd);
-    if gtk_cmd.spawn().is_ok() {
-        return;
-    }
-
-    // 3. Fallback: invoke `simp` binary directly with desktop display env
-    if let Ok(exe) = std::env::current_exe() {
-        let mut cmd = Command::new(exe);
-        cmd.stdin(Stdio::null())
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 1. If an `org.simp.player` window is already open on X11/XWayland, raise/activate it immediately
+        let mut wmctrl = Command::new("wmctrl");
+        wmctrl
+            .args(["-xa", "org.simp.player"])
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        apply_desktop_display_env(&mut cmd);
-        let _ = cmd.spawn();
+        apply_desktop_display_env(&mut wmctrl);
+        if wmctrl.status().map(|s| s.success()).unwrap_or(false) {
+            return;
+        }
+
+        // 2. Prefer `gtk-launch org.simp.player.desktop` so KDE Plasma / KWin tags the application scope
+        // with `org.simp.player.desktop` (preserving the SIMP Portal Icon on the taskbar in Wayland & X11).
+        let mut gtk_cmd = Command::new("gtk-launch");
+        gtk_cmd
+            .arg("org.simp.player.desktop")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        apply_desktop_display_env(&mut gtk_cmd);
+        if gtk_cmd.spawn().is_ok() {
+            return;
+        }
+
+        // 3. Fallback: invoke `simp` binary directly with desktop display env
+        if let Ok(exe) = std::env::current_exe() {
+            let mut cmd = Command::new(exe);
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            apply_desktop_display_env(&mut cmd);
+            let _ = cmd.spawn();
+        }
     }
 }
 

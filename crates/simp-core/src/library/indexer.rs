@@ -21,12 +21,19 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
 /// Crawls configured local directories, Steam OST directories (`libraryfolders.vdf`),
 /// and removable USB/MicroSD mounts (`/run/media`), incrementally indexing tracks into SQLite.
 pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize, usize) {
+    let ignored_roots: HashSet<String> = settings
+        .library
+        .ignored_paths
+        .values()
+        .map(|s| normalize_platform_path(s).to_string_lossy().to_string())
+        .collect();
+
     // 1. User-configured custom paths (normalized for Windows C:\ and bash-escaped spaces)
     let mut active_custom_roots = HashSet::new();
     for (_key, raw_path_str) in &settings.library.custom_paths {
         let norm_path = normalize_platform_path(raw_path_str);
         let norm_str = norm_path.to_string_lossy().to_string();
-        if ! active_custom_roots.insert(norm_str.clone()) {
+        if !active_custom_roots.insert(norm_str.clone()) {
             continue;
         }
         let online = norm_path.is_dir();
@@ -40,10 +47,22 @@ pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize
         }
     }
 
-    // Prune any stale `user_custom` mounts in SQLite that are no longer in `custom_paths`
+    // Prune any stale `user_custom` mounts in SQLite that are no longer in `custom_paths`,
+    // or any mounts explicitly added to `ignored_paths`, or any fixed/optical Windows drive roots
+    // that were previously misclassified as `removable_media` (e.g., `D:\`).
     if let Ok(existing_mounts) = db.get_mounts() {
         for m in existing_mounts {
-            if m.mount_kind == "user_custom" && !active_custom_roots.contains(&m.mount_root) {
+            let is_ignored = ignored_roots.contains(&m.mount_root);
+            #[cfg(target_os = "windows")]
+            let is_misclassified_fixed = m.mount_kind == "removable_media"
+                && crate::library::mounts::is_windows_non_removable_drive_root(&m.mount_root);
+            #[cfg(not(target_os = "windows"))]
+            let is_misclassified_fixed = false;
+
+            if (m.mount_kind == "user_custom" && !active_custom_roots.contains(&m.mount_root))
+                || (m.mount_kind != "user_custom" && is_ignored)
+                || is_misclassified_fixed
+            {
                 let _ = db.remove_mount(&m.mount_root);
             }
         }
@@ -53,14 +72,20 @@ pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize
     if settings.library.scan_steam_osts {
         for ost_dir in discover_steam_music_directories() {
             let root_str = ost_dir.to_string_lossy().to_string();
+            if ignored_roots.contains(&root_str) {
+                continue;
+            }
             let _ = db.upsert_mount(&root_str, "Steam Soundtracks", "steam_vdf", true);
             scan_mount_directory(db, &ost_dir, &root_str, "steam_ost");
         }
     }
 
-    // 3. Removable USB / MicroSD Drives (`/run/media/...`)
+    // 3. Removable USB / MicroSD Drives (`/run/media/...` on Linux, `DRIVE_REMOVABLE` on Windows)
     if settings.library.auto_mount_removable {
-        let discovered = discover_removable_mounts();
+        let discovered: Vec<(PathBuf, String)> = discover_removable_mounts()
+            .into_iter()
+            .filter(|(p, _)| !ignored_roots.contains(&p.to_string_lossy().to_string()))
+            .collect();
         if let Ok(existing_mounts) = db.get_mounts() {
             for m in existing_mounts {
                 if m.mount_kind == "removable_media"

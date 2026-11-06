@@ -3,15 +3,15 @@ use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rodio::{source::SeekError as RodioSeekError, Source};
 use sha1::{Digest, Sha1};
-#[cfg(target_os = "linux")]
-use simp_protocol::TrackMetadata;
-use simp_protocol::OpticalDiscStatus;
-#[cfg(target_os = "linux")]
+use simp_protocol::{OpticalDiscStatus, TrackMetadata};
 use std::fs::OpenOptions;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
+#[cfg(target_os = "windows")]
+use std::os::windows::io::AsRawHandle;
+#[cfg(not(target_os = "windows"))]
 use std::path::Path;
 use std::time::Duration;
 
@@ -29,14 +29,22 @@ const CDROM_DRIVE_STATUS: libc::Ioctl = 0x5326;
 #[cfg(target_os = "linux")]
 const CDROM_DISC_STATUS: libc::Ioctl = 0x5327;
 
+#[cfg(target_os = "linux")]
 const CDROM_LBA: u8 = 0x01;
+#[cfg(target_os = "linux")]
 const CDROM_MSF: u8 = 0x02;
+#[cfg(target_os = "linux")]
 const CDROM_LEADOUT: u8 = 0xAA;
 
+#[cfg(target_os = "linux")]
 const CDS_NO_INFO: libc::c_int = 0;
+#[cfg(target_os = "linux")]
 const CDS_NO_DISC: libc::c_int = 1;
+#[cfg(target_os = "linux")]
 const CDS_TRAY_OPEN: libc::c_int = 2;
+#[cfg(target_os = "linux")]
 const CDS_DRIVE_NOT_READY: libc::c_int = 3;
+#[cfg(target_os = "linux")]
 const CDS_DISC_OK: libc::c_int = 4;
 
 const CDS_AUDIO: libc::c_int = 100;
@@ -46,6 +54,7 @@ const CD_FRAMESIZE_RAW: usize = 2352; // 588 stereo 16-bit samples per sector (1
 const CD_SECTORS_PER_SECOND: u32 = 75;
 const READ_CHUNK_SECTORS: i32 = 25; // ~333ms per ioctl read chunk
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 struct CdromTochdr {
@@ -53,6 +62,7 @@ struct CdromTochdr {
     cdth_trk1: u8,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CdromMsf0 {
@@ -61,6 +71,7 @@ struct CdromMsf0 {
     frame: u8,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 union CdromAddr {
@@ -68,6 +79,7 @@ union CdromAddr {
     lba: libc::c_int,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CdromTocentry {
@@ -78,6 +90,7 @@ struct CdromTocentry {
     cdte_datamode: u8,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct CdromReadAudio {
     addr: CdromAddr,
@@ -104,19 +117,62 @@ pub struct CdToc {
     pub mb_toc_param: String,
 }
 
-/// Discovers the first present optical drive device node (`/dev/sr0`..`/dev/sr3` or `/dev/cdrom`).
+/// Discovers the first present optical drive device node (`/dev/sr0`..`/dev/sr3` on Linux,
+/// or `\\.\D:`..`\\.\Z:` via `GetDriveTypeW == DRIVE_CDROM` on Windows).
 pub fn find_optical_device(preferred: Option<&str>) -> Option<String> {
-    if let Some(pref) = preferred {
-        if !pref.trim().is_empty() && Path::new(pref.trim()).exists() {
-            return Some(pref.trim().to_string());
+    #[cfg(target_os = "windows")]
+    {
+        extern "system" {
+            fn GetDriveTypeW(lp_root_path_name: *const u16) -> u32;
         }
-    }
-    for candidate in ["/dev/sr0", "/dev/sr1", "/dev/sr2", "/dev/sr3", "/dev/cdrom"] {
-        if Path::new(candidate).exists() {
-            return Some(candidate.to_string());
+        const DRIVE_CDROM: u32 = 5;
+
+        let is_cdrom_letter = |ch: char| -> bool {
+            let upper = ch.to_ascii_uppercase();
+            let root_wide: [u16; 4] = [upper as u16, b':' as u16, b'\\' as u16, 0];
+            unsafe { GetDriveTypeW(root_wide.as_ptr()) == DRIVE_CDROM }
+        };
+
+        if let Some(pref) = preferred {
+            let trimmed = pref.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with("/dev/") {
+                let candidate_letter = if let Some(rest) = trimmed.strip_prefix(r"\\.\") {
+                    rest.chars().next()
+                } else {
+                    trimmed.chars().next()
+                };
+                if let Some(ch) = candidate_letter {
+                    if ch.is_ascii_alphabetic() && is_cdrom_letter(ch) {
+                        let upper = ch.to_ascii_uppercase();
+                        return Some(format!(r"\\.\{upper}:"));
+                    }
+                }
+            }
         }
+
+        for letter in b'C'..=b'Z' {
+            let ch = letter as char;
+            if is_cdrom_letter(ch) {
+                return Some(format!(r"\\.\{ch}:"));
+            }
+        }
+        return None;
     }
-    None
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(pref) = preferred {
+            if !pref.trim().is_empty() && Path::new(pref.trim()).exists() {
+                return Some(pref.trim().to_string());
+            }
+        }
+        for candidate in ["/dev/sr0", "/dev/sr1", "/dev/sr2", "/dev/sr3", "/dev/cdrom"] {
+            if Path::new(candidate).exists() {
+                return Some(candidate.to_string());
+            }
+        }
+        None
+    }
 }
 
 /// Computes the official MusicBrainz DiscID (`base64` with `+ -> .`, `/ -> _`, `= -> -` over `SHA-1`
@@ -167,11 +223,217 @@ pub fn compute_musicbrainz_disc_id(
     (mb_disc_id, toc_parts.join("+"))
 }
 
+#[cfg(target_os = "windows")]
+mod win_cdrom {
+    use super::*;
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+
+    pub const IOCTL_CDROM_READ_TOC: u32 = 0x00024000;
+    pub const IOCTL_CDROM_RAW_READ: u32 = 0x0002403E;
+    pub const IOCTL_STORAGE_CHECK_VERIFY: u32 = 0x002D4800;
+    pub const IOCTL_STORAGE_CHECK_VERIFY2: u32 = 0x002D0800;
+    pub const IOCTL_STORAGE_EJECT_MEDIA: u32 = 0x002D4808;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct WinTrackData {
+        pub reserved: u8,
+        pub control_adr: u8,
+        pub track_number: u8,
+        pub reserved1: u8,
+        pub address: [u8; 4],
+    }
+
+    #[repr(C)]
+    pub struct WinCdromToc {
+        pub length: [u8; 2],
+        pub first_track: u8,
+        pub last_track: u8,
+        pub track_data: [WinTrackData; 100],
+    }
+
+    #[repr(C)]
+    pub struct WinRawReadInfo {
+        pub disk_offset: i64,
+        pub sector_count: u32,
+        pub track_mode: u32,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn DeviceIoControl(
+            h_device: *mut c_void,
+            dw_io_control_code: u32,
+            lp_in_buffer: *const c_void,
+            n_in_buffer_size: u32,
+            lp_out_buffer: *mut c_void,
+            n_out_buffer_size: u32,
+            lp_bytes_returned: *mut u32,
+            lp_overlapped: *mut c_void,
+        ) -> i32;
+    }
+
+    pub fn msf_to_lba(addr: [u8; 4]) -> i32 {
+        let m = addr[1] as i32;
+        let s = addr[2] as i32;
+        let f = addr[3] as i32;
+        (m * 60 + s) * 75 + f - 150
+    }
+
+    pub fn check_disc_present(file: &std::fs::File, device_path: &str) -> bool {
+        let handle = file.as_raw_handle() as *mut c_void;
+        let mut bytes_ret = 0u32;
+        let ok2 = unsafe {
+            DeviceIoControl(
+                handle,
+                IOCTL_STORAGE_CHECK_VERIFY2,
+                null_mut(),
+                0,
+                null_mut(),
+                0,
+                &mut bytes_ret,
+                null_mut(),
+            )
+        };
+        if ok2 != 0 {
+            return true;
+        }
+        let ok1 = unsafe {
+            DeviceIoControl(
+                handle,
+                IOCTL_STORAGE_CHECK_VERIFY,
+                null_mut(),
+                0,
+                null_mut(),
+                0,
+                &mut bytes_ret,
+                null_mut(),
+            )
+        };
+        if ok1 != 0 {
+            return true;
+        }
+        // Fallback: if Windows mounted a data/DVD filesystem at `<Drive>:\`, check if `<Drive>:\` is readable
+        let drive_letter = device_path
+            .strip_prefix(r"\\.\")
+            .unwrap_or(device_path)
+            .chars()
+            .next();
+        if let Some(ch) = drive_letter {
+            if ch.is_ascii_alphabetic() {
+                let root = format!("{ch}:\\");
+                if std::fs::read_dir(&root).is_ok() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Reads the Table of Contents (TOC) from a Windows optical drive (`\\.\D:`) via `IOCTL_CDROM_READ_TOC`.
+#[cfg(target_os = "windows")]
+pub fn read_cd_toc(device_path: &str) -> Result<CdToc> {
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+    use win_cdrom::*;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .open(device_path)
+        .map_err(|e| anyhow!("Cannot open optical drive {device_path}: {e}"))?;
+    let handle = file.as_raw_handle() as *mut c_void;
+
+    let mut toc: WinCdromToc = unsafe { std::mem::zeroed() };
+    let mut bytes_ret = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_CDROM_READ_TOC,
+            null_mut(),
+            0,
+            &mut toc as *mut WinCdromToc as *mut c_void,
+            std::mem::size_of::<WinCdromToc>() as u32,
+            &mut bytes_ret,
+            null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(anyhow!(
+            "Failed to read CD TOC from {device_path}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let first_track = toc.first_track;
+    let last_track = toc.last_track;
+    if first_track == 0 || last_track < first_track || last_track > 99 {
+        return Err(anyhow!(
+            "Invalid track range in CD TOC ({first_track}..{last_track})"
+        ));
+    }
+
+    let count = (last_track - first_track + 1) as usize;
+    let mut raw_entries: Vec<(u8, i32, bool)> = Vec::with_capacity(count);
+    for i in 0..count {
+        let td = toc.track_data[i];
+        let lba = msf_to_lba(td.address);
+        let is_data = (td.control_adr & 0x04) != 0;
+        raw_entries.push((td.track_number, lba, is_data));
+    }
+
+    let leadout_td = toc.track_data[count];
+    let leadout_lba = msf_to_lba(leadout_td.address);
+
+    let mut tracks = Vec::with_capacity(raw_entries.len());
+    let mut audio_track_lbas = Vec::with_capacity(raw_entries.len());
+    let mut last_audio_track = first_track;
+    let mut audio_leadout_lba = leadout_lba;
+
+    for i in 0..raw_entries.len() {
+        let (trk_num, start_lba, is_data) = raw_entries[i];
+        let next_lba = if i + 1 < raw_entries.len() {
+            raw_entries[i + 1].1
+        } else {
+            leadout_lba
+        };
+        let length_sectors = (next_lba - start_lba).max(0);
+        if !is_data {
+            audio_track_lbas.push(start_lba);
+            last_audio_track = trk_num;
+            audio_leadout_lba = next_lba;
+        }
+        tracks.push(CdTrackTocEntry {
+            track_number: trk_num,
+            start_lba,
+            length_sectors,
+            is_data_track: is_data,
+        });
+    }
+
+    let (disc_id, mb_toc_param) = compute_musicbrainz_disc_id(
+        first_track,
+        last_audio_track,
+        audio_leadout_lba,
+        &audio_track_lbas,
+    );
+
+    Ok(CdToc {
+        first_track,
+        last_track,
+        leadout_lba,
+        tracks,
+        disc_id,
+        mb_toc_param,
+    })
+}
+
 /// Reads the Table of Contents (TOC) from an optical drive via Linux `ioctl` without requiring `sudo`.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn read_cd_toc(device_path: &str) -> Result<CdToc> {
     Err(anyhow!(
-        "Direct optical CD-DA TOC ioctl is only supported on Linux ({device_path})"
+        "Direct optical CD-DA TOC ioctl is not supported on this platform ({device_path})"
     ))
 }
 
@@ -289,7 +551,7 @@ pub fn read_cd_toc(device_path: &str) -> Result<CdToc> {
 
 /// Scans an optical drive on-demand (invoked only when the user opens Sources / CD view or clicks Scan).
 /// Resolves track titles and album cover art via MusicBrainz + Cover Art Archive and caches by `disc_id` in SQLite.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn scan_optical_disc(
     _db: &LibraryDatabase,
     preferred_device: Option<&str>,
@@ -306,23 +568,28 @@ pub fn scan_optical_disc(
         release_year: None,
         art_url: None,
         tracks: Vec::new(),
-        status_message: "Direct optical CD-DA drive scanning is supported on Linux".to_string(),
+        status_message: "Direct optical CD-DA drive scanning is not supported on this platform".to_string(),
         ..Default::default()
     }
 }
 
 /// Scans an optical drive on-demand (invoked only when the user opens Sources / CD view or clicks Scan).
 /// Resolves track titles and album cover art via MusicBrainz + Cover Art Archive and caches by `disc_id` in SQLite.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub fn scan_optical_disc(
     db: &LibraryDatabase,
     preferred_device: Option<&str>,
     force_refresh: bool,
 ) -> OpticalDiscStatus {
+    let default_dev = if cfg!(target_os = "windows") {
+        r"\\.\D:"
+    } else {
+        "/dev/sr0"
+    };
     let Some(device_path) = find_optical_device(preferred_device) else {
         return OpticalDiscStatus {
             drive_present: false,
-            device_path: "/dev/sr0".to_string(),
+            device_path: default_dev.to_string(),
             disc_present: false,
             is_audio_cd: false,
             disc_id: None,
@@ -331,39 +598,33 @@ pub fn scan_optical_disc(
             release_year: None,
             art_url: None,
             tracks: Vec::new(),
-            status_message: "No USB optical drive (/dev/sr0) connected".to_string(),
+            status_message: format!("No optical drive ({default_dev}) connected"),
             ..Default::default()
         };
     };
 
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(&device_path)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            return OpticalDiscStatus {
-                drive_present: true,
-                device_path,
-                disc_present: false,
-                is_audio_cd: false,
-                disc_id: None,
-                album_title: String::new(),
-                artist_name: String::new(),
-                release_year: None,
-                art_url: None,
-                tracks: Vec::new(),
-                status_message: format!("Optical drive busy or inaccessible ({e})"),
-                ..Default::default()
-            };
-        }
-    };
-
-    let fd = file.as_raw_fd();
-    let drive_status = unsafe { libc::ioctl(fd, CDROM_DRIVE_STATUS, 0 as libc::c_int) };
-    match drive_status {
-        CDS_NO_DISC => {
+    #[cfg(target_os = "windows")]
+    let disc_status: libc::c_int = {
+        let file = match OpenOptions::new().read(true).open(&device_path) {
+            Ok(f) => f,
+            Err(e) => {
+                return OpticalDiscStatus {
+                    drive_present: true,
+                    device_path,
+                    disc_present: false,
+                    is_audio_cd: false,
+                    disc_id: None,
+                    album_title: String::new(),
+                    artist_name: String::new(),
+                    release_year: None,
+                    art_url: None,
+                    tracks: Vec::new(),
+                    status_message: format!("Optical drive busy or inaccessible ({e})"),
+                    ..Default::default()
+                };
+            }
+        };
+        if !win_cdrom::check_disc_present(&file, &device_path) {
             return OpticalDiscStatus {
                 drive_present: true,
                 device_path,
@@ -379,43 +640,100 @@ pub fn scan_optical_disc(
                 ..Default::default()
             };
         }
-        CDS_TRAY_OPEN => {
-            return OpticalDiscStatus {
-                drive_present: true,
-                device_path,
-                disc_present: false,
-                is_audio_cd: false,
-                disc_id: None,
-                album_title: String::new(),
-                artist_name: String::new(),
-                release_year: None,
-                art_url: None,
-                tracks: Vec::new(),
-                status_message: "Drive tray is open".to_string(),
-                ..Default::default()
-            };
-        }
-        CDS_DRIVE_NOT_READY => {
-            return OpticalDiscStatus {
-                drive_present: true,
-                device_path,
-                disc_present: false,
-                is_audio_cd: false,
-                disc_id: None,
-                album_title: String::new(),
-                artist_name: String::new(),
-                release_year: None,
-                art_url: None,
-                tracks: Vec::new(),
-                status_message: "Optical drive spinning up — reading disc...".to_string(),
-                ..Default::default()
-            };
-        }
-        CDS_DISC_OK | CDS_NO_INFO | _ => {}
-    }
+        101 // Non-zero disc status so DVD fallback can run if TOC is not an Audio CD
+    };
 
-    let disc_status = unsafe { libc::ioctl(fd, CDROM_DISC_STATUS, 0 as libc::c_int) };
-    drop(file);
+    #[cfg(target_os = "linux")]
+    let disc_status: libc::c_int = {
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&device_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                return OpticalDiscStatus {
+                    drive_present: true,
+                    device_path,
+                    disc_present: false,
+                    is_audio_cd: false,
+                    disc_id: None,
+                    album_title: String::new(),
+                    artist_name: String::new(),
+                    release_year: None,
+                    art_url: None,
+                    tracks: Vec::new(),
+                    status_message: format!("Optical drive busy or inaccessible ({e})"),
+                    ..Default::default()
+                };
+            }
+        };
+
+        let fd = file.as_raw_fd();
+        let drive_status = unsafe { libc::ioctl(fd, CDROM_DRIVE_STATUS, 0 as libc::c_int) };
+        match drive_status {
+            CDS_NO_DISC => {
+                return OpticalDiscStatus {
+                    drive_present: true,
+                    device_path,
+                    disc_present: false,
+                    is_audio_cd: false,
+                    disc_id: None,
+                    album_title: String::new(),
+                    artist_name: String::new(),
+                    release_year: None,
+                    art_url: None,
+                    tracks: Vec::new(),
+                    status_message: "Drive ready — No disc inserted".to_string(),
+                    ..Default::default()
+                };
+            }
+            CDS_TRAY_OPEN => {
+                return OpticalDiscStatus {
+                    drive_present: true,
+                    device_path,
+                    disc_present: false,
+                    is_audio_cd: false,
+                    disc_id: None,
+                    album_title: String::new(),
+                    artist_name: String::new(),
+                    release_year: None,
+                    art_url: None,
+                    tracks: Vec::new(),
+                    status_message: "Drive tray is open".to_string(),
+                    ..Default::default()
+                };
+            }
+            CDS_DRIVE_NOT_READY => {
+                return OpticalDiscStatus {
+                    drive_present: true,
+                    device_path,
+                    disc_present: false,
+                    is_audio_cd: false,
+                    disc_id: None,
+                    album_title: String::new(),
+                    artist_name: String::new(),
+                    release_year: None,
+                    art_url: None,
+                    tracks: Vec::new(),
+                    status_message: "Optical drive spinning up — reading disc...".to_string(),
+                    ..Default::default()
+                };
+            }
+            CDS_DISC_OK | CDS_NO_INFO | _ => {}
+        }
+
+        unsafe { libc::ioctl(fd, CDROM_DISC_STATUS, 0 as libc::c_int) }
+    };
+
+    // Check for DVD-Video (`VIDEO_TS/VIDEO_TS.IFO`) FIRST before `read_cd_toc`, because on Windows
+    // `IOCTL_CDROM_READ_TOC` fabricates a 1-track TOC for DVDs that would otherwise be mistaken for a 1-track Audio CD.
+    #[cfg(feature = "experimental-dvd")]
+    if disc_status != CDS_AUDIO && disc_status != CDS_MIXED {
+        if let Some(dvd_status) = crate::sinks::dvd::scan_dvd_disc(&device_path, force_refresh) {
+            return dvd_status;
+        }
+    }
 
     let toc = match read_cd_toc(&device_path) {
         Ok(t) => t,
@@ -592,10 +910,41 @@ pub fn scan_optical_disc(
     }
 }
 
-/// Ejects the optical disc tray via `CDROMEJECT` ioctl (or `eject` CLI fallback).
-#[cfg(not(target_os = "linux"))]
+/// Ejects the optical disc tray via `CDROMEJECT` (Linux) or `IOCTL_STORAGE_EJECT_MEDIA` (Windows).
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn eject_optical_disc(_preferred_device: Option<&str>) -> Result<String> {
     Err(anyhow!("No optical drive found"))
+}
+
+/// Ejects the optical disc tray via `IOCTL_STORAGE_EJECT_MEDIA` on Windows.
+#[cfg(target_os = "windows")]
+pub fn eject_optical_disc(preferred_device: Option<&str>) -> Result<String> {
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+    use win_cdrom::*;
+
+    let Some(device_path) = find_optical_device(preferred_device) else {
+        return Err(anyhow!("No optical drive found"));
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .open(&device_path)
+        .map_err(|e| anyhow!("Cannot open optical drive {device_path}: {e}"))?;
+    let handle = file.as_raw_handle() as *mut c_void;
+    let mut bytes_ret = 0u32;
+    unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_EJECT_MEDIA,
+            null_mut(),
+            0,
+            null_mut(),
+            0,
+            &mut bytes_ret,
+            null_mut(),
+        );
+    }
+    Ok(device_path)
 }
 
 /// Ejects the optical disc tray via `CDROMEJECT` ioctl (or `eject` CLI fallback).
@@ -633,24 +982,19 @@ fn fetch_musicbrainz_metadata(disc_id: &str, toc_param: &str) -> Option<MusicBra
     let url = format!(
         "https://musicbrainz.org/ws/2/discid/{disc_id}?toc={toc_param}&fmt=json&inc=artists+recordings"
     );
-    let out = std::process::Command::new("curl")
-        .args([
-            "-sL",
-            "--max-time",
-            "6",
-            "-H",
-            "User-Agent: SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)",
-            "-H",
-            "Accept: application/json",
-            &url,
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() || out.stdout.is_empty() {
-        return None;
-    }
+    let bytes = crate::http_pool::http_get_bytes(
+        &url,
+        &[
+            ("User-Agent", "SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)"),
+            ("Accept", "application/json"),
+        ],
+        None,
+        6,
+    )
+    .ok()
+    .filter(|b| !b.is_empty())?;
 
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let releases = json.get("releases")?.as_array()?;
     let release = releases.first()?;
 
@@ -754,10 +1098,7 @@ fn extract_artist_credit(credit_val: Option<&serde_json::Value>) -> Option<Strin
 }
 
 fn fetch_and_cache_cover_art(disc_id: &str, release_mbid: &str) -> Option<String> {
-    let art_cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("simp")
-        .join("art");
+    let art_cache_dir = crate::simp_art_cache_dir();
     let _ = std::fs::create_dir_all(&art_cache_dir);
 
     let safe_id: String = disc_id
@@ -772,37 +1113,27 @@ fn fetch_and_cache_cover_art(disc_id: &str, release_mbid: &str) -> Option<String
     }
 
     let caa_url = format!("https://coverartarchive.org/release/{release_mbid}/front-500");
-    let status = std::process::Command::new("curl")
-        .args([
-            "-sL",
-            "--fail",
-            "--max-time",
-            "8",
-            "-H",
-            "User-Agent: SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)",
-            "-o",
-            &dest_path.to_string_lossy(),
-            &caa_url,
-        ])
-        .status()
-        .ok()?;
-
-    if status.success()
-        && dest_path.is_file()
-        && dest_path.metadata().map(|m| m.len() > 512).unwrap_or(false)
-    {
-        Some(format!("http://127.0.0.1:18888/art/{filename}"))
-    } else {
-        let _ = std::fs::remove_file(&dest_path);
-        None
+    if let Ok(bytes) = crate::http_pool::http_get_bytes(
+        &caa_url,
+        &[("User-Agent", "SIMP/0.1.0-alpha (https://github.com/niiiitz/simp)")],
+        None,
+        8,
+    ) {
+        if bytes.len() > 512 && std::fs::write(&dest_path, &bytes).is_ok() {
+            return Some(format!("http://127.0.0.1:18888/art/{filename}"));
+        }
     }
+    None
 }
 
-/// Parses a `cdda:///dev/sr0#track=1` URI into `(device_path, track_number)`.
+/// Parses a `cdda:///dev/sr0#track=1` or `cdda://\\.\D:#track=1` URI into `(device_path, track_number)`.
 pub fn parse_cdda_uri(uri: &str) -> Option<(String, u8)> {
     let rest = uri.strip_prefix("cdda://")?;
     let (dev_part, frag_part) = rest.split_once("#track=")?;
-    let device_path = if dev_part.starts_with('/') {
+    let device_path = if dev_part.starts_with('/')
+        || dev_part.starts_with(r"\\")
+        || (dev_part.len() >= 2 && dev_part.as_bytes()[1] == b':')
+    {
         dev_part.to_string()
     } else {
         format!("/{dev_part}")
@@ -811,27 +1142,143 @@ pub fn parse_cdda_uri(uri: &str) -> Option<(String, u8)> {
     Some((device_path, track_num))
 }
 
-/// Red Book CD-DA (`44.1 kHz`, 16-bit stereo little-endian) streaming `rodio::Source`
-/// reading directly from `/dev/sr0` via `CDROMREADAUDIO` in 25-sector buffered chunks.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+struct CddaTrackRamCache {
+    /// Cached PCM sectors (`1176` stereo `i16` samples per sector), indexed by `(lba - start_lba)`.
+    sectors: Vec<Option<std::sync::Arc<[i16]>>>,
+    /// Current playback sector index (`0..total_sectors`), used to guide read-ahead priority.
+    playback_sector: usize,
+    /// Set by `try_seek` when the user jumps to an unbuffered sector so the reader prioritizes it.
+    priority_sector: Option<usize>,
+    /// True once all sectors in the track have been cached or an unrecoverable drive error occurred.
+    finished: bool,
+    /// True when `CddaTrackSource` is dropped so the background reader exits and closes the drive handle.
+    cancelled: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn read_raw_cdda_sectors(
+    file: &std::fs::File,
+    lba: i32,
+    nframes: i32,
+    raw_bytes: &mut [u8],
+) -> Result<()> {
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+    use win_cdrom::*;
+
+    let byte_len = (nframes as usize) * CD_FRAMESIZE_RAW;
+    let info = WinRawReadInfo {
+        disk_offset: (lba.max(0) as i64) * 2048,
+        sector_count: nframes as u32,
+        track_mode: 2, // CDDA (2352 bytes/sector)
+    };
+    let handle = file.as_raw_handle() as *mut c_void;
+    let mut bytes_ret = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_CDROM_RAW_READ,
+            &info as *const WinRawReadInfo as *const c_void,
+            std::mem::size_of::<WinRawReadInfo>() as u32,
+            raw_bytes.as_mut_ptr() as *mut c_void,
+            byte_len as u32,
+            &mut bytes_ret,
+            null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(anyhow!(
+            "IOCTL_CDROM_RAW_READ failed at LBA {}: {}",
+            lba,
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_raw_cdda_sectors(
+    file: &std::fs::File,
+    lba: i32,
+    nframes: i32,
+    raw_bytes: &mut [u8],
+) -> Result<()> {
+    let mut ra = CdromReadAudio {
+        addr: CdromAddr { lba },
+        addr_format: CDROM_LBA,
+        nframes,
+        buf: raw_bytes.as_mut_ptr(),
+    };
+
+    let fd = file.as_raw_fd();
+    let mut res = unsafe { libc::ioctl(fd, CDROMREADAUDIO, &mut ra) };
+
+    // Fallback to MSF addressing if a USB drive firmware prefers CDROM_MSF over CDROM_LBA
+    if res < 0 {
+        let total_frames = (lba + 150).max(0);
+        let minute = (total_frames / (60 * 75)) as u8;
+        let second = ((total_frames / 75) % 60) as u8;
+        let frame = (total_frames % 75) as u8;
+        ra.addr = CdromAddr {
+            msf: CdromMsf0 {
+                minute,
+                second,
+                frame,
+            },
+        };
+        ra.addr_format = CDROM_MSF;
+        res = unsafe { libc::ioctl(fd, CDROMREADAUDIO, &mut ra) };
+    }
+
+    if res < 0 {
+        return Err(anyhow!(
+            "CDROMREADAUDIO failed at LBA {}: {}",
+            lba,
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Red Book CD-DA (`44.1 kHz`, 16-bit stereo little-endian) `rodio::Source` with a background
+/// burst read-ahead RAM cache (`simp-cdda-readahead`).
+///
+/// The background reader burst-reads 25-sector chunks at full optical drive speed into RAM and
+/// closes the device handle as soon as the track is buffered so the physical CD drive can spin down.
 pub struct CddaTrackSource {
-    #[cfg(target_os = "linux")]
-    file: std::fs::File,
-    start_lba: i32,
-    end_lba: i32,
-    current_lba: i32,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    cache: std::sync::Arc<(std::sync::Mutex<CddaTrackRamCache>, std::sync::Condvar)>,
+    total_sectors: usize,
+    current_sector_idx: usize,
     total_duration: Duration,
-    sample_buf: Vec<i16>,
+    current_sector_samples: Option<std::sync::Arc<[i16]>>,
     sample_pos: usize,
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+impl Drop for CddaTrackSource {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.cache;
+        if let Ok(mut guard) = lock.lock() {
+            guard.cancelled = true;
+            cvar.notify_all();
+        }
+    }
+}
+
 impl CddaTrackSource {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     pub fn open_uri(uri: &str) -> Result<Self> {
-        Err(anyhow!("Direct optical CD-DA playback is only supported on Linux ({uri})"))
+        Err(anyhow!(
+            "Direct optical CD-DA playback is not supported on this platform ({uri})"
+        ))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn open_uri(uri: &str) -> Result<Self> {
+        use std::sync::{Arc, Condvar, Mutex};
+
         let (device_path, track_number) =
             parse_cdda_uri(uri).ok_or_else(|| anyhow!("Invalid cdda:// URI: {uri}"))?;
         let toc = read_cd_toc(&device_path)?;
@@ -841,90 +1288,209 @@ impl CddaTrackSource {
             .find(|t| t.track_number == track_number && !t.is_data_track)
             .ok_or_else(|| anyhow!("Audio track {track_number} not found on {device_path}"))?;
 
+        #[cfg(target_os = "linux")]
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(&device_path)
             .map_err(|e| anyhow!("Failed to open optical drive {device_path}: {e}"))?;
 
+        #[cfg(target_os = "windows")]
+        let file = OpenOptions::new()
+            .read(true)
+            .open(&device_path)
+            .map_err(|e| anyhow!("Failed to open optical drive {device_path}: {e}"))?;
+
         let start_lba = entry.start_lba;
-        let end_lba = entry.start_lba + entry.length_sectors.max(1);
-        let duration_ms =
-            (entry.length_sectors.max(0) as u64 * 1000) / CD_SECTORS_PER_SECOND as u64;
+        let total_sectors = entry.length_sectors.max(1) as usize;
+        let duration_ms = (total_sectors as u64 * 1000) / CD_SECTORS_PER_SECOND as u64;
 
-        let mut source = Self {
-            file,
-            start_lba,
-            end_lba,
-            current_lba: start_lba,
+        let mut sectors: Vec<Option<Arc<[i16]>>> = vec![None; total_sectors];
+
+        // Pre-buffer the initial 25 sectors (~333ms) synchronously so audio starts immediately
+        let init_frames = (total_sectors as i32).min(READ_CHUNK_SECTORS);
+        let mut init_raw = vec![0u8; (init_frames as usize) * CD_FRAMESIZE_RAW];
+        read_raw_cdda_sectors(&file, start_lba, init_frames, &mut init_raw)?;
+        let samples_per_sector = CD_FRAMESIZE_RAW / 2;
+        for s_idx in 0..(init_frames as usize) {
+            let byte_off = s_idx * CD_FRAMESIZE_RAW;
+            let sec_bytes = &init_raw[byte_off..byte_off + CD_FRAMESIZE_RAW];
+            let mut pcm = Vec::with_capacity(samples_per_sector);
+            for pair in sec_bytes.chunks_exact(2) {
+                pcm.push(i16::from_le_bytes([pair[0], pair[1]]));
+            }
+            sectors[s_idx] = Some(Arc::from(pcm.into_boxed_slice()));
+        }
+
+        let first_sector_samples = sectors[0].clone();
+        let already_complete = (init_frames as usize) >= total_sectors;
+
+        let cache = Arc::new((
+            Mutex::new(CddaTrackRamCache {
+                sectors,
+                playback_sector: 0,
+                priority_sector: None,
+                finished: already_complete,
+                cancelled: false,
+            }),
+            Condvar::new(),
+        ));
+
+        if !already_complete {
+            let cache_bg = Arc::clone(&cache);
+            let _ = std::thread::Builder::new()
+                .name("simp-cdda-readahead".to_string())
+                .spawn(move || {
+                    // Keep up to 12 minutes (`54,000` sectors = ~126 MB) ahead of playback in RAM.
+                    // For normal tracks (<= 12 min), the entire track is burst-read at full drive speed,
+                    // then `file` is dropped here so the optical drive spins down completely.
+                    const MAX_AHEAD_SECTORS: usize = 54_000;
+                    let mut raw_buf = vec![0u8; (READ_CHUNK_SECTORS as usize) * CD_FRAMESIZE_RAW];
+                    let mut cursor = init_frames as usize;
+                    let mut consecutive_errors = 0u8;
+
+                    loop {
+                        let next_idx = {
+                            let (lock, cvar) = &*cache_bg;
+                            let Ok(mut guard) = lock.lock() else {
+                                break;
+                            };
+                            loop {
+                                if guard.cancelled {
+                                    return;
+                                }
+                                if let Some(prio) = guard.priority_sector.take() {
+                                    cursor = prio.min(total_sectors.saturating_sub(1));
+                                }
+                                // Find next unbuffered sector starting from `cursor`, wrapping around if needed
+                                let found = (cursor..total_sectors)
+                                    .find(|&i| guard.sectors[i].is_none())
+                                    .or_else(|| {
+                                        (0..cursor).find(|&i| guard.sectors[i].is_none())
+                                    });
+                                let Some(target_idx) = found else {
+                                    guard.finished = true;
+                                    cvar.notify_all();
+                                    return; // Track 100% cached in RAM -> drop `file` so disc spins down!
+                                };
+                                if total_sectors > MAX_AHEAD_SECTORS
+                                    && target_idx
+                                        > guard.playback_sector.saturating_add(MAX_AHEAD_SECTORS)
+                                {
+                                    let _ = cvar.wait_timeout(
+                                        guard,
+                                        Duration::from_millis(500),
+                                    );
+                                    guard = match lock.lock() {
+                                        Ok(g) => g,
+                                        Err(_) => return,
+                                    };
+                                    continue;
+                                }
+                                break target_idx;
+                            }
+                        };
+
+                        // Determine contiguous unbuffered chunk length up to `READ_CHUNK_SECTORS` (25)
+                        let nframes = ((total_sectors - next_idx) as i32).min(READ_CHUNK_SECTORS);
+                        let lba = start_lba + (next_idx as i32);
+                        let byte_len = (nframes as usize) * CD_FRAMESIZE_RAW;
+
+                        if read_raw_cdda_sectors(&file, lba, nframes, &mut raw_buf[..byte_len])
+                            .is_ok()
+                        {
+                            consecutive_errors = 0;
+                            let mut parsed_batch: Vec<(usize, Arc<[i16]>)> =
+                                Vec::with_capacity(nframes as usize);
+                            for i in 0..(nframes as usize) {
+                                let off = i * CD_FRAMESIZE_RAW;
+                                let slice = &raw_buf[off..off + CD_FRAMESIZE_RAW];
+                                let mut pcm = Vec::with_capacity(samples_per_sector);
+                                for pair in slice.chunks_exact(2) {
+                                    pcm.push(i16::from_le_bytes([pair[0], pair[1]]));
+                                }
+                                parsed_batch.push((next_idx + i, Arc::from(pcm.into_boxed_slice())));
+                            }
+                            let (lock, cvar) = &*cache_bg;
+                            if let Ok(mut guard) = lock.lock() {
+                                for (idx, arc_pcm) in parsed_batch {
+                                    if idx < guard.sectors.len() {
+                                        guard.sectors[idx] = Some(arc_pcm);
+                                    }
+                                }
+                                cursor = next_idx + (nframes as usize);
+                                cvar.notify_all();
+                            }
+                        } else {
+                            consecutive_errors += 1;
+                            if consecutive_errors >= 6 {
+                                let (lock, cvar) = &*cache_bg;
+                                if let Ok(mut guard) = lock.lock() {
+                                    guard.finished = true;
+                                    cvar.notify_all();
+                                }
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(40));
+                        }
+                    }
+                });
+        }
+
+        Ok(Self {
+            cache,
+            total_sectors,
+            current_sector_idx: 0,
             total_duration: Duration::from_millis(duration_ms),
-            sample_buf: Vec::with_capacity(READ_CHUNK_SECTORS as usize * CD_FRAMESIZE_RAW / 2),
+            current_sector_samples: first_sector_samples,
             sample_pos: 0,
-        };
-        source.fill_next_chunk()?;
-        Ok(source)
+        })
     }
 
-    #[cfg(not(target_os = "linux"))]
-    fn fill_next_chunk(&mut self) -> Result<bool> {
-        Ok(false)
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    fn load_sector(&mut self, _sector_idx: usize) -> bool {
+        false
     }
 
-    #[cfg(target_os = "linux")]
-    fn fill_next_chunk(&mut self) -> Result<bool> {
-        if self.current_lba >= self.end_lba {
-            return Ok(false);
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn load_sector(&mut self, sector_idx: usize) -> bool {
+        if sector_idx >= self.total_sectors {
+            self.current_sector_samples = None;
+            return false;
         }
-        let remaining = self.end_lba - self.current_lba;
-        let nframes = remaining.min(READ_CHUNK_SECTORS);
-        let byte_len = nframes as usize * CD_FRAMESIZE_RAW;
-        let mut raw_bytes = vec![0u8; byte_len];
-
-        let mut ra = CdromReadAudio {
-            addr: CdromAddr {
-                lba: self.current_lba,
-            },
-            addr_format: CDROM_LBA,
-            nframes,
-            buf: raw_bytes.as_mut_ptr(),
+        let (lock, cvar) = &*self.cache;
+        let Ok(mut guard) = lock.lock() else {
+            return false;
         };
-
-        let fd = self.file.as_raw_fd();
-        let mut res = unsafe { libc::ioctl(fd, CDROMREADAUDIO, &mut ra) };
-
-        // Fallback to MSF addressing if a USB drive firmware prefers CDROM_MSF over CDROM_LBA
-        if res < 0 {
-            let total_frames = (self.current_lba + 150).max(0);
-            let minute = (total_frames / (60 * 75)) as u8;
-            let second = ((total_frames / 75) % 60) as u8;
-            let frame = (total_frames % 75) as u8;
-            ra.addr = CdromAddr {
-                msf: CdromMsf0 {
-                    minute,
-                    second,
-                    frame,
-                },
+        guard.playback_sector = sector_idx;
+        if let Some(samples) = guard.sectors.get(sector_idx).and_then(|s| s.clone()) {
+            self.current_sector_idx = sector_idx;
+            self.current_sector_samples = Some(samples);
+            self.sample_pos = 0;
+            cvar.notify_all();
+            return true;
+        }
+        // Sector not yet in RAM cache: prioritize it and wait up to 4 seconds for the background reader
+        guard.priority_sector = Some(sector_idx);
+        cvar.notify_all();
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while !guard.finished && !guard.cancelled {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let Ok((next_guard, _)) = cvar.wait_timeout(guard, deadline - now) else {
+                return false;
             };
-            ra.addr_format = CDROM_MSF;
-            res = unsafe { libc::ioctl(fd, CDROMREADAUDIO, &mut ra) };
+            guard = next_guard;
+            if let Some(samples) = guard.sectors.get(sector_idx).and_then(|s| s.clone()) {
+                self.current_sector_idx = sector_idx;
+                self.current_sector_samples = Some(samples);
+                self.sample_pos = 0;
+                return true;
+            }
         }
-
-        if res < 0 {
-            return Err(anyhow!(
-                "CDROMREADAUDIO failed at LBA {}: {}",
-                self.current_lba,
-                std::io::Error::last_os_error()
-            ));
-        }
-
-        self.current_lba += nframes;
-        self.sample_buf.clear();
-        for chunk in raw_bytes.chunks_exact(2) {
-            self.sample_buf
-                .push(i16::from_le_bytes([chunk[0], chunk[1]]));
-        }
-        self.sample_pos = 0;
-        Ok(!self.sample_buf.is_empty())
+        false
     }
 }
 
@@ -933,22 +1499,27 @@ impl Iterator for CddaTrackSource {
 
     #[inline]
     fn next(&mut self) -> Option<i16> {
-        if self.sample_pos >= self.sample_buf.len() {
-            match self.fill_next_chunk() {
-                Ok(true) => {}
-                _ => return None,
+        loop {
+            if let Some(samples) = self.current_sector_samples.as_ref() {
+                if let Some(&sample) = samples.get(self.sample_pos) {
+                    self.sample_pos += 1;
+                    return Some(sample);
+                }
+            }
+            let next_sector = self.current_sector_idx + 1;
+            if !self.load_sector(next_sector) {
+                return None;
             }
         }
-        let sample = *self.sample_buf.get(self.sample_pos)?;
-        self.sample_pos += 1;
-        Some(sample)
     }
 }
 
 impl Source for CddaTrackSource {
     #[inline]
     fn current_frame_len(&self) -> Option<usize> {
-        Some(self.sample_buf.len().saturating_sub(self.sample_pos))
+        self.current_sector_samples
+            .as_ref()
+            .map(|s| s.len().saturating_sub(self.sample_pos))
     }
 
     #[inline]
@@ -967,12 +1538,9 @@ impl Source for CddaTrackSource {
     }
 
     fn try_seek(&mut self, pos: Duration) -> std::result::Result<(), RodioSeekError> {
-        let sector_offset = ((pos.as_millis() as u64 * CD_SECTORS_PER_SECOND as u64) / 1000) as i32;
-        let target_lba = (self.start_lba + sector_offset).clamp(self.start_lba, self.end_lba);
-        self.current_lba = target_lba;
-        self.sample_buf.clear();
-        self.sample_pos = 0;
-        let _ = self.fill_next_chunk();
+        let sector_offset = ((pos.as_millis() as u64 * CD_SECTORS_PER_SECOND as u64) / 1000) as usize;
+        let target_idx = sector_offset.min(self.total_sectors.saturating_sub(1));
+        let _ = self.load_sector(target_idx);
         Ok(())
     }
 }

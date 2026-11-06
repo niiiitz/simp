@@ -2,7 +2,9 @@ use anyhow::Result;
 use keyvalues_parser::Value;
 use simp_protocol::SessionState;
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "windows"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Discovers all active Steam soundtrack directories across:
 /// - SteamOS / Linux (`~/.local/share/Steam`, `~/.steam/steam`, Flatpak Steam)
@@ -28,6 +30,15 @@ pub fn discover_steam_music_directories() -> Vec<PathBuf> {
     candidate_vdfs.push(PathBuf::from(
         "/mnt/c/Program Files/Steam/steamapps/libraryfolders.vdf",
     ));
+    #[cfg(target_os = "windows")]
+    {
+        candidate_vdfs.push(PathBuf::from(
+            r"C:\Program Files (x86)\Steam\steamapps\libraryfolders.vdf",
+        ));
+        candidate_vdfs.push(PathBuf::from(
+            r"C:\Program Files\Steam\steamapps\libraryfolders.vdf",
+        ));
+    }
 
     for vdf_path in candidate_vdfs {
         let Ok(vdf_text) = fs::read_to_string(&vdf_path) else {
@@ -63,10 +74,12 @@ pub fn discover_steam_music_directories() -> Vec<PathBuf> {
         }
     }
 
-    // Explicit direct fallback for standard WSL2 / SteamOS music paths
+    // Explicit direct fallback for standard WSL2 / SteamOS / Windows music paths
     let direct_fallbacks = [
         PathBuf::from("/mnt/c/Program Files (x86)/Steam/steamapps/music"),
         PathBuf::from("/mnt/c/Program Files/Steam/steamapps/music"),
+        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\music"),
+        PathBuf::from(r"C:\Program Files\Steam\steamapps\music"),
     ];
     for fallback in direct_fallbacks {
         if fallback.is_dir() && !music_dirs.contains(&fallback) {
@@ -134,24 +147,24 @@ pub fn normalize_platform_path(raw_path: &str) -> PathBuf {
         && bytes[1] == b':'
         && (bytes[2] == b'\\' || bytes[2] == b'/')
     {
-        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
-        let rest = unescaped[3..].replace('\\', "/");
-        let rest_clean = rest.trim_end_matches('/');
-        let wsl_path = PathBuf::from(format!("/mnt/{drive_letter}/{rest_clean}"));
-        if Path::new("/mnt").is_dir() {
-            return wsl_path;
+        #[cfg(not(target_os = "windows"))]
+        {
+            let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+            let rest = unescaped[3..].replace('\\', "/");
+            let rest_clean = rest.trim_end_matches('/');
+            let wsl_path = PathBuf::from(format!("/mnt/{drive_letter}/{rest_clean}"));
+            if Path::new("/mnt").is_dir() {
+                return wsl_path;
+            }
         }
     }
 
     PathBuf::from(unescaped)
 }
 
-/// Path to `~/.local/share/simp/session_state.vdf`.
+/// Path to `~/.local/share/simp/session_state.vdf` (or `<exe_dir>/data/session_state.vdf` in Portable Mode).
 pub fn session_state_vdf_path() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("simp")
-        .join("session_state.vdf")
+    crate::simp_data_dir().join("session_state.vdf")
 }
 
 /// Loads persisted session state (`~/.local/share/simp/session_state.vdf`) if present.

@@ -100,7 +100,10 @@ export async function checkWidevineDrm(): Promise<boolean> {
   const configs: MediaKeySystemConfiguration[] = [
     {
       initDataTypes: ['cenc'],
-      audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
+      audioCapabilities: [
+        { contentType: 'audio/mp4; codecs="mp4a.40.2"', robustness: 'SW_SECURE_CRYPTO' },
+        { contentType: 'audio/mp4; codecs="mp4a.40.2"' },
+      ],
     },
   ];
   for (const ks of ['com.widevine.alpha', 'com.apple.fps.1_0', 'com.apple.fps']) {
