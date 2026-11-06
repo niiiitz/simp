@@ -148,6 +148,7 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/ia/item", get(ia_item_handler))
         .route("/api/ia/search", get(ia_search_handler))
         .route("/api/video/local", get(local_video_handler))
+        .route("/api/video/ia_stream", get(ia_video_stream_handler))
         .route("/api/video/subtitles", get(video_subtitles_handler))
         .route("/api/dvd/stream", get(dvd_stream_handler))
         .route("/ws", get(ws_handler))
@@ -944,9 +945,13 @@ async fn ia_discover_handler(
     })
     .await;
     match res {
-        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "data": items })),
-        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
-        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "items": items, "data": items })),
+        Ok(Err(e)) => Json(
+            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
+        ),
+        Err(e) => Json(
+            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
+        ),
     }
 }
 
@@ -961,7 +966,7 @@ async fn ia_item_handler(
     })
     .await;
     match res {
-        Ok(Ok(detail)) => Json(serde_json::json!({ "ok": true, "data": detail })),
+        Ok(Ok(detail)) => Json(serde_json::json!({ "ok": true, "detail": detail, "data": detail })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
@@ -979,9 +984,93 @@ async fn ia_search_handler(
     })
     .await;
     match res {
-        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "data": items })),
-        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
-        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "items": items, "data": items })),
+        Ok(Err(e)) => Json(
+            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
+        ),
+        Err(e) => Json(
+            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
+        ),
+    }
+}
+
+fn stream_ffmpeg_child_response(mut child: std::process::Child) -> axum::response::Response {
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+            .body(axum::body::Body::from("Missing ffmpeg stdout pipe"))
+            .unwrap();
+    };
+
+    let (tx, rx) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>(24);
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = vec![0u8; 32 * 1024];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.blocking_send(Ok(buf[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    break;
+                }
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    });
+
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "video/mp4")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap()
+}
+
+async fn ia_video_stream_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let id = params.get("id").cloned().unwrap_or_default();
+    let file = params.get("file").cloned().unwrap_or_default();
+    let direct_url = params.get("url").cloned();
+    let seek_ms = params
+        .get("seek_ms")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&ms| ms > 0);
+
+    let target_url = if let Some(u) = direct_url.filter(|u| u.starts_with("http://") || u.starts_with("https://")) {
+        u
+    } else if !id.is_empty() && !file.is_empty() {
+        format!(
+            "https://archive.org/download/{}/{}",
+            simp_core::sinks::internet_archive_api::url_encode_component(&id),
+            simp_core::sinks::internet_archive_api::url_encode_path_preserve_slashes(&file)
+        )
+    } else {
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::BAD_REQUEST)
+            .body(axum::body::Body::from("Missing id/file or url"))
+            .unwrap();
+    };
+
+    match simp_core::sinks::dvd::spawn_generic_video_mp4_stream(&target_url, seek_ms) {
+        Ok(child) => stream_ffmpeg_child_response(child),
+        Err(e) => axum::response::Response::builder()
+            .status(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+            ))
+            .unwrap(),
     }
 }
 
@@ -996,11 +1085,16 @@ async fn local_video_handler(
         .unwrap_or(&raw_path)
         .to_string();
     let want_meta = params.get("meta").map(|v| v == "1").unwrap_or(false);
+    let want_transcode = params.get("transcode").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let seek_ms = params
+        .get("seek_ms")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&ms| ms > 0);
     let path_buf = simp_core::library::vdf::normalize_platform_path(&clean_path);
 
     if want_meta {
         let ep = simp_core::sinks::internet_archive_api::build_local_video_episode(&path_buf, 1);
-        return Json(serde_json::json!({ "ok": true, "data": ep })).into_response();
+        return Json(serde_json::json!({ "ok": true, "episodes": [ep], "data": ep })).into_response();
     }
 
     if !path_buf.is_file() {
@@ -1008,6 +1102,20 @@ async fn local_video_handler(
             .status(axum::http::StatusCode::NOT_FOUND)
             .body(axum::body::Body::from("Video file not found"))
             .unwrap();
+    }
+
+    if want_transcode {
+        let input_str = path_buf.to_string_lossy().to_string();
+        return match simp_core::sinks::dvd::spawn_generic_video_mp4_stream(&input_str, seek_ms) {
+            Ok(child) => stream_ffmpeg_child_response(child),
+            Err(e) => axum::response::Response::builder()
+                .status(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(),
+                ))
+                .unwrap(),
+        };
     }
 
     match tower_http::services::ServeFile::new(path_buf)

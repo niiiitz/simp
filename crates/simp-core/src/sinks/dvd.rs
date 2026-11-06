@@ -2231,6 +2231,78 @@ pub fn spawn_dvd_title_mp4_stream(
     Ok(child)
 }
 
+/// Spawns an `ffmpeg` fragmented MP4 (`video/mp4`) child process that transcodes any local file
+/// or remote HTTP/HTTPS video stream (such as legacy MPEG-4 Part 2, MPEG-2, AVI, MKV, or AC-3 audio)
+/// into browser-native H.264 + AAC fMP4 on `stdout`.
+pub fn spawn_generic_video_mp4_stream(
+    input_source: &str,
+    seek_ms: Option<u32>,
+) -> Result<Child> {
+    let ffmpeg_bin = find_ffmpeg_binary()
+        .ok_or_else(|| anyhow!("ffmpeg not found in ~/.local/share/simp/bin/ or PATH"))?;
+    let mut args: Vec<String> = vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-fflags".to_string(),
+        "+genpts+discardcorrupt".to_string(),
+    ];
+    if let Some(ms) = seek_ms.filter(|&m| m > 0) {
+        args.push("-ss".to_string());
+        args.push(format!("{:.3}", (ms as f64) / 1000.0));
+    }
+    if input_source.starts_with("http://") || input_source.starts_with("https://") {
+        args.extend([
+            "-reconnect".to_string(),
+            "1".to_string(),
+            "-reconnect_streamed".to_string(),
+            "1".to_string(),
+            "-reconnect_delay_max".to_string(),
+            "5".to_string(),
+        ]);
+    }
+    args.extend([
+        "-i".to_string(),
+        input_source.to_string(),
+        "-map".to_string(),
+        "0:v:0".to_string(),
+        "-map".to_string(),
+        "0:a:0?".to_string(),
+        "-c:v".to_string(),
+        "libx264".to_string(),
+        "-preset".to_string(),
+        "ultrafast".to_string(),
+        "-tune".to_string(),
+        "zerolatency".to_string(),
+        "-g".to_string(),
+        "48".to_string(),
+        "-crf".to_string(),
+        "21".to_string(),
+        "-pix_fmt".to_string(),
+        "yuv420p".to_string(),
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-ac".to_string(),
+        "2".to_string(),
+        "-b:a".to_string(),
+        "160k".to_string(),
+        "-f".to_string(),
+        "mp4".to_string(),
+        "-movflags".to_string(),
+        "frag_keyframe+empty_moov+default_base_moof".to_string(),
+        "pipe:1".to_string(),
+    ]);
+
+    let mut cmd = Command::new(ffmpeg_bin);
+    cmd.args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::configure_background_command(&mut cmd);
+    cmd.spawn()
+        .map_err(|e| anyhow!("Failed to spawn ffmpeg video stream: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

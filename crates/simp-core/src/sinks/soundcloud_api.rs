@@ -661,6 +661,7 @@ pub fn pkce_code_challenge_s256(code_verifier: &str) -> String {
 
 fn generate_random_url_safe_token(byte_len: usize) -> String {
     let mut buf = vec![0u8; byte_len];
+    #[allow(unused_mut)]
     let mut filled = false;
     #[cfg(unix)]
     {
