@@ -467,7 +467,11 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   const [activeMountRoot, setActiveMountRoot] = useState<string | null>(null);
   const [mountAlbums, setMountAlbums] = useState<AlbumRecord[]>([]);
   const [mountTracks, setMountTracks] = useState<TrackMetadata[]>([]);
-  const [simpHubFilter, setSimpHubFilter] = useState<'all' | 'hybrid' | 'pinned' | 'albums'>('all');
+  const [localVideos, setLocalVideos] = useState<TrackMetadata[]>([]);
+  const [localSearchTracks, setLocalSearchTracks] = useState<TrackMetadata[]>([]);
+  const [simpHubFilter, setSimpHubFilter] = useState<
+    'all' | 'hybrid' | 'pinned' | 'albums' | 'videos'
+  >('all');
   const [cloudPage, setCloudPage] = useState<number>(0);
   const [cloudAlpha, setCloudAlpha] = useState<AlphaBucket>('all');
   const [radioFilter, setRadioFilter] = useState<
@@ -603,6 +607,43 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       })
       .catch(() => {});
   }, [activeMountRoot, browserSearch, albums]);
+
+  // Load indexed Local Video files (`source: 'local_video'`) for the SIMP Library hub
+  useEffect(() => {
+    defaultSimpClient
+      .query<TrackMetadata[]>('get_tracks', {
+        source: 'local_video',
+        mount_root: null,
+        search: null,
+        limit: 500,
+        offset: 0,
+      })
+      .then((res) => {
+        if (Array.isArray(res)) setLocalVideos(res);
+      })
+      .catch(() => {});
+  }, [albums, snap?.mounts]);
+
+  // Query matching Local tracks & videos when searching in `all` or `local`
+  useEffect(() => {
+    const q = browserSearch.trim();
+    if (!q || (browserSourceFilter !== 'all' && browserSourceFilter !== 'local')) {
+      setLocalSearchTracks([]);
+      return;
+    }
+    defaultSimpClient
+      .query<TrackMetadata[]>('get_tracks', {
+        source: null,
+        mount_root: null,
+        search: q,
+        limit: 60,
+        offset: 0,
+      })
+      .then((res) => {
+        if (Array.isArray(res)) setLocalSearchTracks(res);
+      })
+      .catch(() => {});
+  }, [browserSearch, browserSourceFilter]);
 
   // Auto-focus Right Pane when selecting a Place ('tile') or Collection ('track')
   const pendingRightFocusRef = useRef<'track' | 'tile' | null>(null);
@@ -2804,7 +2845,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 fontWeight: 800,
               }}
             >
-              {isVideo ? '🎬 VIDEO' : '🏛️ AUDIO'}
+              {isVideo ? 'VIDEO' : 'AUDIO'}
             </span>
             {isVideo ? (
               <span
@@ -2947,6 +2988,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         <button
           data-single-song-play="true"
           onClick={() => {
+            if (s.source === 'local_video' || s.uri.startsWith('video://local/')) {
+              openLocalVideoFile(s);
+              return;
+            }
             setPlayingContextId(`${ctxPrefix}:${s.uri}`);
             const idx = Math.max(0, peerList.findIndex((tr) => tr.uri === s.uri));
             defaultSimpClient.loadQueue(
@@ -3368,31 +3413,31 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 [
                   {
                     id: 'pinned' as const,
-                    label: `📌 SIMP Library (${filteredPlaylists.length})`,
+                    label: `SIMP Library (${filteredPlaylists.length})`,
                     isSimp: true,
                     defaultSub: 'all',
                   },
                   {
                     id: 'trending' as const,
-                    label: '🔥 Trending & Favorites',
+                    label: 'Trending',
                     isSimp: false,
                     defaultSub: 'all',
                   },
                   {
                     id: 'films' as const,
-                    label: '🎬 Films & Cinema',
+                    label: 'Films & Cinema',
                     isSimp: false,
                     defaultSub: 'all',
                   },
                   {
                     id: 'tv' as const,
-                    label: '📺 TV & Animation',
+                    label: 'TV & Animation',
                     isSimp: false,
                     defaultSub: 'all',
                   },
                   {
                     id: 'audio' as const,
-                    label: '🎸 Live Concerts & Audio',
+                    label: 'Concerts & Audio',
                     isSimp: false,
                     defaultSub: 'all',
                   },
@@ -4401,6 +4446,26 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   </>
                 )}
 
+                {/* 1C-2. Matching Local Tracks & Local Videos */}
+                {localSearchTracks.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                      LOCAL TRACKS & VIDEOS ({localSearchTracks.length})
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {localSearchTracks.map((s) =>
+                        renderSingleSongRow(
+                          s,
+                          localSearchTracks.filter(
+                            (tr) => tr.source !== 'local_video' && !tr.uri.startsWith('video://local/')
+                          ),
+                          'local_search'
+                        )
+                      )}
+                    </div>
+                  </>
+                )}
+
                 {/* 1D. Personal Apple Cloud Library ("Your Library") & Public Catalog Search Results */}
                 {browserSourceFilter !== 'local' && snap?.apple_authenticated && (
                   <>
@@ -4541,6 +4606,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 {filteredPlaylists.length === 0 &&
                   filteredCloudPlaylists.length === 0 &&
                   albums.length === 0 &&
+                  localSearchTracks.length === 0 &&
                   catalogSearchResults.albums.length === 0 &&
                   catalogSearchResults.playlists.length === 0 &&
                   catalogSearchResults.stations.length === 0 &&
@@ -4588,16 +4654,22 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    {mountTracks.length > 0 && (
+                    {mountTracks.some(
+                      (t) => t.source !== 'local_video' && !t.uri.startsWith('video://local/')
+                    ) && (
                       <>
                         <button
                           data-right-tile="true"
                           onClick={() => {
+                            const audioOnly = mountTracks.filter(
+                              (t) =>
+                                t.source !== 'local_video' && !t.uri.startsWith('video://local/')
+                            );
                             setPlayingContextId(`mount:${activeMountPlaceObj.mount_root}`);
                             defaultSimpClient.loadQueue(
-                              mountTracks.map((t) => t.uri),
+                              audioOnly.map((t) => t.uri),
                               0,
-                              mountTracks
+                              audioOnly
                             );
                             setView('lock');
                           }}
@@ -4613,16 +4685,27 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                             cursor: 'pointer',
                           }}
                         >
-                          ▶ Play All ({mountTracks.length})
+                          ▶ Play All (
+                          {
+                            mountTracks.filter(
+                              (t) =>
+                                t.source !== 'local_video' && !t.uri.startsWith('video://local/')
+                            ).length
+                          }
+                          )
                         </button>
                         <button
-                          onClick={() =>
+                          onClick={() => {
+                            const audioOnly = mountTracks.filter(
+                              (t) =>
+                                t.source !== 'local_video' && !t.uri.startsWith('video://local/')
+                            );
                             handleAddTracksToPlaylist(
-                              mountTracks.map((t) => t.uri),
-                              `all ${mountTracks.length} tracks from ${activeMountPlaceObj.label}`,
-                              mountTracks
-                            )
-                          }
+                              audioOnly.map((t) => t.uri),
+                              `all ${audioOnly.length} tracks from ${activeMountPlaceObj.label}`,
+                              audioOnly
+                            );
+                          }}
                           style={{
                             minHeight: 36,
                             padding: '0 10px',
@@ -4651,9 +4734,34 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     <div style={tileGridStyle}>{mountAlbums.map(renderSimpAlbumCard)}</div>
                   </>
                 ) : (
-                  <div style={{ fontSize: 12, color: '#8e8e99', padding: '12px 4px' }}>
-                    No albums indexed on {activeMountPlaceObj.label} yet.
-                  </div>
+                  mountTracks.length === 0 && (
+                    <div style={{ fontSize: 12, color: '#8e8e99', padding: '12px 4px' }}>
+                      No albums indexed on {activeMountPlaceObj.label} yet.
+                    </div>
+                  )
+                )}
+
+                {mountTracks.some(
+                  (t) => t.source === 'local_video' || t.uri.startsWith('video://local/')
+                ) && (
+                  <>
+                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                      LOCAL VIDEOS ON {activeMountPlaceObj.label.toUpperCase()} (
+                      {
+                        mountTracks.filter(
+                          (t) => t.source === 'local_video' || t.uri.startsWith('video://local/')
+                        ).length
+                      }
+                      )
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {mountTracks
+                        .filter(
+                          (t) => t.source === 'local_video' || t.uri.startsWith('video://local/')
+                        )
+                        .map((v) => renderSingleSongRow(v, [], 'mount_video'))}
+                    </div>
+                  </>
                 )}
               </>
             ) : (
@@ -4705,6 +4813,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                                 ]
                               : []),
                             { id: 'albums', label: `💿 Albums (${albums.length})` },
+                            ...(localVideos.length > 0
+                              ? [
+                                  {
+                                    id: 'videos' as const,
+                                    label: `Videos (${localVideos.length})`,
+                                  },
+                                ]
+                              : []),
                           ] as const
                         ).map((f) => {
                           const active = simpHubFilter === f.id;
@@ -4822,6 +4938,21 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           </div>
                           <div style={tileGridStyle}>
                             {albums.map(renderSimpAlbumCard)}
+                          </div>
+                        </>
+                      )}
+
+                    {/* Indexed Local Unencrypted Video Files Section */}
+                    {(simpHubFilter === 'all' || simpHubFilter === 'videos') &&
+                      localVideos.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                            LOCAL VIDEOS ({localVideos.length})
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {localVideos.map((v) =>
+                              renderSingleSongRow(v, [], 'local_video_hub')
+                            )}
                           </div>
                         </>
                       )}
@@ -5773,34 +5904,34 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         </span>
                         {(iaSubTab === 'trending'
                           ? [
-                              { id: 'all', label: '🔥 Trending This Week' },
-                              { id: 'movies', label: '🎬 Trending Video' },
-                              { id: 'audio', label: '🎸 Trending Audio' },
-                              { id: 'all_time', label: '🏆 All-Time Classics' },
-                              { id: 'favorites', label: '★ My Favorites' },
+                              { id: 'all', label: 'This Week' },
+                              { id: 'movies', label: 'Video' },
+                              { id: 'audio', label: 'Audio' },
+                              { id: 'all_time', label: 'All-Time' },
+                              { id: 'favorites', label: 'Favorites' },
                             ]
                           : iaSubTab === 'films'
                           ? [
-                              { id: 'all', label: '🎬 Feature Films' },
-                              { id: 'noir', label: '🕵️ Film Noir' },
-                              { id: 'scifi_horror', label: '👽 Sci-Fi & Horror' },
-                              { id: 'comedy', label: '🎭 Comedy & Shorts' },
-                              { id: 'silent', label: '🎞️ Silent Hall of Fame' },
+                              { id: 'all', label: 'Feature Films' },
+                              { id: 'noir', label: 'Film Noir' },
+                              { id: 'scifi_horror', label: 'Sci-Fi & Horror' },
+                              { id: 'comedy', label: 'Comedy' },
+                              { id: 'silent', label: 'Silent Films' },
                             ]
                           : iaSubTab === 'tv'
                           ? [
-                              { id: 'all', label: '📺 All TV & Animation' },
-                              { id: 'cartoons', label: '🎨 Classic Animation' },
-                              { id: 'chronicles', label: '🕹️ Computer Chronicles' },
-                              { id: 'classic_tv', label: '📡 Classic TV' },
-                              { id: 'scifi_tv', label: '🛸 Sci-Fi & Anthology' },
+                              { id: 'all', label: 'All TV' },
+                              { id: 'cartoons', label: 'Animation' },
+                              { id: 'chronicles', label: 'Computer Chronicles' },
+                              { id: 'classic_tv', label: 'Classic TV' },
+                              { id: 'scifi_tv', label: 'Sci-Fi & Anthology' },
                             ]
                           : [
-                              { id: 'all', label: '🎸 All Audio' },
-                              { id: 'etree', label: '🎤 Live Music Archive' },
-                              { id: 'netlabels', label: '💿 Netlabels' },
-                              { id: 'radio', label: '📻 Old Time Radio' },
-                              { id: 'librivox', label: '📖 LibriVox Audiobooks' },
+                              { id: 'all', label: 'All Audio' },
+                              { id: 'etree', label: 'Live Concerts' },
+                              { id: 'netlabels', label: 'Netlabels' },
+                              { id: 'radio', label: 'Old Time Radio' },
+                              { id: 'librivox', label: 'Audiobooks' },
                             ]
                         ).map((f) => {
                           const active = iaSubFilter === f.id;
@@ -6699,7 +6830,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           mode={activeVideoModal.mode}
           discTitle={activeVideoModal.title}
           episodes={activeVideoModal.episodes}
-          initialChapter={(activeVideoModal.initialEpisodeIndex ?? 0) + 1}
+          initialEpisodeIndex={activeVideoModal.initialEpisodeIndex ?? 0}
           onClose={() => setActiveVideoModal(null)}
         />
       )}
