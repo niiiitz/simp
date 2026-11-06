@@ -153,6 +153,11 @@ export function useGamepadNavigation({
         lastBrowserFocusRef.current = el;
       }
       el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      if (el.closest('[data-nav-col="left"]') && el.dataset.xmbPreview === 'true') {
+        window.dispatchEvent(
+          new CustomEvent('simp-xmb-left-focus', { detail: { element: el } })
+        );
+      }
     }
   }, []);
 
@@ -161,9 +166,13 @@ export function useGamepadNavigation({
     if (view !== 'browser' && !sourceModalOpen && !powerModalOpen) return;
     const t = window.setTimeout(() => {
       if (sourceModalOpen || powerModalOpen) {
-        const modalTarget = document.querySelector<HTMLElement>(
-          '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled])'
-        );
+        const modalTarget =
+          document.querySelector<HTMLElement>(
+            '[data-modal-root="true"] [data-default-focus="true"]:not([disabled])'
+          ) ||
+          document.querySelector<HTMLElement>(
+            '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled])'
+          );
         if (modalTarget) {
           applyFocusMarker(modalTarget);
         }
@@ -315,6 +324,17 @@ export function useGamepadNavigation({
       }
 
       if (!oskTarget && !isModalOpen && (dir === 'left' || dir === 'right') && curCol) {
+        // PS3 XMB Drill-Right Action: If focused on a Left-Column drill-right row (`🍎 Apple Music ▸`, `☁️ SoundCloud ▸`, or `+ New Playlist`),
+        // pressing D-Pad Right triggers the drill-in / action directly!
+        if (curCol === 'left' && dir === 'right' && active.dataset.xmbDrillRight === 'true') {
+          const drillTarget =
+            active.parentElement?.querySelector<HTMLElement>(
+              '[data-xmb-drill-action="true"]:not([disabled])'
+            ) || active;
+          drillTarget.click();
+          return;
+        }
+
         // 1. First look for a sibling control on the SAME horizontal row in the SAME column
         let bestSameRow: HTMLElement | null = null;
         let bestSameRowDx = Infinity;
@@ -344,13 +364,40 @@ export function useGamepadNavigation({
           return;
         }
 
-        // 2. Otherwise cross directly between the Left Column (`left`) and Right Column (`right`) at the closest vertical Y!
+        // 2. Otherwise cross directly between the Left Column (`left`) and Right Column (`right`)!
         const targetCol =
           curCol === 'left' && dir === 'right'
             ? 'right'
             : curCol === 'right' && dir === 'left'
             ? 'left'
             : null;
+
+        if (targetCol === 'right') {
+          // PS3 XMB Ergonomics: Crossing from Left Column to Right Column ALWAYS lands on the FIRST playable tile/track
+          // (never on top filter/genre pills, which remain reachable by pressing D-Pad Up from the first tile row!)
+          const firstContentItem = document.querySelector<HTMLElement>(
+            '[data-nav-col="right"] [data-right-tile="true"]:not([disabled]), [data-nav-col="right"] [data-single-song-play="true"]:not([disabled]), [data-nav-col="right"] [data-right-track="true"]:not([disabled]), [data-nav-col="right"] [data-right-play-all="true"]:not([disabled])'
+          );
+          if (firstContentItem) {
+            const rect = firstContentItem.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              applyFocusMarker(firstContentItem);
+              return;
+            }
+          }
+        } else if (targetCol === 'left') {
+          // Crossing from Right Column back to Left Column prefers the active Left-Column item (`data-left-active="true"`)
+          const activeLeftItem = document.querySelector<HTMLElement>(
+            '[data-nav-col="left"] button[data-left-active="true"]:not([disabled])'
+          );
+          if (activeLeftItem) {
+            const rect = activeLeftItem.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              applyFocusMarker(activeLeftItem);
+              return;
+            }
+          }
+        }
 
         if (targetCol) {
           let bestCrossCol: HTMLElement | null = null;
@@ -359,6 +406,7 @@ export function useGamepadNavigation({
           for (const candidate of nodes) {
             if (getCol(candidate) !== targetCol) continue;
             if (isAuxRowElement(candidate)) continue;
+            if (targetCol === 'right' && candidate.dataset.rightFilterPill === 'true') continue;
             const r = candidate.getBoundingClientRect();
             const ty = r.top + r.height / 2;
             const score = Math.abs(ty - cy) + r.left * 0.05;
@@ -395,7 +443,23 @@ export function useGamepadNavigation({
         if (dir === 'up' && dy >= -6) continue;
 
         const primary = dir === 'left' || dir === 'right' ? Math.abs(dx) : Math.abs(dy);
-        const cross = dir === 'left' || dir === 'right' ? Math.abs(dy) : Math.abs(dx);
+        // Use bounding-box interval overlap for cross-axis distance so wide full-width rows
+        // (such as `⚙ Folders & Connected Accounts` in PowerModal) are never skipped when moving Up/Down!
+        const boxCross =
+          dir === 'left' || dir === 'right'
+            ? cy >= r.top && cy <= r.bottom
+              ? 0
+              : Math.min(Math.abs(cy - r.top), Math.abs(cy - r.bottom))
+            : cx >= r.left && cx <= r.right
+            ? 0
+            : Math.min(Math.abs(cx - r.left), Math.abs(cx - r.right));
+        const centerTieBreak =
+          (dir === 'left' || dir === 'right' ? Math.abs(ty - cy) : Math.abs(tx - cx)) * 0.08;
+        const cross = oskTarget
+          ? dir === 'left' || dir === 'right'
+            ? Math.abs(dy)
+            : Math.abs(dx)
+          : boxCross + centerTieBreak;
         const score = primary + cross * (oskTarget ? 1.8 : 2.2);
 
         if (score < bestScore) {
@@ -429,11 +493,19 @@ export function useGamepadNavigation({
       }
 
       const isDvdModalOpen = Boolean(document.querySelector('[data-dvd-modal="true"]'));
+      const isPlayerActionsModalOpen = Boolean(
+        document.querySelector('[data-player-actions-modal="true"]')
+      );
 
       // In the `🎵 Player` (`lock`) view (when modals and OSK are closed), D-Pad maps directly
       // to the on-screen transport badges (`◄` Previous, `►` Next, `▲/▼` Volume, `A` Play/Pause)!
       const isDirectTransportView =
-        view === 'lock' && !sourceModalOpen && !powerModalOpen && !oskTarget && !isDvdModalOpen;
+        view === 'lock' &&
+        !sourceModalOpen &&
+        !powerModalOpen &&
+        !oskTarget &&
+        !isDvdModalOpen &&
+        !isPlayerActionsModalOpen;
 
       if (isDvdModalOpen) {
         const activeDvdEl =
@@ -607,6 +679,13 @@ export function useGamepadNavigation({
             }, 30);
             break;
           }
+          const playerActionsClose = document.querySelector<HTMLElement>(
+            '[data-player-actions-close="true"]'
+          );
+          if (playerActionsClose) {
+            playerActionsClose.click();
+            break;
+          }
           const hybridPickerClose = document.querySelector<HTMLElement>(
             '[data-hybrid-picker-close="true"]'
           );
@@ -659,12 +738,20 @@ export function useGamepadNavigation({
               }
               break;
             }
-            // 3. Already in Left Column: if search has text, clear it; otherwise stay in Left Column (L1 switches to Player)
+            // 3. Already in Left Column: if search has text, clear it; otherwise if we drilled into a Service Place, walk back!
             const clearSearchBtn = document.querySelector<HTMLElement>(
               '[data-clear-search="true"]:not([disabled])'
             );
             if (clearSearchBtn) {
               clearSearchBtn.click();
+              break;
+            }
+            const walkBackBtn = document.querySelector<HTMLElement>(
+              '[data-right-walk-back="true"]:not([disabled])'
+            );
+            if (walkBackBtn) {
+              walkBackBtn.click();
+              break;
             }
           } else if (window.parent && window.parent !== window) {
             window.parent.postMessage({ type: 'SIMP_EXIT_CONSOLE' }, '*');
@@ -701,6 +788,8 @@ export function useGamepadNavigation({
             window.dispatchEvent(
               new CustomEvent('simp-browser-gamepad-op', { detail: { op: 'select' } })
             );
+          } else if (view === 'lock' && !sourceModalOpen && !powerModalOpen && !oskTarget) {
+            window.dispatchEvent(new CustomEvent('simp-player-actions-toggle'));
           } else {
             setOskTarget(null);
             setPowerModalOpen(false);

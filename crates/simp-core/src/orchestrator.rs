@@ -1035,7 +1035,7 @@ impl AudioOrchestrator {
                 {
                     let mut st = self.state.lock().unwrap();
                     st.position_ms = position_ms;
-                    if position_ms > 0 {
+                    if position_ms >= 8_000 {
                         for offset in [1usize, 2usize] {
                             let target_idx = st.queue_index + offset;
                             if target_idx < st.queue.len() {
@@ -1047,6 +1047,8 @@ impl AudioOrchestrator {
                                 }
                             }
                         }
+                    }
+                    if position_ms > 0 {
                         let mut healed_url_opt = None;
                         if let Some(ref mut cur) = st.current_track {
                             let needs_art_heal = cur

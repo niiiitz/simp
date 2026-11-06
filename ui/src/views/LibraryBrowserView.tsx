@@ -522,8 +522,35 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
   // Auto-focus Right Pane when selecting a Place ('tile') or Collection ('track')
   const pendingRightFocusRef = useRef<'track' | 'tile' | null>(null);
+  const xmbPreviewTriggerRef = useRef<boolean>(false);
+
+  // PS3 XMB Auto-Fill: When cursor lands on a non-drill-down row in the Left Column (`data-xmb-preview="true"`),
+  // automatically fill the Right Pane after a 75ms debounce while keeping focus in the Left Column!
+  useEffect(() => {
+    let debounceTimer = 0;
+    const onXmbLeftFocus = (e: Event) => {
+      const el = (e as CustomEvent<{ element?: HTMLElement }>)?.detail?.element;
+      if (!el) return;
+      window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(() => {
+        if (!el.isConnected || el.getAttribute('data-simp-active-focus') !== 'true') return;
+        xmbPreviewTriggerRef.current = true;
+        try {
+          el.click();
+        } finally {
+          xmbPreviewTriggerRef.current = false;
+        }
+      }, 75);
+    };
+    window.addEventListener('simp-xmb-left-focus', onXmbLeftFocus);
+    return () => {
+      window.clearTimeout(debounceTimer);
+      window.removeEventListener('simp-xmb-left-focus', onXmbLeftFocus);
+    };
+  }, []);
 
   const focusRightPaneFirstTrack = useCallback(() => {
+    if (xmbPreviewTriggerRef.current) return;
     pendingRightFocusRef.current = 'track';
     window.setTimeout(() => {
       const firstTrack =
@@ -543,18 +570,26 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   }, [applyFocusMarker]);
 
   const focusRightPaneFirstTile = useCallback(() => {
+    if (xmbPreviewTriggerRef.current) return;
     pendingRightFocusRef.current = 'tile';
     window.setTimeout(() => {
       const firstTile =
         document.querySelector<HTMLElement>(
-          '[data-nav-col="right"] [data-right-tile="true"]:not([disabled])'
+          '[data-nav-col="right"] [data-right-tile="true"]:not([disabled]), [data-nav-col="right"] [data-single-song-play="true"]:not([disabled]), [data-nav-col="right"] [data-right-track="true"]:not([disabled])'
+        ) ||
+        document.querySelector<HTMLElement>(
+          '[data-nav-col="right"] button:not([disabled]):not([data-right-filter-pill="true"])'
         ) ||
         document.querySelector<HTMLElement>(
           '[data-nav-col="right"] button:not([disabled])'
         );
       if (firstTile) {
         applyFocusMarker(firstTile);
-        if (firstTile.dataset.rightTile === 'true') {
+        if (
+          firstTile.dataset.rightTile === 'true' ||
+          firstTile.dataset.singleSongPlay === 'true' ||
+          firstTile.dataset.rightTrack === 'true'
+        ) {
           pendingRightFocusRef.current = null;
         }
       }
@@ -578,7 +613,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     if (pendingRightFocusRef.current === 'tile' && rightPaneMode === 'browse') {
       const t = window.setTimeout(() => {
         const firstTile = document.querySelector<HTMLElement>(
-          '[data-nav-col="right"] [data-right-tile="true"]:not([disabled])'
+          '[data-nav-col="right"] [data-right-tile="true"]:not([disabled]), [data-nav-col="right"] [data-single-song-play="true"]:not([disabled]), [data-nav-col="right"] [data-right-track="true"]:not([disabled])'
         );
         if (firstTile) {
           applyFocusMarker(firstTile);
@@ -591,10 +626,18 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     browserTracks,
     rightPaneMode,
     appleSubTab,
+    soundCloudSubTab,
     cloudPlaylists,
     radioStations,
     forYouPlaylists,
     newFeedAlbums,
+    scLikedTracks,
+    scPlaylists,
+    scStreamTracks,
+    scStreamPlaylists,
+    scTrendingTracks,
+    scTrendingMixes,
+    scTrendingPlaylists,
     applyFocusMarker,
   ]);
 
@@ -764,32 +807,39 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     };
   }, [pagedCloudPlaylists, snap?.apple_authenticated, browserSourceFilter, setCloudPlaylists]);
 
-  // Right-pane navigation history stack so mouse users (and controller 'B' in Tracklist view) can walk back step-by-step
+  // Right-pane navigation history stack so mouse users (and controller 'B' in Tracklist/Service view) can walk back step-by-step
   interface RightNavEntry {
+    browserSourceFilter: 'all' | 'local' | 'apple_music' | 'soundcloud';
     rightPaneMode: 'browse' | 'tracks';
     browserTarget: BrowserTarget | null;
     browserTracks: TrackMetadata[];
     appleSubTab: 'pinned' | 'cloud_playlists' | 'radio' | 'new';
+    soundCloudSubTab: 'pinned' | 'likes_sets' | 'stream_radio' | 'trending';
     activeMountRoot: string | null;
     browserSearch: string;
   }
   const [navHistory, setNavHistory] = useState<RightNavEntry[]>([]);
 
   const pushCurrentNavState = useCallback(() => {
+    if (xmbPreviewTriggerRef.current) return;
     setNavHistory((prev) => {
       const next: RightNavEntry = {
+        browserSourceFilter,
         rightPaneMode,
         browserTarget,
         browserTracks,
         appleSubTab,
+        soundCloudSubTab,
         activeMountRoot,
         browserSearch,
       };
       const last = prev[prev.length - 1];
       if (
         last &&
+        last.browserSourceFilter === next.browserSourceFilter &&
         last.rightPaneMode === next.rightPaneMode &&
         last.appleSubTab === next.appleSubTab &&
+        last.soundCloudSubTab === next.soundCloudSubTab &&
         last.activeMountRoot === next.activeMountRoot &&
         last.browserSearch === next.browserSearch &&
         JSON.stringify(last.browserTarget) === JSON.stringify(next.browserTarget)
@@ -798,13 +848,24 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       }
       return [...prev.slice(-15), next];
     });
-  }, [rightPaneMode, browserTarget, browserTracks, appleSubTab, activeMountRoot, browserSearch]);
+  }, [
+    browserSourceFilter,
+    rightPaneMode,
+    browserTarget,
+    browserTracks,
+    appleSubTab,
+    soundCloudSubTab,
+    activeMountRoot,
+    browserSearch,
+  ]);
 
   const handleWalkBack = useCallback(() => {
     if (navHistory.length > 0) {
       const prev = navHistory[navHistory.length - 1];
       setNavHistory((h) => h.slice(0, -1));
+      setBrowserSourceFilter(prev.browserSourceFilter);
       setAppleSubTab(prev.appleSubTab);
+      setSoundCloudSubTab(prev.soundCloudSubTab);
       setActiveMountRoot(prev.activeMountRoot);
       setBrowserSearch(prev.browserSearch);
       setBrowserTarget(prev.browserTarget);
@@ -830,12 +891,21 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       setActiveMountRoot(null);
       return;
     }
+    if (browserSourceFilter !== 'all') {
+      setBrowserSourceFilter('all');
+      setAppleSubTab('pinned');
+      setSoundCloudSubTab('pinned');
+      return;
+    }
   }, [
     navHistory,
     rightPaneMode,
     browserSearch,
     activeMountRoot,
+    browserSourceFilter,
+    setBrowserSourceFilter,
     setAppleSubTab,
+    setSoundCloudSubTab,
     setActiveMountRoot,
     setBrowserSearch,
     setBrowserTarget,
@@ -846,7 +916,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   ]);
 
   const canWalkBackInBrowse =
-    navHistory.length > 0 || Boolean(browserSearch.trim()) || Boolean(activeMountRoot);
+    navHistory.length > 0 ||
+    Boolean(browserSearch.trim()) ||
+    Boolean(activeMountRoot) ||
+    browserSourceFilter !== 'all';
 
   // Open a collection, switch the Right Pane to Tracklist view, and focus the first track
   const selectLocalCollection = (target: BrowserTarget) => {
@@ -2363,6 +2436,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         }}
       >
         <button
+          data-single-song-play="true"
           onClick={() => {
             setPlayingContextId(`${ctxPrefix}:${s.uri}`);
             const idx = Math.max(0, peerList.findIndex((tr) => tr.uri === s.uri));
@@ -2629,90 +2703,107 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           )}
         </div>
 
-        {/* Row 2: Top-Level Source Filter Bar (`[ 🌐 All | 💾 Local | 🍎 Apple | ☁️ SoundCloud ]`) */}
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-            gap: 5,
-          }}
-        >
-          {(
-            [
-              { id: 'all', label: '🌐 All', accent: 'teal' },
-              { id: 'local', label: '💾 Local', accent: 'teal' },
-              {
-                id: 'apple_music',
-                label: appleAuthState === 'reauth_required' ? '🍎 Apple⚠️' : '🍎 Apple',
-                accent: 'apple',
-              },
-              {
-                id: 'soundcloud',
-                label: '☁️ SC',
-                accent: 'soundcloud',
-              },
-            ] as const
-          ).map((tab) => {
-            const active = browserSourceFilter === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => {
-                  setBrowserSourceFilter(tab.id);
-                  if (tab.id === 'local') {
-                    setAppleSubTab('pinned');
-                    setSoundCloudSubTab('pinned');
-                    setRightPaneMode('browse');
-                  } else if (tab.id === 'soundcloud') {
-                    if (soundCloudSubTab === 'pinned') {
-                      setSoundCloudSubTab(snap?.soundcloud_authenticated ? 'trending' : 'trending');
-                    }
-                    setRightPaneMode('browse');
-                  } else if (
-                    tab.id === 'apple_music' &&
-                    (browserTarget?.kind === 'mount' || browserTarget?.kind === 'cdda')
-                  ) {
-                    setRightPaneMode('browse');
-                  }
-                }}
-                style={{
-                  minHeight: 34,
-                  padding: '0 4px',
-                  borderRadius: 8,
-                  background: active
-                    ? tab.accent === 'apple'
-                      ? '#28111b'
-                      : tab.accent === 'soundcloud'
-                      ? '#2c140a'
-                      : '#0f222a'
-                    : '#0a0a0e',
-                  border: active
-                    ? tab.accent === 'apple'
-                      ? '1px solid #fa243c'
-                      : tab.accent === 'soundcloud'
-                      ? '1px solid #ea580c'
-                      : '1px solid #2aa3c4'
-                    : '1px solid #1e1e26',
-                  color: active
-                    ? tab.accent === 'apple'
-                      ? '#fecdd3'
-                      : tab.accent === 'soundcloud'
-                      ? '#fdba74'
-                      : '#bfeaf5'
-                    : '#9ca3af',
-                  fontSize: 11,
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                }}
-              >
-                {tab.label}
-              </button>
-            );
-          })}
-        </div>
+        {/* Row 2: Top-Level Source Filter Bar (`[ 🌐 All | 💾 Local | 🍎 Apple | ☁️ SC ]`)
+            Only show Apple / SoundCloud pills when authenticated (or reauth_required for Apple). */}
+        {(() => {
+          const sourceTabs = [
+            { id: 'all' as const, label: '🌐 All', accent: 'teal' as const },
+            { id: 'local' as const, label: '💾 Local', accent: 'teal' as const },
+            ...(snap?.apple_authenticated || appleAuthState === 'reauth_required'
+              ? [
+                  {
+                    id: 'apple_music' as const,
+                    label: appleAuthState === 'reauth_required' ? '🍎 Apple⚠️' : '🍎 Apple',
+                    accent: 'apple' as const,
+                  },
+                ]
+              : []),
+            ...(snap?.soundcloud_authenticated
+              ? [
+                  {
+                    id: 'soundcloud' as const,
+                    label: '☁️ SC',
+                    accent: 'soundcloud' as const,
+                  },
+                ]
+              : []),
+          ];
+          return (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: `repeat(${sourceTabs.length}, minmax(0, 1fr))`,
+                gap: 5,
+              }}
+            >
+              {sourceTabs.map((tab) => {
+                const active = browserSourceFilter === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => {
+                      if (browserSourceFilter !== tab.id) {
+                        pushCurrentNavState();
+                      }
+                      setBrowserSourceFilter(tab.id);
+                      if (tab.id === 'local') {
+                        setAppleSubTab('pinned');
+                        setSoundCloudSubTab('pinned');
+                        setRightPaneMode('browse');
+                      } else if (tab.id === 'soundcloud') {
+                        setActiveMountRoot(null);
+                        if (soundCloudSubTab === 'pinned') {
+                          setSoundCloudSubTab('trending');
+                        }
+                        setRightPaneMode('browse');
+                      } else if (tab.id === 'apple_music') {
+                        setActiveMountRoot(null);
+                        if (appleSubTab === 'pinned') {
+                          setAppleSubTab('cloud_playlists');
+                        }
+                        setRightPaneMode('browse');
+                      }
+                    }}
+                    style={{
+                      minHeight: 34,
+                      padding: '0 4px',
+                      borderRadius: 8,
+                      background: active
+                        ? tab.accent === 'apple'
+                          ? '#28111b'
+                          : tab.accent === 'soundcloud'
+                          ? '#2c140a'
+                          : '#0f222a'
+                        : '#0a0a0e',
+                      border: active
+                        ? tab.accent === 'apple'
+                          ? '1px solid #fa243c'
+                          : tab.accent === 'soundcloud'
+                          ? '1px solid #ea580c'
+                          : '1px solid #2aa3c4'
+                        : '1px solid #1e1e26',
+                      color: active
+                        ? tab.accent === 'apple'
+                          ? '#fecdd3'
+                          : tab.accent === 'soundcloud'
+                          ? '#fdba74'
+                          : '#bfeaf5'
+                        : '#9ca3af',
+                      fontSize: 11,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {/* =================================================================
-            COLLAPSIBLE BUCKET 0: ▾ PLACES (Vertical Destination Stack)
+            COLLAPSIBLE BUCKET 0: ▾ PLACES (Unified PS3 XMB Vertical Stack)
            ================================================================= */}
         <button
           onClick={togglePlacesOpen}
@@ -2774,18 +2865,23 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     key={hub.id}
                     data-default-focus={hub.id === 'pinned' ? 'true' : undefined}
                     data-left-active={active ? 'true' : undefined}
+                    data-xmb-preview="true"
                     onClick={() => {
+                      const isPreview = xmbPreviewTriggerRef.current;
                       if (
-                        activeMountRoot !== null ||
-                        soundCloudSubTab !== hub.id ||
-                        rightPaneMode !== 'browse'
+                        !isPreview &&
+                        (activeMountRoot !== null ||
+                          soundCloudSubTab !== hub.id ||
+                          rightPaneMode !== 'browse')
                       ) {
                         pushCurrentNavState();
                       }
                       setActiveMountRoot(null);
                       setSoundCloudSubTab(hub.id);
                       setRightPaneMode('browse');
-                      focusRightPaneFirstTile();
+                      if (!isPreview) {
+                        focusRightPaneFirstTile();
+                      }
                     }}
                     style={{
                       minHeight: 34,
@@ -2829,21 +2925,11 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 );
               })
             ) : (
-              (browserSourceFilter === 'local'
+              (browserSourceFilter === 'apple_music'
                 ? [
                     {
                       id: 'pinned' as const,
-                      label: `📌 Local SIMP Library (${filteredPlaylists.length + albums.length})`,
-                      isSimp: true,
-                    },
-                  ]
-                : [
-                    {
-                      id: 'pinned' as const,
-                      label:
-                        browserSourceFilter === 'apple_music'
-                          ? `📌 SIMP Library (${filteredPlaylists.length + albums.length})`
-                          : `📌 My SIMP Library (${filteredPlaylists.length + albums.length})`,
+                      label: `📌 SIMP Library (${filteredPlaylists.length + albums.length})`,
                       isSimp: true,
                     },
                     {
@@ -2856,6 +2942,16 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     { id: 'radio' as const, label: '📻 Radio & For You', isSimp: false },
                     { id: 'new' as const, label: '✨ New & Charts', isSimp: false },
                   ]
+                : [
+                    {
+                      id: 'pinned' as const,
+                      label:
+                        browserSourceFilter === 'local'
+                          ? `📌 Local SIMP Library (${filteredPlaylists.length + albums.length})`
+                          : `📌 My SIMP Library (${filteredPlaylists.length + albums.length})`,
+                      isSimp: true,
+                    },
+                  ]
               ).map((hub) => {
                 const active =
                   !activeMountRoot && appleSubTab === hub.id && rightPaneMode === 'browse';
@@ -2864,18 +2960,23 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     key={hub.id}
                     data-default-focus={hub.id === 'pinned' ? 'true' : undefined}
                     data-left-active={active ? 'true' : undefined}
+                    data-xmb-preview="true"
                     onClick={() => {
+                      const isPreview = xmbPreviewTriggerRef.current;
                       if (
-                        activeMountRoot !== null ||
-                        appleSubTab !== hub.id ||
-                        rightPaneMode !== 'browse'
+                        !isPreview &&
+                        (activeMountRoot !== null ||
+                          appleSubTab !== hub.id ||
+                          rightPaneMode !== 'browse')
                       ) {
                         pushCurrentNavState();
                       }
                       setActiveMountRoot(null);
                       setAppleSubTab(hub.id);
                       setRightPaneMode('browse');
-                      focusRightPaneFirstTile();
+                      if (!isPreview) {
+                        focusRightPaneFirstTile();
+                      }
                     }}
                     style={{
                       minHeight: 34,
@@ -2920,9 +3021,42 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               })
             )}
 
-            {/* Quick-jump to SoundCloud Trending & Mixes when in `🌐 All` mode */}
-            {browserSourceFilter === 'all' && (
+            {/* Unified Service Drill-Right Places in `🌐 All` mode (only when authenticated) */}
+            {browserSourceFilter === 'all' && snap?.apple_authenticated && (
               <button
+                data-xmb-drill-right="true"
+                onClick={() => {
+                  pushCurrentNavState();
+                  setActiveMountRoot(null);
+                  setBrowserSourceFilter('apple_music');
+                  setAppleSubTab('cloud_playlists');
+                  setRightPaneMode('browse');
+                  focusRightPaneFirstTile();
+                }}
+                style={{
+                  minHeight: 34,
+                  padding: '0 10px',
+                  borderRadius: 8,
+                  background: '#0a0a0e',
+                  border: '1px solid #181820',
+                  color: '#fecdd3',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <span>🍎 Apple Music</span>
+                <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>▸</span>
+              </button>
+            )}
+
+            {browserSourceFilter === 'all' && snap?.soundcloud_authenticated && (
+              <button
+                data-xmb-drill-right="true"
                 onClick={() => {
                   pushCurrentNavState();
                   setActiveMountRoot(null);
@@ -2947,14 +3081,13 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   alignItems: 'center',
                 }}
               >
-                <span>☁️ SoundCloud Trending & Mixes</span>
-                <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#71717a' }}>⊞</span>
+                <span>☁️ SoundCloud</span>
+                <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>▸</span>
               </button>
             )}
 
-            {/* Local Storage Mount Places (shown in `🌐 All` and `💾 Local` modes) */}
-            {browserSourceFilter !== 'apple_music' &&
-              browserSourceFilter !== 'soundcloud' &&
+            {/* Local Places (shown in `🌐 All` and `💾 Local` modes) */}
+            {(browserSourceFilter === 'all' || browserSourceFilter === 'local') &&
               snap?.mounts.map((m) => {
                 const isMountActive =
                   activeMountRoot === m.mount_root && rightPaneMode === 'browse';
@@ -2962,13 +3095,20 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   <button
                     key={m.mount_root}
                     data-left-active={isMountActive ? 'true' : undefined}
+                    data-xmb-preview="true"
                     onClick={() => {
-                      if (activeMountRoot !== m.mount_root || rightPaneMode !== 'browse') {
+                      const isPreview = xmbPreviewTriggerRef.current;
+                      if (
+                        !isPreview &&
+                        (activeMountRoot !== m.mount_root || rightPaneMode !== 'browse')
+                      ) {
                         pushCurrentNavState();
                       }
                       setActiveMountRoot(m.mount_root);
                       setRightPaneMode('browse');
-                      focusRightPaneFirstTile();
+                      if (!isPreview) {
+                        focusRightPaneFirstTile();
+                      }
                     }}
                     title={m.mount_root}
                     style={{
@@ -2998,7 +3138,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         flex: 1,
                       }}
                     >
-                      {m.is_online ? '🟢' : '⚫'} 💾 {m.label} ({m.track_count})
+                      {m.is_online ? '🟢' : '⚫'} 💾 Local: {m.label} ({m.track_count})
                     </span>
                     <span
                       style={{
@@ -3014,8 +3154,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 );
               })}
 
-            {/* Loaded Audio CD or DVD-Video (`cdda://` or `dvd://`) — lives under PLACES */}
-            {browserSourceFilter !== 'apple_music' && (
+            {/* Loaded Audio CD or DVD-Video (`cdda://` or `dvd://`) — only shown in `🌐 All` and `💾 Local` */}
+            {(browserSourceFilter === 'all' || browserSourceFilter === 'local') && (
               <div
                 style={{
                   padding: '6px 10px',
@@ -3044,6 +3184,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       ? 'true'
                       : undefined
                   }
+                  data-xmb-preview={
+                    opticalDisc?.is_audio_cd || opticalDisc?.is_dvd_video ? 'true' : undefined
+                  }
                   onClick={() => {
                     if (opticalDisc?.is_audio_cd) {
                       selectLocalCollection({
@@ -3071,7 +3214,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         art_url: opticalDisc.art_url,
                       });
                       setBrowserTracks([]);
-                    } else {
+                    } else if (!xmbPreviewTriggerRef.current) {
                       handleScanOpticalDisc(false, false);
                     }
                   }}
@@ -3206,6 +3349,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           }}
         >
           <button
+            data-xmb-drill-right="true"
             onClick={togglePlaylistsOpen}
             style={{
               flex: 1,
@@ -3224,12 +3368,24 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             {playlistsOpen ? '▾' : '▸'} SIMP PLAYLISTS ({filteredPlaylists.length})
           </button>
           <button
+            data-xmb-drill-action="true"
             onClick={(e) => {
               e.stopPropagation();
               if (!playlistsOpen) {
                 togglePlaylistsOpen();
               }
-              setCreatingPlaylist((v) => !v);
+              setCreatingPlaylist((v) => {
+                const next = !v;
+                if (next) {
+                  window.setTimeout(() => {
+                    const inputEl = document.querySelector<HTMLElement>(
+                      '[data-osk-input="playlist"]'
+                    );
+                    if (inputEl) inputEl.focus();
+                  }, 30);
+                }
+                return next;
+              });
             }}
             title={creatingPlaylist ? 'Cancel New SIMP Playlist' : 'Create New SIMP Hybrid Playlist'}
             style={{
@@ -3319,6 +3475,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 data-left-hybrid-id={isLocalPlaylist ? pl.id : undefined}
                 data-left-playlist-id={pl.id}
                 data-left-playlist-name={cleanTitle}
+                data-xmb-preview="true"
                 onClick={() => {
                   if (isLocalPlaylist) {
                     setActivePlaylistId(pl.id);
@@ -3846,6 +4003,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           return (
                             <button
                               key={f.id}
+                              data-right-filter-pill="true"
                               onClick={() => setSimpHubFilter(f.id)}
                               style={{
                                 padding: '4px 10px',
@@ -4006,6 +4164,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           return (
                             <button
                               key={b.id}
+                              data-right-filter-pill="true"
                               onClick={() => {
                                 setCloudAlpha(b.id);
                                 setCloudPage(0);
@@ -4032,6 +4191,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         {totalCloudPages > 1 && (
                           <>
                             <button
+                              data-right-filter-pill="true"
                               onClick={() => setCloudPage((p) => Math.max(0, p - 1))}
                               disabled={safeCloudPage === 0}
                               style={{
@@ -4062,6 +4222,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                               of {filteredCloudPlaylists.length}
                             </span>
                             <button
+                              data-right-filter-pill="true"
                               onClick={() =>
                                 setCloudPage((p) => Math.min(totalCloudPages - 1, p + 1))
                               }
@@ -4084,6 +4245,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           </>
                         )}
                         <button
+                          data-right-filter-pill="true"
                           onClick={() => {
                             setCloudLoading(true);
                             fetchAppleCloudPlaylists()
@@ -4165,6 +4327,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           return (
                             <button
                               key={f.id}
+                              data-right-filter-pill="true"
                               onClick={() => setRadioFilter(f.id)}
                               style={{
                                 padding: '4px 10px',
@@ -4183,6 +4346,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         })}
                       </div>
                       <button
+                        data-right-filter-pill="true"
                         onClick={() => {
                           setCloudLoading(true);
                           Promise.all([
@@ -4310,6 +4474,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           return (
                             <button
                               key={f.id}
+                              data-right-filter-pill="true"
                               onClick={() => setNewFilter(f.id)}
                               style={{
                                 padding: '4px 10px',
@@ -4329,6 +4494,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <button
+                          data-right-filter-pill="true"
                           onClick={() => {
                             setCloudLoading(true);
                             fetchAppleNewFeed()
@@ -4431,6 +4597,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           return (
                             <button
                               key={f.id}
+                              data-right-filter-pill="true"
                               onClick={() => setScLikesFilter(f.id)}
                               style={{
                                 padding: '4px 10px',
@@ -4451,6 +4618,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         {scLikedTracks.length > 0 && (
                           <button
+                            data-right-filter-pill="true"
                             onClick={() => {
                               setPlayingContextId('sc:likes');
                               defaultSimpClient.loadQueue(
@@ -4475,6 +4643,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           </button>
                         )}
                         <button
+                          data-right-filter-pill="true"
                           onClick={() => {
                             setCloudLoading(true);
                             fetchSoundCloudLikesAndPlaylists()
@@ -4575,6 +4744,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           return (
                             <button
                               key={f.id}
+                              data-right-filter-pill="true"
                               onClick={() => setScStreamFilter(f.id)}
                               style={{
                                 padding: '4px 10px',
@@ -4595,6 +4765,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         {(scStreamTracks.length > 0 || scLikedTracks.length > 0) && (
                           <button
+                            data-right-filter-pill="true"
                             onClick={() => {
                               const seed = scStreamTracks[0] || scLikedTracks[0];
                               if (seed) handleStartSoundCloudTrackRadio(seed);
@@ -4614,6 +4785,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           </button>
                         )}
                         <button
+                          data-right-filter-pill="true"
                           onClick={() => {
                             setCloudLoading(true);
                             fetchSoundCloudStreamAndRadio()
@@ -4722,6 +4894,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                             return (
                               <button
                                 key={f.id}
+                                data-right-filter-pill="true"
                                 onClick={() => setScTrendingFilter(f.id)}
                                 style={{
                                   padding: '4px 10px',
@@ -4740,6 +4913,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           })}
                         </div>
                         <button
+                          data-right-filter-pill="true"
                           onClick={() => {
                             setCloudLoading(true);
                             fetchSoundCloudDiscover(scSelectedGenre || undefined)
@@ -4786,6 +4960,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           return (
                             <button
                               key={g.id || 'all'}
+                              data-right-filter-pill="true"
                               onClick={() => {
                                 setScSelectedGenre(g.id);
                                 setCloudLoading(true);

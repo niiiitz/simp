@@ -3,6 +3,7 @@ import { defaultSimpClient } from '@simp/client';
 
 interface Props {
   durationMs: number;
+  trackUri?: string;
   waveformBars?: number[] | null;
   commentTimestampsMs?: number[];
   onPlayheadTick?: (currentMs: number) => void;
@@ -21,6 +22,7 @@ interface Props {
  */
 export const ProgressBarRaf: React.FC<Props> = ({
   durationMs,
+  trackUri,
   waveformBars,
   commentTimestampsMs,
   onPlayheadTick,
@@ -41,18 +43,34 @@ export const ProgressBarRaf: React.FC<Props> = ({
   const dragPreviewMsRef = useRef(0);
   const lastDragSeekSentRef = useRef(0);
   const lastTickCallbackPerfRef = useRef(0);
+  const prevTrackUriRef = useRef<string | undefined>(trackUri);
 
   useEffect(() => {
     let rafId = 0;
     let lastDomPct = -1;
     let lastDomTimeText = '';
 
+    // Reset monotonic playhead state when switching tracks or mounting back onto PlayerView
+    const snap = defaultSimpClient.getState();
+    const initialPos = Math.max(0, snap?.position_ms ?? 0);
+    if (prevTrackUriRef.current !== trackUri) {
+      prevTrackUriRef.current = trackUri;
+      anchorPosRef.current = initialPos;
+      lastRenderedMsRef.current = initialPos;
+      anchorPerfRef.current = performance.now();
+    } else {
+      anchorPosRef.current = initialPos;
+      lastRenderedMsRef.current = initialPos;
+      anchorPerfRef.current = performance.now();
+    }
+    isPlayingRef.current = !!snap?.is_playing;
+
     const updateDom = () => {
       let currentMs = anchorPosRef.current;
       if (isDraggingRef.current) {
         currentMs = dragPreviewMsRef.current;
         lastRenderedMsRef.current = currentMs;
-      } else if (isPlayingRef.current && anchorPosRef.current > 0) {
+      } else if (isPlayingRef.current && anchorPosRef.current >= 0 && durationMs > 0) {
         const elapsedSinceTick = Math.min(performance.now() - anchorPerfRef.current, 1500);
         const rawMs = anchorPosRef.current + elapsedSinceTick;
         // Monotonic forward guard during active playback
@@ -94,7 +112,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
       const wasPlaying = isPlayingRef.current;
       isPlayingRef.current = playing;
 
-      if (!playing) {
+      if (!playing || !wasPlaying) {
         anchorPosRef.current = posMs;
         anchorPerfRef.current = perfNow;
         lastRenderedMsRef.current = posMs;
@@ -103,13 +121,11 @@ export const ProgressBarRaf: React.FC<Props> = ({
       }
 
       // Compute our current smooth rAF-extrapolated playhead position
-      const predictedMs = wasPlaying
-        ? anchorPosRef.current + (perfNow - anchorPerfRef.current)
-        : anchorPosRef.current;
+      const predictedMs = anchorPosRef.current + (perfNow - anchorPerfRef.current);
       const driftMs = posMs - predictedMs;
 
       // Track restart or explicit backward seek (> 2.2s backward jump, or reset near 0:00)
-      if (posMs <= 400 && predictedMs > 1200) {
+      if (posMs <= 600 && predictedMs > 1200) {
         anchorPosRef.current = posMs;
         anchorPerfRef.current = perfNow;
         lastRenderedMsRef.current = posMs;
@@ -150,7 +166,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
       cancelAnimationFrame(rafId);
       unsub();
     };
-  }, [durationMs]);
+  }, [durationMs, trackUri]);
 
   const computeMsFromPointer = (clientX: number): number => {
     const el = railRef.current || trackContainerRef.current;

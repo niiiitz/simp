@@ -1141,6 +1141,48 @@ const ConsoleMainApp: React.FC = () => {
     await commitAddTracksToPlaylist(uris, label, trackMetadata);
   };
 
+  const handleFavoriteTrack = async (favTrack: TrackMetadata) => {
+    const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
+    const favPl = writablePlaylists.find(
+      (p) =>
+        p.name.toLowerCase().includes('favorite') ||
+        p.name.toLowerCase().includes('liked')
+    );
+    if (favPl) {
+      await commitAddTracksToPlaylist(
+        [favTrack.uri],
+        `"${favTrack.title}"`,
+        [favTrack],
+        favPl.id
+      );
+    } else {
+      await commitAddTracksToPlaylist(
+        [favTrack.uri],
+        `"${favTrack.title}"`,
+        [favTrack],
+        undefined,
+        '❤️ Favorites'
+      );
+    }
+  };
+
+  const handleMoreByArtist = (artistName: string) => {
+    const cleaned = artistName.trim();
+    if (!cleaned) return;
+    setBrowserSearch(cleaned);
+    setView('browser');
+  };
+
+  // Automatically reset `browserSourceFilter` to `'all'` if the user disconnects or is not signed into that service
+  useEffect(() => {
+    if (!snap) return;
+    if (browserSourceFilter === 'apple_music' && !snap.apple_authenticated) {
+      setBrowserSourceFilter('all');
+    } else if (browserSourceFilter === 'soundcloud' && !snap.soundcloud_authenticated) {
+      setBrowserSourceFilter('all');
+    }
+  }, [snap?.apple_authenticated, snap?.soundcloud_authenticated, browserSourceFilter]);
+
   const handleRemoveTrackFromPlaylist = async (playlistId: string, trackUri: string, title: string) => {
     try {
       await defaultSimpClient.query('remove_track_from_playlist', {
@@ -1806,6 +1848,10 @@ const ConsoleMainApp: React.FC = () => {
           setView={setView}
           handleOpenFullAppleAlbum={handleOpenFullAppleAlbum}
           handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
+          handleAddTracksToPlaylist={handleAddTracksToPlaylist}
+          handleFavoriteTrack={handleFavoriteTrack}
+          handleMoreByArtist={handleMoreByArtist}
+          applyFocusMarker={applyFocusMarker}
           showToast={showToast}
         />
       )}

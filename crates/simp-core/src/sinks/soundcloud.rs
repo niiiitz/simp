@@ -176,6 +176,7 @@ struct PrefetchedSoundCloudTrack {
     track_id: String,
     playlist: Option<AppleHlsMediaPlaylist>,
     init_bytes: Vec<u8>,
+    initial_segments: Vec<Vec<u8>>,
     initial_pcm: Vec<f32>,
     initial_segment_count: usize,
     is_complete: bool,
@@ -255,6 +256,7 @@ pub fn prefetch_soundcloud_track(settings: SimpSettings, track_uri: String) {
                         track_id,
                         playlist: prepared.playlist,
                         init_bytes: prepared.init_bytes,
+                        initial_segments: prepared.initial_segments,
                         initial_pcm: prepared.initial_pcm,
                         initial_segment_count: prepared.initial_segment_count,
                         is_complete: prepared.is_complete,
@@ -393,6 +395,31 @@ pub fn decode_clear_audio_bytes_to_pcm(
         return Err(anyhow!("Decoded 0 PCM samples from SoundCloud stream"));
     }
 
+    // Resample to 44,100 Hz stereo if the stream uses a different sample rate (e.g. 48,000 Hz)
+    // so `DecryptedFmp4RodioSource` (fixed 44,100 Hz stereo) plays at exact speed without drift or underrun.
+    if sample_rate > 0 && sample_rate != 44_100 && channels == 2 && samples.len() >= 4 {
+        let in_frames = samples.len() / 2;
+        let ratio = sample_rate as f64 / 44_100.0;
+        let out_frames = ((in_frames as f64) / ratio).round() as usize;
+        if out_frames > 0 {
+            let mut resampled = Vec::with_capacity(out_frames * 2);
+            for out_idx in 0..out_frames {
+                let src_pos = (out_idx as f64) * ratio;
+                let idx0 = (src_pos.floor() as usize).min(in_frames - 1);
+                let idx1 = (idx0 + 1).min(in_frames - 1);
+                let frac = (src_pos - (idx0 as f64)) as f32;
+                let l0 = samples[idx0 * 2];
+                let r0 = samples[idx0 * 2 + 1];
+                let l1 = samples[idx1 * 2];
+                let r1 = samples[idx1 * 2 + 1];
+                resampled.push(l0 + (l1 - l0) * frac);
+                resampled.push(r0 + (r1 - r0) * frac);
+            }
+            samples = resampled;
+            sample_rate = 44_100;
+        }
+    }
+
     Ok((samples, channels, sample_rate))
 }
 
@@ -459,14 +486,15 @@ fn prepare_initial_soundcloud_stream(
                         Vec::new()
                     };
 
-                    let mut initial_count = 1usize.min(playlist.segments.len());
+                    // Pre-buffer 2 segments (~6-8s of audio) so startup comment/waveform fetches never starve Segment #1
+                    let mut initial_count = 2usize.min(playlist.segments.len());
                     if start_pos_ms > 0 {
                         let target_sec = (start_pos_ms as f64 / 1000.0) + 6.0;
                         let mut accum = 0.0;
                         for (i, seg) in playlist.segments.iter().enumerate() {
                             accum += seg.duration_secs.max(4.0);
                             if accum >= target_sec {
-                                initial_count = (i + 1).max(1).min(playlist.segments.len());
+                                initial_count = (i + 1).max(2).min(playlist.segments.len());
                                 break;
                             }
                         }
@@ -601,12 +629,14 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                                 tr.play();
                             }
                         }
-                        if let Some(ref next_uri) = next_track_uri {
-                            prefetch_soundcloud_track(settings.clone(), next_uri.clone());
-                        }
                     }
 
                     if pf.is_complete {
+                        if active_epoch.load(Ordering::SeqCst) == epoch {
+                            if let Some(next_uri) = next_track_uri {
+                                prefetch_soundcloud_track(settings.clone(), next_uri);
+                            }
+                        }
                         return;
                     }
 
@@ -614,11 +644,13 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                         stream_remaining_sc_hls_segments(
                             playlist,
                             pf.init_bytes,
-                            Vec::new(),
+                            pf.initial_segments,
                             pf.initial_segment_count,
                             epoch,
-                            active_epoch,
+                            active_epoch.clone(),
                             state,
+                            settings,
+                            next_track_uri,
                         );
                     }
                     return;
@@ -680,12 +712,14 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                         tr.play();
                     }
                 }
-                if let Some(next_uri) = next_track_uri {
-                    prefetch_soundcloud_track(settings.clone(), next_uri);
-                }
             }
 
             if prepared.is_complete {
+                if active_epoch.load(Ordering::SeqCst) == epoch {
+                    if let Some(next_uri) = next_track_uri {
+                        prefetch_soundcloud_track(settings.clone(), next_uri);
+                    }
+                }
                 return;
             }
 
@@ -698,6 +732,8 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                     epoch,
                     active_epoch,
                     state,
+                    settings,
+                    next_track_uri,
                 );
             }
         })
@@ -706,6 +742,7 @@ pub fn spawn_progressive_soundcloud_rodio_source(
     Ok(source)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stream_remaining_sc_hls_segments(
     playlist: AppleHlsMediaPlaylist,
     init_bytes: Vec<u8>,
@@ -714,10 +751,13 @@ fn stream_remaining_sc_hls_segments(
     epoch: u64,
     active_epoch: Arc<AtomicU64>,
     state: Arc<Mutex<StreamingPcmState>>,
+    settings: SimpSettings,
+    mut next_track_uri: Option<String>,
 ) {
     let has_fmp4_init = !init_bytes.is_empty();
     let mut decoded_pcm_len = state.lock().map(|g| g.samples.len()).unwrap_or(0);
     let mut idx = start_idx;
+    let mut batches_completed = 0usize;
 
     while idx < playlist.segments.len() {
         if active_epoch.load(Ordering::SeqCst) != epoch {
@@ -730,14 +770,48 @@ fn stream_remaining_sc_hls_segments(
 
         let step = if idx == start_idx { 3usize } else { 5usize };
         let end_idx = (idx + step).min(playlist.segments.len());
-        let batch_segs = match download_hls_segment_slice(&playlist.segments[idx..end_idx])
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("SoundCloud HLS segment batch {idx}..{end_idx} failed: {e}");
-                break;
+
+        // Retry transient CDN errors up to 3 times before falling back to single-segment download
+        let mut batch_segs_opt = None;
+        for attempt in 0..3 {
+            if active_epoch.load(Ordering::SeqCst) != epoch {
+                if let Ok(mut g) = state.lock() {
+                    g.aborted = true;
+                    g.is_complete = true;
+                }
+                return;
+            }
+            match download_hls_segment_slice(&playlist.segments[idx..end_idx]) {
+                Ok(s) => {
+                    batch_segs_opt = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    if attempt == 2 {
+                        tracing::warn!("SoundCloud HLS segment batch {idx}..{end_idx} failed after 3 attempts: {e}");
+                    } else {
+                        std::thread::sleep(Duration::from_millis(150 * (attempt as u64 + 1)));
+                    }
+                }
+            }
+        }
+
+        let batch_segs = match batch_segs_opt {
+            Some(s) => s,
+            None => {
+                // Try downloading just the single next segment before giving up
+                if end_idx > idx + 1 {
+                    if let Ok(single) = download_hls_segment_slice(&playlist.segments[idx..idx + 1]) {
+                        single
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
             }
         };
+        let actual_end_idx = idx + batch_segs.len();
 
         if active_epoch.load(Ordering::SeqCst) != epoch {
             if let Ok(mut g) = state.lock() {
@@ -748,15 +822,36 @@ fn stream_remaining_sc_hls_segments(
         }
 
         if has_fmp4_init {
-            all_fmp4_segments.extend(batch_segs);
-            if let Ok(full_pcm) = decode_soundcloud_segments(&init_bytes, &all_fmp4_segments, Some("m4a"))
-                .or_else(|_| decode_soundcloud_segments(&init_bytes, &all_fmp4_segments, None))
+            // Try O(1) batch decode first (`init_bytes + batch_segs`); fall back to full contiguous decode if needed
+            let direct_batch_ok = if let Ok(batch_pcm) =
+                decode_soundcloud_segments(&init_bytes, &batch_segs, Some("m4a"))
+                    .or_else(|_| decode_soundcloud_segments(&init_bytes, &batch_segs, None))
             {
-                if full_pcm.len() > decoded_pcm_len {
+                if !batch_pcm.is_empty() {
                     if let Ok(mut g) = state.lock() {
-                        g.samples.extend_from_slice(&full_pcm[decoded_pcm_len..]);
+                        g.samples.extend_from_slice(&batch_pcm);
                     }
-                    decoded_pcm_len = full_pcm.len();
+                    decoded_pcm_len += batch_pcm.len();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            all_fmp4_segments.extend(batch_segs);
+            if !direct_batch_ok {
+                if let Ok(full_pcm) =
+                    decode_soundcloud_segments(&init_bytes, &all_fmp4_segments, Some("m4a"))
+                        .or_else(|_| decode_soundcloud_segments(&init_bytes, &all_fmp4_segments, None))
+                {
+                    if full_pcm.len() > decoded_pcm_len {
+                        if let Ok(mut g) = state.lock() {
+                            g.samples.extend_from_slice(&full_pcm[decoded_pcm_len..]);
+                        }
+                        decoded_pcm_len = full_pcm.len();
+                    }
                 }
             }
         } else {
@@ -770,7 +865,23 @@ fn stream_remaining_sc_hls_segments(
             }
         }
 
-        idx = end_idx;
+        idx = actual_end_idx;
+        batches_completed += 1;
+
+        // Only trigger next-track prefetch after we have buffered at least 2 batches (~20-30s) of the active track
+        if batches_completed >= 2 {
+            if let Some(next_uri) = next_track_uri.take() {
+                if active_epoch.load(Ordering::SeqCst) == epoch {
+                    prefetch_soundcloud_track(settings.clone(), next_uri);
+                }
+            }
+        }
+    }
+
+    if let Some(next_uri) = next_track_uri.take() {
+        if active_epoch.load(Ordering::SeqCst) == epoch {
+            prefetch_soundcloud_track(settings, next_uri);
+        }
     }
 
     if let Ok(mut g) = state.lock() {

@@ -87,6 +87,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   refreshLibraryData,
   showToast,
 }) => {
+  const [pairHelpOpen, setPairHelpOpen] = React.useState(false);
+
   return (
     <div
       onClick={() => setSourceModalOpen(false)}
@@ -290,17 +292,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
         </div>
 
-        <div
+        <button
+          type="button"
+          data-default-focus="true"
           onClick={() => {
             setView('browser');
             setSourceModalOpen(false);
           }}
           style={{
+            width: '100%',
             minHeight: 54,
             padding: '10px 14px',
             borderRadius: 12,
             background: '#0d1b22',
             border: '1px solid #2aa3c4',
+            color: '#f4f4f6',
+            textAlign: 'left',
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
@@ -312,11 +319,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               📁 Local, Steam OSTs & Removable USB/SD
             </div>
             <div style={{ fontSize: 12, color: '#8e8e99' }}>
-              {snap?.mounts.length ?? 0} storage mounts indexed • Click to browse
+              {snap?.mounts.length ?? 0} local folders indexed • Browse in Library
             </div>
           </div>
-          <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>Browse</span>
-        </div>
+          <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>Browse →</span>
+        </button>
 
         {/* External USB / Optical CD-ROM Drive (Red Book CD-DA + DVD-Video) */}
         <div
@@ -773,11 +780,114 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
 
+        {/* Collapsible Phone / PC Companion Pairing & Diagnostics (/pair) */}
+        <div
+          style={{
+            borderRadius: 12,
+            background: '#0d0d14',
+            border: '1px solid #262636',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setPairHelpOpen((v) => !v)}
+            style={{
+              width: '100%',
+              minHeight: 44,
+              padding: '10px 14px',
+              background: 'transparent',
+              border: 'none',
+              color: '#a1a1aa',
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: 'pointer',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              textAlign: 'left',
+            }}
+          >
+            <span>🛠️ Companion Pairing & Auth Diagnostics (/pair)</span>
+            <span style={{ fontFamily: 'monospace', color: '#67e8f9' }}>
+              {pairHelpOpen ? '▾ Hide' : '▸ Show QR'}
+            </span>
+          </button>
+
+          {pairHelpOpen && (
+            <div
+              style={{
+                padding: '0 14px 14px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 14,
+                borderTop: '1px solid #1c1c28',
+                paddingTop: 12,
+              }}
+            >
+              <QrCodeSvg
+                value={appleAuthCfg?.pair_url || 'http://steamdeck.local:18888/pair'}
+                size={84}
+              />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5, flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: '#67e8f9' }}>
+                  📱 Remote Phone / PC Companion Portal
+                </div>
+                <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.4 }}>
+                  Scan with your phone or visit on a PC to pair Apple Music / SoundCloud or access{' '}
+                  <strong>FIDO2 / YubiKey & Token Debug</strong> tools.
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    flexWrap: 'wrap',
+                    marginTop: 2,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color: '#fda4af',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                  >
+                    {appleAuthCfg?.pair_url || 'http://127.0.0.1:18888/pair'}
+                  </span>
+                  <a
+                    href="/pair"
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      padding: '5px 10px',
+                      borderRadius: 8,
+                      background: '#171724',
+                      border: '1px solid #2aa3c4',
+                      color: '#bfeaf5',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      textDecoration: 'none',
+                    }}
+                  >
+                    Open /pair ↗
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
           <button
             onClick={() => {
               defaultSimpClient.rescanStorage();
-              showToast('Rescanning storage mounts...');
+              showToast('Rescanning local folders...');
               setSourceModalOpen(false);
             }}
             style={{
@@ -792,7 +902,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               cursor: 'pointer',
             }}
           >
-            🔄 Rescan Storage Drives
+            🔄 Rescan Local Folders
           </button>
           <button
             onClick={() => {

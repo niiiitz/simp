@@ -3,7 +3,6 @@ import {
   AppleMusicAuthConfig,
   defaultSimpClient,
 } from '@simp/client';
-import { QrCodeSvg } from '../components/QrCodeSvg';
 
 interface DaemonPerfSnapshot {
   cpu_percent: number;
@@ -482,73 +481,7 @@ export const PowerModal: React.FC<PowerModalProps> = ({
           </button>
         </div>
 
-        {/* 3. Pairing & Troubleshooting Assistance (/pair) */}
-        <div
-          style={{
-            padding: '12px 14px',
-            borderRadius: 12,
-            background: '#0d0d14',
-            border: '1px solid #262636',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 14,
-          }}
-        >
-          <QrCodeSvg
-            value={appleAuthCfg?.pair_url || 'http://steamdeck.local:18888/pair'}
-            size={84}
-          />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 5, flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
-              📱 Pairing & Troubleshooting Assistance (/pair)
-            </div>
-            <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.4 }}>
-              Scan with your phone or visit on a PC to pair Apple Music or access the{' '}
-              <strong>FIDO2 / YubiKey & Token Debug</strong> tools.
-            </div>
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 8,
-                flexWrap: 'wrap',
-                marginTop: 2,
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                  color: '#fda4af',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                }}
-              >
-                {appleAuthCfg?.pair_url || 'http://127.0.0.1:18888/pair'}
-              </span>
-              <a
-                href="/pair"
-                target="_blank"
-                rel="noreferrer"
-                style={{
-                  padding: '5px 10px',
-                  borderRadius: 8,
-                  background: '#171724',
-                  border: '1px solid #2aa3c4',
-                  color: '#bfeaf5',
-                  fontSize: 11,
-                  fontWeight: 700,
-                  textDecoration: 'none',
-                }}
-              >
-                Open /pair ↗
-              </a>
-            </div>
-          </div>
-        </div>
-
-        {/* 4. Database Cache Reset & Hard Reset All Settings */}
+        {/* 3. Database Cache Reset & Hard Reset All Settings */}
         <div
           style={{
             padding: '12px 14px',
