@@ -89,6 +89,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const [pairHelpOpen, setPairHelpOpen] = React.useState(false);
   const [iaUsername, setIaUsername] = React.useState('');
+  const [iaAccessKey, setIaAccessKey] = React.useState('');
+  const [iaSecretKey, setIaSecretKey] = React.useState('');
+  const [iaKeysOpen, setIaKeysOpen] = React.useState(false);
   const [iaEnabledLocal, setIaEnabledLocal] = React.useState(
     !!snap?.internet_archive_authenticated
   );
@@ -907,64 +910,144 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           {iaEnabledLocal && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <input
-                type="text"
-                placeholder="Optional @username on archive.org (syncs fav-@username)"
-                value={iaUsername}
-                onChange={(e) => setIaUsername(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <input
+                  type="text"
+                  placeholder="Optional @username on archive.org (syncs fav-@username)"
+                  value={iaUsername}
+                  onChange={(e) => setIaUsername(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      defaultSimpClient.configureInternetArchive({
+                        enabled: true,
+                        username: iaUsername.trim(),
+                        ...(iaAccessKey.trim() ? { access_key: iaAccessKey.trim() } : {}),
+                        ...(iaSecretKey.trim() ? { secret_key: iaSecretKey.trim() } : {}),
+                      });
+                      showToast(
+                        iaUsername.trim()
+                          ? `Saved Internet Archive @${iaUsername.trim()}`
+                          : 'Updated Internet Archive settings'
+                      );
+                    }
+                  }}
+                  style={{
+                    flex: 1,
+                    minWidth: 180,
+                    minHeight: 34,
+                    padding: '0 10px',
+                    borderRadius: 8,
+                    background: '#080b0a',
+                    border: '1px solid #243830',
+                    color: '#d4d4dc',
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                  }}
+                />
+                <button
+                  onClick={() => {
                     defaultSimpClient.configureInternetArchive({
                       enabled: true,
                       username: iaUsername.trim(),
+                      ...(iaAccessKey.trim() ? { access_key: iaAccessKey.trim() } : {}),
+                      ...(iaSecretKey.trim() ? { secret_key: iaSecretKey.trim() } : {}),
                     });
                     showToast(
                       iaUsername.trim()
                         ? `Saved Internet Archive @${iaUsername.trim()}`
                         : 'Updated Internet Archive settings'
                     );
-                  }
-                }}
-                style={{
-                  flex: 1,
-                  minWidth: 200,
-                  minHeight: 34,
-                  padding: '0 10px',
-                  borderRadius: 8,
-                  background: '#080b0a',
-                  border: '1px solid #243830',
-                  color: '#d4d4dc',
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                }}
-              />
-              <button
-                onClick={() => {
-                  defaultSimpClient.configureInternetArchive({
-                    enabled: true,
-                    username: iaUsername.trim(),
-                  });
-                  showToast(
-                    iaUsername.trim()
-                      ? `Saved Internet Archive @${iaUsername.trim()}`
-                      : 'Updated Internet Archive settings'
-                  );
-                }}
-                style={{
-                  minHeight: 34,
-                  padding: '0 12px',
-                  borderRadius: 8,
-                  background: '#132a22',
-                  border: '1px solid #34d399',
-                  color: '#a7f3d0',
-                  fontSize: 11,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                }}
-              >
-                Save @username
-              </button>
+                  }}
+                  style={{
+                    minHeight: 34,
+                    padding: '0 12px',
+                    borderRadius: 8,
+                    background: '#132a22',
+                    border: '1px solid #34d399',
+                    color: '#a7f3d0',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIaKeysOpen((v) => !v)}
+                  style={{
+                    minHeight: 34,
+                    padding: '0 10px',
+                    borderRadius: 8,
+                    background: '#0e1412',
+                    border: '1px solid #243830',
+                    color: '#9ca3af',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {iaKeysOpen ? '▾ Hide S3 Keys' : '▸ Optional S3 Keys'}
+                </button>
+              </div>
+
+              {iaKeysOpen && (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                    padding: '8px 10px',
+                    borderRadius: 8,
+                    background: '#080b0a',
+                    border: '1px solid #1e2e28',
+                  }}
+                >
+                  <div style={{ fontSize: 10, color: '#9ca3af' }}>
+                    Optional IAS3 keys from <code>archive.org/account/s3.php</code> for higher rate
+                    limits (`Authorization: LOW access:secret`).
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <input
+                      type="text"
+                      placeholder="IAS3 Access Key"
+                      value={iaAccessKey}
+                      onChange={(e) => setIaAccessKey(e.target.value)}
+                      style={{
+                        flex: 1,
+                        minWidth: 140,
+                        minHeight: 32,
+                        padding: '0 8px',
+                        borderRadius: 6,
+                        background: '#050706',
+                        border: '1px solid #243830',
+                        color: '#d4d4dc',
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      }}
+                    />
+                    <input
+                      type="password"
+                      placeholder="IAS3 Secret Key"
+                      value={iaSecretKey}
+                      onChange={(e) => setIaSecretKey(e.target.value)}
+                      style={{
+                        flex: 1,
+                        minWidth: 140,
+                        minHeight: 32,
+                        padding: '0 8px',
+                        borderRadius: 6,
+                        background: '#050706',
+                        border: '1px solid #243830',
+                        color: '#d4d4dc',
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

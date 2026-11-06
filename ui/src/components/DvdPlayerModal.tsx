@@ -529,88 +529,38 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
           </div>
         </div>
 
-        {/* Controller-Friendly Quality/Audio (X), Subtitle (Y) & Fullscreen Cycle Buttons */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          {(isDirectVideo ? activeQualities.length > 0 : dvdAudioTracks.length > 0) && (
-            <button
-              data-gamepad-item
-              onClick={cycleAudioOrQuality}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                fontSize: '11px',
-                fontWeight: 600,
-                color: '#e2e8f0',
-                background: 'rgba(255,255,255,0.07)',
-                padding: '5px 10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(255,255,255,0.15)',
-                cursor:
-                  (isDirectVideo ? activeQualities.length : dvdAudioTracks.length) > 1
-                    ? 'pointer'
-                    : 'default',
-              }}
-            >
-              <span style={{ color: '#94a3b8' }}>
-                {isDirectVideo ? 'Quality (X):' : 'Audio (X):'}
-              </span>
-              <span style={{ color: '#38bdf8', fontWeight: 700 }}>
-                {currentAudioOrQualityLabel}
-              </span>
-            </button>
-          )}
-
-          {(isDirectVideo ? activeSubtitles.length > 0 : dvdSubtitleTracks.length > 0) && (
-            <button
-              data-gamepad-item
-              onClick={cycleSubtitleTrack}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                fontSize: '11px',
-                fontWeight: 600,
-                color: '#e2e8f0',
-                background:
-                  subIdx !== 'off' ? 'rgba(56, 189, 248, 0.14)' : 'rgba(255,255,255,0.07)',
-                padding: '5px 10px',
-                borderRadius: '6px',
-                border:
-                  subIdx !== 'off'
-                    ? '1px solid rgba(56, 189, 248, 0.42)'
-                    : '1px solid rgba(255,255,255,0.15)',
-                cursor: 'pointer',
-              }}
-            >
-              <span style={{ color: '#94a3b8' }}>Subtitles (Y):</span>
-              <span
-                style={{
-                  color: subIdx !== 'off' ? '#38bdf8' : '#cbd5e1',
-                  fontWeight: 700,
-                }}
-              >
-                {currentSubLabel}
-              </span>
-            </button>
-          )}
-
-          <button
-            data-gamepad-item
-            onClick={toggleFullscreen}
+        {/* Clean Typographic Mode Badge (All interactive controls live on the single bottom D-Pad rail) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span
             style={{
-              background: 'rgba(255,255,255,0.07)',
-              border: '1px solid rgba(255,255,255,0.15)',
-              color: '#cbd5e1',
-              borderRadius: '6px',
-              padding: '5px 10px',
-              fontSize: '11px',
-              fontWeight: 600,
-              cursor: 'pointer',
+              fontSize: '10px',
+              fontFamily: 'monospace',
+              fontWeight: 800,
+              letterSpacing: '0.06em',
+              padding: '3px 8px',
+              borderRadius: '5px',
+              background:
+                mode === 'ia_video'
+                  ? 'rgba(245, 158, 11, 0.14)'
+                  : mode === 'local_video'
+                    ? 'rgba(56, 189, 248, 0.14)'
+                    : 'rgba(148, 163, 184, 0.14)',
+              border:
+                mode === 'ia_video'
+                  ? '1px solid rgba(245, 158, 11, 0.38)'
+                  : mode === 'local_video'
+                    ? '1px solid rgba(56, 189, 248, 0.38)'
+                    : '1px solid rgba(148, 163, 184, 0.3)',
+              color:
+                mode === 'ia_video'
+                  ? '#fde68a'
+                  : mode === 'local_video'
+                    ? '#7dd3fc'
+                    : '#cbd5e1',
             }}
           >
-            Fullscreen
-          </button>
+            {mode === 'ia_video' ? 'ARCHIVE' : mode === 'local_video' ? 'VIDEO' : 'DVD'}
+          </span>
         </div>
       </div>
 
@@ -960,21 +910,104 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
             )}
           </div>
 
-          <button
-            data-gamepad-item
-            onClick={toggleMute}
-            style={{
-              background: 'rgba(255,255,255,0.06)',
-              border: '1px solid rgba(255,255,255,0.14)',
-              color: isMuted ? '#f87171' : '#cbd5e1',
-              borderRadius: '6px',
-              padding: '4px 10px',
-              fontSize: '11px',
-              cursor: 'pointer',
-            }}
-          >
-            {isMuted ? 'Muted' : 'Mute'}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+            {(isDirectVideo ? activeQualities.length > 0 : dvdAudioTracks.length > 0) && (
+              <button
+                data-gamepad-item
+                onClick={cycleAudioOrQuality}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: '#e2e8f0',
+                  background: 'rgba(255,255,255,0.06)',
+                  padding: '4px 9px',
+                  borderRadius: '6px',
+                  border: '1px solid rgba(255,255,255,0.14)',
+                  cursor:
+                    (isDirectVideo ? activeQualities.length : dvdAudioTracks.length) > 1
+                      ? 'pointer'
+                      : 'default',
+                }}
+              >
+                <span style={{ color: '#94a3b8' }}>
+                  {isDirectVideo ? 'Quality (X):' : 'Audio (X):'}
+                </span>
+                <span style={{ color: '#38bdf8', fontWeight: 700 }}>
+                  {currentAudioOrQualityLabel}
+                </span>
+              </button>
+            )}
+
+            {(isDirectVideo ? activeSubtitles.length > 0 : dvdSubtitleTracks.length > 0) && (
+              <button
+                data-gamepad-item
+                onClick={cycleSubtitleTrack}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: '#e2e8f0',
+                  background:
+                    subIdx !== 'off' ? 'rgba(56, 189, 248, 0.14)' : 'rgba(255,255,255,0.06)',
+                  padding: '4px 9px',
+                  borderRadius: '6px',
+                  border:
+                    subIdx !== 'off'
+                      ? '1px solid rgba(56, 189, 248, 0.42)'
+                      : '1px solid rgba(255,255,255,0.14)',
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ color: '#94a3b8' }}>CC (Y):</span>
+                <span
+                  style={{
+                    color: subIdx !== 'off' ? '#38bdf8' : '#cbd5e1',
+                    fontWeight: 700,
+                  }}
+                >
+                  {currentSubLabel}
+                </span>
+              </button>
+            )}
+
+            <button
+              data-gamepad-item
+              onClick={toggleMute}
+              style={{
+                background: 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.14)',
+                color: isMuted ? '#f87171' : '#cbd5e1',
+                borderRadius: '6px',
+                padding: '4px 9px',
+                fontSize: '11px',
+                cursor: 'pointer',
+              }}
+            >
+              {isMuted ? 'Muted' : 'Mute'}
+            </button>
+
+            <button
+              data-gamepad-item
+              onClick={toggleFullscreen}
+              style={{
+                background: 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.14)',
+                color: '#cbd5e1',
+                borderRadius: '6px',
+                padding: '4px 9px',
+                fontSize: '11px',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Fullscreen (SELECT)
+            </button>
+          </div>
         </div>
 
         {/* Compact Episode / Chapter Strip when multi-part */}

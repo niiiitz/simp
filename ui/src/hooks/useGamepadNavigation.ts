@@ -508,6 +508,9 @@ export function useGamepadNavigation({
         !isPlayerActionsModalOpen;
 
       if (isDvdModalOpen) {
+        window.dispatchEvent(
+          new CustomEvent('simp-dvd-gamepad-op', { detail: { op: 'wake' } })
+        );
         const activeDvdEl =
           (document.querySelector<HTMLElement>(
             '[data-simp-active-focus="true"]'
