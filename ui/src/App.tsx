@@ -6,6 +6,7 @@ import {
   OpticalDiscStatus,
   PlaylistRecord,
   SimpStateSnapshot,
+  SoundCloudAuthConfig,
   TrackMetadata,
 } from '@simp/client';
 import { CompanionPairView } from './components/CompanionPairView';
@@ -24,6 +25,17 @@ import {
   pinApplePlaylistToSimp,
   searchAppleMusicCatalog,
 } from './drivers/AppleMusicDriver';
+import {
+  fetchSoundCloudDiscover,
+  fetchSoundCloudLikesAndPlaylists,
+  fetchSoundCloudPlaylistTracks,
+  fetchSoundCloudStreamAndRadio,
+  pinSoundCloudPlaylistToSimp,
+  searchSoundCloudCatalog,
+  SoundCloudCatalogSearchResults,
+  SoundCloudPlaylistSummary,
+  startSoundCloudTrackRadio,
+} from './drivers/SoundCloudDriver';
 import { OskTargetKind, useGamepadNavigation } from './hooks/useGamepadNavigation';
 import { BrowserTarget, PlayerView } from './views/PlayerView';
 import { LibraryBrowserView } from './views/LibraryBrowserView';
@@ -53,7 +65,9 @@ const ConsoleMainApp: React.FC = () => {
   // Library & Playlist Browser state
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
-  const [browserSourceFilter, setBrowserSourceFilter] = useState<'all' | 'local' | 'apple_music'>('all');
+  const [browserSourceFilter, setBrowserSourceFilter] = useState<
+    'all' | 'local' | 'apple_music' | 'soundcloud'
+  >('all');
   const [browserSearch, setBrowserSearch] = useState('');
   const [browserTarget, setBrowserTarget] = useState<BrowserTarget | null>(null);
   const [browserTracks, setBrowserTracks] = useState<TrackMetadata[]>([]);
@@ -81,6 +95,25 @@ const ConsoleMainApp: React.FC = () => {
   const [activeCloudAlbum, setActiveCloudAlbum] = useState<AppleCloudAlbumSummary | null>(null);
   const [activeCloudPlaylist, setActiveCloudPlaylist] = useState<AppleCloudPlaylistSummary | null>(null);
 
+  // SoundCloud Cloud Hub state
+  const [soundCloudSubTab, setSoundCloudSubTab] = useState<
+    'pinned' | 'likes_sets' | 'stream_radio' | 'trending'
+  >('trending');
+  const [scLikedTracks, setScLikedTracks] = useState<TrackMetadata[]>([]);
+  const [scPlaylists, setScPlaylists] = useState<SoundCloudPlaylistSummary[]>([]);
+  const [scStreamTracks, setScStreamTracks] = useState<TrackMetadata[]>([]);
+  const [scStreamPlaylists, setScStreamPlaylists] = useState<SoundCloudPlaylistSummary[]>([]);
+  const [scTrendingTracks, setScTrendingTracks] = useState<TrackMetadata[]>([]);
+  const [scTrendingMixes, setScTrendingMixes] = useState<TrackMetadata[]>([]);
+  const [scTrendingPlaylists, setScTrendingPlaylists] = useState<SoundCloudPlaylistSummary[]>([]);
+  const [scSelectedGenre, setScSelectedGenre] = useState<string>('');
+  const [scCatalogSearchResults, setScCatalogSearchResults] =
+    useState<SoundCloudCatalogSearchResults>({
+      songs: [],
+      playlists: [],
+    });
+  const [activeScPlaylist, setActiveScPlaylist] = useState<SoundCloudPlaylistSummary | null>(null);
+
   // Playlist creation, active playback context & target state
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
@@ -92,9 +125,12 @@ const ConsoleMainApp: React.FC = () => {
   const [oskTarget, setOskTarget] = useState<OskTargetKind>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-  // Apple Music Auth Modal state
+  // Apple Music & SoundCloud Auth Modal state
   const [appleAuthCfg, setAppleAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
   const [appleBusy, setAppleBusy] = useState(false);
+  const [soundcloudAuthCfg, setSoundcloudAuthCfg] = useState<SoundCloudAuthConfig | null>(null);
+  const [soundcloudBusy, setSoundcloudBusy] = useState(false);
+  const scAutoClientAuthRef = useRef(false);
 
   // OLED auto-dim, active luminance percentage, popovers & sub-pixel orbit state
   const [isDimmed, setIsDimmed] = useState(false);
@@ -178,44 +214,127 @@ const ConsoleMainApp: React.FC = () => {
     }
   }, [snap?.daemon_version]);
 
+  const resolveDaemonBaseUrl = useCallback(() => {
+    if (typeof window !== 'undefined' && window.location?.hostname) {
+      const host = window.location.hostname;
+      if (
+        window.location.protocol === 'http:' &&
+        host !== 'steamloopback.host' &&
+        host !== '127.0.0.1' &&
+        host !== 'localhost'
+      ) {
+        const port = window.location.port === '1420' ? '18888' : window.location.port || '18888';
+        return `http://${host}:${port}`;
+      }
+    }
+    return 'http://127.0.0.1:18888';
+  }, []);
+
+  const compareSemverStrings = useCallback((currentRaw: string, candidateRaw: string): boolean => {
+    const parseTuple = (v: string): [number, number, number, number, number] => {
+      const cleaned = v.trim().replace(/^v/i, '');
+      const [core, pre = ''] = cleaned.split('-', 2);
+      const parts = core.split('.').map((n) => parseInt(n, 10) || 0);
+      const major = parts[0] || 0;
+      const minor = parts[1] || 0;
+      const patch = parts[2] || 0;
+      if (!pre) return [major, minor, patch, 1, 0];
+      const preParts = pre.split('.');
+      const preNum = parseInt(preParts[preParts.length - 1] || '0', 10) || 0;
+      return [major, minor, patch, 0, preNum];
+    };
+    const cur = parseTuple(currentRaw);
+    const cand = parseTuple(candidateRaw);
+    for (let i = 0; i < 5; i++) {
+      if (cand[i] !== cur[i]) return cand[i] > cur[i];
+    }
+    return false;
+  }, []);
+
   const checkSimpUpdates = useCallback(async (_silent = false) => {
     setUpdateStatus((prev) => ({ ...prev, checking: true, error: undefined }));
+    const base = resolveDaemonBaseUrl();
     try {
-      const resp = await fetch(`/api/update/check?t=${Date.now()}`, { cache: 'no-store' });
-      const data = await resp.json();
-      if (data.ok) {
-        setUpdateStatus({
-          current_version: data.current_version,
-          latest_version: data.latest_version,
-          latest_tag: data.latest_tag,
-          update_available: Boolean(data.update_available),
-          target_arch: data.target_arch,
-          checking: false,
-        });
-      } else {
-        setUpdateStatus((prev) => ({
-          ...prev,
-          current_version: data.current_version || prev.current_version,
-          target_arch: data.target_arch || prev.target_arch,
-          checking: false,
-          error: data.error || 'Update check failed',
-        }));
+      const resp = await fetch(`${base}/api/update/check?t=${Date.now()}`, { cache: 'no-store' });
+      const text = await resp.text();
+      if (text.trim().startsWith('{')) {
+        const data = JSON.parse(text);
+        if (data.ok) {
+          setUpdateStatus({
+            current_version: data.current_version,
+            latest_version: data.latest_version,
+            latest_tag: data.latest_tag,
+            update_available: Boolean(data.update_available),
+            target_arch: data.target_arch,
+            checking: false,
+          });
+          return;
+        } else if (data.error && !String(data.error).includes('<!DOCTYPE')) {
+          setUpdateStatus((prev) => ({
+            ...prev,
+            current_version: data.current_version || prev.current_version,
+            target_arch: data.target_arch || prev.target_arch,
+            checking: false,
+            error: data.error,
+          }));
+          return;
+        }
       }
+
+      // Fallback: query GitHub Releases API directly if the daemon endpoint returned HTML or was unreachable
+      const ghResp = await fetch('https://api.github.com/repos/niiiitz/simp/releases?per_page=10', {
+        headers: { Accept: 'application/vnd.github+json' },
+        cache: 'no-store',
+      });
+      const ghText = await ghResp.text();
+      if (!ghText.trim().startsWith('[')) {
+        throw new Error('Could not query GitHub Releases API');
+      }
+      const releases = JSON.parse(ghText) as Array<{ tag_name?: string; draft?: boolean }>;
+      const valid = releases.filter((r) => !r.draft && r.tag_name);
+      if (valid.length === 0) {
+        throw new Error('No published releases found on GitHub');
+      }
+      const newestTag = String(valid[0].tag_name || '');
+      const latestVer = newestTag.replace(/^v/i, '');
+      setUpdateStatus((prev) => {
+        const curVer = prev.current_version || snap?.daemon_version || '';
+        const isNewer = curVer ? compareSemverStrings(curVer, latestVer) : false;
+        return {
+          ...prev,
+          current_version: curVer || undefined,
+          latest_version: latestVer,
+          latest_tag: newestTag,
+          update_available: isNewer,
+          checking: false,
+          error: undefined,
+        };
+      });
     } catch (e: any) {
+      const rawMsg = String(e?.message || 'Could not reach update server');
+      const cleanMsg =
+        rawMsg.includes('<!DOCTYPE') || rawMsg.includes('Unexpected token')
+          ? 'Daemon binary needs restart to enable self-update endpoint'
+          : rawMsg;
       setUpdateStatus((prev) => ({
         ...prev,
         checking: false,
-        error: e?.message || 'Could not reach daemon',
+        error: cleanMsg,
       }));
     }
-  }, []);
+  }, [resolveDaemonBaseUrl, compareSemverStrings, snap?.daemon_version]);
 
   const applySimpUpdate = useCallback(async () => {
     setUpdateStatus((prev) => ({ ...prev, applying: true, error: undefined }));
     showToast('Downloading & installing latest SIMP release from GitHub...');
+    const base = resolveDaemonBaseUrl();
     try {
-      const resp = await fetch('/api/update/apply', { method: 'POST', cache: 'no-store' });
-      const data = await resp.json();
+      const resp = await fetch(`${base}/api/update/apply`, { method: 'POST', cache: 'no-store' });
+      const text = await resp.text();
+      if (!text.trim().startsWith('{')) {
+        throw new Error('Daemon binary does not support /api/update/apply yet — rebuild or restart simp --daemon');
+      }
+      const data = JSON.parse(text);
       if (data.ok) {
         const nextVer = String(data.updated_version || '').replace(/^v/, '');
         if (nextVer) {
@@ -229,7 +348,7 @@ const ConsoleMainApp: React.FC = () => {
         await new Promise((r) => window.setTimeout(r, 950));
         for (let attempt = 0; attempt < 15; attempt++) {
           try {
-            const hr = await fetch(`/health?t=${Date.now()}`, { cache: 'no-store' });
+            const hr = await fetch(`${base}/health?t=${Date.now()}`, { cache: 'no-store' });
             if (hr.ok) {
               const hj = await hr.json();
               const reported = String(hj?.version || '').replace(/^v/, '');
@@ -261,7 +380,7 @@ const ConsoleMainApp: React.FC = () => {
       }));
       showToast('Update failed — check network connection');
     }
-  }, [showToast]);
+  }, [resolveDaemonBaseUrl, showToast]);
 
   const dismissConsole = useCallback(() => {
     if (window.parent && window.parent !== window) {
@@ -322,6 +441,26 @@ const ConsoleMainApp: React.FC = () => {
   useEffect(() => {
     if (view === 'browser' || sourceModalOpen || powerModalOpen) {
       refreshLibraryData();
+    }
+    if (view === 'browser' || sourceModalOpen || powerModalOpen) {
+      defaultSimpClient
+        .getSoundCloudAuthConfig()
+        .then((cfg) => {
+          setSoundcloudAuthCfg(cfg);
+          // Auto-bootstrap Tier 1 Public Mode (client_credentials) if credentials exist and not yet authenticated
+          if (
+            cfg.configured &&
+            !cfg.soundcloud_authenticated &&
+            !scAutoClientAuthRef.current
+          ) {
+            scAutoClientAuthRef.current = true;
+            fetch('/api/soundcloud/client-auth', { method: 'POST' })
+              .then(() => defaultSimpClient.getSoundCloudAuthConfig())
+              .then((nextCfg) => setSoundcloudAuthCfg(nextCfg))
+              .catch(() => {});
+          }
+        })
+        .catch(() => {});
     }
     if (sourceModalOpen || powerModalOpen) {
       defaultSimpClient
@@ -537,27 +676,164 @@ const ConsoleMainApp: React.FC = () => {
     showToast,
   ]);
 
-  // Debounced live Apple Music Catalog Search
+  // 3c. SoundCloud Cloud Hub data loader
+  useEffect(() => {
+    if (
+      view !== 'browser' ||
+      browserSourceFilter !== 'soundcloud' ||
+      (!snap?.soundcloud_authenticated && !soundcloudAuthCfg?.soundcloud_authenticated)
+    ) {
+      return;
+    }
+    if (
+      soundCloudSubTab === 'likes_sets' &&
+      scLikedTracks.length === 0 &&
+      scPlaylists.length === 0
+    ) {
+      setCloudLoading(true);
+      fetchSoundCloudLikesAndPlaylists()
+        .then((res) => {
+          setScLikedTracks(res.likedTracks);
+          setScPlaylists(res.playlists);
+        })
+        .catch(() => {})
+        .finally(() => setCloudLoading(false));
+    } else if (
+      soundCloudSubTab === 'stream_radio' &&
+      scStreamTracks.length === 0 &&
+      scStreamPlaylists.length === 0
+    ) {
+      setCloudLoading(true);
+      fetchSoundCloudStreamAndRadio()
+        .then((res) => {
+          setScStreamTracks(res.streamTracks);
+          setScStreamPlaylists(res.streamPlaylists);
+        })
+        .catch(() => {})
+        .finally(() => setCloudLoading(false));
+    } else if (
+      soundCloudSubTab === 'trending' &&
+      scTrendingTracks.length === 0 &&
+      scTrendingMixes.length === 0 &&
+      scTrendingPlaylists.length === 0
+    ) {
+      setCloudLoading(true);
+      fetchSoundCloudDiscover(scSelectedGenre || undefined)
+        .then((res) => {
+          setScTrendingTracks(res.tracks);
+          setScTrendingMixes(res.mixes);
+          setScTrendingPlaylists(res.playlists);
+        })
+        .catch((err: any) =>
+          showToast(err?.message || 'Failed to load SoundCloud Trending & Mixes')
+        )
+        .finally(() => setCloudLoading(false));
+    }
+  }, [
+    view,
+    browserSourceFilter,
+    snap?.soundcloud_authenticated,
+    soundcloudAuthCfg?.soundcloud_authenticated,
+    soundCloudSubTab,
+    scLikedTracks.length,
+    scPlaylists.length,
+    scStreamTracks.length,
+    scStreamPlaylists.length,
+    scTrendingTracks.length,
+    scTrendingMixes.length,
+    scTrendingPlaylists.length,
+    scSelectedGenre,
+    showToast,
+  ]);
+
+  // Debounced live Apple Music & SoundCloud Catalog Search
   useEffect(() => {
     const term = browserSearch.trim();
-    if (!term || !snap?.apple_authenticated) {
+    if (!term) {
       setCatalogSearchResults({ songs: [], albums: [], playlists: [], stations: [] });
+      setScCatalogSearchResults({ songs: [], playlists: [] });
       return;
     }
     if (browserSourceFilter === 'local') {
       return;
     }
     const timer = window.setTimeout(() => {
-      setCloudLoading(true);
-      searchAppleMusicCatalog(term)
-        .then((res) => {
-          setCatalogSearchResults(res);
-        })
-        .catch(() => {})
-        .finally(() => setCloudLoading(false));
+      const promises: Promise<any>[] = [];
+      if (browserSourceFilter !== 'soundcloud' && snap?.apple_authenticated) {
+        promises.push(
+          searchAppleMusicCatalog(term)
+            .then((res) => setCatalogSearchResults(res))
+            .catch(() => {})
+        );
+      } else {
+        setCatalogSearchResults({ songs: [], albums: [], playlists: [], stations: [] });
+      }
+      if (
+        browserSourceFilter !== 'apple_music' &&
+        (snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated)
+      ) {
+        promises.push(
+          searchSoundCloudCatalog(term)
+            .then((res) => setScCatalogSearchResults(res))
+            .catch(() => {})
+        );
+      } else {
+        setScCatalogSearchResults({ songs: [], playlists: [] });
+      }
+      if (promises.length > 0) {
+        setCloudLoading(true);
+        Promise.all(promises).finally(() => setCloudLoading(false));
+      }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [browserSearch, browserSourceFilter, snap?.apple_authenticated]);
+  }, [
+    browserSearch,
+    browserSourceFilter,
+    snap?.apple_authenticated,
+    snap?.soundcloud_authenticated,
+    soundcloudAuthCfg?.soundcloud_authenticated,
+  ]);
+
+  const handleOpenSoundCloudPlaylist = useCallback(
+    async (pl: SoundCloudPlaylistSummary) => {
+      setActiveScPlaylist(pl);
+      setActiveCloudPlaylist(null);
+      setActiveCloudAlbum(null);
+      setBrowserTarget({
+        kind: 'soundcloud_playlist',
+        id: pl.id,
+        title: `☁️ ${pl.name}`,
+        subtitle: pl.description,
+        art_url: pl.art_url,
+      });
+      if (pl.tracks && pl.tracks.length > 0) {
+        setBrowserTracks(pl.tracks);
+      }
+      setCloudLoading(true);
+      try {
+        const tracks = await fetchSoundCloudPlaylistTracks(pl.id);
+        if (tracks.length > 0) {
+          setBrowserTracks(tracks);
+        }
+      } catch (err: any) {
+        if (!pl.tracks || pl.tracks.length === 0) {
+          showToast(err?.message || 'Could not load SoundCloud set tracks');
+        }
+      } finally {
+        setCloudLoading(false);
+      }
+    },
+    [showToast]
+  );
+
+  const handleStartSoundCloudTrackRadio = useCallback(
+    (seedTrack: TrackMetadata) => {
+      setPlayingContextId(`sc:radio:${seedTrack.uri}`);
+      startSoundCloudTrackRadio(seedTrack.uri, seedTrack.title, showToast);
+      setView('lock');
+    },
+    [showToast]
+  );
 
   const handleOpenCloudPlaylist = useCallback(
     async (pl: AppleCloudPlaylistSummary) => {
@@ -769,6 +1045,17 @@ const ConsoleMainApp: React.FC = () => {
           tracks: appleTracks,
         });
       }
+      const scTracks = (trackMetadata || browserTracks).filter(
+        (t) => t.source === 'soundcloud' && uris.includes(t.uri)
+      );
+      if (scTracks.length > 0) {
+        defaultSimpClient.importCatalogTracks({
+          source: 'soundcloud',
+          album: null,
+          playlist: null,
+          tracks: scTracks,
+        });
+      }
 
       const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
       let targetPlId = '';
@@ -937,6 +1224,21 @@ const ConsoleMainApp: React.FC = () => {
     }
   };
 
+  const handlePinSoundCloudPlaylist = async (
+    pl: SoundCloudPlaylistSummary,
+    preloadedTracks?: TrackMetadata[]
+  ) => {
+    setCloudLoading(true);
+    try {
+      await pinSoundCloudPlaylistToSimp(pl, preloadedTracks, showToast);
+      refreshLibraryData();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to pin SoundCloud set to SIMP');
+    } finally {
+      setCloudLoading(false);
+    }
+  };
+
   const handleAddFolder = (folderPath: string) => {
     const cleaned = folderPath.trim();
     if (!cleaned) return;
@@ -1059,7 +1361,7 @@ const ConsoleMainApp: React.FC = () => {
             }}
           >
             <span>
-              🌙 SIMP OLED Sleep • {snap?.is_playing && track ? `▶ ${track.title}` : 'Standby'}
+              🌙 SIMP Screen Sleep • {snap?.is_playing && track ? `▶ ${track.title}` : 'Standby'}
             </span>
             <span style={{ fontSize: 11 }}>Tap anywhere or press any button to wake</span>
           </div>
@@ -1503,6 +1805,8 @@ const ConsoleMainApp: React.FC = () => {
           setBrowserTarget={setBrowserTarget}
           setView={setView}
           handleOpenFullAppleAlbum={handleOpenFullAppleAlbum}
+          handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
+          showToast={showToast}
         />
       )}
       <LibraryBrowserView
@@ -1544,6 +1848,26 @@ const ConsoleMainApp: React.FC = () => {
           setCloudLoading={setCloudLoading}
           activeCloudAlbum={activeCloudAlbum}
           activeCloudPlaylist={activeCloudPlaylist}
+          soundCloudSubTab={soundCloudSubTab}
+          setSoundCloudSubTab={setSoundCloudSubTab}
+          scLikedTracks={scLikedTracks}
+          setScLikedTracks={setScLikedTracks}
+          scPlaylists={scPlaylists}
+          setScPlaylists={setScPlaylists}
+          scStreamTracks={scStreamTracks}
+          setScStreamTracks={setScStreamTracks}
+          scStreamPlaylists={scStreamPlaylists}
+          setScStreamPlaylists={setScStreamPlaylists}
+          scTrendingTracks={scTrendingTracks}
+          setScTrendingTracks={setScTrendingTracks}
+          scTrendingMixes={scTrendingMixes}
+          setScTrendingMixes={setScTrendingMixes}
+          scTrendingPlaylists={scTrendingPlaylists}
+          setScTrendingPlaylists={setScTrendingPlaylists}
+          scSelectedGenre={scSelectedGenre}
+          setScSelectedGenre={setScSelectedGenre}
+          scCatalogSearchResults={scCatalogSearchResults}
+          activeScPlaylist={activeScPlaylist}
           creatingPlaylist={creatingPlaylist}
           setCreatingPlaylist={setCreatingPlaylist}
           newPlaylistName={newPlaylistName}
@@ -1566,6 +1890,10 @@ const ConsoleMainApp: React.FC = () => {
           handleOpenCloudPlaylist={handleOpenCloudPlaylist}
           handleOpenFullAppleAlbum={handleOpenFullAppleAlbum}
           handleStartAppleStation={handleStartAppleStation}
+          handleOpenSoundCloudPlaylist={handleOpenSoundCloudPlaylist}
+          handlePinSoundCloudPlaylist={handlePinSoundCloudPlaylist}
+          handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
+          showToast={showToast}
         />
 
       {/* Source Selection, Custom Folder Picker & Authentication Pop-Up Modal */}
@@ -1590,8 +1918,13 @@ const ConsoleMainApp: React.FC = () => {
           setAppleAuthCfg={setAppleAuthCfg}
           appleBusy={appleBusy}
           setAppleBusy={setAppleBusy}
+          soundcloudAuthCfg={soundcloudAuthCfg}
+          setSoundcloudAuthCfg={setSoundcloudAuthCfg}
+          soundcloudBusy={soundcloudBusy}
+          setSoundcloudBusy={setSoundcloudBusy}
           setBrowserSourceFilter={setBrowserSourceFilter}
           setAppleSubTab={setAppleSubTab}
+          setSoundCloudSubTab={setSoundCloudSubTab}
           refreshLibraryData={refreshLibraryData}
           showToast={showToast}
         />

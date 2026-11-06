@@ -149,12 +149,13 @@ impl LocalAudioEngine {
         let sink = self.sink.as_ref().unwrap();
         sink.stop();
 
-        let is_apple_progressive = uri.starts_with("applemusic:");
+        let is_progressive_stream =
+            uri.starts_with("applemusic:") || uri.starts_with("soundcloud:");
         if uri.starts_with("cdda://") {
             let source = crate::sinks::cdda::CddaTrackSource::open_uri(uri)
                 .with_context(|| format!("Failed to open Audio CD track: {uri}"))?;
             sink.append(source);
-        } else if is_apple_progressive {
+        } else if uri.starts_with("applemusic:") {
             let settings = load_local_settings_vdf();
             let source =
                 crate::sinks::apple_native::source::spawn_progressive_apple_music_rodio_source(
@@ -168,6 +169,21 @@ impl LocalAudioEngine {
                     self.user_paused.clone(),
                 )
                 .with_context(|| format!("Failed to load native Apple Music stream: {uri}"))?;
+            sink.append(source);
+        } else if uri.starts_with("soundcloud:") {
+            let settings = load_local_settings_vdf();
+            let source =
+                crate::sinks::soundcloud::spawn_progressive_soundcloud_rodio_source(
+                    settings,
+                    uri.to_string(),
+                    None,
+                    start_pos_ms,
+                    epoch,
+                    self.active_epoch.clone(),
+                    self.tracker.clone(),
+                    self.user_paused.clone(),
+                )
+                .with_context(|| format!("Failed to load native SoundCloud stream: {uri}"))?;
             sink.append(source);
         } else {
             let file_path_str = uri.strip_prefix("file://").unwrap_or(uri);
@@ -188,13 +204,13 @@ impl LocalAudioEngine {
             let mut tracker = self.tracker.lock().unwrap();
             tracker.reset();
             if start_pos_ms > 0 {
-                if !is_apple_progressive {
+                if !is_progressive_stream {
                     let target = Duration::from_millis(start_pos_ms as u64);
                     let _ = sink.try_seek(target);
                 }
                 tracker.seek(start_pos_ms);
             }
-            if !is_apple_progressive {
+            if !is_progressive_stream {
                 tracker.play();
             }
         }
@@ -298,6 +314,20 @@ impl LocalAudioEngine {
                         self.user_paused.clone(),
                     )?;
                 sink.append(source);
+            } else if uri.starts_with("soundcloud:") {
+                let settings = load_local_settings_vdf();
+                let source =
+                    crate::sinks::soundcloud::spawn_progressive_soundcloud_rodio_source(
+                        settings,
+                        uri.to_string(),
+                        None,
+                        position_ms,
+                        epoch,
+                        self.active_epoch.clone(),
+                        self.tracker.clone(),
+                        self.user_paused.clone(),
+                    )?;
+                sink.append(source);
             } else {
                 let file_path_str = uri.strip_prefix("file://").unwrap_or(&uri);
                 let path = Path::new(file_path_str);
@@ -361,7 +391,7 @@ impl crate::sinks::AudioSink for LocalAudioEngine {
     }
 
     fn supports_uri(&self, uri: &str) -> bool {
-        !uri.starts_with("applemusic:")
+        !uri.starts_with("applemusic:") && !uri.starts_with("soundcloud:")
     }
 
     fn load_and_play_track(

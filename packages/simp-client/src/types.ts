@@ -1,4 +1,4 @@
-export type ActiveEngine = 'local' | 'apple_music' | 'none';
+export type ActiveEngine = 'local' | 'apple_music' | 'soundcloud' | 'none';
 export type RepeatMode = 'off' | 'queue' | 'track';
 
 export interface TrackMetadata {
@@ -35,6 +35,7 @@ export interface PlaylistRecord {
   updated_at: number;
   has_local?: boolean;
   has_apple?: boolean;
+  has_soundcloud?: boolean;
 }
 
 export interface MountStatus {
@@ -65,8 +66,32 @@ export interface SimpStateSnapshot {
   mounts: MountStatus[];
   power: PowerState;
   apple_authenticated: boolean;
+  soundcloud_authenticated?: boolean;
   brightness_pct?: number;
   daemon_version?: string;
+}
+
+export interface SoundCloudAuthConfig {
+  configured: boolean;
+  client_id: string;
+  has_client_secret: boolean;
+  soundcloud_authenticated: boolean;
+  auth_mode: 'user' | 'client_credentials' | '';
+  username: string;
+  redirect_uri: string;
+  lan_ip?: string | null;
+  lan_ips?: string[];
+  pair_url?: string | null;
+  status_error: string | null;
+}
+
+export interface SoundCloudComment {
+  id: string;
+  body: string;
+  timestamp_ms: number;
+  username: string;
+  avatar_url?: string | null;
+  created_at?: string | null;
 }
 
 export interface AppleMusicAuthConfig {

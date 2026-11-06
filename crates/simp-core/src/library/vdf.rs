@@ -1,6 +1,6 @@
 use anyhow::Result;
 use keyvalues_parser::Value;
-use simp_protocol::SessionState;
+use simp_protocol::{SessionState, SimpSettings};
 use std::fs;
 #[cfg(not(target_os = "windows"))]
 use std::path::Path;
@@ -160,6 +160,35 @@ pub fn normalize_platform_path(raw_path: &str) -> PathBuf {
     }
 
     PathBuf::from(unescaped)
+}
+
+/// Path to `~/.config/simp/settings.vdf` (or `<exe_dir>/data/settings.vdf` in Portable Mode).
+pub fn settings_vdf_path() -> PathBuf {
+    crate::simp_config_dir().join("settings.vdf")
+}
+
+/// Loads `SimpSettings` from `settings.vdf` or returns default settings.
+pub fn load_or_create_settings() -> SimpSettings {
+    let path = settings_vdf_path();
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(settings) = keyvalues_serde::from_str::<SimpSettings>(&content) {
+            return settings;
+        }
+    }
+    SimpSettings::default()
+}
+
+/// Saves `SimpSettings` to `settings.vdf`.
+pub fn save_settings(settings: &SimpSettings) -> Result<()> {
+    let path = settings_vdf_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let serialized = keyvalues_serde::to_string_with_key(settings, "SimpSettings")?;
+    let tmp_path = path.with_extension("vdf.tmp");
+    fs::write(&tmp_path, serialized)?;
+    fs::rename(&tmp_path, &path)?;
+    Ok(())
 }
 
 /// Path to `~/.local/share/simp/session_state.vdf` (or `<exe_dir>/data/session_state.vdf` in Portable Mode).

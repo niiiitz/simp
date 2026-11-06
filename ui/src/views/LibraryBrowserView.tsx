@@ -21,6 +21,15 @@ import {
   fetchAppleRadioAndForYou,
   fetchFullAppleAlbum,
 } from '../drivers/AppleMusicDriver';
+import {
+  fetchSoundCloudDiscover,
+  fetchSoundCloudLikesAndPlaylists,
+  fetchSoundCloudPlaylistTracks,
+  fetchSoundCloudStreamAndRadio,
+  likeSoundCloudTrack,
+  SoundCloudCatalogSearchResults,
+  SoundCloudPlaylistSummary,
+} from '../drivers/SoundCloudDriver';
 import { OskTargetKind } from '../hooks/useGamepadNavigation';
 import { BrowserTarget } from './PlayerView';
 
@@ -30,8 +39,10 @@ export interface LibraryBrowserViewProps {
   track: TrackMetadata | null | undefined;
   albums: AlbumRecord[];
   playlists: PlaylistRecord[];
-  browserSourceFilter: 'all' | 'local' | 'apple_music';
-  setBrowserSourceFilter: React.Dispatch<React.SetStateAction<'all' | 'local' | 'apple_music'>>;
+  browserSourceFilter: 'all' | 'local' | 'apple_music' | 'soundcloud';
+  setBrowserSourceFilter: React.Dispatch<
+    React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud'>
+  >;
   browserSearch: string;
   setBrowserSearch: React.Dispatch<React.SetStateAction<string>>;
   browserTarget: BrowserTarget | null;
@@ -46,6 +57,28 @@ export interface LibraryBrowserViewProps {
   setAppleSubTab: React.Dispatch<
     React.SetStateAction<'pinned' | 'cloud_playlists' | 'radio' | 'new'>
   >;
+  soundCloudSubTab: 'pinned' | 'likes_sets' | 'stream_radio' | 'trending';
+  setSoundCloudSubTab: React.Dispatch<
+    React.SetStateAction<'pinned' | 'likes_sets' | 'stream_radio' | 'trending'>
+  >;
+  scLikedTracks: TrackMetadata[];
+  setScLikedTracks: React.Dispatch<React.SetStateAction<TrackMetadata[]>>;
+  scPlaylists: SoundCloudPlaylistSummary[];
+  setScPlaylists: React.Dispatch<React.SetStateAction<SoundCloudPlaylistSummary[]>>;
+  scStreamTracks: TrackMetadata[];
+  setScStreamTracks: React.Dispatch<React.SetStateAction<TrackMetadata[]>>;
+  scStreamPlaylists: SoundCloudPlaylistSummary[];
+  setScStreamPlaylists: React.Dispatch<React.SetStateAction<SoundCloudPlaylistSummary[]>>;
+  scTrendingTracks: TrackMetadata[];
+  setScTrendingTracks: React.Dispatch<React.SetStateAction<TrackMetadata[]>>;
+  scTrendingMixes: TrackMetadata[];
+  setScTrendingMixes: React.Dispatch<React.SetStateAction<TrackMetadata[]>>;
+  scTrendingPlaylists: SoundCloudPlaylistSummary[];
+  setScTrendingPlaylists: React.Dispatch<React.SetStateAction<SoundCloudPlaylistSummary[]>>;
+  scSelectedGenre: string;
+  setScSelectedGenre: React.Dispatch<React.SetStateAction<string>>;
+  scCatalogSearchResults: SoundCloudCatalogSearchResults;
+  activeScPlaylist: SoundCloudPlaylistSummary | null;
   cloudPlaylists: AppleCloudPlaylistSummary[];
   setCloudPlaylists: React.Dispatch<React.SetStateAction<AppleCloudPlaylistSummary[]>>;
   radioStations: AppleRadioStationSummary[];
@@ -105,6 +138,13 @@ export interface LibraryBrowserViewProps {
     fallbackTitle?: string;
   }) => Promise<void>;
   handleStartAppleStation: (st: AppleRadioStationSummary) => void;
+  handleOpenSoundCloudPlaylist: (pl: SoundCloudPlaylistSummary) => Promise<void>;
+  handlePinSoundCloudPlaylist: (
+    pl: SoundCloudPlaylistSummary,
+    preloadedTracks?: TrackMetadata[]
+  ) => Promise<void>;
+  handleStartSoundCloudTrackRadio: (seedTrack: TrackMetadata) => void;
+  showToast: (msg: string) => void;
 }
 
 const CLOUD_PAGE_SIZE = 50;
@@ -260,6 +300,26 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   handleEjectOpticalDisc,
   appleSubTab,
   setAppleSubTab,
+  soundCloudSubTab,
+  setSoundCloudSubTab,
+  scLikedTracks,
+  setScLikedTracks,
+  scPlaylists,
+  setScPlaylists,
+  scStreamTracks,
+  setScStreamTracks,
+  scStreamPlaylists,
+  setScStreamPlaylists,
+  scTrendingTracks,
+  setScTrendingTracks,
+  scTrendingMixes,
+  setScTrendingMixes,
+  scTrendingPlaylists,
+  setScTrendingPlaylists,
+  scSelectedGenre,
+  setScSelectedGenre,
+  scCatalogSearchResults,
+  activeScPlaylist,
   cloudPlaylists,
   setCloudPlaylists,
   radioStations,
@@ -301,6 +361,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   handleOpenCloudPlaylist,
   handleOpenFullAppleAlbum,
   handleStartAppleStation,
+  handleOpenSoundCloudPlaylist,
+  handlePinSoundCloudPlaylist,
+  handleStartSoundCloudTrackRadio,
+  showToast,
 }) => {
   // Left Sidebar Collapsible Section States (persisted in localStorage)
   const [placesOpen, setPlacesOpen] = useState<boolean>(() => {
@@ -393,13 +457,16 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     'all' | 'stations' | 'mixes' | 'albums' | 'recent_library'
   >('all');
   const [newFilter, setNewFilter] = useState<'all' | 'albums' | 'playlists' | 'songs'>('all');
+  const [scLikesFilter, setScLikesFilter] = useState<'all' | 'likes' | 'sets'>('all');
+  const [scStreamFilter, setScStreamFilter] = useState<'all' | 'stream' | 'sets'>('all');
+  const [scTrendingFilter, setScTrendingFilter] = useState<'all' | 'mixes' | 'sets' | 'tracks'>('all');
   const [recentlyAddedCloudAlbums, setRecentlyAddedCloudAlbums] = useState<AppleCloudAlbumSummary[]>(
     []
   );
   const recentLoadedRef = useRef(false);
 
   useEffect(() => {
-    if (!snap?.apple_authenticated || browserSourceFilter === 'local') return;
+    if (!snap?.apple_authenticated || browserSourceFilter === 'local' || browserSourceFilter === 'soundcloud') return;
     if (appleSubTab !== 'radio' && appleSubTab !== 'pinned') return;
     if (recentLoadedRef.current && recentlyAddedCloudAlbums.length > 0) return;
     recentLoadedRef.current = true;
@@ -412,9 +479,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       });
   }, [snap?.apple_authenticated, browserSourceFilter, appleSubTab, recentlyAddedCloudAlbums.length]);
 
-  // Clear activeMountRoot if user switches source filter to Apple Music only
+  // Clear activeMountRoot if user switches source filter to Apple Music or SoundCloud only
   useEffect(() => {
-    if (browserSourceFilter === 'apple_music' && activeMountRoot) {
+    if ((browserSourceFilter === 'apple_music' || browserSourceFilter === 'soundcloud') && activeMountRoot) {
       setActiveMountRoot(null);
     }
   }, [browserSourceFilter, activeMountRoot]);
@@ -567,18 +634,22 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
   const searchLower = browserSearch.trim().toLowerCase();
 
-  // Source-aware SIMP Playlist membership (`has_local` & `has_apple`)
+  // Source-aware SIMP Playlist membership (`has_local`, `has_apple`, & `has_soundcloud`)
   const filteredPlaylists = useMemo(
     () =>
       playlists.filter((pl) => {
         if (browserSourceFilter === 'local') {
-          if (pl.origin === 'apple_remote') return false;
-          // Exclude user-created SIMP playlists that contain ONLY Apple Music tracks
-          if (pl.track_count > 0 && pl.has_apple && !pl.has_local) return false;
+          if (pl.origin === 'apple_remote' || pl.origin === 'soundcloud_remote') return false;
+          // Exclude user-created SIMP playlists that contain ONLY cloud tracks
+          if (pl.track_count > 0 && (pl.has_apple || pl.has_soundcloud) && !pl.has_local) return false;
         } else if (browserSourceFilter === 'apple_music') {
-          // Include Pinned Apple Playlists (`apple_remote`), empty new SIMP playlists,
-          // and any SIMP Playlist (`simp_local`) that contains Apple Music tracks (`has_apple`)!
+          if (pl.origin === 'soundcloud_remote') return false;
           if (pl.origin === 'simp_local' && pl.track_count > 0 && !pl.has_apple) {
+            return false;
+          }
+        } else if (browserSourceFilter === 'soundcloud') {
+          if (pl.origin === 'apple_remote') return false;
+          if (pl.origin === 'simp_local' && pl.track_count > 0 && !pl.has_soundcloud) {
             return false;
           }
         }
@@ -594,20 +665,21 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   );
 
   const cleanCollectionTitle = (raw: string): string =>
-    raw.replace(/^[\s📌🍎🎵💿]+/u, '').trim() || raw;
+    raw.replace(/^[\s📌🍎☁️🎵💿]+/u, '').trim() || raw;
 
   const formatPlaylistSourceBadge = (pl: PlaylistRecord): string => {
+    if (pl.origin === 'soundcloud_remote') {
+      return '☁️';
+    }
     if (pl.origin !== 'simp_local') {
       return '🍎';
     }
-    if (pl.has_local && pl.has_apple) {
-      return '💾 + 🍎';
-    }
-    if (pl.has_apple && !pl.has_local) {
-      return '🍎';
-    }
-    if (pl.has_local && !pl.has_apple) {
-      return '💾';
+    const parts: string[] = [];
+    if (pl.has_local) parts.push('💾');
+    if (pl.has_apple) parts.push('🍎');
+    if (pl.has_soundcloud) parts.push('☁️');
+    if (parts.length > 0) {
+      return parts.join(' + ');
     }
     return '★ SIMP';
   };
@@ -617,7 +689,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     [filteredPlaylists]
   );
   const pinnedPlaylistsList = useMemo(
-    () => filteredPlaylists.filter((p) => p.origin === 'apple_remote'),
+    () =>
+      filteredPlaylists.filter(
+        (p) => p.origin === 'apple_remote' || p.origin === 'soundcloud_remote'
+      ),
     [filteredPlaylists]
   );
 
@@ -788,6 +863,13 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     await handleOpenCloudPlaylist(pl);
   };
 
+  const selectSoundCloudPlaylist = async (pl: SoundCloudPlaylistSummary) => {
+    pushCurrentNavState();
+    setRightPaneMode('tracks');
+    focusRightPaneFirstTrack();
+    await handleOpenSoundCloudPlaylist(pl);
+  };
+
   const selectCloudAlbum = async (params: {
     albumId?: string | null;
     songUri?: string | null;
@@ -805,6 +887,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     ? `💾 ${activeMountPlaceObj.label}`
     : browserSourceFilter === 'local'
     ? 'Local SIMP Library'
+    : browserSourceFilter === 'soundcloud'
+    ? soundCloudSubTab === 'likes_sets'
+      ? 'SoundCloud Likes & Sets'
+      : soundCloudSubTab === 'stream_radio'
+      ? 'SoundCloud Stream & Radio'
+      : soundCloudSubTab === 'trending'
+      ? 'SoundCloud Trending & Mixes'
+      : 'SIMP Library (SoundCloud)'
     : appleSubTab === 'cloud_playlists'
     ? 'Apple Playlists'
     : appleSubTab === 'radio'
@@ -902,6 +992,27 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             tracks.map((t) => t.uri),
             `all ${tracks.length} tracks from "${alb.title}"`,
             tracks
+          );
+        }
+      } catch {
+        // Handled by parent toast
+      } finally {
+        setCloudLoading(false);
+      }
+    },
+    [handleAddTracksToPlaylist, setCloudLoading]
+  );
+
+  const handleAddSoundCloudPlaylistToHybrid = useCallback(
+    async (pl: SoundCloudPlaylistSummary) => {
+      setCloudLoading(true);
+      try {
+        const items = await fetchSoundCloudPlaylistTracks(pl.id);
+        if (items.length > 0) {
+          await handleAddTracksToPlaylist(
+            items.map((t) => t.uri),
+            `all ${items.length} tracks from "${pl.name}"`,
+            items
           );
         }
       } catch {
@@ -1018,6 +1129,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       browserTarget?.kind === 'cloud_playlist' &&
       activeCloudPlaylist &&
       playlists.some((p) => p.id === `applemusic:playlist:${activeCloudPlaylist.id}`);
+
+    const isScPlaylistPinned =
+      rightPaneMode === 'tracks' &&
+      browserTarget?.kind === 'cloud_playlist' &&
+      activeScPlaylist &&
+      playlists.some((p) => p.id === `soundcloud:playlist:${activeScPlaylist.id}`);
 
     const isCloudAlbumPinned =
       rightPaneMode === 'tracks' &&
@@ -1215,6 +1332,39 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 >
                   {gpYBadge}
                   <span>{isCloudPlaylistPinned ? '✓ Pinned (Unpin)' : '📌 Pin to SIMP'}</span>
+                </button>
+              )}
+
+              {browserTarget.kind === 'cloud_playlist' && activeScPlaylist && (
+                <button
+                  data-tile-aux="true"
+                  data-collection-y="true"
+                  onClick={() => {
+                    if (isScPlaylistPinned) {
+                      handleDeletePlaylist(
+                        `soundcloud:playlist:${activeScPlaylist.id}`,
+                        activeScPlaylist.name
+                      );
+                    } else {
+                      handlePinSoundCloudPlaylist(activeScPlaylist, browserTracks);
+                    }
+                  }}
+                  title="Pin or Unpin this SoundCloud set in SIMP"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: '3px 9px',
+                    borderRadius: 6,
+                    background: isScPlaylistPinned ? '#0f222a' : '#2c140a',
+                    border: isScPlaylistPinned ? '1px solid #2aa3c4' : '1px solid #ea580c',
+                    color: isScPlaylistPinned ? '#67e8f9' : '#fdba74',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {gpYBadge}
+                  <span>{isScPlaylistPinned ? '✓ Pinned (Unpin)' : '📌 Pin Set to SIMP'}</span>
                 </button>
               )}
 
@@ -2058,148 +2208,339 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     );
   };
 
-  // Reusable Row/Card for Individual Songs / Singles (Direct Play + Add to Hybrid Playlist + Open Full Album)
-  const renderSingleSongRow = (s: TrackMetadata, peerList: TrackMetadata[], ctxPrefix: string) => (
-    <div
-      key={s.uri}
-      data-single-song-row="true"
-      style={{
-        minHeight: 54,
-        padding: '6px 10px',
-        borderRadius: 12,
-        background: track?.uri === s.uri ? '#0d1b22' : '#0a0a0e',
-        border: track?.uri === s.uri ? '1px solid #2aa3c4' : '1px solid #181822',
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        gap: 8,
-      }}
-    >
+  // Reusable Visual Tile for SoundCloud Sets / Playlists
+  const renderSoundCloudPlaylistCard = (pl: SoundCloudPlaylistSummary) => {
+    const isSelected = browserTarget?.kind === 'cloud_playlist' && browserTarget.id === `sc:${pl.id}`;
+    const isPinned = playlists.some((p) => p.id === `soundcloud:playlist:${pl.id}`);
+    return (
       <button
-        onClick={() => {
-          setPlayingContextId(`${ctxPrefix}:${s.uri}`);
-          const idx = Math.max(0, peerList.findIndex((tr) => tr.uri === s.uri));
-          defaultSimpClient.loadQueue(
-            peerList.map((tr) => tr.uri),
-            idx,
-            peerList
-          );
-          setView('lock');
-        }}
+        key={pl.id}
+        data-right-tile="true"
+        onClick={() => selectSoundCloudPlaylist(pl)}
         style={{
-          flex: 1,
           minWidth: 0,
-          background: 'transparent',
-          border: 'none',
+          minHeight: 124,
+          padding: 10,
+          borderRadius: 12,
+          background: isSelected ? '#2c140a' : '#0a0a0e',
+          border: isSelected ? '1px solid #ea580c' : '1px solid #181822',
           color: '#d4d4dc',
           textAlign: 'left',
           cursor: 'pointer',
           display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          padding: 0,
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          gap: 8,
+          boxSizing: 'border-box',
         }}
       >
-        {s.art_url ? (
-          <img
-            src={s.art_url}
-            alt=""
-            loading="lazy"
-            style={{
-              width: 40,
-              height: 40,
-              borderRadius: 8,
-              objectFit: 'cover',
-              border: '1px solid #262632',
-              flexShrink: 0,
-            }}
+        <div
+          style={{
+            width: '100%',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-start',
+            gap: 6,
+          }}
+        >
+          <ResilientTileArtwork
+            src={pl.art_url}
+            fallbackIcon="☁️"
+            bg="#23120b"
+            border="1px solid #7c2d12"
           />
-        ) : (
-          <div
-            style={{
-              width: 40,
-              height: 40,
-              borderRadius: 8,
-              background: '#161622',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 15,
-              flexShrink: 0,
-            }}
-          >
-            🎵
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+            <span
+              role="button"
+              data-tile-aux="true"
+              data-tile-select="true"
+              title="Add set tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleAddSoundCloudPlaylistToHybrid(pl);
+              }}
+              style={{
+                padding: '2px 6px',
+                borderRadius: 6,
+                background: '#0f222a',
+                border: '1px solid #2aa3c4',
+                color: '#67e8f9',
+                fontSize: 10,
+                fontWeight: 800,
+                cursor: 'pointer',
+              }}
+            >
+              +
+            </span>
+            <span
+              role="button"
+              data-tile-aux="true"
+              data-tile-y="true"
+              title={isPinned ? 'Unpin Set from SIMP (Y)' : 'Pin Set to SIMP (Y)'}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (isPinned) {
+                  handleDeletePlaylist(`soundcloud:playlist:${pl.id}`, pl.name);
+                } else {
+                  handlePinSoundCloudPlaylist(pl);
+                }
+              }}
+              style={{
+                padding: '2px 6px',
+                borderRadius: 6,
+                background: isPinned ? '#0f222a' : '#2c140a',
+                border: isPinned ? '1px solid #2aa3c4' : '1px solid #7c2d12',
+                color: isPinned ? '#67e8f9' : '#fdba74',
+                fontSize: 10,
+                fontFamily: 'monospace',
+                fontWeight: 800,
+                cursor: 'pointer',
+              }}
+            >
+              {isPinned ? '✓ 📌' : '📌'}
+            </span>
           </div>
-        )}
-        <div style={{ minWidth: 0, flex: 1 }}>
+        </div>
+        <div style={{ minWidth: 0, width: '100%' }}>
           <div
             style={{
               fontSize: 13,
-              fontWeight: 700,
+              fontWeight: 800,
+              lineHeight: 1.3,
+              color: '#e4e4ec',
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
               overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
+              whiteSpace: 'normal',
+              overflowWrap: 'anywhere',
             }}
           >
-            ▶ {s.title}
+            {pl.name}
           </div>
           <div
             style={{
               fontSize: 11,
+              lineHeight: 1.35,
               color: '#8e8e99',
+              marginTop: 4,
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
               overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
+              whiteSpace: 'normal',
+              overflowWrap: 'anywhere',
             }}
           >
-            {s.artists.join(', ')}
-            {s.album ? ` • ${s.album}` : ''}
+            {pl.track_count ? `${pl.track_count} tracks • ` : ''}
+            {pl.description || 'SoundCloud Set'}
           </div>
         </div>
       </button>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+    );
+  };
+
+  // Reusable Row/Card for Individual Songs / Singles / DJ Mixes (Direct Play + Add to Hybrid Playlist + Open Full Album / Start Track Radio)
+  const renderSingleSongRow = (s: TrackMetadata, peerList: TrackMetadata[], ctxPrefix: string) => {
+    const isLongMix = s.source === 'soundcloud' && s.duration_ms >= 20 * 60 * 1000;
+    const durMin = Math.floor(s.duration_ms / 60000);
+    const durSec = Math.floor((s.duration_ms / 1000) % 60);
+    return (
+      <div
+        key={s.uri}
+        data-single-song-row="true"
+        style={{
+          minHeight: 54,
+          padding: '6px 10px',
+          borderRadius: 12,
+          background: track?.uri === s.uri ? '#0d1b22' : '#0a0a0e',
+          border: track?.uri === s.uri ? '1px solid #2aa3c4' : '1px solid #181822',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 8,
+        }}
+      >
         <button
-          data-row-aux="true"
-          data-track-select="true"
-          onClick={() => handleAddTracksToPlaylist([s.uri], `"${s.title}"`, [s])}
-          title="Add single to active SIMP Hybrid Playlist (SELECT)"
+          onClick={() => {
+            setPlayingContextId(`${ctxPrefix}:${s.uri}`);
+            const idx = Math.max(0, peerList.findIndex((tr) => tr.uri === s.uri));
+            defaultSimpClient.loadQueue(
+              peerList.map((tr) => tr.uri),
+              idx,
+              peerList
+            );
+            setView('lock');
+          }}
           style={{
-            padding: '5px 9px',
-            borderRadius: 8,
-            background: '#0f222a',
-            border: '1px solid #2aa3c4',
-            color: '#67e8f9',
-            fontSize: 12,
-            fontWeight: 800,
+            flex: 1,
+            minWidth: 0,
+            background: 'transparent',
+            border: 'none',
+            color: '#d4d4dc',
+            textAlign: 'left',
             cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: 0,
           }}
         >
-          +
+          {s.art_url ? (
+            <img
+              src={s.art_url}
+              alt=""
+              loading="lazy"
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 8,
+                objectFit: 'cover',
+                border: '1px solid #262632',
+                flexShrink: 0,
+              }}
+            />
+          ) : (
+            <div
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 8,
+                background: '#161622',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 15,
+                flexShrink: 0,
+              }}
+            >
+              {s.source === 'soundcloud' ? '☁️' : '🎵'}
+            </div>
+          )}
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div
+              style={{
+                fontSize: 13,
+                fontWeight: 700,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              ▶ {s.title}
+            </div>
+            <div
+              style={{
+                fontSize: 11,
+                color: '#8e8e99',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {s.artists.join(', ')}
+              {s.album ? ` • ${s.album}` : ''}
+            </div>
+          </div>
         </button>
-        <button
-          data-row-aux="true"
-          onClick={() =>
-            selectCloudAlbum({
-              songUri: s.uri,
-              fallbackTitle: s.album || s.title,
-            })
-          }
-          title="Open Full Parent Album"
-          style={{
-            padding: '5px 8px',
-            borderRadius: 8,
-            background: '#181824',
-            border: '1px solid #2e2e3e',
-            color: '#fda4af',
-            fontSize: 11,
-            cursor: 'pointer',
-          }}
-        >
-          💿
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          {s.duration_ms > 0 && (
+            <span
+              style={{
+                fontSize: 10,
+                fontFamily: 'monospace',
+                padding: '2px 6px',
+                borderRadius: 6,
+                background: isLongMix ? '#2c140a' : '#12121a',
+                border: isLongMix ? '1px solid #ea580c' : '1px solid #222230',
+                color: isLongMix ? '#fdba74' : '#8e8e99',
+              }}
+            >
+              {isLongMix ? `🎧 ${durMin}m` : `${durMin}:${String(durSec).padStart(2, '0')}`}
+            </span>
+          )}
+          <button
+            data-row-aux="true"
+            data-track-select="true"
+            onClick={() => handleAddTracksToPlaylist([s.uri], `"${s.title}"`, [s])}
+            title="Add single to active SIMP Hybrid Playlist (SELECT)"
+            style={{
+              padding: '5px 9px',
+              borderRadius: 8,
+              background: '#0f222a',
+              border: '1px solid #2aa3c4',
+              color: '#67e8f9',
+              fontSize: 12,
+              fontWeight: 800,
+              cursor: 'pointer',
+            }}
+          >
+            +
+          </button>
+          {s.source === 'soundcloud' ? (
+            <>
+              <button
+                data-row-aux="true"
+                onClick={() => handleStartSoundCloudTrackRadio(s)}
+                title="Start SoundCloud Track Radio from this track"
+                style={{
+                  padding: '5px 8px',
+                  borderRadius: 8,
+                  background: '#2c140a',
+                  border: '1px solid #ea580c',
+                  color: '#fdba74',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                📻
+              </button>
+              <button
+                data-row-aux="true"
+                onClick={() => likeSoundCloudTrack(s.uri, showToast)}
+                title="Like this track on SoundCloud"
+                style={{
+                  padding: '5px 8px',
+                  borderRadius: 8,
+                  background: '#18141c',
+                  border: '1px solid #2e2e3e',
+                  color: '#fb923c',
+                  fontSize: 11,
+                  cursor: 'pointer',
+                }}
+              >
+                ❤️
+              </button>
+            </>
+          ) : (
+            <button
+              data-row-aux="true"
+              onClick={() =>
+                selectCloudAlbum({
+                  songUri: s.uri,
+                  fallbackTitle: s.album || s.title,
+                })
+              }
+              title="Open Full Parent Album"
+              style={{
+                padding: '5px 8px',
+                borderRadius: 8,
+                background: '#181824',
+                border: '1px solid #2e2e3e',
+                color: '#fda4af',
+                fontSize: 11,
+                cursor: 'pointer',
+              }}
+            >
+              💿
+            </button>
+          )}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <main
@@ -2239,7 +2580,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             placeholder={
               browserSourceFilter === 'local'
                 ? '🔍 Filter local playlists, albums, or tracks...'
-                : '🔍 Search SIMP Library, Apple Playlists & Catalog...'
+                : browserSourceFilter === 'soundcloud'
+                ? '🔍 Search SoundCloud Tracks, Sets & DJ Mixes...'
+                : '🔍 Search SIMP Library, Apple Music & SoundCloud...'
             }
             value={browserSearch}
             onChange={(e) => setBrowserSearch(e.target.value)}
@@ -2286,23 +2629,27 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           )}
         </div>
 
-        {/* Row 2: Top-Level Source Filter Bar (`[ 🌐 All | 💾 Local | 🍎 Apple Music ]`) */}
+        {/* Row 2: Top-Level Source Filter Bar (`[ 🌐 All | 💾 Local | 🍎 Apple | ☁️ SoundCloud ]`) */}
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)',
-            gap: 6,
+            gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+            gap: 5,
           }}
         >
           {(
             [
-              { id: 'all', label: '🌐 All', isApple: false },
-              { id: 'local', label: '💾 Local', isApple: false },
+              { id: 'all', label: '🌐 All', accent: 'teal' },
+              { id: 'local', label: '💾 Local', accent: 'teal' },
               {
                 id: 'apple_music',
-                label:
-                  appleAuthState === 'reauth_required' ? '🍎 Apple ⚠️' : '🍎 Apple Music',
-                isApple: true,
+                label: appleAuthState === 'reauth_required' ? '🍎 Apple⚠️' : '🍎 Apple',
+                accent: 'apple',
+              },
+              {
+                id: 'soundcloud',
+                label: '☁️ SC',
+                accent: 'soundcloud',
               },
             ] as const
           ).map((tab) => {
@@ -2314,6 +2661,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   setBrowserSourceFilter(tab.id);
                   if (tab.id === 'local') {
                     setAppleSubTab('pinned');
+                    setSoundCloudSubTab('pinned');
+                    setRightPaneMode('browse');
+                  } else if (tab.id === 'soundcloud') {
+                    if (soundCloudSubTab === 'pinned') {
+                      setSoundCloudSubTab(snap?.soundcloud_authenticated ? 'trending' : 'trending');
+                    }
                     setRightPaneMode('browse');
                   } else if (
                     tab.id === 'apple_music' &&
@@ -2324,15 +2677,29 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 }}
                 style={{
                   minHeight: 34,
-                  padding: '0 6px',
+                  padding: '0 4px',
                   borderRadius: 8,
-                  background: active ? (tab.isApple ? '#28111b' : '#0f222a') : '#0a0a0e',
+                  background: active
+                    ? tab.accent === 'apple'
+                      ? '#28111b'
+                      : tab.accent === 'soundcloud'
+                      ? '#2c140a'
+                      : '#0f222a'
+                    : '#0a0a0e',
                   border: active
-                    ? tab.isApple
+                    ? tab.accent === 'apple'
                       ? '1px solid #fa243c'
+                      : tab.accent === 'soundcloud'
+                      ? '1px solid #ea580c'
                       : '1px solid #2aa3c4'
                     : '1px solid #1e1e26',
-                  color: active ? (tab.isApple ? '#fecdd3' : '#bfeaf5') : '#9ca3af',
+                  color: active
+                    ? tab.accent === 'apple'
+                      ? '#fecdd3'
+                      : tab.accent === 'soundcloud'
+                      ? '#fdba74'
+                      : '#bfeaf5'
+                    : '#9ca3af',
                   fontSize: 11,
                   fontWeight: 800,
                   cursor: 'pointer',
@@ -2371,94 +2738,223 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
         {placesOpen && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-            {(browserSourceFilter === 'local'
-              ? [
+            {browserSourceFilter === 'soundcloud' ? (
+              (
+                [
                   {
                     id: 'pinned' as const,
-                    label: `📌 Local SIMP Library (${filteredPlaylists.length + albums.length})`,
-                    isSimp: true,
-                  },
-                ]
-              : [
-                  {
-                    id: 'pinned' as const,
-                    label:
-                      browserSourceFilter === 'apple_music'
-                        ? `📌 SIMP Library (${filteredPlaylists.length + albums.length})`
-                        : `📌 My SIMP Library (${filteredPlaylists.length + albums.length})`,
+                    label: `📌 SIMP Library (${filteredPlaylists.length})`,
                     isSimp: true,
                   },
                   {
-                    id: 'cloud_playlists' as const,
-                    label: `☁️ Apple Playlists${
-                      cloudPlaylists.length ? ` (${cloudPlaylists.length})` : ''
+                    id: 'likes_sets' as const,
+                    label: `❤️ Likes & Sets${
+                      scLikedTracks.length + scPlaylists.length
+                        ? ` (${scLikedTracks.length + scPlaylists.length})`
+                        : ''
                     }`,
                     isSimp: false,
                   },
-                  { id: 'radio' as const, label: '📻 Radio & For You', isSimp: false },
-                  { id: 'new' as const, label: '✨ New & Charts', isSimp: false },
-                ]
-            ).map((hub) => {
-              const active =
-                !activeMountRoot && appleSubTab === hub.id && rightPaneMode === 'browse';
-              return (
-                <button
-                  key={hub.id}
-                  data-default-focus={hub.id === 'pinned' ? 'true' : undefined}
-                  data-left-active={active ? 'true' : undefined}
-                  onClick={() => {
-                    if (activeMountRoot !== null || appleSubTab !== hub.id || rightPaneMode !== 'browse') {
-                      pushCurrentNavState();
-                    }
-                    setActiveMountRoot(null);
-                    setAppleSubTab(hub.id);
-                    setRightPaneMode('browse');
-                    focusRightPaneFirstTile();
-                  }}
-                  style={{
-                    minHeight: 34,
-                    padding: '0 10px',
-                    borderRadius: 8,
-                    background: active
-                      ? hub.isSimp
-                        ? '#0f222a'
-                        : '#28111b'
-                      : '#0a0a0e',
-                    border: active
-                      ? hub.isSimp
-                        ? '1px solid #2aa3c4'
-                        : '1px solid #fa243c'
-                      : '1px solid #181820',
-                    color: active
-                      ? hub.isSimp
-                        ? '#bfeaf5'
-                        : '#fecdd3'
-                      : '#c8c8d2',
-                    fontSize: 12,
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                    textAlign: 'left',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                  }}
-                >
-                  <span>{hub.label}</span>
-                  <span
+                  {
+                    id: 'stream_radio' as const,
+                    label: '⚡ Stream & Radio',
+                    isSimp: false,
+                  },
+                  {
+                    id: 'trending' as const,
+                    label: '🔥 Trending & Mixes',
+                    isSimp: false,
+                  },
+                ] as const
+              ).map((hub) => {
+                const active =
+                  !activeMountRoot && soundCloudSubTab === hub.id && rightPaneMode === 'browse';
+                return (
+                  <button
+                    key={hub.id}
+                    data-default-focus={hub.id === 'pinned' ? 'true' : undefined}
+                    data-left-active={active ? 'true' : undefined}
+                    onClick={() => {
+                      if (
+                        activeMountRoot !== null ||
+                        soundCloudSubTab !== hub.id ||
+                        rightPaneMode !== 'browse'
+                      ) {
+                        pushCurrentNavState();
+                      }
+                      setActiveMountRoot(null);
+                      setSoundCloudSubTab(hub.id);
+                      setRightPaneMode('browse');
+                      focusRightPaneFirstTile();
+                    }}
                     style={{
-                      fontSize: 10,
-                      fontFamily: 'monospace',
-                      color: active ? (hub.isSimp ? '#2aa3c4' : '#fda4af') : '#71717a',
+                      minHeight: 34,
+                      padding: '0 10px',
+                      borderRadius: 8,
+                      background: active
+                        ? hub.isSimp
+                          ? '#0f222a'
+                          : '#2c140a'
+                        : '#0a0a0e',
+                      border: active
+                        ? hub.isSimp
+                          ? '1px solid #2aa3c4'
+                          : '1px solid #ea580c'
+                        : '1px solid #181820',
+                      color: active
+                        ? hub.isSimp
+                          ? '#bfeaf5'
+                          : '#fdba74'
+                        : '#c8c8d2',
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
                     }}
                   >
-                    ⊞
-                  </span>
-                </button>
-              );
-            })}
+                    <span>{hub.label}</span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        color: active ? (hub.isSimp ? '#2aa3c4' : '#fdba74') : '#71717a',
+                      }}
+                    >
+                      ⊞
+                    </span>
+                  </button>
+                );
+              })
+            ) : (
+              (browserSourceFilter === 'local'
+                ? [
+                    {
+                      id: 'pinned' as const,
+                      label: `📌 Local SIMP Library (${filteredPlaylists.length + albums.length})`,
+                      isSimp: true,
+                    },
+                  ]
+                : [
+                    {
+                      id: 'pinned' as const,
+                      label:
+                        browserSourceFilter === 'apple_music'
+                          ? `📌 SIMP Library (${filteredPlaylists.length + albums.length})`
+                          : `📌 My SIMP Library (${filteredPlaylists.length + albums.length})`,
+                      isSimp: true,
+                    },
+                    {
+                      id: 'cloud_playlists' as const,
+                      label: `☁️ Apple Playlists${
+                        cloudPlaylists.length ? ` (${cloudPlaylists.length})` : ''
+                      }`,
+                      isSimp: false,
+                    },
+                    { id: 'radio' as const, label: '📻 Radio & For You', isSimp: false },
+                    { id: 'new' as const, label: '✨ New & Charts', isSimp: false },
+                  ]
+              ).map((hub) => {
+                const active =
+                  !activeMountRoot && appleSubTab === hub.id && rightPaneMode === 'browse';
+                return (
+                  <button
+                    key={hub.id}
+                    data-default-focus={hub.id === 'pinned' ? 'true' : undefined}
+                    data-left-active={active ? 'true' : undefined}
+                    onClick={() => {
+                      if (
+                        activeMountRoot !== null ||
+                        appleSubTab !== hub.id ||
+                        rightPaneMode !== 'browse'
+                      ) {
+                        pushCurrentNavState();
+                      }
+                      setActiveMountRoot(null);
+                      setAppleSubTab(hub.id);
+                      setRightPaneMode('browse');
+                      focusRightPaneFirstTile();
+                    }}
+                    style={{
+                      minHeight: 34,
+                      padding: '0 10px',
+                      borderRadius: 8,
+                      background: active
+                        ? hub.isSimp
+                          ? '#0f222a'
+                          : '#28111b'
+                        : '#0a0a0e',
+                      border: active
+                        ? hub.isSimp
+                          ? '1px solid #2aa3c4'
+                          : '1px solid #fa243c'
+                        : '1px solid #181820',
+                      color: active
+                        ? hub.isSimp
+                          ? '#bfeaf5'
+                          : '#fecdd3'
+                        : '#c8c8d2',
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span>{hub.label}</span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        color: active ? (hub.isSimp ? '#2aa3c4' : '#fda4af') : '#71717a',
+                      }}
+                    >
+                      ⊞
+                    </span>
+                  </button>
+                );
+              })
+            )}
+
+            {/* Quick-jump to SoundCloud Trending & Mixes when in `🌐 All` mode */}
+            {browserSourceFilter === 'all' && (
+              <button
+                onClick={() => {
+                  pushCurrentNavState();
+                  setActiveMountRoot(null);
+                  setBrowserSourceFilter('soundcloud');
+                  setSoundCloudSubTab('trending');
+                  setRightPaneMode('browse');
+                  focusRightPaneFirstTile();
+                }}
+                style={{
+                  minHeight: 34,
+                  padding: '0 10px',
+                  borderRadius: 8,
+                  background: '#0a0a0e',
+                  border: '1px solid #181820',
+                  color: '#fdba74',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <span>☁️ SoundCloud Trending & Mixes</span>
+                <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#71717a' }}>⊞</span>
+              </button>
+            )}
 
             {/* Local Storage Mount Places (shown in `🌐 All` and `💾 Local` modes) */}
             {browserSourceFilter !== 'apple_music' &&
+              browserSourceFilter !== 'soundcloud' &&
               snap?.mounts.map((m) => {
                 const isMountActive =
                   activeMountRoot === m.mount_root && rightPaneMode === 'browse';
@@ -2810,14 +3306,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             const isLocalPlaylist = pl.origin === 'simp_local';
             const isActiveTarget = isLocalPlaylist && activePlaylistId === pl.id;
             const cleanTitle = cleanCollectionTitle(pl.name);
-            const inlineSources =
-              isLocalPlaylist && pl.has_local && pl.has_apple
-                ? '💾🍎 '
-                : isLocalPlaylist && pl.has_apple
-                ? '🍎 '
-                : isLocalPlaylist && pl.has_local
-                ? '💾 '
-                : '';
+            const inlineSourceIcons = isLocalPlaylist
+              ? `${pl.has_local ? '💾' : ''}${pl.has_apple ? '🍎' : ''}${
+                  pl.has_soundcloud ? '☁️' : ''
+                }`
+              : '';
+            const inlineSources = inlineSourceIcons ? `${inlineSourceIcons} ` : '';
             return (
               <button
                 key={pl.id}
@@ -2861,6 +3355,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 >
                   {isLocalPlaylist
                     ? `${isActiveTarget ? '★ ' : '🎵 '}${cleanTitle}`
+                    : pl.origin === 'soundcloud_remote'
+                    ? `☁️ ${cleanTitle}`
                     : `🍎 ${cleanTitle}`}
                 </span>
                 <span
@@ -2907,7 +3403,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             {/* Not Signed In Setup Card (only shown when opening an Apple Cloud Hub while not authenticated) */}
             {!snap?.apple_authenticated &&
               appleSubTab !== 'pinned' &&
-              browserSourceFilter !== 'local' && (
+              browserSourceFilter !== 'local' &&
+              browserSourceFilter !== 'soundcloud' && (
                 <div
                   style={{
                     padding: 14,
@@ -2952,16 +3449,62 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 </div>
               )}
 
+            {/* SoundCloud Setup Card (shown when opening SoundCloud hubs before connecting) */}
+            {browserSourceFilter === 'soundcloud' &&
+              !snap?.soundcloud_authenticated &&
+              soundCloudSubTab !== 'pinned' && (
+                <div
+                  style={{
+                    padding: 14,
+                    borderRadius: 12,
+                    background: '#1a110b',
+                    border: '1px solid #7c2d12',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 12,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
+                      ☁️ Connect SoundCloud (OAuth 2.1 PKCE or Public Mode)
+                    </div>
+                    <div style={{ fontSize: 11, color: '#a1a1aa', marginTop: 2 }}>
+                      Sign in with SoundCloud to access your Likes, Sets & Activity Stream, or enable Public Mode for Trending, DJ Mixes & Search.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setSourceModalOpen(true)}
+                    style={{
+                      minHeight: 36,
+                      padding: '0 14px',
+                      borderRadius: 8,
+                      background: '#2c140a',
+                      border: '1px solid #ea580c',
+                      color: '#fdba74',
+                      fontSize: 11,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Open SoundCloud Setup
+                  </button>
+                </div>
+              )}
+
             {cloudLoading && (
               <div
                 style={{
                   fontSize: 12,
                   fontFamily: 'monospace',
-                  color: '#fda4af',
+                  color: browserSourceFilter === 'soundcloud' ? '#fdba74' : '#fda4af',
                   padding: '4px 2px',
                 }}
               >
-                ⏳ Loading from Apple Music Cloud...
+                {browserSourceFilter === 'soundcloud'
+                  ? '⏳ Loading from SoundCloud...'
+                  : '⏳ Loading from Apple Music Cloud...'}
               </div>
             )}
 
@@ -3090,6 +3633,51 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   </>
                 )}
 
+                {/* 1E. SoundCloud Catalog Search Results (Sets & Tracks) */}
+                {browserSourceFilter !== 'local' &&
+                  browserSourceFilter !== 'apple_music' &&
+                  (scCatalogSearchResults.playlists.length > 0 ||
+                    scCatalogSearchResults.songs.length > 0) && (
+                    <>
+                      <div
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 800,
+                          color: '#fdba74',
+                          borderBottom: '1px solid #3c1c0f',
+                          paddingBottom: 6,
+                          marginTop: 8,
+                        }}
+                      >
+                        ☁️ SoundCloud Sets & Tracks
+                      </div>
+
+                      {scCatalogSearchResults.playlists.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            🎶 SOUNDCLOUD SETS & PLAYLISTS ({scCatalogSearchResults.playlists.length})
+                          </div>
+                          <div style={tileGridStyle}>
+                            {scCatalogSearchResults.playlists.map(renderSoundCloudPlaylistCard)}
+                          </div>
+                        </>
+                      )}
+
+                      {scCatalogSearchResults.songs.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            ☁️ SOUNDCLOUD TRACKS & MIXES ({scCatalogSearchResults.songs.length})
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {scCatalogSearchResults.songs.map((s) =>
+                              renderSingleSongRow(s, scCatalogSearchResults.songs, 'sc_search')
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </>
+                  )}
+
                 {filteredPlaylists.length === 0 &&
                   filteredCloudPlaylists.length === 0 &&
                   albums.length === 0 &&
@@ -3097,6 +3685,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   catalogSearchResults.playlists.length === 0 &&
                   catalogSearchResults.stations.length === 0 &&
                   catalogSearchResults.songs.length === 0 &&
+                  scCatalogSearchResults.playlists.length === 0 &&
+                  scCatalogSearchResults.songs.length === 0 &&
                   !cloudLoading && (
                     <div style={{ fontSize: 12, color: '#8e8e99', padding: '12px 4px' }}>
                       No playlists, albums, or catalog matches found for "{browserSearch.trim()}".
@@ -3209,7 +3799,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 {/* ---------------------------------------------------------
                     2B. 📌 MY SIMP LIBRARY HUB (4-Column Visual Card Grid & Playlist Manager)
                    --------------------------------------------------------- */}
-                {appleSubTab === 'pinned' && (
+                {((browserSourceFilter !== 'soundcloud' && appleSubTab === 'pinned') ||
+                  (browserSourceFilter === 'soundcloud' && soundCloudSubTab === 'pinned')) && (
                   <>
                     <div
                       style={{
@@ -3288,7 +3879,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         <input
                           type="text"
                           data-osk-input="playlist"
-                          placeholder="Name your new SIMP Hybrid Playlist (Local + Apple Music)..."
+                          placeholder="Name your new SIMP Hybrid Playlist (Local + Apple + SoundCloud)..."
                           value={newPlaylistName}
                           onChange={(e) => setNewPlaylistName(e.target.value)}
                           onClick={() => {
@@ -3343,12 +3934,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         </>
                       )}
 
-                    {/* Pinned Apple Music Playlists Section */}
+                    {/* Pinned Cloud Playlists Section */}
                     {(simpHubFilter === 'all' || simpHubFilter === 'pinned') &&
                       pinnedPlaylistsList.length > 0 && (
                         <>
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                            📌 PINNED APPLE MUSIC PLAYLISTS ({pinnedPlaylistsList.length})
+                            📌 PINNED CLOUD PLAYLISTS ({pinnedPlaylistsList.length})
                           </div>
                           <div style={tileGridStyle}>
                             {pinnedPlaylistsList.map(renderSimpPlaylistCard)}
@@ -3374,7 +3965,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 {/* ---------------------------------------------------------
                     3. ☁️ APPLE LIBRARY PLAYLISTS HUB (Paginated 50/page + A-Z Jump Pills)
                    --------------------------------------------------------- */}
-                {appleSubTab === 'cloud_playlists' && snap?.apple_authenticated && (
+                {browserSourceFilter !== 'soundcloud' &&
+                  appleSubTab === 'cloud_playlists' &&
+                  snap?.apple_authenticated && (
                   <>
                     <div
                       style={{
@@ -3526,7 +4119,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 {/* ---------------------------------------------------------
                     4. 📻 RADIO & FOR YOU HUB (Sub-filter Pills + 4-Col-Max Artwork Tiles)
                    --------------------------------------------------------- */}
-                {appleSubTab === 'radio' && snap?.apple_authenticated && (
+                {browserSourceFilter !== 'soundcloud' &&
+                  appleSubTab === 'radio' &&
+                  snap?.apple_authenticated && (
                   <>
                     <div
                       style={{
@@ -3674,7 +4269,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 {/* ---------------------------------------------------------
                     5. ✨ NEW RELEASES & TOP CHARTS HUB (4-Col-Max Tiles + Direct Singles)
                    --------------------------------------------------------- */}
-                {appleSubTab === 'new' && snap?.apple_authenticated && (
+                {browserSourceFilter !== 'soundcloud' &&
+                  appleSubTab === 'new' &&
+                  snap?.apple_authenticated && (
                   <>
                     <div
                       style={{
@@ -3793,6 +4390,471 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         </div>
                       </>
                     )}
+                  </>
+                )}
+
+                {/* ---------------------------------------------------------
+                    6. ☁️ SOUNDCLOUD LIKES & SETS HUB (Personal Account OAuth)
+                   --------------------------------------------------------- */}
+                {browserSourceFilter === 'soundcloud' && soundCloudSubTab === 'likes_sets' && (
+                  <>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        paddingBottom: 10,
+                        borderBottom: '1px solid #16161c',
+                        flexWrap: 'wrap',
+                        gap: 8,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 800,
+                            color: '#fed7aa',
+                            marginRight: 6,
+                          }}
+                        >
+                          ❤️ Likes & Sets
+                        </span>
+                        {(
+                          [
+                            { id: 'all', label: 'All' },
+                            { id: 'likes', label: `❤️ Liked Tracks (${scLikedTracks.length})` },
+                            { id: 'sets', label: `🎶 Sets & Playlists (${scPlaylists.length})` },
+                          ] as const
+                        ).map((f) => {
+                          const active = scLikesFilter === f.id;
+                          return (
+                            <button
+                              key={f.id}
+                              onClick={() => setScLikesFilter(f.id)}
+                              style={{
+                                padding: '4px 10px',
+                                borderRadius: 6,
+                                background: active ? '#2c140a' : '#101018',
+                                border: active ? '1px solid #ff5500' : '1px solid #222230',
+                                color: active ? '#fed7aa' : '#9ca3af',
+                                fontSize: 11,
+                                fontWeight: 800,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {f.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {scLikedTracks.length > 0 && (
+                          <button
+                            onClick={() => {
+                              setPlayingContextId('sc:likes');
+                              defaultSimpClient.loadQueue(
+                                scLikedTracks.map((t) => t.uri),
+                                0,
+                                scLikedTracks
+                              );
+                              setView('lock');
+                            }}
+                            style={{
+                              padding: '4px 10px',
+                              borderRadius: 6,
+                              background: '#2c140a',
+                              border: '1px solid #ff5500',
+                              color: '#fed7aa',
+                              fontSize: 11,
+                              fontWeight: 800,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            ▶ Play All Likes
+                          </button>
+                        )}
+                        <button
+                          onClick={() => {
+                            setCloudLoading(true);
+                            fetchSoundCloudLikesAndPlaylists()
+                              .then((res) => {
+                                setScLikedTracks(res.likedTracks);
+                                setScPlaylists(res.playlists);
+                              })
+                              .catch(() => {})
+                              .finally(() => setCloudLoading(false));
+                          }}
+                          style={{
+                            padding: '4px 9px',
+                            borderRadius: 6,
+                            background: '#161620',
+                            border: '1px solid #2a2a38',
+                            color: '#fdba74',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          ↻ Refresh
+                        </button>
+                      </div>
+                    </div>
+
+                    {(scLikesFilter === 'all' || scLikesFilter === 'sets') &&
+                      scPlaylists.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            🎶 YOUR SOUNDCLOUD SETS & PLAYLISTS ({scPlaylists.length})
+                          </div>
+                          <div style={tileGridStyle}>
+                            {scPlaylists.map(renderSoundCloudPlaylistCard)}
+                          </div>
+                        </>
+                      )}
+
+                    {(scLikesFilter === 'all' || scLikesFilter === 'likes') &&
+                      scLikedTracks.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            ❤️ LIKED TRACKS ({scLikedTracks.length})
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {scLikedTracks.map((s) =>
+                              renderSingleSongRow(s, scLikedTracks, 'sc_likes')
+                            )}
+                          </div>
+                        </>
+                      )}
+
+                    {scPlaylists.length === 0 && scLikedTracks.length === 0 && !cloudLoading && (
+                      <div style={{ fontSize: 12, color: '#8e8e99', padding: '12px 4px' }}>
+                        {snap?.soundcloud_authenticated
+                          ? 'No SoundCloud likes or sets found yet.'
+                          : 'Sign in with your personal SoundCloud account (OAuth 2.1 + PKCE) to browse your Likes & Sets, or switch to 🔥 Trending & Mixes.'}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* ---------------------------------------------------------
+                    7. ⚡ SOUNDCLOUD STREAM & RADIO HUB (Chronological Feed + Track Radio)
+                   --------------------------------------------------------- */}
+                {browserSourceFilter === 'soundcloud' && soundCloudSubTab === 'stream_radio' && (
+                  <>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        paddingBottom: 10,
+                        borderBottom: '1px solid #16161c',
+                        flexWrap: 'wrap',
+                        gap: 8,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 800,
+                            color: '#fed7aa',
+                            marginRight: 6,
+                          }}
+                        >
+                          ⚡ Stream & Radio
+                        </span>
+                        {(
+                          [
+                            { id: 'all', label: 'All' },
+                            { id: 'stream', label: `⚡ Activity Stream (${scStreamTracks.length})` },
+                            { id: 'sets', label: `🎶 Reposted Sets (${scStreamPlaylists.length})` },
+                          ] as const
+                        ).map((f) => {
+                          const active = scStreamFilter === f.id;
+                          return (
+                            <button
+                              key={f.id}
+                              onClick={() => setScStreamFilter(f.id)}
+                              style={{
+                                padding: '4px 10px',
+                                borderRadius: 6,
+                                background: active ? '#2c140a' : '#101018',
+                                border: active ? '1px solid #ff5500' : '1px solid #222230',
+                                color: active ? '#fed7aa' : '#9ca3af',
+                                fontSize: 11,
+                                fontWeight: 800,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {f.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {(scStreamTracks.length > 0 || scLikedTracks.length > 0) && (
+                          <button
+                            onClick={() => {
+                              const seed = scStreamTracks[0] || scLikedTracks[0];
+                              if (seed) handleStartSoundCloudTrackRadio(seed);
+                            }}
+                            style={{
+                              padding: '4px 10px',
+                              borderRadius: 6,
+                              background: '#2c140a',
+                              border: '1px solid #ff5500',
+                              color: '#fed7aa',
+                              fontSize: 11,
+                              fontWeight: 800,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            📻 Start Station
+                          </button>
+                        )}
+                        <button
+                          onClick={() => {
+                            setCloudLoading(true);
+                            fetchSoundCloudStreamAndRadio()
+                              .then((res) => {
+                                setScStreamTracks(res.streamTracks);
+                                setScStreamPlaylists(res.streamPlaylists);
+                              })
+                              .catch(() => {})
+                              .finally(() => setCloudLoading(false));
+                          }}
+                          style={{
+                            padding: '4px 9px',
+                            borderRadius: 6,
+                            background: '#161620',
+                            border: '1px solid #2a2a38',
+                            color: '#fdba74',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          ↻ Refresh
+                        </button>
+                      </div>
+                    </div>
+
+                    {(scStreamFilter === 'all' || scStreamFilter === 'sets') &&
+                      scStreamPlaylists.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            🎶 SETS FROM ARTISTS YOU FOLLOW ({scStreamPlaylists.length})
+                          </div>
+                          <div style={tileGridStyle}>
+                            {scStreamPlaylists.map(renderSoundCloudPlaylistCard)}
+                          </div>
+                        </>
+                      )}
+
+                    {(scStreamFilter === 'all' || scStreamFilter === 'stream') &&
+                      scStreamTracks.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            ⚡ CHRONOLOGICAL ACTIVITY STREAM ({scStreamTracks.length})
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {scStreamTracks.map((s) =>
+                              renderSingleSongRow(s, scStreamTracks, 'sc_stream')
+                            )}
+                          </div>
+                        </>
+                      )}
+
+                    {scStreamPlaylists.length === 0 && scStreamTracks.length === 0 && !cloudLoading && (
+                      <div style={{ fontSize: 12, color: '#8e8e99', padding: '12px 4px' }}>
+                        {snap?.soundcloud_authenticated
+                          ? 'Your chronological SoundCloud activity stream is empty.'
+                          : 'Sign in with your personal SoundCloud account to view your chronological /me/activities/all/own feed.'}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* ---------------------------------------------------------
+                    8. 🔥 SOUNDCLOUD TRENDING & MIXES HUB (Genres + 20m+ DJ Mixes + Featured Sets)
+                   --------------------------------------------------------- */}
+                {browserSourceFilter === 'soundcloud' && soundCloudSubTab === 'trending' && (
+                  <>
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 8,
+                        paddingBottom: 10,
+                        borderBottom: '1px solid #16161c',
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: 8,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <span
+                            style={{
+                              fontSize: 14,
+                              fontWeight: 800,
+                              color: '#fed7aa',
+                              marginRight: 6,
+                            }}
+                          >
+                            🔥 Trending & Mixes
+                          </span>
+                          {(
+                            [
+                              { id: 'all', label: 'All' },
+                              { id: 'mixes', label: `🎧 20m+ DJ Mixes (${scTrendingMixes.length})` },
+                              { id: 'sets', label: `🎶 Featured Sets (${scTrendingPlaylists.length})` },
+                              { id: 'tracks', label: `🔥 Trending Tracks (${scTrendingTracks.length})` },
+                            ] as const
+                          ).map((f) => {
+                            const active = scTrendingFilter === f.id;
+                            return (
+                              <button
+                                key={f.id}
+                                onClick={() => setScTrendingFilter(f.id)}
+                                style={{
+                                  padding: '4px 10px',
+                                  borderRadius: 6,
+                                  background: active ? '#2c140a' : '#101018',
+                                  border: active ? '1px solid #ff5500' : '1px solid #222230',
+                                  color: active ? '#fed7aa' : '#9ca3af',
+                                  fontSize: 11,
+                                  fontWeight: 800,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                {f.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <button
+                          onClick={() => {
+                            setCloudLoading(true);
+                            fetchSoundCloudDiscover(scSelectedGenre || undefined)
+                              .then((res) => {
+                                setScTrendingTracks(res.tracks);
+                                setScTrendingMixes(res.mixes);
+                                setScTrendingPlaylists(res.playlists);
+                              })
+                              .catch(() => {})
+                              .finally(() => setCloudLoading(false));
+                          }}
+                          style={{
+                            padding: '4px 9px',
+                            borderRadius: 6,
+                            background: '#161620',
+                            border: '1px solid #2a2a38',
+                            color: '#fdba74',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          ↻ Refresh
+                        </button>
+                      </div>
+
+                      {/* Genre & Vibe Pills */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 10, fontFamily: 'monospace', color: '#9ca3af' }}>
+                          VIBE:
+                        </span>
+                        {[
+                          { id: '', label: '🌐 All Vibes' },
+                          { id: 'Electronic', label: '⚡ Electronic' },
+                          { id: 'House', label: '🪩 House' },
+                          { id: 'Techno', label: '🎛️ Techno' },
+                          { id: 'Drum & Bass', label: '🥁 Drum & Bass' },
+                          { id: 'Hip-hop & Rap', label: '🎤 Hip-Hop' },
+                          { id: 'Ambient', label: '🌌 Ambient' },
+                          { id: 'Synthwave', label: '🌆 Synthwave' },
+                          { id: 'Indie', label: '🎸 Indie' },
+                        ].map((g) => {
+                          const active = scSelectedGenre === g.id;
+                          return (
+                            <button
+                              key={g.id || 'all'}
+                              onClick={() => {
+                                setScSelectedGenre(g.id);
+                                setCloudLoading(true);
+                                fetchSoundCloudDiscover(g.id || undefined)
+                                  .then((res) => {
+                                    setScTrendingTracks(res.tracks);
+                                    setScTrendingMixes(res.mixes);
+                                    setScTrendingPlaylists(res.playlists);
+                                  })
+                                  .catch(() => {})
+                                  .finally(() => setCloudLoading(false));
+                              }}
+                              style={{
+                                padding: '3px 8px',
+                                borderRadius: 999,
+                                background: active ? '#3c1c0f' : '#12121a',
+                                border: active ? '1px solid #ff5500' : '1px solid #232332',
+                                color: active ? '#fed7aa' : '#a1a1aa',
+                                fontSize: 10,
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {g.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {(scTrendingFilter === 'all' || scTrendingFilter === 'sets') &&
+                      scTrendingPlaylists.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            🎶 FEATURED SOUNDCLOUD SETS ({scTrendingPlaylists.length})
+                          </div>
+                          <div style={tileGridStyle}>
+                            {scTrendingPlaylists.map(renderSoundCloudPlaylistCard)}
+                          </div>
+                        </>
+                      )}
+
+                    {(scTrendingFilter === 'all' || scTrendingFilter === 'mixes') &&
+                      scTrendingMixes.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            🎧 LONG-FORM DJ MIXES & SETS (20m+) ({scTrendingMixes.length})
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {scTrendingMixes.map((s) =>
+                              renderSingleSongRow(s, scTrendingMixes, 'sc_mixes')
+                            )}
+                          </div>
+                        </>
+                      )}
+
+                    {(scTrendingFilter === 'all' || scTrendingFilter === 'tracks') &&
+                      scTrendingTracks.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            🔥 TRENDING TRACKS ({scTrendingTracks.length})
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {scTrendingTracks.map((s) =>
+                              renderSingleSongRow(s, scTrendingTracks, 'sc_trending')
+                            )}
+                          </div>
+                        </>
+                      )}
                   </>
                 )}
               </>
@@ -4359,12 +5421,16 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         background:
                           t.source === 'apple_music'
                             ? '#251018'
+                            : t.source === 'soundcloud'
+                            ? '#2c140a'
                             : t.source === 'cdda'
                             ? '#261a0d'
                             : '#101822',
                         color:
                           t.source === 'apple_music'
                             ? '#fda4af'
+                            : t.source === 'soundcloud'
+                            ? '#fdba74'
                             : t.source === 'cdda'
                             ? '#fcd34d'
                             : '#67e8f9',
@@ -4372,6 +5438,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     >
                       {t.source === 'apple_music'
                         ? '🍎 Apple'
+                        : t.source === 'soundcloud'
+                        ? '☁️ SC'
                         : t.source === 'steam_ost'
                         ? '🎮 OST'
                         : t.source === 'cdda'
@@ -4382,6 +5450,28 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       {Math.floor(t.duration_ms / 60000)}:
                       {String(Math.floor((t.duration_ms / 1000) % 60)).padStart(2, '0')}
                     </span>
+                    {t.source === 'soundcloud' && (
+                      <button
+                        data-row-aux="true"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleStartSoundCloudTrackRadio(t);
+                        }}
+                        title={`Start SoundCloud Track Radio from "${t.title}"`}
+                        style={{
+                          padding: '5px 8px',
+                          borderRadius: 8,
+                          background: '#221108',
+                          border: '1px solid #5c280e',
+                          color: '#fdba74',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        📻 Radio
+                      </button>
+                    )}
                     {t.source === 'apple_music' && browserTarget?.kind !== 'cloud_album' && (
                       <button
                         data-row-aux="true"

@@ -133,6 +133,17 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/apple/resolve-track", get(apple_resolve_track_handler))
         .route("/api/apple/web-playback", get(apple_web_playback_handler))
         .route("/api/apple/native-probe", get(apple_native_probe_handler))
+        .route("/api/soundcloud/auth/start", get(soundcloud_auth_start_handler))
+        .route("/api/soundcloud/callback", get(soundcloud_callback_handler))
+        .route("/api/soundcloud/client-auth", post(soundcloud_client_auth_handler))
+        .route("/api/soundcloud/playlists", get(soundcloud_playlists_handler))
+        .route("/api/soundcloud/playlist-tracks", get(soundcloud_playlist_tracks_handler))
+        .route("/api/soundcloud/stream", get(soundcloud_stream_handler))
+        .route("/api/soundcloud/discover", get(soundcloud_discover_handler))
+        .route("/api/soundcloud/search", get(soundcloud_search_handler))
+        .route("/api/soundcloud/comments", get(soundcloud_comments_handler))
+        .route("/api/soundcloud/waveform", get(soundcloud_waveform_handler))
+        .route("/api/soundcloud/like", post(soundcloud_like_handler))
         .route("/api/dvd/stream", get(dvd_stream_handler))
         .route("/ws", get(ws_handler))
         .nest_service("/art", ServeDir::new(art_cache_dir));
@@ -509,6 +520,325 @@ async fn apple_native_probe_handler(
     }
 }
 
+async fn soundcloud_auth_start_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let cfg = state.settings.lock().unwrap().clone();
+    let redirect_override = params.get("redirect_uri").cloned();
+    let wants_json = params.get("json").map(|v| v == "1").unwrap_or(false);
+
+    match simp_core::sinks::soundcloud_api::start_oauth_pkce_flow(
+        &cfg,
+        redirect_override.as_deref(),
+    ) {
+        Ok((authorize_url, csrf_state)) => {
+            if wants_json {
+                Json(serde_json::json!({
+                    "ok": true,
+                    "authorize_url": authorize_url,
+                    "state": csrf_state,
+                }))
+                .into_response()
+            } else {
+                axum::response::Redirect::temporary(&authorize_url).into_response()
+            }
+        }
+        Err(e) => {
+            if wants_json {
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": e.to_string(),
+                }))
+                .into_response()
+            } else {
+                let html = format!(
+                    "<!doctype html><html><head><meta charset='utf-8'><title>SIMP SoundCloud Auth Error</title></head>\
+                     <body style='background:#050507;color:#fca5a5;font-family:system-ui,sans-serif;padding:40px;text-align:center'>\
+                     <h2>☁️ SoundCloud Configuration Needed</h2><p>{}</p></body></html>",
+                    e
+                );
+                axum::response::Html(html).into_response()
+            }
+        }
+    }
+}
+
+async fn soundcloud_callback_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let cfg = state.settings.lock().unwrap().clone();
+    let code = params.get("code").cloned().unwrap_or_default();
+    let csrf_state = params.get("state").cloned();
+    let redirect_override = params.get("redirect_uri").cloned();
+    let wants_json = params.get("json").map(|v| v == "1").unwrap_or(false);
+
+    if code.trim().is_empty() {
+        let err_desc = params
+            .get("error_description")
+            .or_else(|| params.get("error"))
+            .cloned()
+            .unwrap_or_else(|| "Missing authorization code from SoundCloud callback".to_string());
+        if wants_json {
+            return Json(serde_json::json!({ "ok": false, "error": err_desc })).into_response();
+        }
+        let html = format!(
+            "<!doctype html><html><head><meta charset='utf-8'><title>SoundCloud Sign-In Failed</title></head>\
+             <body style='background:#050507;color:#fca5a5;font-family:system-ui,sans-serif;padding:40px;text-align:center'>\
+             <h2>☁️ SoundCloud Sign-In Cancelled or Failed</h2><p>{err_desc}</p>\
+             <p><a href='/' style='color:#ff5500'>Return to SIMP</a></p></body></html>"
+        );
+        return axum::response::Html(html).into_response();
+    }
+
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::exchange_oauth_code(
+            &cfg,
+            &code,
+            csrf_state.as_deref(),
+            redirect_override.as_deref(),
+        )
+    })
+    .await;
+
+    match res {
+        Ok(Ok(bundle)) => {
+            let _ = state.cmd_tx.send(AudioCommand::SetSoundCloudTokens {
+                access_token: bundle.access_token.clone(),
+                refresh_token: bundle.refresh_token.clone(),
+                expires_at: bundle.expires_at,
+                auth_mode: bundle.auth_mode.clone(),
+                username: bundle.username.clone(),
+            });
+            let settings_clone = state.settings.clone();
+            tokio::task::spawn_blocking(move || {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                let updated = settings_clone.lock().unwrap().clone();
+                let _ = crate::config::save_settings(&updated);
+            });
+
+            if wants_json {
+                return Json(serde_json::json!({
+                    "ok": true,
+                    "username": bundle.username,
+                    "auth_mode": bundle.auth_mode,
+                }))
+                .into_response();
+            }
+
+            let uname_label = if bundle.username.is_empty() {
+                "SoundCloud Account".to_string()
+            } else {
+                format!("@{}", bundle.username)
+            };
+            let html = format!(
+                "<!doctype html><html><head><meta charset='utf-8'><title>SIMP SoundCloud Connected</title></head>\
+                 <body style='background:#050507;color:#f4f4f6;font-family:system-ui,sans-serif;padding:48px 24px;text-align:center'>\
+                 <div style='max-width:440px;margin:0 auto;padding:28px;border-radius:18px;background:#0d0d14;border:1px solid #ff5500'>\
+                 <div style='font-size:42px;margin-bottom:12px'>☁️</div>\
+                 <h2 style='margin:0 0 8px;color:#ff7733'>SoundCloud Connected!</h2>\
+                 <p style='color:#a1a1aa;font-size:14px;margin:0 0 20px'>Signed in as <strong style='color:#f4f4f6'>{uname_label}</strong>. Your Likes, Sets, Stream &amp; Native 160kbps AAC playback are now active in SIMP.</p>\
+                 <button onclick=\"if(window.opener){{window.close();}}else{{window.location.href='/';}}\" \
+                   style='padding:12px 24px;border-radius:10px;background:#ff5500;color:#fff;border:none;font-weight:800;cursor:pointer;font-size:14px'>\
+                   Return to SIMP Console\
+                 </button>\
+                 </div>\
+                 <script>setTimeout(()=>{{if(window.opener){{window.close();}}else{{window.location.href='/';}}}}, 1800);</script>\
+                 </body></html>"
+            );
+            axum::response::Html(html).into_response()
+        }
+        Ok(Err(e)) => {
+            if wants_json {
+                return Json(serde_json::json!({ "ok": false, "error": e.to_string() }))
+                    .into_response();
+            }
+            let html = format!(
+                "<!doctype html><html><head><meta charset='utf-8'><title>SoundCloud OAuth Error</title></head>\
+                 <body style='background:#050507;color:#fca5a5;font-family:system-ui,sans-serif;padding:40px;text-align:center'>\
+                 <h2>☁️ SoundCloud Token Exchange Failed</h2><p>{e}</p>\
+                 <p><a href='/' style='color:#ff5500'>Return to SIMP</a></p></body></html>"
+            );
+            axum::response::Html(html).into_response()
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response(),
+    }
+}
+
+async fn soundcloud_client_auth_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::obtain_client_credentials_token(&cfg)
+    })
+    .await;
+    match res {
+        Ok(Ok(bundle)) => {
+            let _ = state.cmd_tx.send(AudioCommand::SetSoundCloudTokens {
+                access_token: bundle.access_token.clone(),
+                refresh_token: bundle.refresh_token.clone(),
+                expires_at: bundle.expires_at,
+                auth_mode: bundle.auth_mode.clone(),
+                username: bundle.username.clone(),
+            });
+            let settings_clone = state.settings.clone();
+            tokio::task::spawn_blocking(move || {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                let updated = settings_clone.lock().unwrap().clone();
+                let _ = crate::config::save_settings(&updated);
+            });
+            Json(serde_json::json!({
+                "ok": true,
+                "auth_mode": bundle.auth_mode,
+                "username": bundle.username,
+                "expires_at": bundle.expires_at,
+            }))
+        }
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_playlists_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::fetch_user_playlists_and_likes(&cfg)
+    })
+    .await;
+    match res {
+        Ok(Ok(data)) => Json(serde_json::json!({ "ok": true, "data": data })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_playlist_tracks_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::fetch_playlist_tracks(&cfg, &id)
+    })
+    .await;
+    match res {
+        Ok(Ok(tracks)) => Json(serde_json::json!({ "ok": true, "data": tracks })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_stream_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::fetch_stream_and_stations(&cfg)
+    })
+    .await;
+    match res {
+        Ok(Ok(feed)) => Json(serde_json::json!({ "ok": true, "data": feed })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_discover_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let genre = params.get("genre").cloned();
+    let mixes_only = params
+        .get("mixes_only")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::fetch_trending_and_mixes(
+            &cfg,
+            genre.as_deref(),
+            mixes_only,
+        )
+    })
+    .await;
+    match res {
+        Ok(Ok(feed)) => Json(serde_json::json!({ "ok": true, "data": feed })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_search_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let term = params
+        .get("term")
+        .or_else(|| params.get("q"))
+        .cloned()
+        .unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::search_catalog(&cfg, &term)
+    })
+    .await;
+    match res {
+        Ok(Ok(results)) => Json(serde_json::json!({ "ok": true, "data": results })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_comments_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::fetch_track_comments(&cfg, &id)
+    })
+    .await;
+    match res {
+        Ok(Ok(comments)) => Json(serde_json::json!({ "ok": true, "data": comments })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+    }
+}
+
+async fn soundcloud_waveform_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::fetch_track_waveform(&cfg, &id)
+    })
+    .await;
+    match res {
+        Ok(Ok(wf)) => Json(serde_json::json!({ "ok": true, "data": wf })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_like_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::like_soundcloud_track(&cfg, &id)
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
 async fn dvd_stream_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
@@ -652,6 +982,9 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
                                 | AudioCommand::ConfigureAppleMusic { .. }
                                 | AudioCommand::SetAppleMusicUserToken { .. }
                                 | AudioCommand::DisconnectAppleMusic
+                                | AudioCommand::ConfigureSoundCloud { .. }
+                                | AudioCommand::SetSoundCloudTokens { .. }
+                                | AudioCommand::DisconnectSoundCloud
                                 | AudioCommand::FactoryReset
                         );
                         let _ = state.cmd_tx.send(command);
@@ -947,6 +1280,55 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                     "music_user_token": creds.music_user_token,
                     "apple_authenticated": apple_authenticated,
                     "headless_worker_active": headless_worker_active,
+                    "lan_ip": lan_ip,
+                    "lan_ips": lan_ips,
+                    "pair_url": pair_url,
+                    "status_error": status_error,
+                }),
+                error: None,
+            }
+        }
+        LibraryQuery::GetSoundCloudAuthConfig => {
+            let cfg = state.settings.lock().unwrap().clone();
+            let creds = simp_core::sinks::soundcloud_api::resolve_soundcloud_credentials(&cfg);
+            let configured = !creds.client_id.is_empty() && !creds.client_secret.is_empty();
+            let has_token = !creds.access_token.is_empty();
+            let soundcloud_authenticated = has_token || configured;
+            let auth_mode = if !creds.auth_mode.is_empty() {
+                creds.auth_mode.clone()
+            } else if configured {
+                "client_credentials".to_string()
+            } else {
+                String::new()
+            };
+
+            let lan_ips = detect_lan_ips();
+            let lan_ip = lan_ips.first().cloned();
+            let pair_url = lan_ip
+                .as_ref()
+                .map(|ip| format!("http://{ip}:18888/pair"))
+                .unwrap_or_else(|| "http://steamdeck.local:18888/pair".to_string());
+
+            let status_error = if !configured && !has_token {
+                Some(
+                    "Set SOUNDCLOUD_CLIENT_ID and SOUNDCLOUD_CLIENT_SECRET in .env or Sources (Select)"
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+
+            ServerEnvelope::QueryResponse {
+                req_id,
+                ok: true,
+                data: serde_json::json!({
+                    "configured": configured,
+                    "client_id": creds.client_id,
+                    "has_client_secret": !creds.client_secret.is_empty(),
+                    "soundcloud_authenticated": soundcloud_authenticated,
+                    "auth_mode": auth_mode,
+                    "username": creds.username,
+                    "redirect_uri": simp_core::sinks::soundcloud_api::SOUNDCLOUD_DEFAULT_REDIRECT_URI,
                     "lan_ip": lan_ip,
                     "lan_ips": lan_ips,
                     "pair_url": pair_url,

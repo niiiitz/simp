@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 pub enum ActiveEngine {
     Local,
     AppleMusic,
+    #[serde(rename = "soundcloud")]
+    SoundCloud,
     #[default]
     None,
 }
@@ -50,7 +52,7 @@ pub struct PlaylistRecord {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub origin: String, // "simp_mixed" | "apple_remote"
+    pub origin: String, // "simp_mixed" | "apple_remote" | "soundcloud_remote"
     pub cover_art_url: Option<String>,
     pub track_count: usize,
     pub updated_at: i64,
@@ -58,6 +60,8 @@ pub struct PlaylistRecord {
     pub has_local: bool,
     #[serde(default)]
     pub has_apple: bool,
+    #[serde(default)]
+    pub has_soundcloud: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -246,6 +250,22 @@ pub struct ServiceSettings {
     pub apple_developer_token: String,
     #[serde(default)]
     pub apple_music_user_token: String,
+    #[serde(default)]
+    pub soundcloud_enabled: bool,
+    #[serde(default)]
+    pub soundcloud_client_id: String,
+    #[serde(default)]
+    pub soundcloud_client_secret: String,
+    #[serde(default)]
+    pub soundcloud_access_token: String,
+    #[serde(default)]
+    pub soundcloud_refresh_token: String,
+    #[serde(default)]
+    pub soundcloud_token_expires_at: i64,
+    #[serde(default)]
+    pub soundcloud_auth_mode: String,
+    #[serde(default)]
+    pub soundcloud_username: String,
 }
 
 impl Default for SimpSettings {
@@ -284,6 +304,14 @@ impl Default for SimpSettings {
                 apple_private_key_path: String::new(),
                 apple_developer_token: String::new(),
                 apple_music_user_token: String::new(),
+                soundcloud_enabled: false,
+                soundcloud_client_id: String::new(),
+                soundcloud_client_secret: String::new(),
+                soundcloud_access_token: String::new(),
+                soundcloud_refresh_token: String::new(),
+                soundcloud_token_expires_at: 0,
+                soundcloud_auth_mode: String::new(),
+                soundcloud_username: String::new(),
             },
             provisioning: ProvisioningSettings::default(),
         }

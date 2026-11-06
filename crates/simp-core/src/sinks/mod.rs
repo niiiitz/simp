@@ -5,6 +5,8 @@ pub mod cdda;
 #[cfg(feature = "experimental-dvd")]
 pub mod dvd;
 pub mod local;
+pub mod soundcloud;
+pub mod soundcloud_api;
 
 use anyhow::Result;
 use simp_protocol::{ActiveEngine, PlaybackEvent};

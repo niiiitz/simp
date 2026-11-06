@@ -14,7 +14,7 @@ import { encodeQrMatrix } from '../../ui/src/components/qrMatrix';
  */
 const SP_REACT: typeof ReactTypes = (window as any).SP_REACT || (globalThis as any).SP_REACT || (window as any).React;
 
-const SIMP_VERSION = 'v0.1.0-alpha.54';
+const SIMP_VERSION = 'v0.1.0-alpha.55';
 let cachedLiveDaemonVersion = SIMP_VERSION;
 const SIMP_CONSOLE_ROUTE = '/simp-console';
 

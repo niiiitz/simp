@@ -5,7 +5,7 @@
 
   **A lightweight, controller-friendly music player for SteamOS, Bazzite, Linux desktops, and SteamVR.**
 
-  [![Status: v0.1.0-alpha.54](https://img.shields.io/badge/status-v0.1.0--alpha.54-ff6a00?style=flat-square)](#)
+  [![Status: v0.1.0-alpha.55](https://img.shields.io/badge/status-v0.1.0--alpha.55-ff6a00?style=flat-square)](#)
   [![Target: SteamOS / Linux / SteamVR](https://img.shields.io/badge/target-SteamOS%20%7C%20Linux%20%7C%20SteamVR-000000?style=flat-square)](#)
   [![Backend: 100% Native Rust](https://img.shields.io/badge/backend-Native%20Rust-dea584?style=flat-square)](#)
 </div>
@@ -30,8 +30,9 @@ If you use a Steam Deck, a living-room Bazzite box, or a Linux desktop, playing 
 
 ## Highlights
 
-* **One queue for everything:** Mix local audio files (`FLAC`, `MP3`, `WAV`, `OGG`, `OPUS`, `M4A`), your installed **Steam Soundtracks**, **Apple Music** streams, and even physical **Audio CDs** (via an external USB drive) inside the same playlist.
-* **No background browser bloat:** Playback, library indexing, and Apple Music streaming run natively in a single ~4 MB Rust background daemon. Close the window to jump back into your game and your music keeps playing with `< 1%` CPU usage.
+* **One queue for everything:** Mix local audio files (`FLAC`, `MP3`, `WAV`, `OGG`, `OPUS`, `M4A`), your installed **Steam Soundtracks**, **Apple Music** streams, **SoundCloud** tracks & long-form DJ mixes, and even physical **Audio CDs** (via an external USB drive) inside the same playlist.
+* **No background browser bloat:** Playback, library indexing, Apple Music streaming, and SoundCloud 160kbps AAC / 128kbps MP3 streaming run natively in a single ~4 MB Rust background daemon. Close the window to jump back into your game and your music keeps playing with `< 1%` CPU usage.
+* **First-class SoundCloud experience:** Browse **Trending & 20m+ DJ Mixes**, genre vibes, your **Likes & Sets**, and **Activity Stream**, launch instant **Track Radio (`📻`)** stations, and toggle **ephemeral timed comment speech bubbles (`💬`)** and waveform silhouettes synced to the playhead.
 * **Pin only what you care about:** Instead of dumping thousands of cloud tracks into your local library, you can browse your cloud playlists, radio stations, and catalog search results on demand, and **Pin** your favorites into SIMP for instant startup.
 * **Adapts to your input:** Pick up a controller and button hints (`L1`, `R1`, `A`, `B`, `X`, `Y`) light up for couch/handheld navigation. Move your mouse on a desktop and the controller badges get out of the way automatically.
 * **Built for OLED screens:** Pure `#000000` black backgrounds, subtle pixel-shifting, automatic idle dimming, and a one-tap sleep screen so you can leave your music up on an OLED display without worrying about burn-in.

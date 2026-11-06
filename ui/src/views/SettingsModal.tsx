@@ -4,6 +4,7 @@ import {
   defaultSimpClient,
   OpticalDiscStatus,
   SimpStateSnapshot,
+  SoundCloudAuthConfig,
   TrackMetadata,
 } from '@simp/client';
 import { QrCodeSvg } from '../components/QrCodeSvg';
@@ -11,6 +12,11 @@ import {
   authorizeAppleMusic,
   disconnectAppleMusicCleanSlate,
 } from '../drivers/AppleMusicDriver';
+import {
+  disconnectSoundCloudCleanSlate,
+  enableSoundCloudPublicMode,
+  startSoundCloudOAuthLogin,
+} from '../drivers/SoundCloudDriver';
 import { OskTargetKind } from '../hooks/useGamepadNavigation';
 import { BrowserTarget } from './PlayerView';
 
@@ -34,9 +40,18 @@ export interface SettingsModalProps {
   setAppleAuthCfg: React.Dispatch<React.SetStateAction<AppleMusicAuthConfig | null>>;
   appleBusy: boolean;
   setAppleBusy: React.Dispatch<React.SetStateAction<boolean>>;
-  setBrowserSourceFilter: React.Dispatch<React.SetStateAction<'all' | 'local' | 'apple_music'>>;
+  soundcloudAuthCfg: SoundCloudAuthConfig | null;
+  setSoundcloudAuthCfg: React.Dispatch<React.SetStateAction<SoundCloudAuthConfig | null>>;
+  soundcloudBusy: boolean;
+  setSoundcloudBusy: React.Dispatch<React.SetStateAction<boolean>>;
+  setBrowserSourceFilter: React.Dispatch<
+    React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud'>
+  >;
   setAppleSubTab: React.Dispatch<
     React.SetStateAction<'pinned' | 'cloud_playlists' | 'radio' | 'new'>
+  >;
+  setSoundCloudSubTab: React.Dispatch<
+    React.SetStateAction<'pinned' | 'likes_sets' | 'stream_radio' | 'trending'>
   >;
   refreshLibraryData: () => void;
   showToast: (msg: string) => void;
@@ -62,8 +77,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   setAppleAuthCfg,
   appleBusy,
   setAppleBusy,
+  soundcloudAuthCfg,
+  setSoundcloudAuthCfg,
+  soundcloudBusy,
+  setSoundcloudBusy,
   setBrowserSourceFilter,
   setAppleSubTab,
+  setSoundCloudSubTab,
   refreshLibraryData,
   showToast,
 }) => {
@@ -103,7 +123,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <strong style={{ fontSize: 15 }}>Audio Sources, Folders & Auth</strong>
+          <strong style={{ fontSize: 15 }}>Folders & Connected Accounts</strong>
           <button
             onClick={() => setSourceModalOpen(false)}
             style={{
@@ -578,6 +598,179 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               or use the <strong>⏻ Power Menu</strong>.
             </div>
           )}
+        </div>
+
+        {/* SoundCloud (OAuth 2.1 PKCE + Client Credentials Public Discovery) */}
+        <div
+          style={{
+            padding: '12px 14px',
+            borderRadius: 12,
+            background:
+              snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated
+                ? '#18110c'
+                : '#121218',
+            border:
+              snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated
+                ? '1px solid #ea580c'
+                : '1px solid #24242e',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 10,
+              flexWrap: 'wrap',
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#fdba74' }}>
+                ☁️ SoundCloud
+              </div>
+              <div style={{ fontSize: 11, color: '#8e8e99' }}>
+                {snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated
+                  ? soundcloudAuthCfg?.username
+                    ? `🟢 Connected (@${soundcloudAuthCfg.username}) — Likes, Sets, Stream, Radio & DJ Mixes`
+                    : '🟢 Public Discovery Active (Client Credentials) — Trending, Search, Radio & DJ Mixes'
+                  : soundcloudAuthCfg?.configured
+                  ? 'Sign in with SoundCloud (OAuth 2.1 PKCE) or enable Public Discovery'
+                  : 'Configure SOUNDCLOUD_CLIENT_ID & SOUNDCLOUD_CLIENT_SECRET in .env or /pair'}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              {soundcloudAuthCfg?.configured && (
+                <button
+                  disabled={soundcloudBusy}
+                  onClick={async () => {
+                    setSoundcloudBusy(true);
+                    try {
+                      await startSoundCloudOAuthLogin(showToast);
+                      const updated = await defaultSimpClient.getSoundCloudAuthConfig();
+                      setSoundcloudAuthCfg(updated);
+                      refreshLibraryData();
+                    } catch (err: any) {
+                      showToast(err?.message || 'SoundCloud OAuth failed');
+                    } finally {
+                      setSoundcloudBusy(false);
+                    }
+                  }}
+                  style={{
+                    minHeight: 36,
+                    padding: '0 12px',
+                    borderRadius: 8,
+                    background: '#2c140a',
+                    border: '1px solid #ea580c',
+                    color: '#fdba74',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {soundcloudBusy
+                    ? 'Working...'
+                    : soundcloudAuthCfg?.username
+                    ? `Re-Auth (@${soundcloudAuthCfg.username})`
+                    : 'Sign in with SoundCloud'}
+                </button>
+              )}
+
+              {soundcloudAuthCfg?.configured &&
+                !(snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated) && (
+                  <button
+                    disabled={soundcloudBusy}
+                    onClick={async () => {
+                      setSoundcloudBusy(true);
+                      try {
+                        await enableSoundCloudPublicMode(showToast);
+                        const updated = await defaultSimpClient.getSoundCloudAuthConfig();
+                        setSoundcloudAuthCfg(updated);
+                        refreshLibraryData();
+                      } catch (err: any) {
+                        showToast(err?.message || 'SoundCloud Public Mode failed');
+                      } finally {
+                        setSoundcloudBusy(false);
+                      }
+                    }}
+                    style={{
+                      minHeight: 36,
+                      padding: '0 10px',
+                      borderRadius: 8,
+                      background: '#161622',
+                      border: '1px solid #2e2e40',
+                      color: '#cbd5e1',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ⚡ Public Mode
+                  </button>
+                )}
+
+              {(snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated) && (
+                <>
+                  <button
+                    onClick={() => {
+                      setBrowserSourceFilter('soundcloud');
+                      setSoundCloudSubTab(
+                        soundcloudAuthCfg?.username ? 'likes_sets' : 'trending'
+                      );
+                      setView('browser');
+                      setSourceModalOpen(false);
+                    }}
+                    style={{
+                      minHeight: 36,
+                      padding: '0 10px',
+                      borderRadius: 8,
+                      background: '#0f222a',
+                      border: '1px solid #2aa3c4',
+                      color: '#bfeaf5',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ☁️ SoundCloud Hub
+                  </button>
+                  <button
+                    onClick={async () => {
+                      await disconnectSoundCloudCleanSlate(showToast);
+                      const updated = await defaultSimpClient
+                        .getSoundCloudAuthConfig()
+                        .catch(() => null);
+                      if (updated) setSoundcloudAuthCfg(updated);
+                    }}
+                    style={{
+                      minHeight: 36,
+                      padding: '0 10px',
+                      borderRadius: 8,
+                      background: '#1f1216',
+                      border: '1px solid #4c2228',
+                      color: '#f87171',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Disconnect
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div style={{ fontSize: 11, color: '#71717a' }}>
+            Redirect URI:{' '}
+            <span style={{ fontFamily: 'monospace', color: '#fdba74' }}>
+              {soundcloudAuthCfg?.redirect_uri ||
+                'http://127.0.0.1:18888/api/soundcloud/callback'}
+            </span>
+          </div>
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
