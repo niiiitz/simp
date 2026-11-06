@@ -428,7 +428,7 @@ impl LibraryDatabase {
              JOIN tracks t ON t.album_id = a.id
              LEFT JOIN storage_mounts m ON t.mount_root = m.mount_root
              WHERE (t.mount_root IS NULL OR m.is_online = 1)
-               AND (?1 IS NULL OR (?1 = 'local' AND t.source != 'apple_music') OR t.source = ?1)
+               AND (?1 IS NULL OR (?1 = 'local' AND t.source != 'apple_music' AND t.source != 'soundcloud') OR t.source = ?1)
                AND (?2 IS NULL OR t.mount_root = ?2)
                AND (a.title LIKE ?3 OR a.album_artist LIKE ?3)
              GROUP BY a.id
@@ -507,7 +507,7 @@ impl LibraryDatabase {
              FROM tracks t
              LEFT JOIN storage_mounts m ON t.mount_root = m.mount_root
              WHERE (t.mount_root IS NULL OR m.is_online = 1)
-               AND (?1 IS NULL OR (?1 = 'local' AND t.source != 'apple_music') OR t.source = ?1)
+               AND (?1 IS NULL OR (?1 = 'local' AND t.source != 'apple_music' AND t.source != 'soundcloud') OR t.source = ?1)
                AND (?2 IS NULL OR t.mount_root = ?2)
                AND (t.title LIKE ?3 OR t.album_title LIKE ?3 OR t.artists_json LIKE ?3)
              ORDER BY t.album_title COLLATE NOCASE ASC, COALESCE(t.disc_number, 1) ASC, COALESCE(t.track_number, 999) ASC
@@ -540,8 +540,9 @@ impl LibraryDatabase {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT p.id, p.name, p.description, p.origin, p.cover_art_url, p.track_count, p.updated_at,
-                    EXISTS(SELECT 1 FROM playlist_items pi WHERE pi.playlist_id = p.id AND pi.track_uri NOT LIKE 'applemusic:%') AS has_local,
-                    EXISTS(SELECT 1 FROM playlist_items pi WHERE pi.playlist_id = p.id AND pi.track_uri LIKE 'applemusic:%') AS has_apple
+                    EXISTS(SELECT 1 FROM playlist_items pi WHERE pi.playlist_id = p.id AND pi.track_uri NOT LIKE 'applemusic:%' AND pi.track_uri NOT LIKE 'soundcloud:%') AS has_local,
+                    EXISTS(SELECT 1 FROM playlist_items pi WHERE pi.playlist_id = p.id AND pi.track_uri LIKE 'applemusic:%') AS has_apple,
+                    EXISTS(SELECT 1 FROM playlist_items pi WHERE pi.playlist_id = p.id AND pi.track_uri LIKE 'soundcloud:%') AS has_soundcloud
              FROM playlists p
              ORDER BY CASE WHEN p.origin = 'simp_local' THEN 0 ELSE 1 END ASC,
                       p.name COLLATE NOCASE ASC",
@@ -550,6 +551,8 @@ impl LibraryDatabase {
             let origin: String = row.get(3)?;
             let has_local: bool = row.get(7).unwrap_or(false);
             let has_apple: bool = row.get(8).unwrap_or(false) || origin == "apple_remote";
+            let has_soundcloud: bool =
+                row.get(9).unwrap_or(false) || origin == "soundcloud_remote";
             Ok(PlaylistRecord {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -560,6 +563,7 @@ impl LibraryDatabase {
                 updated_at: row.get(6)?,
                 has_local,
                 has_apple,
+                has_soundcloud,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -634,6 +638,7 @@ impl LibraryDatabase {
             updated_at,
             has_local: false,
             has_apple: false,
+            has_soundcloud: false,
         })
     }
 
@@ -791,7 +796,10 @@ impl LibraryDatabase {
                     alb.steam_app_id,
                     alb.art_url.as_deref().or(t.art_url.as_deref()),
                 )?;
-            } else if playlist.is_none() && t.source != "apple_music" {
+            } else if playlist.is_none()
+                && t.source != "apple_music"
+                && t.source != "soundcloud"
+            {
                 let alb_id = t.album_id.clone().unwrap_or_else(|| {
                     let hash_key = format!(
                         "album::{}::{}::{}",

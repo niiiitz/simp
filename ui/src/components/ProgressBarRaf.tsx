@@ -3,6 +3,9 @@ import { defaultSimpClient } from '@simp/client';
 
 interface Props {
   durationMs: number;
+  waveformBars?: number[] | null;
+  commentTimestampsMs?: number[];
+  onPlayheadTick?: (currentMs: number) => void;
 }
 
 /**
@@ -14,13 +17,21 @@ interface Props {
  *   headless worker timer jitter) never cause the playhead to "inchworm" backward and forward.
  * - Insets the horizontal rail (`padding: 0 14px`) so the 26px playhead thumb (`±13px` radius)
  *   stays cleanly inside the column bounds at `0%` and `100%` without clipping or overlapping adjacent art.
+ * - Optionally renders a 96-bar SoundCloud beat-drop waveform silhouette and comment cluster micro-dots.
  */
-export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
+export const ProgressBarRaf: React.FC<Props> = ({
+  durationMs,
+  waveformBars,
+  commentTimestampsMs,
+  onPlayheadTick,
+}) => {
   const trackContainerRef = useRef<HTMLDivElement | null>(null);
   const railRef = useRef<HTMLDivElement | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
   const timeTextRef = useRef<HTMLSpanElement | null>(null);
+  const onPlayheadTickRef = useRef(onPlayheadTick);
+  onPlayheadTickRef.current = onPlayheadTick;
 
   const anchorPosRef = useRef(0);
   const anchorPerfRef = useRef(performance.now());
@@ -29,6 +40,7 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
   const isDraggingRef = useRef(false);
   const dragPreviewMsRef = useRef(0);
   const lastDragSeekSentRef = useRef(0);
+  const lastTickCallbackPerfRef = useRef(0);
 
   useEffect(() => {
     let rafId = 0;
@@ -67,6 +79,13 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
         lastDomTimeText = nextTimeText;
         if (timeTextRef.current) {
           timeTextRef.current.textContent = nextTimeText;
+        }
+      }
+      if (onPlayheadTickRef.current) {
+        const nowPerf = performance.now();
+        if (nowPerf - lastTickCallbackPerfRef.current > 200) {
+          lastTickCallbackPerfRef.current = nowPerf;
+          onPlayheadTickRef.current(currentMs);
         }
       }
     };
@@ -224,16 +243,83 @@ export const ProgressBarRaf: React.FC<Props> = ({ durationMs }) => {
               position: 'relative',
             }}
           >
+            {/* SoundCloud Waveform Beat-Drop Silhouette (96 low-luminance vertical bars) */}
+            {waveformBars && waveformBars.length > 0 && (
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: '2px 8px',
+                  display: 'flex',
+                  alignItems: 'flex-end',
+                  justifyContent: 'space-between',
+                  gap: 1,
+                  pointerEvents: 'none',
+                  zIndex: 1,
+                }}
+              >
+                {waveformBars.map((val, idx) => {
+                  const pctHeight = Math.max(14, Math.min(100, Math.round(val * 100)));
+                  return (
+                    <div
+                      key={idx}
+                      style={{
+                        flex: 1,
+                        height: `${pctHeight}%`,
+                        background: 'rgba(251, 146, 60, 0.28)',
+                        borderRadius: 1,
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            )}
+
             <div
               ref={barRef}
               style={{
                 width: '100%',
                 height: '100%',
-                background: 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
+                background:
+                  waveformBars && waveformBars.length > 0
+                    ? 'linear-gradient(90deg, rgba(124, 45, 18, 0.78) 0%, rgba(234, 88, 12, 0.82) 100%)'
+                    : 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
                 transformOrigin: 'left center',
                 transform: 'scaleX(0)',
+                position: 'relative',
+                zIndex: 2,
               }}
             />
+
+            {/* SoundCloud Timed Comment Cluster Micro-Dots */}
+            {durationMs > 0 && commentTimestampsMs && commentTimestampsMs.length > 0 && (
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  pointerEvents: 'none',
+                  zIndex: 3,
+                }}
+              >
+                {commentTimestampsMs.slice(0, 80).map((ts, idx) => {
+                  const pct = Math.max(2, Math.min(98, (ts / durationMs) * 100));
+                  return (
+                    <div
+                      key={`${ts}-${idx}`}
+                      style={{
+                        position: 'absolute',
+                        left: `${pct}%`,
+                        bottom: 2,
+                        width: 3,
+                        height: 3,
+                        borderRadius: 99,
+                        background: 'rgba(253, 186, 116, 0.72)',
+                        transform: 'translateX(-50%)',
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* OLED-Safe Low-Luminance Playhead Thumb */}

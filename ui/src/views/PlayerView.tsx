@@ -1,14 +1,27 @@
-import React from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   defaultSimpClient,
   OpticalDiscStatus,
   SimpStateSnapshot,
+  SoundCloudComment,
   TrackMetadata,
 } from '@simp/client';
 import { ProgressBarRaf } from '../components/ProgressBarRaf';
+import {
+  fetchSoundCloudTrackComments,
+  fetchSoundCloudTrackWaveform,
+  likeSoundCloudTrack,
+} from '../drivers/SoundCloudDriver';
 
 export interface BrowserTarget {
-  kind: 'album' | 'playlist' | 'mount' | 'cloud_playlist' | 'cloud_album' | 'cdda';
+  kind:
+    | 'album'
+    | 'playlist'
+    | 'mount'
+    | 'cloud_playlist'
+    | 'cloud_album'
+    | 'soundcloud_playlist'
+    | 'cdda';
   id: string;
   title?: string;
   subtitle?: string;
@@ -29,6 +42,22 @@ export interface PlayerViewProps {
     songUri?: string | null;
     fallbackTitle?: string;
   }) => Promise<void>;
+  handleStartSoundCloudTrackRadio?: (seedTrack: TrackMetadata) => void;
+  showToast?: (msg: string) => void;
+}
+
+interface ActiveCommentBubble {
+  comment: SoundCloudComment;
+  slot: 0 | 1;
+  expiresAt: number;
+}
+
+function formatCommentTs(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms) || ms < 0) return '💬';
+  const totalSec = Math.floor(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
 }
 
 export const PlayerView: React.FC<PlayerViewProps> = ({
@@ -41,7 +70,129 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   setBrowserTarget,
   setView,
   handleOpenFullAppleAlbum,
+  handleStartSoundCloudTrackRadio,
+  showToast,
 }) => {
+  const isSoundCloudTrack = track?.source === 'soundcloud';
+
+  const [scCommentsEnabled, setScCommentsEnabled] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('simp_sc_comments_enabled') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const [scComments, setScComments] = useState<SoundCloudComment[]>([]);
+  const [scWaveformBars, setScWaveformBars] = useState<number[] | null>(null);
+  const [activeBubbles, setActiveBubbles] = useState<ActiveCommentBubble[]>([]);
+  const shownCommentIdsRef = useRef<Set<string>>(new Set());
+  const lastPlayheadMsRef = useRef<number>(0);
+
+  const toggleScComments = useCallback(() => {
+    setScCommentsEnabled((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('simp_sc_comments_enabled', next ? '1' : '0');
+      } catch {}
+      if (!next) {
+        setActiveBubbles([]);
+      }
+      showToast?.(
+        next ? '💬 SoundCloud timed comment bubbles ON' : '💬 SoundCloud timed comment bubbles OFF'
+      );
+      return next;
+    });
+  }, [showToast]);
+
+  useEffect(() => {
+    shownCommentIdsRef.current.clear();
+    setActiveBubbles([]);
+    lastPlayheadMsRef.current = 0;
+
+    if (!isSoundCloudTrack || !track?.uri) {
+      setScComments([]);
+      setScWaveformBars(null);
+      return;
+    }
+
+    let cancelled = false;
+    fetchSoundCloudTrackComments(track.uri)
+      .then((comments) => {
+        if (!cancelled) {
+          setScComments(comments);
+        }
+      })
+      .catch(() => {});
+
+    fetchSoundCloudTrackWaveform(track.uri)
+      .then((wf) => {
+        if (!cancelled) {
+          setScWaveformBars(wf?.bars || null);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isSoundCloudTrack, track?.uri]);
+
+  // Periodically prune expired comment speech bubbles
+  useEffect(() => {
+    if (activeBubbles.length === 0) return;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setActiveBubbles((prev) => {
+        const filtered = prev.filter((b) => b.expiresAt > now);
+        return filtered.length === prev.length ? prev : filtered;
+      });
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [activeBubbles.length]);
+
+  const commentTimestampsMs = useMemo(
+    () =>
+      scComments
+        .map((c) => c.timestamp_ms)
+        .filter((ts): ts is number => typeof ts === 'number' && ts >= 0),
+    [scComments]
+  );
+
+  const handlePlayheadTick = useCallback(
+    (currentMs: number) => {
+      if (!isSoundCloudTrack || !scCommentsEnabled || scComments.length === 0) return;
+
+      // Reset shown IDs if user seeked backward or track looped
+      if (currentMs + 2500 < lastPlayheadMsRef.current) {
+        shownCommentIdsRef.current.clear();
+      }
+      lastPlayheadMsRef.current = currentMs;
+
+      const durMs = Math.max(track?.duration_ms || 180_000, 30_000);
+      const match = scComments.find((c, idx) => {
+        if (shownCommentIdsRef.current.has(c.id)) return false;
+        const effectiveTs =
+          c.timestamp_ms !== null && c.timestamp_ms > 0
+            ? c.timestamp_ms
+            : Math.round(((idx + 1) / (scComments.length + 1)) * durMs);
+        return currentMs >= effectiveTs - 350 && currentMs <= effectiveTs + 1850;
+      });
+
+      if (!match) return;
+      shownCommentIdsRef.current.add(match.id);
+
+      const now = Date.now();
+      setActiveBubbles((prev) => {
+        const alive = prev.filter((b) => b.expiresAt > now);
+        if (alive.length >= 2) return alive;
+        const usedSlot0 = alive.some((b) => b.slot === 0);
+        const slot: 0 | 1 = usedSlot0 ? 1 : 0;
+        return [...alive, { comment: match, slot, expiresAt: now + 4200 }];
+      });
+    },
+    [isSoundCloudTrack, scCommentsEnabled, scComments, track?.duration_ms]
+  );
+
   return (
     <main
       style={{
@@ -97,14 +248,17 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             />
           )}
 
-          {/* Top-Left 💿 Full Album Overlay Badge on Album Art */}
+          {/* Top-Left 💿 Full Album or 📻 SoundCloud Track Radio Overlay Badge on Album Art */}
           {track &&
             (track.source === 'apple_music' ||
+              track.source === 'soundcloud' ||
               track.source === 'cdda' ||
               track.album_id) && (
               <button
                 onClick={() => {
-                  if (track.source === 'apple_music') {
+                  if (track.source === 'soundcloud') {
+                    handleStartSoundCloudTrackRadio?.(track);
+                  } else if (track.source === 'apple_music') {
                     handleOpenFullAppleAlbum({
                       songUri: track.uri,
                       fallbackTitle: track.album || track.title,
@@ -126,7 +280,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     setView('browser');
                   }
                 }}
-                title={`Open Full Album: ${track.album || track.title}`}
+                title={
+                  track.source === 'soundcloud'
+                    ? `Start SoundCloud Track Radio for "${track.title}"`
+                    : `Open Full Album: ${track.album || track.title}`
+                }
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -149,13 +307,46 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                   padding: 0,
                 }}
               >
-                💿
+                {track.source === 'soundcloud' ? '📻' : '💿'}
               </button>
             )}
+
+          {/* Top-Right ❤️ SoundCloud Quick-Like Overlay Badge on Album Art */}
+          {track && track.source === 'soundcloud' && (
+            <button
+              onClick={() => {
+                likeSoundCloudTrack(track.uri, showToast);
+              }}
+              title="Like this track on SoundCloud"
+              style={{
+                position: 'absolute',
+                top: 0,
+                right: 0,
+                width: 44,
+                height: 44,
+                borderTopRightRadius: 19,
+                borderBottomLeftRadius: 16,
+                borderTopLeftRadius: 6,
+                borderBottomRightRadius: 6,
+                background: 'rgba(10, 10, 16, 0.88)',
+                border: '1px solid rgba(251, 146, 60, 0.35)',
+                boxShadow: '0 4px 14px rgba(0,0,0,0.7)',
+                color: '#fb923c',
+                fontSize: 19,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                padding: 0,
+              }}
+            >
+              ❤️
+            </button>
+          )}
         </div>
 
-        {/* Queue Mode Controls: Shuffle (X) & Loop/Repeat (Y) directly under Album Art */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        {/* Queue Mode Controls: Shuffle (X), Loop/Repeat (Y), & SoundCloud Timed Comment Bubbles (💬) directly under Album Art */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <TransportIconButton
             icon="🔀"
             badge="X"
@@ -174,12 +365,29 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             active={snap?.repeat_mode !== 'off'}
             onClick={() => defaultSimpClient.cycleRepeat()}
           />
+          {isSoundCloudTrack && (
+            <TransportIconButton
+              icon="💬"
+              badge={scCommentsEnabled ? `ON•${scComments.length}` : 'OFF'}
+              active={scCommentsEnabled}
+              onClick={toggleScComments}
+            />
+          )}
         </div>
       </div>
 
-      {/* Right Column: Track Info + Tall Scrub Bar + Aligned Player Transport Row */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 22, minWidth: 0, overflow: 'hidden' }}>
-        <div style={{ minWidth: 0 }}>
+      {/* Right Column: Track Info + Ephemeral SoundCloud Comment Bubbles + Tall Scrub Bar + Aligned Player Transport Row */}
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 22,
+          minWidth: 0,
+          overflow: 'hidden',
+          position: 'relative',
+        }}
+      >
+        <div style={{ minWidth: 0, position: 'relative' }}>
           <h1
             style={{
               margin: 0,
@@ -213,7 +421,130 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           </p>
         </div>
 
-        <ProgressBarRaf durationMs={track?.duration_ms ?? 0} />
+        {/* Ephemeral SoundCloud Timed Comment Speech Bubbles (Synced to Track Playhead) */}
+        {isSoundCloudTrack && scCommentsEnabled && activeBubbles.length > 0 && (
+          <div
+            style={{
+              display: 'flex',
+              gap: 10,
+              flexWrap: 'wrap',
+              pointerEvents: 'none',
+              marginBottom: -10,
+              marginTop: -6,
+              minHeight: 46,
+            }}
+          >
+            {activeBubbles.map((b) => (
+              <div
+                key={b.comment.id}
+                style={{
+                  position: 'relative',
+                  maxWidth: '48%',
+                  minWidth: 200,
+                  padding: '8px 12px',
+                  borderRadius: 14,
+                  borderBottomLeftRadius: b.slot === 0 ? 4 : 14,
+                  borderBottomRightRadius: b.slot === 1 ? 4 : 14,
+                  background: 'rgba(16, 14, 22, 0.94)',
+                  border: '1px solid rgba(251, 146, 60, 0.45)',
+                  boxShadow: '0 8px 22px rgba(0, 0, 0, 0.75)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                }}
+              >
+                {b.comment.avatar_url ? (
+                  <img
+                    src={b.comment.avatar_url}
+                    alt=""
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: 99,
+                      objectFit: 'cover',
+                      border: '1px solid #ea580c',
+                      flexShrink: 0,
+                    }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: 99,
+                      background: '#27150c',
+                      border: '1px solid #ea580c',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: 13,
+                      flexShrink: 0,
+                    }}
+                  >
+                    💬
+                  </div>
+                )}
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color: '#fdba74',
+                      fontWeight: 800,
+                    }}
+                  >
+                    <span
+                      style={{
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      @{b.comment.username}
+                    </span>
+                    <span
+                      style={{
+                        padding: '1px 5px',
+                        borderRadius: 5,
+                        background: '#27150c',
+                        border: '1px solid #7c2d12',
+                        color: '#fb923c',
+                        fontSize: 10,
+                        flexShrink: 0,
+                      }}
+                    >
+                      {formatCommentTs(b.comment.timestamp_ms)}
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: '#e4e4ec',
+                      marginTop: 2,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    “{b.comment.body.slice(0, 110)}”
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <ProgressBarRaf
+          durationMs={track?.duration_ms ?? 0}
+          waveformBars={isSoundCloudTrack ? scWaveformBars : null}
+          commentTimestampsMs={
+            isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
+          }
+          onPlayheadTick={isSoundCloudTrack ? handlePlayheadTick : undefined}
+        />
 
         {/* Symmetrical Transport Row: Rewind (L2) | Prev (◄) | Play/Pause (A) | Next (►) | Fast-Forward (R2) */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>

@@ -3,23 +3,28 @@ import {
   AppleMusicAuthConfig,
   defaultSimpClient,
   SimpStateSnapshot,
+  SoundCloudAuthConfig,
 } from '@simp/client';
 import {
   authorizeAppleMusic,
   syncAppleMusicCatalog,
 } from '../drivers/AppleMusicDriver';
+import {
+  enableSoundCloudPublicMode,
+  startSoundCloudOAuthLogin,
+} from '../drivers/SoundCloudDriver';
 
 /**
  * Console-Style LAN QR Companion Pairing Page (`/pair` or `?pair=1`).
  * Designed for iPhone / Android / PC browsers on the same LAN as the Steam Deck:
  * - Runs `MusicKit.getInstance().authorize()` natively on the user's phone/PC where
  *   Face ID, Touch ID, Passkeys, and YubiKey / FIDO2 hardware keys work natively.
- * - Pushes `Music-User-Token` + synced Apple Music playlists & songs directly over
- *   WebSocket (`ws://<deck-lan-ip>:18888/ws`) to the Steam Deck's `simp --daemon`.
+ * - Also supports SoundCloud OAuth 2.1 PKCE login + Client Credentials configuration.
  */
 export const CompanionPairView: React.FC = () => {
   const [snap, setSnap] = useState<SimpStateSnapshot | null>(null);
   const [authCfg, setAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
+  const [scAuthCfg, setScAuthCfg] = useState<SoundCloudAuthConfig | null>(null);
   const [busy, setBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string>(
     'Connecting to SIMP Daemon on your Steam Deck...'
@@ -30,6 +35,8 @@ export const CompanionPairView: React.FC = () => {
   const [devTeamId, setDevTeamId] = useState('');
   const [devKeyId, setDevKeyId] = useState('');
   const [devKeyPath, setDevKeyPath] = useState('');
+  const [scClientId, setScClientId] = useState('');
+  const [scClientSecret, setScClientSecret] = useState('');
   const [syncResult, setSyncResult] = useState<{
     playlists: number;
     tracks: number;
@@ -43,6 +50,11 @@ export const CompanionPairView: React.FC = () => {
 
     const timer = window.setTimeout(() => {
       defaultSimpClient
+        .getSoundCloudAuthConfig()
+        .then((sc) => setScAuthCfg(sc))
+        .catch(() => {});
+
+      defaultSimpClient
         .getAppleMusicAuthConfig()
         .then((cfg) => {
           setAuthCfg(cfg);
@@ -52,11 +64,11 @@ export const CompanionPairView: React.FC = () => {
             );
           } else if (cfg.configured) {
             setStatusMsg(
-              'Ready to pair — tap below to sign in with Apple ID (Face ID / Passkey / YubiKey supported).'
+              'Ready to pair — tap below to sign in with Apple ID or SoundCloud.'
             );
           } else {
             setStatusMsg(
-              cfg.status_error || 'Apple Developer Token not configured on host.'
+              cfg.status_error || 'Ready to pair Apple Music or SoundCloud.'
             );
           }
         })
@@ -288,6 +300,94 @@ export const CompanionPairView: React.FC = () => {
           </div>
         )}
 
+        {/* SoundCloud OAuth 2.1 PKCE + Public Discovery Pairing */}
+        <div
+          style={{
+            borderTop: '1px solid #1e1e2a',
+            paddingTop: 14,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
+              ☁️ SoundCloud Pairing
+            </span>
+            <span style={{ fontSize: 11, color: '#8e8e99', fontFamily: 'monospace' }}>
+              {snap?.soundcloud_authenticated || scAuthCfg?.soundcloud_authenticated
+                ? scAuthCfg?.username
+                  ? `🟢 @${scAuthCfg.username}`
+                  : '🟢 Public Mode'
+                : scAuthCfg?.configured
+                ? 'Ready'
+                : 'Needs Client ID'}
+            </span>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <button
+              disabled={busy || !scAuthCfg?.configured}
+              onClick={async () => {
+                setBusy(true);
+                setErrorMsg(null);
+                try {
+                  await startSoundCloudOAuthLogin((msg) => setStatusMsg(msg));
+                  const updated = await defaultSimpClient.getSoundCloudAuthConfig();
+                  setScAuthCfg(updated);
+                } catch (err: any) {
+                  setErrorMsg(err?.message || 'SoundCloud OAuth failed');
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              style={{
+                minHeight: 44,
+                borderRadius: 12,
+                background: '#2c140a',
+                border: '1px solid #ea580c',
+                color: '#fdba74',
+                fontSize: 12,
+                fontWeight: 800,
+                cursor: busy ? 'wait' : 'pointer',
+              }}
+            >
+              ☁️ Sign in (OAuth 2.1)
+            </button>
+            <button
+              disabled={busy || !scAuthCfg?.configured}
+              onClick={async () => {
+                setBusy(true);
+                setErrorMsg(null);
+                try {
+                  await enableSoundCloudPublicMode((msg) => setStatusMsg(msg));
+                  const updated = await defaultSimpClient.getSoundCloudAuthConfig();
+                  setScAuthCfg(updated);
+                } catch (err: any) {
+                  setErrorMsg(err?.message || 'SoundCloud Public Mode failed');
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              style={{
+                minHeight: 44,
+                borderRadius: 12,
+                background: '#161622',
+                border: '1px solid #2e2e40',
+                color: '#cbd5e1',
+                fontSize: 12,
+                fontWeight: 800,
+                cursor: busy ? 'wait' : 'pointer',
+              }}
+            >
+              ⚡ Public Mode
+            </button>
+          </div>
+          <div style={{ fontSize: 10, color: '#71717a', fontFamily: 'monospace' }}>
+            Redirect URI: {scAuthCfg?.redirect_uri || 'http://127.0.0.1:18888/api/soundcloud/callback'}
+          </div>
+        </div>
+
         {/* Collapsible Troubleshooting, FIDO2/YubiKey Bypass & Developer Debug Section */}
         <div
           style={{
@@ -504,6 +604,90 @@ export const CompanionPairView: React.FC = () => {
                     }}
                   >
                     Sign Key
+                  </button>
+                </div>
+              </div>
+
+              {/* SoundCloud Client ID / Secret Override */}
+              <div
+                style={{
+                  borderTop: '1px dashed #222232',
+                  paddingTop: 10,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                }}
+              >
+                <div style={{ fontSize: 11, color: '#fdba74', fontWeight: 700 }}>
+                  ☁️ SoundCloud API Credentials (Optional if not in .env)
+                </div>
+                <input
+                  type="text"
+                  placeholder="SOUNDCLOUD_CLIENT_ID"
+                  value={scClientId}
+                  onChange={(e) => setScClientId(e.target.value)}
+                  style={{
+                    minHeight: 34,
+                    padding: '0 10px',
+                    borderRadius: 8,
+                    background: '#050508',
+                    border: '1px solid #282838',
+                    color: '#d4d4dc',
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                  }}
+                />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input
+                    type="password"
+                    placeholder="SOUNDCLOUD_CLIENT_SECRET"
+                    value={scClientSecret}
+                    onChange={(e) => setScClientSecret(e.target.value)}
+                    style={{
+                      flex: 1,
+                      minHeight: 34,
+                      padding: '0 10px',
+                      borderRadius: 8,
+                      background: '#050508',
+                      border: '1px solid #282838',
+                      color: '#d4d4dc',
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                    }}
+                  />
+                  <button
+                    onClick={() => {
+                      defaultSimpClient.configureSoundCloud({
+                        client_id: scClientId,
+                        client_secret: scClientSecret,
+                      });
+                      window.setTimeout(() => {
+                        defaultSimpClient
+                          .getSoundCloudAuthConfig()
+                          .then((sc) => {
+                            setScAuthCfg(sc);
+                            setStatusMsg(
+                              sc.configured
+                                ? 'SoundCloud Client ID & Secret saved!'
+                                : sc.status_error || 'Failed to save SoundCloud credentials'
+                            );
+                          })
+                          .catch(() => {});
+                      }, 250);
+                    }}
+                    style={{
+                      minHeight: 34,
+                      padding: '0 12px',
+                      borderRadius: 8,
+                      background: '#2c140a',
+                      border: '1px solid #ea580c',
+                      color: '#fdba74',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Save SC
                   </button>
                 </div>
               </div>

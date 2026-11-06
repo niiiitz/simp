@@ -74,6 +74,8 @@ pub enum ServerEnvelope {
         power: PowerState,
         apple_authenticated: bool,
         #[serde(default)]
+        soundcloud_authenticated: bool,
+        #[serde(default)]
         brightness_pct: u8,
         #[serde(default)]
         daemon_version: String,

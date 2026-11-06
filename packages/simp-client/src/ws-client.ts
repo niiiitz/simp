@@ -6,6 +6,7 @@ import type {
   PlaylistRecord,
   RepeatMode,
   SimpStateSnapshot,
+  SoundCloudAuthConfig,
   TrackMetadata,
 } from './types';
 
@@ -58,6 +59,7 @@ export class SimpDaemonClient {
     mounts: [],
     power: { on_battery: false, battery_pct: null },
     apple_authenticated: false,
+    soundcloud_authenticated: false,
     brightness_pct: 100,
   };
 
@@ -102,6 +104,7 @@ export class SimpDaemonClient {
         mounts: msg.mounts ?? [],
         power: msg.power ?? { on_battery: false, battery_pct: null },
         apple_authenticated: !!msg.apple_authenticated,
+        soundcloud_authenticated: !!msg.soundcloud_authenticated,
         brightness_pct: typeof msg.brightness_pct === 'number' && msg.brightness_pct >= 25 ? msg.brightness_pct : 100,
       };
       this.notifyState();
@@ -281,6 +284,25 @@ export class SimpDaemonClient {
 
   public getAppleMusicAuthConfig = (): Promise<AppleMusicAuthConfig> =>
     this.query<AppleMusicAuthConfig>('get_apple_music_auth_config');
+
+  // SoundCloud Native Sink & OAuth 2.1 helpers
+  public configureSoundCloud = (params: {
+    client_id: string;
+    client_secret: string;
+  }) => this.sendCommand('configure_soundcloud', params);
+
+  public setSoundCloudTokens = (params: {
+    access_token: string;
+    refresh_token?: string;
+    expires_at?: number;
+    auth_mode?: string;
+    username?: string;
+  }) => this.sendCommand('set_soundcloud_tokens', params);
+
+  public disconnectSoundCloud = () => this.sendCommand('disconnect_soundcloud');
+
+  public getSoundCloudAuthConfig = (): Promise<SoundCloudAuthConfig> =>
+    this.query<SoundCloudAuthConfig>('get_soundcloud_auth_config');
 
   public reportAppleWorkerEvent = (
     state: 'playing' | 'paused' | 'ended' | 'time_update' | 'authorized' | 'worker_ready',

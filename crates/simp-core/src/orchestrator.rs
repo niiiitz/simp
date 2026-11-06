@@ -5,6 +5,7 @@ use crate::library::vdf::{load_session_state, save_session_state};
 use crate::mpris::{initialize_mpris, update_mpris_metadata, update_mpris_playback, MprisHandle};
 use crate::sinks::apple::AppleMusicSink;
 use crate::sinks::local::LocalAudioEngine;
+use crate::sinks::soundcloud::SoundCloudSink;
 use crate::sinks::AudioSink;
 use simp_protocol::{
     ActiveEngine, AudioCommand, PlaybackEvent, RepeatMode, ServerEnvelope, SessionState,
@@ -26,6 +27,7 @@ pub struct OrchestratorSnapshot {
     pub queue: Vec<TrackMetadata>,
     pub queue_index: usize,
     pub apple_authenticated: bool,
+    pub soundcloud_authenticated: bool,
     pub brightness_pct: u8,
 }
 
@@ -35,6 +37,7 @@ pub struct AudioOrchestrator {
     pub state: Arc<Mutex<OrchestratorSnapshot>>,
     local_engine: LocalAudioEngine,
     apple_sink: AppleMusicSink,
+    soundcloud_sink: SoundCloudSink,
     mpris_controls: Option<MprisHandle>,
     transition_epoch: u64,
     consecutive_failures: u32,
@@ -59,11 +62,13 @@ impl AudioOrchestrator {
 
         let mut apple_sink = AppleMusicSink::new();
         apple_sink.set_volume(initial_vol);
-        let initial_apple_auth = {
+        let (initial_apple_auth, initial_soundcloud_auth) = {
             let cfg = settings.lock().unwrap();
-            AppleMusicSink::resolve_credentials(&cfg)
+            let apple_ok = AppleMusicSink::resolve_credentials(&cfg)
                 .music_user_token
-                .is_some()
+                .is_some();
+            let sc_ok = crate::sinks::soundcloud_api::is_soundcloud_ready(&cfg);
+            (apple_ok, sc_ok)
         };
         apple_sink.is_authenticated = initial_apple_auth;
         if initial_apple_auth {
@@ -76,6 +81,10 @@ impl AudioOrchestrator {
             }
         }
 
+        let mut soundcloud_sink = SoundCloudSink::new();
+        soundcloud_sink.set_volume(initial_vol);
+        soundcloud_sink.is_authenticated = initial_soundcloud_auth;
+
         let state = Arc::new(Mutex::new(OrchestratorSnapshot {
             active_engine: ActiveEngine::None,
             is_playing: false,
@@ -87,6 +96,7 @@ impl AudioOrchestrator {
             queue: Vec::new(),
             queue_index: 0,
             apple_authenticated: initial_apple_auth,
+            soundcloud_authenticated: initial_soundcloud_auth,
             brightness_pct: initial_brightness,
         }));
 
@@ -98,6 +108,7 @@ impl AudioOrchestrator {
             state,
             local_engine,
             apple_sink,
+            soundcloud_sink,
             mpris_controls,
             transition_epoch: 0,
             consecutive_failures: 0,
@@ -128,6 +139,7 @@ impl AudioOrchestrator {
                 _ = idle_check_interval.tick() => {
                     self.local_engine.check_idle_suspend();
                     self.apple_sink.check_idle_suspend();
+                    self.soundcloud_sink.check_idle_suspend();
                     if self.state.lock().unwrap().is_playing {
                         self.persist_session_to_vdf();
                     }
@@ -140,7 +152,7 @@ impl AudioOrchestrator {
         match cmd {
             AudioCommand::Load { uri } => {
                 let track = self.resolve_track_from_uri(&uri);
-                if uri.starts_with("applemusic:station:") {
+                if uri.starts_with("applemusic:station:") || uri.starts_with("soundcloud:station:") {
                     if let Some(station_tracks) =
                         self.expand_radio_station_tracks(&uri, Some(&track.title))
                     {
@@ -168,14 +180,16 @@ impl AudioOrchestrator {
                 tracks,
             } => {
                 // If full `TrackMetadata` objects were supplied (e.g., pure streaming of an unpinned
-                // Apple Music catalog album, cloud playlist, or search result), upsert their metadata
+                // Apple Music or SoundCloud catalog album, cloud playlist, or search result), upsert their metadata
                 // into the `tracks` table (without creating an AlbumRecord or PlaylistRecord) and
                 // use them directly in the queue so artwork, title, and artist display immediately.
                 let mut provided_map = std::collections::HashMap::new();
                 for t in tracks {
                     let mut clean = t.clone();
-                    crate::sinks::apple_api::remember_track_metadata_hint(&clean);
                     if clean.source == "apple_music" {
+                        crate::sinks::apple_api::remember_track_metadata_hint(&clean);
+                    }
+                    if clean.source == "apple_music" || clean.source == "soundcloud" {
                         // Do not attach unpinned streaming tracks to an album_id unless already pinned
                         let existing = self.db.get_track_by_uri(&clean.uri).ok().flatten();
                         let should_upsert = existing
@@ -204,7 +218,9 @@ impl AudioOrchestrator {
                     return;
                 }
                 let idx = start_index.min(queue.len() - 1);
-                if queue[idx].uri.starts_with("applemusic:station:") {
+                if queue[idx].uri.starts_with("applemusic:station:")
+                    || queue[idx].uri.starts_with("soundcloud:station:")
+                {
                     let st_uri = queue[idx].uri.clone();
                     let st_title = queue[idx].title.clone();
                     if let Some(station_tracks) =
@@ -346,6 +362,8 @@ impl AudioOrchestrator {
                 self.local_engine
                     .sync_volume(clamped as f32, &self.broadcast_tx);
                 self.apple_sink
+                    .sync_volume(clamped as f32, &self.broadcast_tx);
+                self.soundcloud_sink
                     .sync_volume(clamped as f32, &self.broadcast_tx);
                 self.state.lock().unwrap().volume = clamped;
                 self.settings.lock().unwrap().audio.master_volume = clamped;
@@ -592,6 +610,104 @@ impl AudioOrchestrator {
                     total_tracks,
                 });
             }
+            AudioCommand::ConfigureSoundCloud {
+                client_id,
+                client_secret,
+            } => {
+                let is_ready = {
+                    let mut cfg = self.settings.lock().unwrap();
+                    if !client_id.trim().is_empty() {
+                        cfg.services.soundcloud_client_id = client_id.trim().to_string();
+                    }
+                    if !client_secret.trim().is_empty() {
+                        cfg.services.soundcloud_client_secret = client_secret.trim().to_string();
+                    }
+                    cfg.services.soundcloud_enabled = true;
+                    crate::sinks::soundcloud_api::is_soundcloud_ready(&cfg)
+                };
+                self.soundcloud_sink.is_authenticated = is_ready;
+                self.state.lock().unwrap().soundcloud_authenticated = is_ready;
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
+            AudioCommand::SetSoundCloudTokens {
+                access_token,
+                refresh_token,
+                expires_at,
+                auth_mode,
+                username,
+            } => {
+                let trimmed = access_token.trim().to_string();
+                let is_auth = !trimmed.is_empty();
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    cfg.services.soundcloud_access_token = trimmed.clone();
+                    if !refresh_token.trim().is_empty() {
+                        cfg.services.soundcloud_refresh_token = refresh_token.trim().to_string();
+                    }
+                    if expires_at > 0 {
+                        cfg.services.soundcloud_token_expires_at = expires_at;
+                    }
+                    if !auth_mode.trim().is_empty() {
+                        cfg.services.soundcloud_auth_mode = auth_mode.trim().to_string();
+                    }
+                    if !username.trim().is_empty() {
+                        cfg.services.soundcloud_username = username.trim().to_string();
+                    }
+                    cfg.services.soundcloud_enabled = is_auth;
+                }
+                if is_auth {
+                    crate::sinks::soundcloud_api::update_cached_soundcloud_tokens(
+                        crate::sinks::soundcloud_api::SoundCloudTokenBundle {
+                            access_token: trimmed,
+                            refresh_token: refresh_token.trim().to_string(),
+                            expires_at,
+                            auth_mode: if auth_mode.trim().is_empty() {
+                                "user".to_string()
+                            } else {
+                                auth_mode.trim().to_string()
+                            },
+                            username: username.trim().to_string(),
+                        },
+                    );
+                }
+                self.soundcloud_sink.is_authenticated = is_auth;
+                self.state.lock().unwrap().soundcloud_authenticated = is_auth;
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
+            AudioCommand::DisconnectSoundCloud => {
+                if self.state.lock().unwrap().active_engine == ActiveEngine::SoundCloud {
+                    self.pause_active_engine();
+                }
+                let cfg_snapshot = self.settings.lock().unwrap().clone();
+                crate::sinks::soundcloud_api::disconnect_soundcloud_session(&cfg_snapshot);
+                {
+                    let mut cfg = self.settings.lock().unwrap();
+                    cfg.services.soundcloud_access_token.clear();
+                    cfg.services.soundcloud_refresh_token.clear();
+                    cfg.services.soundcloud_token_expires_at = 0;
+                    cfg.services.soundcloud_auth_mode.clear();
+                    cfg.services.soundcloud_username.clear();
+                    cfg.services.soundcloud_enabled = false;
+                }
+                self.soundcloud_sink.is_authenticated = false;
+                self.state.lock().unwrap().soundcloud_authenticated = false;
+                let _ = self
+                    .db
+                    .remove_streaming_source("soundcloud", "soundcloud_remote");
+                let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
+                let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            }
             AudioCommand::ImportCatalogTracks {
                 source,
                 album,
@@ -773,9 +889,12 @@ impl AudioOrchestrator {
                     *cfg = SimpSettings::default();
                 }
                 self.apple_sink.is_authenticated = false;
+                self.soundcloud_sink.is_authenticated = false;
+                crate::sinks::soundcloud_api::clear_cached_soundcloud_state();
                 {
                     let mut st = self.state.lock().unwrap();
                     st.apple_authenticated = false;
+                    st.soundcloud_authenticated = false;
                     st.queue.clear();
                     st.queue_index = 0;
                     st.current_track = None;
@@ -829,6 +948,7 @@ impl AudioOrchestrator {
         match engine {
             ActiveEngine::Local => Some(&self.local_engine),
             ActiveEngine::AppleMusic => Some(&self.apple_sink),
+            ActiveEngine::SoundCloud => Some(&self.soundcloud_sink),
             ActiveEngine::None => None,
         }
     }
@@ -851,13 +971,20 @@ impl AudioOrchestrator {
             ActiveEngine::AppleMusic => {
                 Some((&mut self.apple_sink, internal_tx, broadcast_tx, epoch))
             }
+            ActiveEngine::SoundCloud => {
+                Some((&mut self.soundcloud_sink, internal_tx, broadcast_tx, epoch))
+            }
             ActiveEngine::None => None,
         }
     }
 
     fn suspend_all_sinks(&mut self) {
         let broadcast_tx = &self.broadcast_tx;
-        let sinks: [&mut dyn AudioSink; 2] = [&mut self.local_engine, &mut self.apple_sink];
+        let sinks: [&mut dyn AudioSink; 3] = [
+            &mut self.local_engine,
+            &mut self.apple_sink,
+            &mut self.soundcloud_sink,
+        ];
         for sink in sinks {
             sink.suspend_sink(broadcast_tx);
         }
@@ -865,7 +992,11 @@ impl AudioOrchestrator {
 
     fn shutdown_all_sinks(&mut self) {
         let broadcast_tx = &self.broadcast_tx;
-        let sinks: [&mut dyn AudioSink; 2] = [&mut self.local_engine, &mut self.apple_sink];
+        let sinks: [&mut dyn AudioSink; 3] = [
+            &mut self.local_engine,
+            &mut self.apple_sink,
+            &mut self.soundcloud_sink,
+        ];
         for sink in sinks {
             sink.shutdown_sink(broadcast_tx);
         }
@@ -876,19 +1007,21 @@ impl AudioOrchestrator {
             PlaybackEvent::EndOfTrack { epoch } => {
                 // Race condition guard: ignore stale EndOfTrack from a previous epoch!
                 if epoch == self.transition_epoch {
-                    let is_apple_track = self
+                    let is_cloud_track = self
                         .state
                         .lock()
                         .unwrap()
                         .current_track
                         .as_ref()
-                        .map(|t| t.uri.starts_with("applemusic:"))
+                        .map(|t| {
+                            t.uri.starts_with("applemusic:") || t.uri.starts_with("soundcloud:")
+                        })
                         .unwrap_or(false);
                     let live_pos = self.get_live_position_ms();
-                    if is_apple_track && live_pos == 0 {
-                        // Background Apple Music stream aborted before playing any audio;
+                    if is_cloud_track && live_pos == 0 {
+                        // Background cloud stream aborted before playing any audio;
                         // route through the 3-failure circuit breaker so we don't runaway-skip!
-                        self.handle_track_load_failure("Apple Music stream failed to start");
+                        self.handle_track_load_failure("Cloud stream failed to start");
                     } else {
                         self.consecutive_failures = 0;
                         self.advance_queue(false);
@@ -897,6 +1030,7 @@ impl AudioOrchestrator {
             }
             PlaybackEvent::ProgressTick { position_ms } => {
                 let mut next_apple_uris: Vec<String> = Vec::new();
+                let mut next_sc_uris: Vec<String> = Vec::new();
                 let mut healed_track_meta: Option<TrackMetadata> = None;
                 {
                     let mut st = self.state.lock().unwrap();
@@ -908,6 +1042,8 @@ impl AudioOrchestrator {
                                 let candidate = &st.queue[target_idx].uri;
                                 if candidate.starts_with("applemusic:") {
                                     next_apple_uris.push(candidate.clone());
+                                } else if candidate.starts_with("soundcloud:") {
+                                    next_sc_uris.push(candidate.clone());
                                 }
                             }
                         }
@@ -938,10 +1074,16 @@ impl AudioOrchestrator {
                 }
                 if position_ms > 0 {
                     self.consecutive_failures = 0;
-                    if !next_apple_uris.is_empty() {
+                    if !next_apple_uris.is_empty() || !next_sc_uris.is_empty() {
                         let cfg = self.settings.lock().unwrap().clone();
                         for next_uri in next_apple_uris {
                             crate::sinks::apple_native::source::prefetch_apple_music_track(
+                                cfg.clone(),
+                                next_uri,
+                            );
+                        }
+                        for next_uri in next_sc_uris {
+                            crate::sinks::soundcloud::prefetch_soundcloud_track(
                                 cfg.clone(),
                                 next_uri,
                             );
@@ -980,6 +1122,31 @@ impl AudioOrchestrator {
         title_hint: Option<&str>,
     ) -> Option<Vec<TrackMetadata>> {
         let cfg = self.settings.lock().unwrap().clone();
+        if station_uri.starts_with("soundcloud:station:") {
+            match crate::sinks::soundcloud_api::fetch_related_station_tracks(&cfg, station_uri, 25)
+            {
+                Ok(tracks) if !tracks.is_empty() => {
+                    for t in &tracks {
+                        let mut clean = t.clone();
+                        if self.db.get_track_by_uri(&clean.uri).ok().flatten().is_none() {
+                            clean.album_id = None;
+                            let _ = self.db.upsert_track(&clean, None, None);
+                        }
+                    }
+                    self.active_station =
+                        Some((station_uri.to_string(), title_hint.map(|s| s.to_string())));
+                    return Some(tracks);
+                }
+                Ok(_) => {
+                    tracing::warn!("SoundCloud station {} returned 0 tracks", station_uri);
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to resolve SoundCloud station {}: {e}", station_uri);
+                    return None;
+                }
+            }
+        }
         match crate::sinks::apple_api::fetch_radio_station_tracks(
             &cfg,
             station_uri,
@@ -1056,9 +1223,11 @@ impl AudioOrchestrator {
             t
         };
 
-        // If a radio station URI (`applemusic:station:...`) was restored from `session_state.vdf`
+        // If a radio station URI (`applemusic:station:...` or `soundcloud:station:...`) was restored from `session_state.vdf`
         // or queued directly, expand it into its playable song stream before dispatching to the sink.
-        if track.uri.starts_with("applemusic:station:") {
+        if track.uri.starts_with("applemusic:station:")
+            || track.uri.starts_with("soundcloud:station:")
+        {
             let st_uri = track.uri.clone();
             let st_title = track.title.clone();
             if let Some(station_tracks) =
@@ -1074,10 +1243,14 @@ impl AudioOrchestrator {
             }
         }
 
-        crate::sinks::apple_api::remember_track_metadata_hint(&track);
+        if track.source == "apple_music" {
+            crate::sinks::apple_api::remember_track_metadata_hint(&track);
+        }
 
         let target_engine = if self.apple_sink.supports_uri(&track.uri) {
             self.apple_sink.engine_kind()
+        } else if self.soundcloud_sink.supports_uri(&track.uri) {
+            self.soundcloud_sink.engine_kind()
         } else {
             self.local_engine.engine_kind()
         };
@@ -1126,7 +1299,7 @@ impl AudioOrchestrator {
 
         match load_res {
             Ok(()) => {
-                if !track.uri.starts_with("applemusic:") {
+                if !track.uri.starts_with("applemusic:") && !track.uri.starts_with("soundcloud:") {
                     self.consecutive_failures = 0;
                 }
             }
@@ -1271,6 +1444,15 @@ impl AudioOrchestrator {
         if let Ok(Some(meta)) = self.db.get_track_by_uri(uri) {
             return meta;
         }
+        if uri.starts_with("soundcloud:") && !uri.starts_with("soundcloud:station:") {
+            let cfg = self.settings.lock().unwrap().clone();
+            if let Some(meta) =
+                crate::sinks::soundcloud_api::resolve_track_metadata_by_uri(&cfg, uri)
+            {
+                let _ = self.db.upsert_track(&meta, None, None);
+                return meta;
+            }
+        }
         let fallback_title = uri
             .rsplit('/')
             .next()
@@ -1288,6 +1470,8 @@ impl AudioOrchestrator {
             duration_ms: 0,
             source: if uri.starts_with("applemusic:") {
                 "apple_music".to_string()
+            } else if uri.starts_with("soundcloud:") {
+                "soundcloud".to_string()
             } else if uri.starts_with("cdda://") {
                 "cdda".to_string()
             } else {
@@ -1367,6 +1551,8 @@ impl AudioOrchestrator {
 
         let engine = if track.uri.starts_with("applemusic:") {
             ActiveEngine::AppleMusic
+        } else if track.uri.starts_with("soundcloud:") {
+            ActiveEngine::SoundCloud
         } else {
             ActiveEngine::Local
         };
@@ -1382,6 +1568,9 @@ impl AudioOrchestrator {
                 .prime_restored_session(track.uri.clone(), clamped_pos);
         } else if engine == ActiveEngine::AppleMusic {
             self.apple_sink
+                .prime_restored_session(track.uri.clone(), clamped_pos);
+        } else if engine == ActiveEngine::SoundCloud {
+            self.soundcloud_sink
                 .prime_restored_session(track.uri.clone(), clamped_pos);
         }
 
@@ -1469,6 +1658,7 @@ pub fn build_state_snapshot(
         mounts,
         power,
         apple_authenticated: st.apple_authenticated,
+        soundcloud_authenticated: st.soundcloud_authenticated,
         brightness_pct: st.brightness_pct,
         daemon_version: env!("CARGO_PKG_VERSION").to_string(),
     }

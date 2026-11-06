@@ -6,6 +6,7 @@ import {
   OpticalDiscStatus,
   PlaylistRecord,
   SimpStateSnapshot,
+  SoundCloudAuthConfig,
   TrackMetadata,
 } from '@simp/client';
 import { CompanionPairView } from './components/CompanionPairView';
@@ -24,6 +25,17 @@ import {
   pinApplePlaylistToSimp,
   searchAppleMusicCatalog,
 } from './drivers/AppleMusicDriver';
+import {
+  fetchSoundCloudDiscover,
+  fetchSoundCloudLikesAndPlaylists,
+  fetchSoundCloudPlaylistTracks,
+  fetchSoundCloudStreamAndRadio,
+  pinSoundCloudPlaylistToSimp,
+  searchSoundCloudCatalog,
+  SoundCloudCatalogSearchResults,
+  SoundCloudPlaylistSummary,
+  startSoundCloudTrackRadio,
+} from './drivers/SoundCloudDriver';
 import { OskTargetKind, useGamepadNavigation } from './hooks/useGamepadNavigation';
 import { BrowserTarget, PlayerView } from './views/PlayerView';
 import { LibraryBrowserView } from './views/LibraryBrowserView';
@@ -53,7 +65,9 @@ const ConsoleMainApp: React.FC = () => {
   // Library & Playlist Browser state
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
-  const [browserSourceFilter, setBrowserSourceFilter] = useState<'all' | 'local' | 'apple_music'>('all');
+  const [browserSourceFilter, setBrowserSourceFilter] = useState<
+    'all' | 'local' | 'apple_music' | 'soundcloud'
+  >('all');
   const [browserSearch, setBrowserSearch] = useState('');
   const [browserTarget, setBrowserTarget] = useState<BrowserTarget | null>(null);
   const [browserTracks, setBrowserTracks] = useState<TrackMetadata[]>([]);
@@ -81,6 +95,25 @@ const ConsoleMainApp: React.FC = () => {
   const [activeCloudAlbum, setActiveCloudAlbum] = useState<AppleCloudAlbumSummary | null>(null);
   const [activeCloudPlaylist, setActiveCloudPlaylist] = useState<AppleCloudPlaylistSummary | null>(null);
 
+  // SoundCloud Cloud Hub state
+  const [soundCloudSubTab, setSoundCloudSubTab] = useState<
+    'pinned' | 'likes_sets' | 'stream_radio' | 'trending'
+  >('trending');
+  const [scLikedTracks, setScLikedTracks] = useState<TrackMetadata[]>([]);
+  const [scPlaylists, setScPlaylists] = useState<SoundCloudPlaylistSummary[]>([]);
+  const [scStreamTracks, setScStreamTracks] = useState<TrackMetadata[]>([]);
+  const [scStreamPlaylists, setScStreamPlaylists] = useState<SoundCloudPlaylistSummary[]>([]);
+  const [scTrendingTracks, setScTrendingTracks] = useState<TrackMetadata[]>([]);
+  const [scTrendingMixes, setScTrendingMixes] = useState<TrackMetadata[]>([]);
+  const [scTrendingPlaylists, setScTrendingPlaylists] = useState<SoundCloudPlaylistSummary[]>([]);
+  const [scSelectedGenre, setScSelectedGenre] = useState<string>('');
+  const [scCatalogSearchResults, setScCatalogSearchResults] =
+    useState<SoundCloudCatalogSearchResults>({
+      songs: [],
+      playlists: [],
+    });
+  const [activeScPlaylist, setActiveScPlaylist] = useState<SoundCloudPlaylistSummary | null>(null);
+
   // Playlist creation, active playback context & target state
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
@@ -92,9 +125,12 @@ const ConsoleMainApp: React.FC = () => {
   const [oskTarget, setOskTarget] = useState<OskTargetKind>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-  // Apple Music Auth Modal state
+  // Apple Music & SoundCloud Auth Modal state
   const [appleAuthCfg, setAppleAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
   const [appleBusy, setAppleBusy] = useState(false);
+  const [soundcloudAuthCfg, setSoundcloudAuthCfg] = useState<SoundCloudAuthConfig | null>(null);
+  const [soundcloudBusy, setSoundcloudBusy] = useState(false);
+  const scAutoClientAuthRef = useRef(false);
 
   // OLED auto-dim, active luminance percentage, popovers & sub-pixel orbit state
   const [isDimmed, setIsDimmed] = useState(false);
@@ -323,6 +359,26 @@ const ConsoleMainApp: React.FC = () => {
     if (view === 'browser' || sourceModalOpen || powerModalOpen) {
       refreshLibraryData();
     }
+    if (view === 'browser' || sourceModalOpen || powerModalOpen) {
+      defaultSimpClient
+        .getSoundCloudAuthConfig()
+        .then((cfg) => {
+          setSoundcloudAuthCfg(cfg);
+          // Auto-bootstrap Tier 1 Public Mode (client_credentials) if credentials exist and not yet authenticated
+          if (
+            cfg.configured &&
+            !cfg.soundcloud_authenticated &&
+            !scAutoClientAuthRef.current
+          ) {
+            scAutoClientAuthRef.current = true;
+            fetch('/api/soundcloud/client-auth', { method: 'POST' })
+              .then(() => defaultSimpClient.getSoundCloudAuthConfig())
+              .then((nextCfg) => setSoundcloudAuthCfg(nextCfg))
+              .catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
     if (sourceModalOpen || powerModalOpen) {
       defaultSimpClient
         .getAppleMusicAuthConfig()
@@ -537,27 +593,164 @@ const ConsoleMainApp: React.FC = () => {
     showToast,
   ]);
 
-  // Debounced live Apple Music Catalog Search
+  // 3c. SoundCloud Cloud Hub data loader
+  useEffect(() => {
+    if (
+      view !== 'browser' ||
+      browserSourceFilter !== 'soundcloud' ||
+      (!snap?.soundcloud_authenticated && !soundcloudAuthCfg?.soundcloud_authenticated)
+    ) {
+      return;
+    }
+    if (
+      soundCloudSubTab === 'likes_sets' &&
+      scLikedTracks.length === 0 &&
+      scPlaylists.length === 0
+    ) {
+      setCloudLoading(true);
+      fetchSoundCloudLikesAndPlaylists()
+        .then((res) => {
+          setScLikedTracks(res.likedTracks);
+          setScPlaylists(res.playlists);
+        })
+        .catch(() => {})
+        .finally(() => setCloudLoading(false));
+    } else if (
+      soundCloudSubTab === 'stream_radio' &&
+      scStreamTracks.length === 0 &&
+      scStreamPlaylists.length === 0
+    ) {
+      setCloudLoading(true);
+      fetchSoundCloudStreamAndRadio()
+        .then((res) => {
+          setScStreamTracks(res.streamTracks);
+          setScStreamPlaylists(res.streamPlaylists);
+        })
+        .catch(() => {})
+        .finally(() => setCloudLoading(false));
+    } else if (
+      soundCloudSubTab === 'trending' &&
+      scTrendingTracks.length === 0 &&
+      scTrendingMixes.length === 0 &&
+      scTrendingPlaylists.length === 0
+    ) {
+      setCloudLoading(true);
+      fetchSoundCloudDiscover(scSelectedGenre || undefined)
+        .then((res) => {
+          setScTrendingTracks(res.tracks);
+          setScTrendingMixes(res.mixes);
+          setScTrendingPlaylists(res.playlists);
+        })
+        .catch((err: any) =>
+          showToast(err?.message || 'Failed to load SoundCloud Trending & Mixes')
+        )
+        .finally(() => setCloudLoading(false));
+    }
+  }, [
+    view,
+    browserSourceFilter,
+    snap?.soundcloud_authenticated,
+    soundcloudAuthCfg?.soundcloud_authenticated,
+    soundCloudSubTab,
+    scLikedTracks.length,
+    scPlaylists.length,
+    scStreamTracks.length,
+    scStreamPlaylists.length,
+    scTrendingTracks.length,
+    scTrendingMixes.length,
+    scTrendingPlaylists.length,
+    scSelectedGenre,
+    showToast,
+  ]);
+
+  // Debounced live Apple Music & SoundCloud Catalog Search
   useEffect(() => {
     const term = browserSearch.trim();
-    if (!term || !snap?.apple_authenticated) {
+    if (!term) {
       setCatalogSearchResults({ songs: [], albums: [], playlists: [], stations: [] });
+      setScCatalogSearchResults({ songs: [], playlists: [] });
       return;
     }
     if (browserSourceFilter === 'local') {
       return;
     }
     const timer = window.setTimeout(() => {
-      setCloudLoading(true);
-      searchAppleMusicCatalog(term)
-        .then((res) => {
-          setCatalogSearchResults(res);
-        })
-        .catch(() => {})
-        .finally(() => setCloudLoading(false));
+      const promises: Promise<any>[] = [];
+      if (browserSourceFilter !== 'soundcloud' && snap?.apple_authenticated) {
+        promises.push(
+          searchAppleMusicCatalog(term)
+            .then((res) => setCatalogSearchResults(res))
+            .catch(() => {})
+        );
+      } else {
+        setCatalogSearchResults({ songs: [], albums: [], playlists: [], stations: [] });
+      }
+      if (
+        browserSourceFilter !== 'apple_music' &&
+        (snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated)
+      ) {
+        promises.push(
+          searchSoundCloudCatalog(term)
+            .then((res) => setScCatalogSearchResults(res))
+            .catch(() => {})
+        );
+      } else {
+        setScCatalogSearchResults({ songs: [], playlists: [] });
+      }
+      if (promises.length > 0) {
+        setCloudLoading(true);
+        Promise.all(promises).finally(() => setCloudLoading(false));
+      }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [browserSearch, browserSourceFilter, snap?.apple_authenticated]);
+  }, [
+    browserSearch,
+    browserSourceFilter,
+    snap?.apple_authenticated,
+    snap?.soundcloud_authenticated,
+    soundcloudAuthCfg?.soundcloud_authenticated,
+  ]);
+
+  const handleOpenSoundCloudPlaylist = useCallback(
+    async (pl: SoundCloudPlaylistSummary) => {
+      setActiveScPlaylist(pl);
+      setActiveCloudPlaylist(null);
+      setActiveCloudAlbum(null);
+      setBrowserTarget({
+        kind: 'soundcloud_playlist',
+        id: pl.id,
+        title: `☁️ ${pl.name}`,
+        subtitle: pl.description,
+        art_url: pl.art_url,
+      });
+      if (pl.tracks && pl.tracks.length > 0) {
+        setBrowserTracks(pl.tracks);
+      }
+      setCloudLoading(true);
+      try {
+        const tracks = await fetchSoundCloudPlaylistTracks(pl.id);
+        if (tracks.length > 0) {
+          setBrowserTracks(tracks);
+        }
+      } catch (err: any) {
+        if (!pl.tracks || pl.tracks.length === 0) {
+          showToast(err?.message || 'Could not load SoundCloud set tracks');
+        }
+      } finally {
+        setCloudLoading(false);
+      }
+    },
+    [showToast]
+  );
+
+  const handleStartSoundCloudTrackRadio = useCallback(
+    (seedTrack: TrackMetadata) => {
+      setPlayingContextId(`sc:radio:${seedTrack.uri}`);
+      startSoundCloudTrackRadio(seedTrack.uri, seedTrack.title, showToast);
+      setView('lock');
+    },
+    [showToast]
+  );
 
   const handleOpenCloudPlaylist = useCallback(
     async (pl: AppleCloudPlaylistSummary) => {
@@ -769,6 +962,17 @@ const ConsoleMainApp: React.FC = () => {
           tracks: appleTracks,
         });
       }
+      const scTracks = (trackMetadata || browserTracks).filter(
+        (t) => t.source === 'soundcloud' && uris.includes(t.uri)
+      );
+      if (scTracks.length > 0) {
+        defaultSimpClient.importCatalogTracks({
+          source: 'soundcloud',
+          album: null,
+          playlist: null,
+          tracks: scTracks,
+        });
+      }
 
       const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
       let targetPlId = '';
@@ -932,6 +1136,21 @@ const ConsoleMainApp: React.FC = () => {
       refreshLibraryData();
     } catch (err: any) {
       showToast(err?.message || 'Failed to pin album to SIMP');
+    } finally {
+      setCloudLoading(false);
+    }
+  };
+
+  const handlePinSoundCloudPlaylist = async (
+    pl: SoundCloudPlaylistSummary,
+    preloadedTracks?: TrackMetadata[]
+  ) => {
+    setCloudLoading(true);
+    try {
+      await pinSoundCloudPlaylistToSimp(pl, preloadedTracks, showToast);
+      refreshLibraryData();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to pin SoundCloud set to SIMP');
     } finally {
       setCloudLoading(false);
     }
@@ -1503,6 +1722,8 @@ const ConsoleMainApp: React.FC = () => {
           setBrowserTarget={setBrowserTarget}
           setView={setView}
           handleOpenFullAppleAlbum={handleOpenFullAppleAlbum}
+          handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
+          showToast={showToast}
         />
       )}
       <LibraryBrowserView
@@ -1544,6 +1765,26 @@ const ConsoleMainApp: React.FC = () => {
           setCloudLoading={setCloudLoading}
           activeCloudAlbum={activeCloudAlbum}
           activeCloudPlaylist={activeCloudPlaylist}
+          soundCloudSubTab={soundCloudSubTab}
+          setSoundCloudSubTab={setSoundCloudSubTab}
+          scLikedTracks={scLikedTracks}
+          setScLikedTracks={setScLikedTracks}
+          scPlaylists={scPlaylists}
+          setScPlaylists={setScPlaylists}
+          scStreamTracks={scStreamTracks}
+          setScStreamTracks={setScStreamTracks}
+          scStreamPlaylists={scStreamPlaylists}
+          setScStreamPlaylists={setScStreamPlaylists}
+          scTrendingTracks={scTrendingTracks}
+          setScTrendingTracks={setScTrendingTracks}
+          scTrendingMixes={scTrendingMixes}
+          setScTrendingMixes={setScTrendingMixes}
+          scTrendingPlaylists={scTrendingPlaylists}
+          setScTrendingPlaylists={setScTrendingPlaylists}
+          scSelectedGenre={scSelectedGenre}
+          setScSelectedGenre={setScSelectedGenre}
+          scCatalogSearchResults={scCatalogSearchResults}
+          activeScPlaylist={activeScPlaylist}
           creatingPlaylist={creatingPlaylist}
           setCreatingPlaylist={setCreatingPlaylist}
           newPlaylistName={newPlaylistName}
@@ -1566,6 +1807,10 @@ const ConsoleMainApp: React.FC = () => {
           handleOpenCloudPlaylist={handleOpenCloudPlaylist}
           handleOpenFullAppleAlbum={handleOpenFullAppleAlbum}
           handleStartAppleStation={handleStartAppleStation}
+          handleOpenSoundCloudPlaylist={handleOpenSoundCloudPlaylist}
+          handlePinSoundCloudPlaylist={handlePinSoundCloudPlaylist}
+          handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
+          showToast={showToast}
         />
 
       {/* Source Selection, Custom Folder Picker & Authentication Pop-Up Modal */}
@@ -1590,8 +1835,13 @@ const ConsoleMainApp: React.FC = () => {
           setAppleAuthCfg={setAppleAuthCfg}
           appleBusy={appleBusy}
           setAppleBusy={setAppleBusy}
+          soundcloudAuthCfg={soundcloudAuthCfg}
+          setSoundcloudAuthCfg={setSoundcloudAuthCfg}
+          soundcloudBusy={soundcloudBusy}
+          setSoundcloudBusy={setSoundcloudBusy}
           setBrowserSourceFilter={setBrowserSourceFilter}
           setAppleSubTab={setAppleSubTab}
+          setSoundCloudSubTab={setSoundCloudSubTab}
           refreshLibraryData={refreshLibraryData}
           showToast={showToast}
         />

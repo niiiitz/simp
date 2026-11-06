@@ -38,6 +38,25 @@ pub enum AudioCommand {
         music_user_token: String,
     },
     DisconnectAppleMusic,
+    #[serde(rename = "configure_soundcloud")]
+    ConfigureSoundCloud {
+        client_id: String,
+        client_secret: String,
+    },
+    #[serde(rename = "set_soundcloud_tokens")]
+    SetSoundCloudTokens {
+        access_token: String,
+        #[serde(default)]
+        refresh_token: String,
+        #[serde(default)]
+        expires_at: i64,
+        #[serde(default)]
+        auth_mode: String,
+        #[serde(default)]
+        username: String,
+    },
+    #[serde(rename = "disconnect_soundcloud")]
+    DisconnectSoundCloud,
     ImportCatalogTracks {
         source: String,
         album: Option<AlbumRecord>,
@@ -111,6 +130,8 @@ pub enum LibraryQuery {
     GetMountRoots,
     GetSettings,
     GetAppleMusicAuthConfig,
+    #[serde(rename = "get_soundcloud_auth_config")]
+    GetSoundCloudAuthConfig,
     ScanOpticalDisc {
         #[serde(default)]
         device_path: Option<String>,
