@@ -21,19 +21,36 @@ echo " Building SIMP Portable Windows Package (${RUST_TARGET})"
 echo "============================================================"
 
 echo "1/4 Building production React UI (ui/dist)..."
-npm run build:ui
+if [[ -d "${REPO_ROOT}/node_modules" ]]; then
+  npm run build:ui
+elif [[ -f "${REPO_ROOT}/ui/dist/index.html" ]]; then
+  echo "   • Using prebuilt ui/dist (worktree without node_modules)"
+else
+  npm run build:ui
+fi
 
-echo "2/4 Generating embedded 150-day ES256 Apple Music Developer Token..."
+echo "2/4 Generating embedded 150-day ES256 Apple Music Developer Token & SoundCloud Credentials..."
+ENV_FILE="${REPO_ROOT}/.env"
+if [[ ! -f "${ENV_FILE}" ]]; then
+  COMMON_GIT_DIR="$(git -C "${REPO_ROOT}" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -n "${COMMON_GIT_DIR}" && -f "$(cd "${REPO_ROOT}" && cd "${COMMON_GIT_DIR}/.." && pwd)/.env" ]]; then
+    ENV_FILE="$(cd "${REPO_ROOT}" && cd "${COMMON_GIT_DIR}/.." && pwd)/.env"
+  elif [[ -f "${HOME}/simp/.env" ]]; then
+    ENV_FILE="${HOME}/simp/.env"
+  fi
+fi
+
 if [[ -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" && -s "/tmp/.simp_embedded_jwt" ]]; then
   export SIMP_EMBEDDED_APPLE_DEV_TOKEN="$(cat /tmp/.simp_embedded_jwt)"
 fi
-if [[ -f "${REPO_ROOT}/.env" && -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
-  EMBEDDED_JWT="$(python3 - <<'PY' || true
+if [[ -f "${ENV_FILE}" && -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
+  EMBEDDED_JWT="$(ENV_FILE="${ENV_FILE}" python3 - <<'PY' || true
 import base64, json, os, subprocess, time
 
 env = {}
-if os.path.exists(".env"):
-    for line in open(".env"):
+env_path = os.environ.get("ENV_FILE", ".env")
+if os.path.exists(env_path):
+    for line in open(env_path):
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
@@ -81,9 +98,22 @@ PY
   fi
 fi
 
+if [[ -f "${ENV_FILE}" ]]; then
+  SC_ID="$(ENV_FILE="${ENV_FILE}" python3 -c 'import os; env=dict(l.strip().split("=",1) for l in open(os.environ["ENV_FILE"]) if l.strip() and not l.strip().startswith("#") and "=" in l); print(env.get("SOUNDCLOUD_CLIENT_ID","").strip().strip("\x27\x22"), end="")' 2>/dev/null || true)"
+  SC_SEC="$(ENV_FILE="${ENV_FILE}" python3 -c 'import os; env=dict(l.strip().split("=",1) for l in open(os.environ["ENV_FILE"]) if l.strip() and not l.strip().startswith("#") and "=" in l); print(env.get("SOUNDCLOUD_CLIENT_SECRET","").strip().strip("\x27\x22"), end="")' 2>/dev/null || true)"
+  if [[ -n "${SC_ID}" && -n "${SC_SEC}" ]]; then
+    export SIMP_EMBEDDED_SOUNDCLOUD_CLIENT_ID="${SC_ID}"
+    export SIMP_EMBEDDED_SOUNDCLOUD_CLIENT_SECRET="${SC_SEC}"
+    echo "   • Baked SoundCloud Client Credentials into simp.exe (Public Discovery, OAuth PKCE Sign-In & 160kbps AAC streaming enabled out-of-the-box)"
+  fi
+fi
+
 echo "3/4 Cross-compiling release Rust binary (simp.exe for ${RUST_TARGET})..."
 chmod +x "${REPO_ROOT}/packaging/scripts/setup-windows-toolchain.sh"
 TOOLCHAIN_BIN="$("${REPO_ROOT}/packaging/scripts/setup-windows-toolchain.sh")"
+mkdir -p /tmp/simp-zig-cache
+export ZIG_GLOBAL_CACHE_DIR=/tmp/simp-zig-cache
+export ZIG_LOCAL_CACHE_DIR=/tmp/simp-zig-cache
 export PATH="${TOOLCHAIN_BIN}:${PATH}"
 export CC_x86_64_pc_windows_gnu="${TOOLCHAIN_BIN}/x86_64-w64-mingw32-gcc"
 export CXX_x86_64_pc_windows_gnu="${TOOLCHAIN_BIN}/x86_64-w64-mingw32-g++"

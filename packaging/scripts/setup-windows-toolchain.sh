@@ -13,7 +13,12 @@ ZIG_VER="0.13.0"
 ZIG_DIR="${TOOLCHAIN_DIR}/zig-linux-x86_64-${ZIG_VER}"
 ZIG_BIN="${ZIG_DIR}/zig"
 
-mkdir -p "${BIN_DIR}"
+[[ -d "${BIN_DIR}" ]] || mkdir -p "${BIN_DIR}"
+
+if [[ -x "${BIN_DIR}/x86_64-w64-mingw32-gcc" && -x "${BIN_DIR}/x86_64-w64-mingw32-ar" ]]; then
+  echo "${BIN_DIR}"
+  exit 0
+fi
 
 if [[ ! -x "${ZIG_BIN}" ]]; then
   echo "   • Downloading userland Zig ${ZIG_VER} cross-compiler into ${TOOLCHAIN_DIR}..." >&2

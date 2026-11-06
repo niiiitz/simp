@@ -43,11 +43,12 @@ if not token:
         token = subprocess.check_output(["gh", "auth", "token"], text=True).strip()
     except Exception:
         pass
-if not token and os.path.isfile(".env"):
-    for line in open(".env", "r", encoding="utf-8"):
-        line = line.strip()
-        if line.startswith("GH_TOKEN="):
-            token = line.split("=", 1)[1].strip().strip("'").strip('"')
+for env_candidate in [".env", os.path.expanduser("~/simp/.env")]:
+    if not token and os.path.isfile(env_candidate):
+        for line in open(env_candidate, "r", encoding="utf-8"):
+            line = line.strip()
+            if line.startswith("GH_TOKEN="):
+                token = line.split("=", 1)[1].strip().strip("'").strip('"')
 
 if not token:
     print("❌ ERROR: Could not resolve GitHub token from gh auth token or .env", file=sys.stderr)

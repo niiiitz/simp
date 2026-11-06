@@ -117,26 +117,49 @@ PY
 echo "0/4 Synchronized version ${SYNCED_VERSION} across Cargo.toml, package.json, decky-plugin & README.md"
 
 echo "1/4 Building production React UI (ui/dist)..."
-npm run build:ui
+if [[ -d "${REPO_ROOT}/node_modules" ]]; then
+  npm run build:ui
+elif [[ -f "${REPO_ROOT}/ui/dist/index.html" ]]; then
+  echo "   • Using prebuilt ui/dist (worktree without node_modules)"
+else
+  npm run build:ui
+fi
 
 if [[ "${WITH_DECKY}" == "1" ]]; then
   echo "2/4 Building optional Decky QAM add-on bundle (decky-plugin/dist)..."
-  npm run build:decky
+  if [[ -d "${REPO_ROOT}/decky-plugin/node_modules" || -d "${REPO_ROOT}/node_modules" ]]; then
+    npm run build:decky
+  elif [[ -f "${REPO_ROOT}/decky-plugin/dist/index.js" ]]; then
+    echo "   • Using prebuilt decky-plugin/dist (worktree without node_modules)"
+  else
+    npm run build:decky
+  fi
 else
   echo "2/4 Skipping Decky QAM plugin build (Decky-free ${ARCH} target)..."
 fi
 
 echo "3/4 Building release Rust binary (simp for ${ARCH})..."
+ENV_FILE="${REPO_ROOT}/.env"
+if [[ ! -f "${ENV_FILE}" ]]; then
+  COMMON_GIT_DIR="$(git -C "${REPO_ROOT}" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -n "${COMMON_GIT_DIR}" && -f "$(cd "${REPO_ROOT}" && cd "${COMMON_GIT_DIR}/.." && pwd)/.env" ]]; then
+    ENV_FILE="$(cd "${REPO_ROOT}" && cd "${COMMON_GIT_DIR}/.." && pwd)/.env"
+  elif [[ -f "${HOME}/simp/.env" ]]; then
+    ENV_FILE="${HOME}/simp/.env"
+  fi
+fi
+
 if [[ -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" && -s "/tmp/.simp_embedded_jwt" ]]; then
   export SIMP_EMBEDDED_APPLE_DEV_TOKEN="$(cat /tmp/.simp_embedded_jwt)"
 fi
-if [[ -f "${REPO_ROOT}/.env" && -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
-  EMBEDDED_JWT="$(python3 - <<'PY' || true
+if [[ -f "${ENV_FILE}" && -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
+  EMBEDDED_JWT="$(ENV_FILE="${ENV_FILE}" python3 - <<'PY' || true
 import base64, json, os, subprocess, time
 
 env = {}
-if os.path.exists(".env"):
-    for line in open(".env"):
+env_path = os.environ.get("ENV_FILE", ".env")
+if os.path.exists(env_path):
+    for line in open(env_path):
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
@@ -182,12 +205,15 @@ PY
     export SIMP_EMBEDDED_APPLE_DEV_TOKEN="${EMBEDDED_JWT}"
     echo "   • Baked 150-day ES256 Apple Developer Token into binary (no .p8 key required on target devices)"
   fi
-  SC_ID="$(python3 -c 'import os; env=dict(l.strip().split("=",1) for l in open(".env") if l.strip() and not l.strip().startswith("#") and "=" in l); print(env.get("SOUNDCLOUD_CLIENT_ID","").strip().strip("\x27\x22"), end="")' 2>/dev/null || true)"
-  SC_SEC="$(python3 -c 'import os; env=dict(l.strip().split("=",1) for l in open(".env") for _ in [0] if l.strip() and not l.strip().startswith("#") and "=" in l); print(env.get("SOUNDCLOUD_CLIENT_SECRET","").strip().strip("\x27\x22"), end="")' 2>/dev/null || true)"
+fi
+
+if [[ -f "${ENV_FILE}" ]]; then
+  SC_ID="$(ENV_FILE="${ENV_FILE}" python3 -c 'import os; env=dict(l.strip().split("=",1) for l in open(os.environ["ENV_FILE"]) if l.strip() and not l.strip().startswith("#") and "=" in l); print(env.get("SOUNDCLOUD_CLIENT_ID","").strip().strip("\x27\x22"), end="")' 2>/dev/null || true)"
+  SC_SEC="$(ENV_FILE="${ENV_FILE}" python3 -c 'import os; env=dict(l.strip().split("=",1) for l in open(os.environ["ENV_FILE"]) if l.strip() and not l.strip().startswith("#") and "=" in l); print(env.get("SOUNDCLOUD_CLIENT_SECRET","").strip().strip("\x27\x22"), end="")' 2>/dev/null || true)"
   if [[ -n "${SC_ID}" && -n "${SC_SEC}" ]]; then
-    export SOUNDCLOUD_CLIENT_ID="${SC_ID}"
-    export SOUNDCLOUD_CLIENT_SECRET="${SC_SEC}"
-    echo "   • Baked SoundCloud Client Credentials into binary (Public Discovery & 160kbps AAC streaming enabled out-of-the-box)"
+    export SIMP_EMBEDDED_SOUNDCLOUD_CLIENT_ID="${SC_ID}"
+    export SIMP_EMBEDDED_SOUNDCLOUD_CLIENT_SECRET="${SC_SEC}"
+    echo "   • Baked SoundCloud Client Credentials into binary (Public Discovery, OAuth PKCE Sign-In & 160kbps AAC streaming enabled out-of-the-box)"
   fi
 fi
 if [[ -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
@@ -252,8 +278,10 @@ cp "${REPO_ROOT}/packaging/scripts/uninstall-steamos.sh" "${OUT_DIR}/uninstall-s
 cp "${REPO_ROOT}/packaging/scripts/uninstall-steamos.sh" "${OUT_DIR}/bin/uninstall-steamos.sh"
 chmod +x "${OUT_DIR}/install-steamos.sh" "${OUT_DIR}/uninstall-steamos.sh" "${OUT_DIR}/bin/uninstall-steamos.sh" "${OUT_DIR}/bin/simp"
 
-tar -C "${REPO_ROOT}/dist" -czf "${ARCHIVE}" "simp-steamos-userland"
-cp "${ARCHIVE}" "${ARCH_ARCHIVE}"
+tar -C "${REPO_ROOT}/dist" -czf "${ARCH_ARCHIVE}" "simp-steamos-userland"
+if [[ "${ARCH}" == "x86_64" ]]; then
+  cp "${ARCH_ARCHIVE}" "${ARCHIVE}"
+fi
 
 if [[ "${WITH_DECKY}" == "1" ]]; then
   DECKY_STAGE="${REPO_ROOT}/dist/decky-staging"
