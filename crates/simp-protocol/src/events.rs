@@ -76,6 +76,8 @@ pub enum ServerEnvelope {
         #[serde(default)]
         soundcloud_authenticated: bool,
         #[serde(default)]
+        internet_archive_authenticated: bool,
+        #[serde(default)]
         brightness_pct: u8,
         #[serde(default)]
         daemon_version: String,

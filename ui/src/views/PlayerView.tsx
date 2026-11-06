@@ -21,6 +21,8 @@ export interface BrowserTarget {
     | 'cloud_playlist'
     | 'cloud_album'
     | 'soundcloud_playlist'
+    | 'ia_discover'
+    | 'ia_item'
     | 'cdda';
   id: string;
   title?: string;
@@ -264,12 +266,29 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           ctxKind === 'cdda' ||
           ctxKind === 'cloud_playlist' ||
           ctxKind === 'cloud_album' ||
-          ctxKind === 'soundcloud_playlist'
+          ctxKind === 'soundcloud_playlist' ||
+          ctxKind === 'ia_item'
         ) {
           setBrowserTarget({ kind: ctxKind, id: ctxId });
           setView('browser');
           return;
         }
+      }
+    }
+    if (track?.source === 'internet_archive') {
+      const rawId =
+        track.album_id?.replace(/^ia:/, '') ||
+        track.uri.replace(/^ia:audio:/, '').split('/')[0];
+      if (rawId) {
+        setBrowserTarget({
+          kind: 'ia_item',
+          id: rawId,
+          title: track.album || track.title,
+          subtitle: track.artists?.join(', '),
+          art_url: track.art_url,
+        });
+        setView('browser');
+        return;
       }
     }
     if (track?.source === 'apple_music') {

@@ -2,6 +2,7 @@ import type {
   AlbumRecord,
   AppleMusicAuthConfig,
   AppleSinkCommandPayload,
+  InternetArchiveConfig,
   OpticalDiscStatus,
   PlaylistRecord,
   RepeatMode,
@@ -60,6 +61,7 @@ export class SimpDaemonClient {
     power: { on_battery: false, battery_pct: null },
     apple_authenticated: false,
     soundcloud_authenticated: false,
+    internet_archive_authenticated: false,
     brightness_pct: 100,
   };
 
@@ -105,6 +107,7 @@ export class SimpDaemonClient {
         power: msg.power ?? { on_battery: false, battery_pct: null },
         apple_authenticated: !!msg.apple_authenticated,
         soundcloud_authenticated: !!msg.soundcloud_authenticated,
+        internet_archive_authenticated: !!msg.internet_archive_authenticated,
         brightness_pct: typeof msg.brightness_pct === 'number' && msg.brightness_pct >= 25 ? msg.brightness_pct : 100,
       };
       this.notifyState();
@@ -303,6 +306,25 @@ export class SimpDaemonClient {
 
   public getSoundCloudAuthConfig = (): Promise<SoundCloudAuthConfig> =>
     this.query<SoundCloudAuthConfig>('get_soundcloud_auth_config');
+
+  // Internet Archive Free Digital Library Card & IAS3 helpers
+  public configureInternetArchive = (params: {
+    enabled: boolean;
+    username?: string;
+    access_key?: string;
+    secret_key?: string;
+  }) =>
+    this.sendCommand('configure_internet_archive', {
+      enabled: params.enabled,
+      username: params.username ?? '',
+      access_key: params.access_key ?? '',
+      secret_key: params.secret_key ?? '',
+    });
+
+  public disconnectInternetArchive = () => this.sendCommand('disconnect_internet_archive');
+
+  public getInternetArchiveConfig = (): Promise<InternetArchiveConfig> =>
+    this.query<InternetArchiveConfig>('get_internet_archive_config');
 
   public reportAppleWorkerEvent = (
     state: 'playing' | 'paused' | 'ended' | 'time_update' | 'authorized' | 'worker_ready',

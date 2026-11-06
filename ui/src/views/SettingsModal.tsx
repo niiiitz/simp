@@ -45,7 +45,7 @@ export interface SettingsModalProps {
   soundcloudBusy: boolean;
   setSoundcloudBusy: React.Dispatch<React.SetStateAction<boolean>>;
   setBrowserSourceFilter: React.Dispatch<
-    React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud'>
+    React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive'>
   >;
   setAppleSubTab: React.Dispatch<
     React.SetStateAction<'pinned' | 'cloud_playlists' | 'radio' | 'new'>
@@ -88,6 +88,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   showToast,
 }) => {
   const [pairHelpOpen, setPairHelpOpen] = React.useState(false);
+  const [iaUsername, setIaUsername] = React.useState('');
+  const [iaEnabledLocal, setIaEnabledLocal] = React.useState(
+    !!snap?.internet_archive_authenticated
+  );
+
+  React.useEffect(() => {
+    setIaEnabledLocal(!!snap?.internet_archive_authenticated);
+    defaultSimpClient
+      .getInternetArchiveConfig()
+      .then((cfg) => {
+        if (cfg) {
+          setIaEnabledLocal(!!cfg.enabled);
+          setIaUsername(cfg.username || '');
+        }
+      })
+      .catch(() => {});
+  }, [snap?.internet_archive_authenticated]);
 
   return (
     <div
@@ -778,6 +795,178 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 'http://127.0.0.1:18888/api/soundcloud/callback'}
             </span>
           </div>
+        </div>
+
+        {/* Internet Archive (Free Digital Library Card — Public Domain Movies, TV, Concerts & Audio) */}
+        <div
+          style={{
+            padding: '12px 14px',
+            borderRadius: 12,
+            background: iaEnabledLocal ? '#101815' : '#121218',
+            border: iaEnabledLocal ? '1px solid #34d399' : '1px solid #24242e',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 10,
+              flexWrap: 'wrap',
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#6ee7b7' }}>
+                🏛️ Internet Archive — Free Digital Library Card
+              </div>
+              <div style={{ fontSize: 11, color: '#8e8e99' }}>
+                {iaEnabledLocal
+                  ? iaUsername.trim()
+                    ? `🟢 Active (@${iaUsername.trim()}) — Feature Films, Classic TV, Live Concerts & Audio`
+                    : '🟢 Active — Stream Public Domain Films, TV, Animation, Live Concerts & Audio'
+                  : 'No subscription required — 1-click access to archive.org video & audio collections'}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              {!iaEnabledLocal ? (
+                <button
+                  onClick={() => {
+                    defaultSimpClient.configureInternetArchive({
+                      enabled: true,
+                      username: iaUsername.trim(),
+                    });
+                    setIaEnabledLocal(true);
+                    showToast('Internet Archive Library Card enabled');
+                    refreshLibraryData();
+                  }}
+                  style={{
+                    minHeight: 36,
+                    padding: '0 12px',
+                    borderRadius: 8,
+                    background: '#0d261e',
+                    border: '1px solid #34d399',
+                    color: '#a7f3d0',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Enable Free Library Card
+                </button>
+              ) : (
+                <>
+                  <button
+                    onClick={() => {
+                      setBrowserSourceFilter('internet_archive');
+                      setView('browser');
+                      setSourceModalOpen(false);
+                    }}
+                    style={{
+                      minHeight: 36,
+                      padding: '0 10px',
+                      borderRadius: 8,
+                      background: '#0f222a',
+                      border: '1px solid #2aa3c4',
+                      color: '#bfeaf5',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Open Archive
+                  </button>
+                  <button
+                    onClick={() => {
+                      defaultSimpClient.disconnectInternetArchive();
+                      setIaEnabledLocal(false);
+                      setIaUsername('');
+                      showToast('Internet Archive disconnected');
+                      refreshLibraryData();
+                    }}
+                    style={{
+                      minHeight: 36,
+                      padding: '0 10px',
+                      borderRadius: 8,
+                      background: '#1f1216',
+                      border: '1px solid #4c2228',
+                      color: '#f87171',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Disconnect
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {iaEnabledLocal && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <input
+                type="text"
+                placeholder="Optional @username on archive.org (syncs fav-@username)"
+                value={iaUsername}
+                onChange={(e) => setIaUsername(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    defaultSimpClient.configureInternetArchive({
+                      enabled: true,
+                      username: iaUsername.trim(),
+                    });
+                    showToast(
+                      iaUsername.trim()
+                        ? `Saved Internet Archive @${iaUsername.trim()}`
+                        : 'Updated Internet Archive settings'
+                    );
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  minWidth: 200,
+                  minHeight: 34,
+                  padding: '0 10px',
+                  borderRadius: 8,
+                  background: '#080b0a',
+                  border: '1px solid #243830',
+                  color: '#d4d4dc',
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                }}
+              />
+              <button
+                onClick={() => {
+                  defaultSimpClient.configureInternetArchive({
+                    enabled: true,
+                    username: iaUsername.trim(),
+                  });
+                  showToast(
+                    iaUsername.trim()
+                      ? `Saved Internet Archive @${iaUsername.trim()}`
+                      : 'Updated Internet Archive settings'
+                  );
+                }}
+                style={{
+                  minHeight: 34,
+                  padding: '0 12px',
+                  borderRadius: 8,
+                  background: '#132a22',
+                  border: '1px solid #34d399',
+                  color: '#a7f3d0',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Save @username
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Collapsible Phone / PC Companion Pairing & Diagnostics (/pair) */}

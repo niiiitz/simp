@@ -18,6 +18,8 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
     "flac", "mp3", "wav", "m4a", "aac", "ogg", "opus", "aiff", "aif",
 ];
 
+const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &["mp4", "webm", "m4v", "mov", "mkv", "ogv"];
+
 /// Crawls configured local directories, Steam OST directories (`libraryfolders.vdf`),
 /// and removable USB/MicroSD mounts (`/run/media`), incrementally indexing tracks into SQLite.
 pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize, usize) {
@@ -259,6 +261,106 @@ fn scan_mount_directory(db: &LibraryDatabase, dir: &Path, mount_root: &str, sour
             let _ = db.upsert_track(&track_meta, Some(file_mtime), Some(file_size));
         }
     }
+
+    if source == "local" {
+        let video_files: Vec<PathBuf> = WalkDir::new(dir)
+            .follow_links(false)
+            .max_depth(10)
+            .into_iter()
+            .filter_map(Result::ok)
+            .map(|e| e.into_path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|ext| {
+                            SUPPORTED_VIDEO_EXTENSIONS
+                                .iter()
+                                .any(|s| s.eq_ignore_ascii_case(ext))
+                        })
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        for path in video_files {
+            let uri = format!("video://local/{}", path.to_string_lossy());
+            let Ok(fs_meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            let file_size = fs_meta.len() as i64;
+            let file_mtime = fs_meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            if let Some((cached_mtime, cached_size, _)) = fingerprints.get(&uri) {
+                if *cached_mtime == file_mtime && *cached_size == file_size {
+                    continue;
+                }
+            }
+
+            if let Some(video_meta) = parse_local_video_file(db, &path, &uri, mount_root) {
+                let _ = db.upsert_track(&video_meta, Some(file_mtime), Some(file_size));
+            }
+        }
+    }
+}
+
+fn parse_local_video_file(
+    db: &LibraryDatabase,
+    path: &Path,
+    uri: &str,
+    mount_root: &str,
+) -> Option<TrackMetadata> {
+    let raw_stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Video".to_string());
+    let folder_album = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Local Videos".to_string());
+    let (parsed_track_no, parsed_artist, parsed_title) = parse_stem_metadata(&raw_stem);
+    let art = resolve_and_cache_artwork(path);
+    let art_http = art.as_ref().map(|a| a.http_art_url.clone());
+
+    let parent_folder_key = path
+        .parent()
+        .map(|p| p.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let album_id_input = format!(
+        "{}::{}::local_video",
+        folder_album.to_lowercase(),
+        parent_folder_key
+    );
+    let album_id = blake3::hash(album_id_input.as_bytes()).to_hex()[..16].to_string();
+    let artist_label = parsed_artist.unwrap_or_else(|| "Local Video".to_string());
+
+    let _ = db.upsert_album(
+        &album_id,
+        &folder_album,
+        "Local Video",
+        None,
+        None,
+        art_http.as_deref(),
+    );
+
+    Some(TrackMetadata {
+        uri: uri.to_string(),
+        title: parsed_title,
+        artists: vec![artist_label],
+        album: folder_album,
+        album_id: Some(album_id),
+        track_number: parsed_track_no,
+        disc_number: Some(1),
+        art_url: art_http,
+        duration_ms: 0,
+        source: "local_video".to_string(),
+        mount_root: Some(mount_root.to_string()),
+    })
 }
 
 fn parse_audio_file(

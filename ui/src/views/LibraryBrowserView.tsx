@@ -1,12 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlbumRecord,
+  ArchiveItemDetail,
+  ArchiveItemSummary,
   defaultSimpClient,
   DvdTitleInfo,
   OpticalDiscStatus,
   PlaylistRecord,
   SimpStateSnapshot,
   TrackMetadata,
+  VideoEpisodeItem,
 } from '@simp/client';
 import { DvdPlayerModal } from '../components/DvdPlayerModal';
 import {
@@ -39,9 +42,9 @@ export interface LibraryBrowserViewProps {
   track: TrackMetadata | null | undefined;
   albums: AlbumRecord[];
   playlists: PlaylistRecord[];
-  browserSourceFilter: 'all' | 'local' | 'apple_music' | 'soundcloud';
+  browserSourceFilter: 'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive';
   setBrowserSourceFilter: React.Dispatch<
-    React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud'>
+    React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive'>
   >;
   browserSearch: string;
   setBrowserSearch: React.Dispatch<React.SetStateAction<string>>;
@@ -408,6 +411,20 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   const [dvdAudioChoice, setDvdAudioChoice] = useState<number>(0);
   const [dvdSubChoice, setDvdSubChoice] = useState<string>('off');
 
+  // Internet Archive & Universal Theatre Video Player state
+  const [iaSubTab, setIaSubTab] = useState<'pinned' | 'trending' | 'films' | 'tv' | 'audio'>('trending');
+  const [iaSubFilter, setIaSubFilter] = useState<string>('all');
+  const [iaItems, setIaItems] = useState<ArchiveItemSummary[]>([]);
+  const [iaSearchResults, setIaSearchResults] = useState<ArchiveItemSummary[]>([]);
+  const [activeIaDetail, setActiveIaDetail] = useState<ArchiveItemDetail | null>(null);
+  const [iaLoading, setIaLoading] = useState<boolean>(false);
+  const [activeVideoModal, setActiveVideoModal] = useState<{
+    mode: 'ia_video' | 'local_video';
+    title: string;
+    episodes: VideoEpisodeItem[];
+    initialEpisodeIndex?: number;
+  } | null>(null);
+
   const togglePlacesOpen = () => {
     setPlacesOpen((prev) => {
       const next = !prev;
@@ -479,12 +496,79 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       });
   }, [snap?.apple_authenticated, browserSourceFilter, appleSubTab, recentlyAddedCloudAlbums.length]);
 
-  // Clear activeMountRoot if user switches source filter to Apple Music or SoundCloud only
+  // Clear activeMountRoot if user switches source filter to Apple Music, SoundCloud, or Internet Archive
   useEffect(() => {
-    if ((browserSourceFilter === 'apple_music' || browserSourceFilter === 'soundcloud') && activeMountRoot) {
+    if (
+      (browserSourceFilter === 'apple_music' ||
+        browserSourceFilter === 'soundcloud' ||
+        browserSourceFilter === 'internet_archive') &&
+      activeMountRoot
+    ) {
       setActiveMountRoot(null);
     }
   }, [browserSourceFilter, activeMountRoot]);
+
+  // Fetch Internet Archive discovery hub items
+  const loadIaDiscover = useCallback((hub: string, sub: string) => {
+    setIaLoading(true);
+    fetch(`/api/ia/discover?hub=${encodeURIComponent(hub)}&sub=${encodeURIComponent(sub)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok && Array.isArray(d.items)) {
+          setIaItems(d.items);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setIaLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (browserSourceFilter !== 'internet_archive' || iaSubTab === 'pinned') return;
+    if (!snap?.internet_archive_authenticated) return;
+    loadIaDiscover(iaSubTab, iaSubFilter);
+  }, [browserSourceFilter, iaSubTab, iaSubFilter, snap?.internet_archive_authenticated, loadIaDiscover]);
+
+  // Debounced Internet Archive Search
+  useEffect(() => {
+    const q = browserSearch.trim();
+    if (!q || !snap?.internet_archive_authenticated) {
+      setIaSearchResults([]);
+      return;
+    }
+    if (browserSourceFilter !== 'all' && browserSourceFilter !== 'internet_archive') {
+      setIaSearchResults([]);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      fetch(`/api/ia/search?q=${encodeURIComponent(q)}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (d?.ok && Array.isArray(d.items)) {
+            setIaSearchResults(d.items);
+          }
+        })
+        .catch(() => {});
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [browserSearch, browserSourceFilter, snap?.internet_archive_authenticated]);
+
+  // Auto-load Internet Archive item detail when jumping directly from Player ('Open Collection')
+  useEffect(() => {
+    if (browserTarget?.kind !== 'ia_item') return;
+    setRightPaneMode('tracks');
+    if (activeIaDetail?.summary.identifier === browserTarget.id) return;
+    setIaLoading(true);
+    fetch(`/api/ia/item?id=${encodeURIComponent(browserTarget.id)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok && d?.detail) {
+          setActiveIaDetail(d.detail);
+          setBrowserTracks(d.detail.tracks || []);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setIaLoading(false));
+  }, [browserTarget, activeIaDetail?.summary.identifier, setBrowserTracks]);
 
   // Load albums and tracks belonging to the selected Storage Mount Place (`activeMountRoot`)
   useEffect(() => {
@@ -677,22 +761,37 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
   const searchLower = browserSearch.trim().toLowerCase();
 
-  // Source-aware SIMP Playlist membership (`has_local`, `has_apple`, & `has_soundcloud`)
+  // Source-aware SIMP Playlist membership (`has_local`, `has_apple`, `has_soundcloud`, & `has_archive`)
   const filteredPlaylists = useMemo(
     () =>
       playlists.filter((pl) => {
         if (browserSourceFilter === 'local') {
-          if (pl.origin === 'apple_remote' || pl.origin === 'soundcloud_remote') return false;
+          if (
+            pl.origin === 'apple_remote' ||
+            pl.origin === 'soundcloud_remote' ||
+            pl.origin === 'archive_remote'
+          )
+            return false;
           // Exclude user-created SIMP playlists that contain ONLY cloud tracks
-          if (pl.track_count > 0 && (pl.has_apple || pl.has_soundcloud) && !pl.has_local) return false;
+          if (
+            pl.track_count > 0 &&
+            (pl.has_apple || pl.has_soundcloud || pl.has_archive) &&
+            !pl.has_local
+          )
+            return false;
         } else if (browserSourceFilter === 'apple_music') {
-          if (pl.origin === 'soundcloud_remote') return false;
+          if (pl.origin === 'soundcloud_remote' || pl.origin === 'archive_remote') return false;
           if (pl.origin === 'simp_local' && pl.track_count > 0 && !pl.has_apple) {
             return false;
           }
         } else if (browserSourceFilter === 'soundcloud') {
-          if (pl.origin === 'apple_remote') return false;
+          if (pl.origin === 'apple_remote' || pl.origin === 'archive_remote') return false;
           if (pl.origin === 'simp_local' && pl.track_count > 0 && !pl.has_soundcloud) {
+            return false;
+          }
+        } else if (browserSourceFilter === 'internet_archive') {
+          if (pl.origin === 'apple_remote' || pl.origin === 'soundcloud_remote') return false;
+          if (pl.origin === 'simp_local' && pl.track_count > 0 && !pl.has_archive) {
             return false;
           }
         }
@@ -708,11 +807,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   );
 
   const cleanCollectionTitle = (raw: string): string =>
-    raw.replace(/^[\s📌🍎☁️🎵💿]+/u, '').trim() || raw;
+    raw.replace(/^[\s📌🍎☁️🏛️🎵💿]+/u, '').trim() || raw;
 
   const formatPlaylistSourceBadge = (pl: PlaylistRecord): string => {
     if (pl.origin === 'soundcloud_remote') {
       return '☁️';
+    }
+    if (pl.origin === 'archive_remote') {
+      return '🏛️';
     }
     if (pl.origin !== 'simp_local') {
       return '🍎';
@@ -721,6 +823,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     if (pl.has_local) parts.push('💾');
     if (pl.has_apple) parts.push('🍎');
     if (pl.has_soundcloud) parts.push('☁️');
+    if (pl.has_archive) parts.push('🏛️');
     if (parts.length > 0) {
       return parts.join(' + ');
     }
@@ -734,7 +837,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   const pinnedPlaylistsList = useMemo(
     () =>
       filteredPlaylists.filter(
-        (p) => p.origin === 'apple_remote' || p.origin === 'soundcloud_remote'
+        (p) =>
+          p.origin === 'apple_remote' ||
+          p.origin === 'soundcloud_remote' ||
+          p.origin === 'archive_remote'
       ),
     [filteredPlaylists]
   );
@@ -809,12 +915,13 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
   // Right-pane navigation history stack so mouse users (and controller 'B' in Tracklist/Service view) can walk back step-by-step
   interface RightNavEntry {
-    browserSourceFilter: 'all' | 'local' | 'apple_music' | 'soundcloud';
+    browserSourceFilter: 'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive';
     rightPaneMode: 'browse' | 'tracks';
     browserTarget: BrowserTarget | null;
     browserTracks: TrackMetadata[];
     appleSubTab: 'pinned' | 'cloud_playlists' | 'radio' | 'new';
     soundCloudSubTab: 'pinned' | 'likes_sets' | 'stream_radio' | 'trending';
+    iaSubTab: 'pinned' | 'trending' | 'films' | 'tv' | 'audio';
     activeMountRoot: string | null;
     browserSearch: string;
   }
@@ -830,6 +937,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         browserTracks,
         appleSubTab,
         soundCloudSubTab,
+        iaSubTab,
         activeMountRoot,
         browserSearch,
       };
@@ -840,6 +948,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         last.rightPaneMode === next.rightPaneMode &&
         last.appleSubTab === next.appleSubTab &&
         last.soundCloudSubTab === next.soundCloudSubTab &&
+        last.iaSubTab === next.iaSubTab &&
         last.activeMountRoot === next.activeMountRoot &&
         last.browserSearch === next.browserSearch &&
         JSON.stringify(last.browserTarget) === JSON.stringify(next.browserTarget)
@@ -855,6 +964,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     browserTracks,
     appleSubTab,
     soundCloudSubTab,
+    iaSubTab,
     activeMountRoot,
     browserSearch,
   ]);
@@ -866,6 +976,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       setBrowserSourceFilter(prev.browserSourceFilter);
       setAppleSubTab(prev.appleSubTab);
       setSoundCloudSubTab(prev.soundCloudSubTab);
+      setIaSubTab(prev.iaSubTab);
       setActiveMountRoot(prev.activeMountRoot);
       setBrowserSearch(prev.browserSearch);
       setBrowserTarget(prev.browserTarget);
@@ -895,6 +1006,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       setBrowserSourceFilter('all');
       setAppleSubTab('pinned');
       setSoundCloudSubTab('pinned');
+      setIaSubTab('pinned');
       return;
     }
   }, [
@@ -954,12 +1066,194 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     await handleOpenFullAppleAlbum(params);
   };
 
+  const openLocalVideoFile = useCallback(
+    async (t: TrackMetadata) => {
+      try {
+        const resp = await fetch(`/api/video/local?path=${encodeURIComponent(t.uri)}&meta=1`);
+        const d = await resp.json();
+        const episodes: VideoEpisodeItem[] =
+          d?.ok && Array.isArray(d.episodes) && d.episodes.length > 0
+            ? d.episodes
+            : [
+                {
+                  episode_number: 1,
+                  label: t.title,
+                  duration_ms: t.duration_ms || 0,
+                  qualities: [
+                    {
+                      label: 'Original',
+                      stream_url: `/api/video/local?path=${encodeURIComponent(t.uri)}`,
+                      format: 'Local File',
+                      size_bytes: null,
+                    },
+                  ],
+                  subtitles: [],
+                },
+              ];
+        setActiveVideoModal({
+          mode: 'local_video',
+          title: t.album ? `${t.album} — ${t.title}` : t.title,
+          episodes,
+          initialEpisodeIndex: 0,
+        });
+      } catch {
+        setActiveVideoModal({
+          mode: 'local_video',
+          title: t.title,
+          episodes: [
+            {
+              episode_number: 1,
+              label: t.title,
+              duration_ms: t.duration_ms || 0,
+              qualities: [
+                {
+                  label: 'Original',
+                  stream_url: `/api/video/local?path=${encodeURIComponent(t.uri)}`,
+                  format: 'Local File',
+                  size_bytes: null,
+                },
+              ],
+              subtitles: [],
+            },
+          ],
+          initialEpisodeIndex: 0,
+        });
+      }
+    },
+    []
+  );
+
+  const openIaItem = useCallback(
+    async (item: ArchiveItemSummary, watchImmediately = false) => {
+      setIaLoading(true);
+      try {
+        const resp = await fetch(`/api/ia/item?id=${encodeURIComponent(item.identifier)}`);
+        const d = await resp.json();
+        if (!d?.ok || !d?.detail) {
+          showToast('Could not load Internet Archive item metadata');
+          return;
+        }
+        const detail: ArchiveItemDetail = d.detail;
+        setActiveIaDetail(detail);
+        pushCurrentNavState();
+        setBrowserTarget({
+          kind: 'ia_item',
+          id: detail.summary.identifier,
+          title: detail.summary.title,
+          subtitle: `${detail.summary.creator}${
+            detail.summary.year ? ` • ${detail.summary.year}` : ''
+          }`,
+          art_url: detail.summary.art_url,
+        });
+        setBrowserTracks(detail.tracks || []);
+        setRightPaneMode('tracks');
+        focusRightPaneFirstTrack();
+
+        if (
+          detail.episodes &&
+          detail.episodes.length > 0 &&
+          (watchImmediately || (detail.tracks || []).length === 0)
+        ) {
+          setActiveVideoModal({
+            mode: 'ia_video',
+            title: detail.summary.title,
+            episodes: detail.episodes,
+            initialEpisodeIndex: 0,
+          });
+        }
+      } catch {
+        showToast('Failed to fetch Internet Archive item');
+      } finally {
+        setIaLoading(false);
+      }
+    },
+    [pushCurrentNavState, setBrowserTarget, setBrowserTracks, focusRightPaneFirstTrack, showToast]
+  );
+
+  const handlePinArchiveItem = useCallback(
+    async (item: ArchiveItemSummary, preloadedTracks?: TrackMetadata[]) => {
+      setIaLoading(true);
+      try {
+        let tracksToPin = preloadedTracks;
+        if (!tracksToPin || tracksToPin.length === 0) {
+          const resp = await fetch(`/api/ia/item?id=${encodeURIComponent(item.identifier)}`);
+          const d = await resp.json();
+          tracksToPin = d?.detail?.tracks || [];
+        }
+        if (!tracksToPin || tracksToPin.length === 0) {
+          showToast('Only audio collections can be pinned as playlists');
+          return;
+        }
+        const pinId = `archive:item:${item.identifier}`;
+        const record: PlaylistRecord = {
+          id: pinId,
+          name: `🏛️ ${item.title}`,
+          description: `${item.creator}${item.year ? ` • ${item.year}` : ''}`,
+          origin: 'archive_remote',
+          cover_art_url: item.art_url || tracksToPin[0]?.art_url || null,
+          track_count: tracksToPin.length,
+          updated_at: Math.floor(Date.now() / 1000),
+          has_local: false,
+          has_apple: false,
+          has_soundcloud: false,
+          has_archive: true,
+        };
+        defaultSimpClient.importCatalogTracks({
+          source: 'internet_archive',
+          playlist: record,
+          tracks: tracksToPin,
+        });
+        showToast(`Pinned "${item.title}" (${tracksToPin.length} tracks) to SIMP`);
+      } catch {
+        showToast('Could not pin Internet Archive item');
+      } finally {
+        setIaLoading(false);
+      }
+    },
+    [showToast]
+  );
+
+  const handleAddArchiveItemToHybrid = useCallback(
+    async (item: ArchiveItemSummary) => {
+      setIaLoading(true);
+      try {
+        const resp = await fetch(`/api/ia/item?id=${encodeURIComponent(item.identifier)}`);
+        const d = await resp.json();
+        const tracks: TrackMetadata[] = d?.detail?.tracks || [];
+        if (tracks.length > 0) {
+          await handleAddTracksToPlaylist(
+            tracks.map((t) => t.uri),
+            `all ${tracks.length} tracks from "${item.title}"`,
+            tracks
+          );
+        } else {
+          showToast('No audio tracks found in this Internet Archive item');
+        }
+      } catch {
+        showToast('Could not add Internet Archive item tracks');
+      } finally {
+        setIaLoading(false);
+      }
+    },
+    [handleAddTracksToPlaylist, showToast]
+  );
+
   const activeHubLabel = browserSearch.trim()
     ? 'Search Results'
     : activeMountPlaceObj
     ? `💾 ${activeMountPlaceObj.label}`
     : browserSourceFilter === 'local'
     ? 'Local SIMP Library'
+    : browserSourceFilter === 'internet_archive'
+    ? iaSubTab === 'trending'
+      ? 'Internet Archive Trending'
+      : iaSubTab === 'films'
+      ? 'Films & Cinema'
+      : iaSubTab === 'tv'
+      ? 'TV & Animation'
+      : iaSubTab === 'audio'
+      ? 'Live Concerts & Audio'
+      : 'SIMP Library (Archive)'
     : browserSourceFilter === 'soundcloud'
     ? soundCloudSubTab === 'likes_sets'
       ? 'SoundCloud Likes & Sets'
@@ -1215,6 +1509,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       activeCloudAlbum &&
       albums.some((a) => a.id === `applemusic:album:${activeCloudAlbum.id}`);
 
+    const isArchiveItemPinned =
+      rightPaneMode === 'tracks' &&
+      browserTarget?.kind === 'ia_item' &&
+      activeIaDetail &&
+      playlists.some((p) => p.id === `archive:item:${activeIaDetail.summary.identifier}`);
+
     const gpSelectBadge = (
       <span
         className="simp-gp-badge"
@@ -1313,6 +1613,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         browserTarget.kind === 'mount' ||
         browserTarget.kind === 'cloud_album' ||
         browserTarget.kind === 'cloud_playlist' ||
+        browserTarget.kind === 'ia_item' ||
         (browserTarget.kind === 'playlist' && selectedPlaylistObj?.origin !== 'simp_local')) &&
       browserTracks.length > 0;
 
@@ -1471,6 +1772,39 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 >
                   {gpYBadge}
                   <span>{isCloudAlbumPinned ? '✓ Pinned (Unpin)' : '📌 Pin Album to SIMP'}</span>
+                </button>
+              )}
+
+              {browserTarget.kind === 'ia_item' && activeIaDetail && browserTracks.length > 0 && (
+                <button
+                  data-tile-aux="true"
+                  data-collection-y="true"
+                  onClick={() => {
+                    if (isArchiveItemPinned) {
+                      handleDeletePlaylist(
+                        `archive:item:${activeIaDetail.summary.identifier}`,
+                        activeIaDetail.summary.title
+                      );
+                    } else {
+                      handlePinArchiveItem(activeIaDetail.summary, browserTracks);
+                    }
+                  }}
+                  title="Pin or Unpin this Internet Archive audio collection in SIMP"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: '3px 9px',
+                    borderRadius: 6,
+                    background: isArchiveItemPinned ? '#0f222a' : '#261a0b',
+                    border: isArchiveItemPinned ? '1px solid #2aa3c4' : '1px solid #d97706',
+                    color: isArchiveItemPinned ? '#67e8f9' : '#fde68a',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {gpYBadge}
+                  <span>{isArchiveItemPinned ? '✓ Pinned (Unpin)' : '📌 Pin to SIMP'}</span>
                 </button>
               )}
 
@@ -2414,6 +2748,181 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     );
   };
 
+  // Reusable Visual Tile for Internet Archive Films, TV, Concerts & Audio
+  const renderArchiveItemCard = (item: ArchiveItemSummary) => {
+    const isVideo = item.mediatype === 'movies';
+    const isSelected = browserTarget?.kind === 'ia_item' && browserTarget.id === item.identifier;
+    const isPinned = playlists.some((p) => p.id === `archive:item:${item.identifier}`);
+    return (
+      <button
+        key={item.identifier}
+        data-right-tile="true"
+        onClick={() => openIaItem(item, false)}
+        style={{
+          minWidth: 0,
+          minHeight: 124,
+          padding: 10,
+          borderRadius: 12,
+          background: isSelected ? '#261a0b' : '#0a0a0e',
+          border: isSelected ? '1px solid #f59e0b' : '1px solid #181822',
+          color: '#d4d4dc',
+          textAlign: 'left',
+          cursor: 'pointer',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          gap: 8,
+          boxSizing: 'border-box',
+        }}
+      >
+        <div
+          style={{
+            width: '100%',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-start',
+            gap: 6,
+          }}
+        >
+          <ResilientTileArtwork
+            src={item.art_url}
+            fallbackIcon={isVideo ? '🎬' : '🏛️'}
+            bg="#1f160b"
+            border="1px solid #78350f"
+          />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+            <span
+              style={{
+                padding: '3px 6px',
+                borderRadius: 6,
+                background: '#261a0b',
+                border: '1px solid #78350f',
+                color: '#fde68a',
+                fontSize: 10,
+                fontFamily: 'monospace',
+                fontWeight: 800,
+              }}
+            >
+              {isVideo ? '🎬 VIDEO' : '🏛️ AUDIO'}
+            </span>
+            {isVideo ? (
+              <span
+                role="button"
+                data-tile-aux="true"
+                data-tile-select="true"
+                title="Watch directly in Universal Theatre Player (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openIaItem(item, true);
+                }}
+                style={{
+                  padding: '2px 6px',
+                  borderRadius: 6,
+                  background: '#0f222a',
+                  border: '1px solid #2aa3c4',
+                  color: '#67e8f9',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                ▶
+              </span>
+            ) : (
+              <>
+                <span
+                  role="button"
+                  data-tile-aux="true"
+                  data-tile-select="true"
+                  title="Add audio tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleAddArchiveItemToHybrid(item);
+                  }}
+                  style={{
+                    padding: '2px 6px',
+                    borderRadius: 6,
+                    background: '#0f222a',
+                    border: '1px solid #2aa3c4',
+                    color: '#67e8f9',
+                    fontSize: 10,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  +
+                </span>
+                <span
+                  role="button"
+                  data-tile-aux="true"
+                  data-tile-y="true"
+                  title={isPinned ? 'Unpin from SIMP (Y)' : 'Pin to SIMP (Y)'}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (isPinned) {
+                      handleDeletePlaylist(`archive:item:${item.identifier}`, item.title);
+                    } else {
+                      handlePinArchiveItem(item);
+                    }
+                  }}
+                  style={{
+                    padding: '2px 6px',
+                    borderRadius: 6,
+                    background: isPinned ? '#0f222a' : '#261a0b',
+                    border: isPinned ? '1px solid #2aa3c4' : '1px solid #78350f',
+                    color: isPinned ? '#67e8f9' : '#fde68a',
+                    fontSize: 10,
+                    fontFamily: 'monospace',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {isPinned ? '✓ 📌' : '📌'}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+        <div style={{ minWidth: 0, width: '100%' }}>
+          <div
+            style={{
+              fontSize: 13,
+              fontWeight: 800,
+              lineHeight: 1.3,
+              color: '#e4e4ec',
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              whiteSpace: 'normal',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            {item.title}
+          </div>
+          <div
+            style={{
+              fontSize: 11,
+              lineHeight: 1.35,
+              color: '#8e8e99',
+              marginTop: 4,
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              whiteSpace: 'normal',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            {item.creator}
+            {item.year ? ` • ${item.year}` : ''}
+          </div>
+        </div>
+      </button>
+    );
+  };
+
   // Reusable Row/Card for Individual Songs / Singles / DJ Mixes (Direct Play + Add to Hybrid Playlist + Open Full Album / Start Track Radio)
   const renderSingleSongRow = (s: TrackMetadata, peerList: TrackMetadata[], ctxPrefix: string) => {
     const isLongMix = s.source === 'soundcloud' && s.duration_ms >= 20 * 60 * 1000;
@@ -2656,7 +3165,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 ? '🔍 Filter local playlists, albums, or tracks...'
                 : browserSourceFilter === 'soundcloud'
                 ? '🔍 Search SoundCloud Tracks, Sets & DJ Mixes...'
-                : '🔍 Search SIMP Library, Apple Music & SoundCloud...'
+                : browserSourceFilter === 'internet_archive'
+                ? '🔍 Search Internet Archive Films, TV & Audio...'
+                : '🔍 Search SIMP Library, Apple Music, SoundCloud & Archive...'
             }
             value={browserSearch}
             onChange={(e) => setBrowserSearch(e.target.value)}
@@ -2703,8 +3214,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           )}
         </div>
 
-        {/* Row 2: Top-Level Source Filter Bar (`[ 🌐 All | 💾 Local | 🍎 Apple | ☁️ SC ]`)
-            Only show Apple / SoundCloud pills when authenticated (or reauth_required for Apple). */}
+        {/* Row 2: Top-Level Source Filter Bar (`[ 🌐 All | 💾 Local | 🍎 Apple | ☁️ SC | 🏛️ Archive ]`)
+            Only show Apple / SoundCloud / Archive pills when authenticated (or reauth_required for Apple). */}
         {(() => {
           const sourceTabs = [
             { id: 'all' as const, label: '🌐 All', accent: 'teal' as const },
@@ -2724,6 +3235,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     id: 'soundcloud' as const,
                     label: '☁️ SC',
                     accent: 'soundcloud' as const,
+                  },
+                ]
+              : []),
+            ...(snap?.internet_archive_authenticated
+              ? [
+                  {
+                    id: 'internet_archive' as const,
+                    label: '🏛️ Archive',
+                    accent: 'archive' as const,
                   },
                 ]
               : []),
@@ -2749,6 +3269,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       if (tab.id === 'local') {
                         setAppleSubTab('pinned');
                         setSoundCloudSubTab('pinned');
+                        setIaSubTab('pinned');
                         setRightPaneMode('browse');
                       } else if (tab.id === 'soundcloud') {
                         setActiveMountRoot(null);
@@ -2762,6 +3283,13 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           setAppleSubTab('cloud_playlists');
                         }
                         setRightPaneMode('browse');
+                      } else if (tab.id === 'internet_archive') {
+                        setActiveMountRoot(null);
+                        if (iaSubTab === 'pinned') {
+                          setIaSubTab('trending');
+                          setIaSubFilter('all');
+                        }
+                        setRightPaneMode('browse');
                       }
                     }}
                     style={{
@@ -2773,6 +3301,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           ? '#28111b'
                           : tab.accent === 'soundcloud'
                           ? '#2c140a'
+                          : tab.accent === 'archive'
+                          ? '#261a0b'
                           : '#0f222a'
                         : '#0a0a0e',
                       border: active
@@ -2780,6 +3310,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           ? '1px solid #fa243c'
                           : tab.accent === 'soundcloud'
                           ? '1px solid #ea580c'
+                          : tab.accent === 'archive'
+                          ? '1px solid #f59e0b'
                           : '1px solid #2aa3c4'
                         : '1px solid #1e1e26',
                       color: active
@@ -2787,6 +3319,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           ? '#fecdd3'
                           : tab.accent === 'soundcloud'
                           ? '#fdba74'
+                          : tab.accent === 'archive'
+                          ? '#fde68a'
                           : '#bfeaf5'
                         : '#9ca3af',
                       fontSize: 11,
@@ -2829,7 +3363,109 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
         {placesOpen && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-            {browserSourceFilter === 'soundcloud' ? (
+            {browserSourceFilter === 'internet_archive' ? (
+              (
+                [
+                  {
+                    id: 'pinned' as const,
+                    label: `📌 SIMP Library (${filteredPlaylists.length})`,
+                    isSimp: true,
+                    defaultSub: 'all',
+                  },
+                  {
+                    id: 'trending' as const,
+                    label: '🔥 Trending & Favorites',
+                    isSimp: false,
+                    defaultSub: 'all',
+                  },
+                  {
+                    id: 'films' as const,
+                    label: '🎬 Films & Cinema',
+                    isSimp: false,
+                    defaultSub: 'all',
+                  },
+                  {
+                    id: 'tv' as const,
+                    label: '📺 TV & Animation',
+                    isSimp: false,
+                    defaultSub: 'all',
+                  },
+                  {
+                    id: 'audio' as const,
+                    label: '🎸 Live Concerts & Audio',
+                    isSimp: false,
+                    defaultSub: 'all',
+                  },
+                ] as const
+              ).map((hub) => {
+                const active =
+                  !activeMountRoot && iaSubTab === hub.id && rightPaneMode === 'browse';
+                return (
+                  <button
+                    key={hub.id}
+                    data-default-focus={hub.id === 'pinned' ? 'true' : undefined}
+                    data-left-active={active ? 'true' : undefined}
+                    data-xmb-preview="true"
+                    onClick={() => {
+                      const isPreview = xmbPreviewTriggerRef.current;
+                      if (
+                        !isPreview &&
+                        (activeMountRoot !== null ||
+                          iaSubTab !== hub.id ||
+                          rightPaneMode !== 'browse')
+                      ) {
+                        pushCurrentNavState();
+                      }
+                      setActiveMountRoot(null);
+                      setIaSubTab(hub.id);
+                      setIaSubFilter(hub.defaultSub);
+                      setRightPaneMode('browse');
+                      if (!isPreview) {
+                        focusRightPaneFirstTile();
+                      }
+                    }}
+                    style={{
+                      minHeight: 34,
+                      padding: '0 10px',
+                      borderRadius: 8,
+                      background: active
+                        ? hub.isSimp
+                          ? '#0f222a'
+                          : '#261a0b'
+                        : '#0a0a0e',
+                      border: active
+                        ? hub.isSimp
+                          ? '1px solid #2aa3c4'
+                          : '1px solid #f59e0b'
+                        : '1px solid #181820',
+                      color: active
+                        ? hub.isSimp
+                          ? '#bfeaf5'
+                          : '#fde68a'
+                        : '#c8c8d2',
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span>{hub.label}</span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        color: active ? (hub.isSimp ? '#2aa3c4' : '#fde68a') : '#71717a',
+                      }}
+                    >
+                      ⊞
+                    </span>
+                  </button>
+                );
+              })
+            ) : browserSourceFilter === 'soundcloud' ? (
               (
                 [
                   {
@@ -3083,6 +3719,39 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               >
                 <span>☁️ SoundCloud</span>
                 <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>▸</span>
+              </button>
+            )}
+
+            {browserSourceFilter === 'all' && snap?.internet_archive_authenticated && (
+              <button
+                data-xmb-drill-right="true"
+                onClick={() => {
+                  pushCurrentNavState();
+                  setActiveMountRoot(null);
+                  setBrowserSourceFilter('internet_archive');
+                  setIaSubTab('trending');
+                  setIaSubFilter('all');
+                  setRightPaneMode('browse');
+                  focusRightPaneFirstTile();
+                }}
+                style={{
+                  minHeight: 34,
+                  padding: '0 10px',
+                  borderRadius: 8,
+                  background: '#0a0a0e',
+                  border: '1px solid #181820',
+                  color: '#fde68a',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <span>🏛️ Internet Archive</span>
+                <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#fde68a' }}>▸</span>
               </button>
             )}
 
@@ -3465,7 +4134,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             const inlineSourceIcons = isLocalPlaylist
               ? `${pl.has_local ? '💾' : ''}${pl.has_apple ? '🍎' : ''}${
                   pl.has_soundcloud ? '☁️' : ''
-                }`
+                }${pl.has_archive ? '🏛️' : ''}`
               : '';
             const inlineSources = inlineSourceIcons ? `${inlineSourceIcons} ` : '';
             return (
@@ -3514,6 +4183,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     ? `${isActiveTarget ? '★ ' : '🎵 '}${cleanTitle}`
                     : pl.origin === 'soundcloud_remote'
                     ? `☁️ ${cleanTitle}`
+                    : pl.origin === 'archive_remote'
+                    ? `🏛️ ${cleanTitle}`
                     : `🍎 ${cleanTitle}`}
                 </span>
                 <span
@@ -3561,7 +4232,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             {!snap?.apple_authenticated &&
               appleSubTab !== 'pinned' &&
               browserSourceFilter !== 'local' &&
-              browserSourceFilter !== 'soundcloud' && (
+              browserSourceFilter !== 'soundcloud' &&
+              browserSourceFilter !== 'internet_archive' && (
                 <div
                   style={{
                     padding: 14,
@@ -3650,16 +4322,23 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 </div>
               )}
 
-            {cloudLoading && (
+            {(cloudLoading || iaLoading) && (
               <div
                 style={{
                   fontSize: 12,
                   fontFamily: 'monospace',
-                  color: browserSourceFilter === 'soundcloud' ? '#fdba74' : '#fda4af',
+                  color:
+                    browserSourceFilter === 'internet_archive'
+                      ? '#fde68a'
+                      : browserSourceFilter === 'soundcloud'
+                      ? '#fdba74'
+                      : '#fda4af',
                   padding: '4px 2px',
                 }}
               >
-                {browserSourceFilter === 'soundcloud'
+                {browserSourceFilter === 'internet_archive' || iaLoading
+                  ? '⏳ Loading from Internet Archive...'
+                  : browserSourceFilter === 'soundcloud'
                   ? '⏳ Loading from SoundCloud...'
                   : '⏳ Loading from Apple Music Cloud...'}
               </div>
@@ -3835,6 +4514,30 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     </>
                   )}
 
+                {/* 1F. Internet Archive Search Results (Films, TV, Concerts & Audio) */}
+                {browserSourceFilter !== 'local' &&
+                  browserSourceFilter !== 'apple_music' &&
+                  browserSourceFilter !== 'soundcloud' &&
+                  iaSearchResults.length > 0 && (
+                    <>
+                      <div
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 800,
+                          color: '#fde68a',
+                          borderBottom: '1px solid #3c260a',
+                          paddingBottom: 6,
+                          marginTop: 8,
+                        }}
+                      >
+                        🏛️ Internet Archive ({iaSearchResults.length})
+                      </div>
+                      <div style={tileGridStyle}>
+                        {iaSearchResults.map(renderArchiveItemCard)}
+                      </div>
+                    </>
+                  )}
+
                 {filteredPlaylists.length === 0 &&
                   filteredCloudPlaylists.length === 0 &&
                   albums.length === 0 &&
@@ -3844,7 +4547,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   catalogSearchResults.songs.length === 0 &&
                   scCatalogSearchResults.playlists.length === 0 &&
                   scCatalogSearchResults.songs.length === 0 &&
-                  !cloudLoading && (
+                  iaSearchResults.length === 0 &&
+                  !cloudLoading &&
+                  !iaLoading && (
                     <div style={{ fontSize: 12, color: '#8e8e99', padding: '12px 4px' }}>
                       No playlists, albums, or catalog matches found for "{browserSearch.trim()}".
                     </div>
@@ -3956,8 +4661,11 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 {/* ---------------------------------------------------------
                     2B. 📌 MY SIMP LIBRARY HUB (4-Column Visual Card Grid & Playlist Manager)
                    --------------------------------------------------------- */}
-                {((browserSourceFilter !== 'soundcloud' && appleSubTab === 'pinned') ||
-                  (browserSourceFilter === 'soundcloud' && soundCloudSubTab === 'pinned')) && (
+                {((browserSourceFilter !== 'soundcloud' &&
+                  browserSourceFilter !== 'internet_archive' &&
+                  appleSubTab === 'pinned') ||
+                  (browserSourceFilter === 'soundcloud' && soundCloudSubTab === 'pinned') ||
+                  (browserSourceFilter === 'internet_archive' && iaSubTab === 'pinned')) && (
                   <>
                     <div
                       style={{
@@ -4124,6 +4832,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     3. ☁️ APPLE LIBRARY PLAYLISTS HUB (Paginated 50/page + A-Z Jump Pills)
                    --------------------------------------------------------- */}
                 {browserSourceFilter !== 'soundcloud' &&
+                  browserSourceFilter !== 'internet_archive' &&
                   appleSubTab === 'cloud_playlists' &&
                   snap?.apple_authenticated && (
                   <>
@@ -4282,6 +4991,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     4. 📻 RADIO & FOR YOU HUB (Sub-filter Pills + 4-Col-Max Artwork Tiles)
                    --------------------------------------------------------- */}
                 {browserSourceFilter !== 'soundcloud' &&
+                  browserSourceFilter !== 'internet_archive' &&
                   appleSubTab === 'radio' &&
                   snap?.apple_authenticated && (
                   <>
@@ -4434,6 +5144,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     5. ✨ NEW RELEASES & TOP CHARTS HUB (4-Col-Max Tiles + Direct Singles)
                    --------------------------------------------------------- */}
                 {browserSourceFilter !== 'soundcloud' &&
+                  browserSourceFilter !== 'internet_archive' &&
                   appleSubTab === 'new' &&
                   snap?.apple_authenticated && (
                   <>
@@ -5032,6 +5743,119 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       )}
                   </>
                 )}
+
+                {/* ---------------------------------------------------------
+                    9. 🏛️ INTERNET ARCHIVE DISCOVERY HUB (Trending, Films, TV, Concerts & Audio)
+                   --------------------------------------------------------- */}
+                {browserSourceFilter === 'internet_archive' && iaSubTab !== 'pinned' && (
+                  <>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        paddingBottom: 10,
+                        borderBottom: '1px solid #16161c',
+                        flexWrap: 'wrap',
+                        gap: 8,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 800,
+                            color: '#fde68a',
+                            marginRight: 6,
+                          }}
+                        >
+                          🏛️ {activeHubLabel}
+                        </span>
+                        {(iaSubTab === 'trending'
+                          ? [
+                              { id: 'all', label: '🔥 Trending This Week' },
+                              { id: 'movies', label: '🎬 Trending Video' },
+                              { id: 'audio', label: '🎸 Trending Audio' },
+                              { id: 'all_time', label: '🏆 All-Time Classics' },
+                              { id: 'favorites', label: '★ My Favorites' },
+                            ]
+                          : iaSubTab === 'films'
+                          ? [
+                              { id: 'all', label: '🎬 Feature Films' },
+                              { id: 'noir', label: '🕵️ Film Noir' },
+                              { id: 'scifi_horror', label: '👽 Sci-Fi & Horror' },
+                              { id: 'comedy', label: '🎭 Comedy & Shorts' },
+                              { id: 'silent', label: '🎞️ Silent Hall of Fame' },
+                            ]
+                          : iaSubTab === 'tv'
+                          ? [
+                              { id: 'all', label: '📺 All TV & Animation' },
+                              { id: 'cartoons', label: '🎨 Classic Animation' },
+                              { id: 'chronicles', label: '🕹️ Computer Chronicles' },
+                              { id: 'classic_tv', label: '📡 Classic TV' },
+                              { id: 'prelinger', label: '📽️ Prelinger Archives' },
+                            ]
+                          : [
+                              { id: 'all', label: '🎸 All Audio' },
+                              { id: 'etree', label: '🎤 Live Music Archive' },
+                              { id: 'netlabels', label: '💿 Netlabels' },
+                              { id: 'radio', label: '📻 Old Time Radio' },
+                              { id: 'librivox', label: '📖 LibriVox Audiobooks' },
+                            ]
+                        ).map((f) => {
+                          const active = iaSubFilter === f.id;
+                          return (
+                            <button
+                              key={f.id}
+                              data-right-filter-pill="true"
+                              onClick={() => setIaSubFilter(f.id)}
+                              style={{
+                                padding: '4px 10px',
+                                borderRadius: 6,
+                                background: active ? '#261a0b' : '#101018',
+                                border: active ? '1px solid #f59e0b' : '1px solid #222230',
+                                color: active ? '#fde68a' : '#9ca3af',
+                                fontSize: 11,
+                                fontWeight: 800,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {f.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <button
+                        data-right-filter-pill="true"
+                        onClick={() => loadIaDiscover(iaSubTab, iaSubFilter)}
+                        style={{
+                          padding: '4px 9px',
+                          borderRadius: 6,
+                          background: '#161620',
+                          border: '1px solid #2a2a38',
+                          color: '#fde68a',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        ↻ Refresh
+                      </button>
+                    </div>
+
+                    {iaItems.length > 0 ? (
+                      <div style={tileGridStyle}>{iaItems.map(renderArchiveItemCard)}</div>
+                    ) : (
+                      !iaLoading && (
+                        <div style={{ fontSize: 12, color: '#8e8e99', padding: '12px 4px' }}>
+                          {iaSubFilter === 'favorites'
+                            ? 'No public Internet Archive favorites found. Add your @username in Folders & Connected Accounts to sync fav-{username}.'
+                            : 'No items returned from Internet Archive for this filter.'}
+                        </div>
+                      )
+                    )}
+                  </>
+                )}
               </>
             )}
           </div>
@@ -5110,6 +5934,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   (browserTarget &&
                     (browserTarget.kind === 'cloud_album' ||
                       browserTarget.kind === 'cloud_playlist' ||
+                      browserTarget.kind === 'ia_item' ||
                       browserTarget.kind === 'cdda') &&
                     browserTarget.art_url)) && (
                   <img
@@ -5119,6 +5944,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       (browserTarget &&
                       (browserTarget.kind === 'cloud_album' ||
                         browserTarget.kind === 'cloud_playlist' ||
+                        browserTarget.kind === 'ia_item' ||
                         browserTarget.kind === 'cdda')
                         ? browserTarget.art_url || ''
                         : '')
@@ -5153,17 +5979,27 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       : browserTarget &&
                         (browserTarget.kind === 'cloud_album' ||
                           browserTarget.kind === 'cloud_playlist' ||
+                          browserTarget.kind === 'ia_item' ||
                           browserTarget.kind === 'cdda')
                       ? browserTarget.title
                       : 'Tracks'}
                   </div>
                   <div style={{ fontSize: 12, color: '#8e8e99' }}>
-                    {browserTracks.length} tracks
+                    {browserTarget?.kind === 'ia_item' &&
+                    activeIaDetail &&
+                    activeIaDetail.episodes.length > 0
+                      ? `${activeIaDetail.episodes.length} video ${
+                          activeIaDetail.episodes.length === 1 ? 'part' : 'parts'
+                        }${
+                          browserTracks.length > 0 ? ` • ${browserTracks.length} audio tracks` : ''
+                        }`
+                      : `${browserTracks.length} tracks`}
                     {selectedAlbumObj ? ` • ${selectedAlbumObj.album_artist}` : ''}
                     {selectedMountObj ? ` in ${selectedMountObj.mount_root}` : ''}
                     {browserTarget &&
                     (browserTarget.kind === 'cloud_album' ||
                       browserTarget.kind === 'cloud_playlist' ||
+                      browserTarget.kind === 'ia_item' ||
                       browserTarget.kind === 'cdda') &&
                     browserTarget.subtitle
                       ? ` • ${browserTarget.subtitle}`
@@ -5230,6 +6066,19 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         });
                         return;
                       }
+                      if (
+                        browserTarget.kind === 'ia_item' &&
+                        activeIaDetail &&
+                        activeIaDetail.episodes.length > 0
+                      ) {
+                        setActiveVideoModal({
+                          mode: 'ia_video',
+                          title: activeIaDetail.summary.title,
+                          episodes: activeIaDetail.episodes,
+                          initialEpisodeIndex: 0,
+                        });
+                        return;
+                      }
                       const ctxKey = `${browserTarget.kind}:${browserTarget.id}`;
                       setPlayingContextId(ctxKey);
                       if (browserTarget.kind === 'album') {
@@ -5257,45 +6106,143 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       cursor: 'pointer',
                     }}
                   >
-                    ▶ Play<span className="simp-gp-badge"> (A)</span>
+                    {browserTarget.kind === 'ia_item' &&
+                    activeIaDetail &&
+                    activeIaDetail.episodes.length > 0
+                      ? '▶ Watch in Theatre'
+                      : '▶ Play'}
+                    <span className="simp-gp-badge"> (A)</span>
                   </button>
-                  {!(browserTarget.kind === 'cdda' && opticalDisc?.is_dvd_video) && (
-                    <button
-                      onClick={() => {
-                        const ctxKey = `${browserTarget.kind}:${browserTarget.id}`;
-                        setPlayingContextId(ctxKey);
-                        if (browserTarget.kind === 'album') {
-                          defaultSimpClient.playAlbum(browserTarget.id, true);
-                        } else if (browserTarget.kind === 'playlist') {
-                          defaultSimpClient.playPlaylist(browserTarget.id, true);
-                        } else if (browserTracks.length > 0) {
-                          defaultSimpClient.setShuffle(true);
-                          defaultSimpClient.loadQueue(
-                            browserTracks.map((tr) => tr.uri),
-                            0,
-                            browserTracks
-                          );
-                        }
-                        setView('lock');
-                      }}
-                      style={{
-                        minHeight: 40,
-                        padding: '0 14px',
-                        borderRadius: 10,
-                        background: '#14141c',
-                        color: '#d4d4dc',
-                        border: '1px solid #2e2e3a',
-                        fontWeight: 700,
-                        fontSize: 12,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      🔀 Shuffle<span className="simp-gp-badge"> (X)</span>
-                    </button>
-                  )}
+                  {!(browserTarget.kind === 'cdda' && opticalDisc?.is_dvd_video) &&
+                    browserTracks.length > 0 && (
+                      <button
+                        onClick={() => {
+                          const ctxKey = `${browserTarget.kind}:${browserTarget.id}`;
+                          setPlayingContextId(ctxKey);
+                          if (browserTarget.kind === 'album') {
+                            defaultSimpClient.playAlbum(browserTarget.id, true);
+                          } else if (browserTarget.kind === 'playlist') {
+                            defaultSimpClient.playPlaylist(browserTarget.id, true);
+                          } else if (browserTracks.length > 0) {
+                            defaultSimpClient.setShuffle(true);
+                            defaultSimpClient.loadQueue(
+                              browserTracks.map((tr) => tr.uri),
+                              0,
+                              browserTracks
+                            );
+                          }
+                          setView('lock');
+                        }}
+                        style={{
+                          minHeight: 40,
+                          padding: '0 14px',
+                          borderRadius: 10,
+                          background: '#14141c',
+                          color: '#d4d4dc',
+                          border: '1px solid #2e2e3a',
+                          fontWeight: 700,
+                          fontSize: 12,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        🔀 Shuffle<span className="simp-gp-badge"> (X)</span>
+                      </button>
+                    )}
                 </div>
               )}
             </div>
+
+            {/* Internet Archive Video Episodes & Parts Browser */}
+            {browserTarget?.kind === 'ia_item' &&
+              activeIaDetail &&
+              activeIaDetail.episodes.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {activeIaDetail.summary.description && (
+                    <div
+                      style={{
+                        padding: '10px 12px',
+                        borderRadius: 10,
+                        background: '#0c0d14',
+                        border: '1px solid #1e202c',
+                        fontSize: 12,
+                        color: '#a1a1aa',
+                        lineHeight: 1.45,
+                        display: '-webkit-box',
+                        WebkitLineClamp: 3,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      {activeIaDetail.summary.description}
+                    </div>
+                  )}
+                  {activeIaDetail.episodes.map((ep, epIdx) => {
+                    const totalSec = Math.floor((ep.duration_ms || 0) / 1000);
+                    const mins = Math.floor(totalSec / 60);
+                    const secs = totalSec % 60;
+                    return (
+                      <div
+                        key={`${ep.episode_number}-${epIdx}`}
+                        style={{
+                          padding: '10px 12px',
+                          borderRadius: 12,
+                          background: '#0a0a0e',
+                          border: '1px solid #181822',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 10,
+                        }}
+                      >
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div
+                            style={{
+                              fontSize: 13,
+                              fontWeight: 800,
+                              color: '#f8fafc',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            🎬 {ep.label}
+                          </div>
+                          <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+                            {totalSec > 0 ? `${mins}m ${String(secs).padStart(2, '0')}s • ` : ''}
+                            {ep.qualities.map((q) => q.label).join(' / ')}
+                            {ep.subtitles.length > 0 ? ` • CC (${ep.subtitles.length})` : ''}
+                          </div>
+                        </div>
+                        <button
+                          data-right-track="true"
+                          onClick={() =>
+                            setActiveVideoModal({
+                              mode: 'ia_video',
+                              title: activeIaDetail.summary.title,
+                              episodes: activeIaDetail.episodes,
+                              initialEpisodeIndex: epIdx,
+                            })
+                          }
+                          style={{
+                            minHeight: 36,
+                            padding: '0 14px',
+                            borderRadius: 8,
+                            background: '#261a0b',
+                            border: '1px solid #f59e0b',
+                            color: '#fde68a',
+                            fontSize: 12,
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                            flexShrink: 0,
+                          }}
+                        >
+                          ▶ Watch
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
 
             {/* DVD-Video Title & Episode Browser */}
             {browserTarget?.kind === 'cdda' && opticalDisc?.is_dvd_video && (
@@ -5528,6 +6475,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     }
                   }}
                   onClick={() => {
+                    if (t.source === 'local_video' || t.uri.startsWith('video://local/')) {
+                      openLocalVideoFile(t);
+                      return;
+                    }
                     if (track?.uri === t.uri && playingContextId === currentCtxKey) {
                       setView('lock');
                     } else {
@@ -5598,7 +6549,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                             ? '#251018'
                             : t.source === 'soundcloud'
                             ? '#2c140a'
-                            : t.source === 'cdda'
+                            : t.source === 'internet_archive' || t.source === 'cdda'
                             ? '#261a0d'
                             : '#101822',
                         color:
@@ -5606,7 +6557,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                             ? '#fda4af'
                             : t.source === 'soundcloud'
                             ? '#fdba74'
-                            : t.source === 'cdda'
+                            : t.source === 'internet_archive' || t.source === 'cdda'
                             ? '#fcd34d'
                             : '#67e8f9',
                       }}
@@ -5615,6 +6566,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         ? '🍎 Apple'
                         : t.source === 'soundcloud'
                         ? '☁️ SC'
+                        : t.source === 'internet_archive'
+                        ? '🏛️ Archive'
+                        : t.source === 'local_video' || t.uri.startsWith('video://local/')
+                        ? '🎬 Video'
                         : t.source === 'steam_ost'
                         ? '🎮 OST'
                         : t.source === 'cdda'
@@ -5728,6 +6683,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
       {activeDvdPlayback && opticalDisc && (
         <DvdPlayerModal
+          mode="dvd"
           devicePath={opticalDisc.device_path || '/dev/sr0'}
           discTitle={opticalDisc.album_title || 'DVD Video'}
           titleInfo={activeDvdPlayback.titleInfo}
@@ -5735,6 +6691,16 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           initialAudioIndex={activeDvdPlayback.audioIdx}
           initialSubtitleIndex={activeDvdPlayback.subIdx}
           onClose={() => setActiveDvdPlayback(null)}
+        />
+      )}
+
+      {activeVideoModal && (
+        <DvdPlayerModal
+          mode={activeVideoModal.mode}
+          discTitle={activeVideoModal.title}
+          episodes={activeVideoModal.episodes}
+          initialChapter={(activeVideoModal.initialEpisodeIndex ?? 0) + 1}
+          onClose={() => setActiveVideoModal(null)}
         />
       )}
     </main>

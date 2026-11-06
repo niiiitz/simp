@@ -66,7 +66,7 @@ const ConsoleMainApp: React.FC = () => {
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
   const [browserSourceFilter, setBrowserSourceFilter] = useState<
-    'all' | 'local' | 'apple_music' | 'soundcloud'
+    'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive'
   >('all');
   const [browserSearch, setBrowserSearch] = useState('');
   const [browserTarget, setBrowserTarget] = useState<BrowserTarget | null>(null);
@@ -1056,6 +1056,17 @@ const ConsoleMainApp: React.FC = () => {
           tracks: scTracks,
         });
       }
+      const iaTracks = (trackMetadata || browserTracks).filter(
+        (t) => t.source === 'internet_archive' && uris.includes(t.uri)
+      );
+      if (iaTracks.length > 0) {
+        defaultSimpClient.importCatalogTracks({
+          source: 'internet_archive',
+          album: null,
+          playlist: null,
+          tracks: iaTracks,
+        });
+      }
 
       const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
       let targetPlId = '';
@@ -1180,8 +1191,18 @@ const ConsoleMainApp: React.FC = () => {
       setBrowserSourceFilter('all');
     } else if (browserSourceFilter === 'soundcloud' && !snap.soundcloud_authenticated) {
       setBrowserSourceFilter('all');
+    } else if (
+      browserSourceFilter === 'internet_archive' &&
+      !snap.internet_archive_authenticated
+    ) {
+      setBrowserSourceFilter('all');
     }
-  }, [snap?.apple_authenticated, snap?.soundcloud_authenticated, browserSourceFilter]);
+  }, [
+    snap?.apple_authenticated,
+    snap?.soundcloud_authenticated,
+    snap?.internet_archive_authenticated,
+    browserSourceFilter,
+  ]);
 
   const handleRemoveTrackFromPlaylist = async (playlistId: string, trackUri: string, title: string) => {
     try {

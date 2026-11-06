@@ -144,6 +144,11 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/soundcloud/comments", get(soundcloud_comments_handler))
         .route("/api/soundcloud/waveform", get(soundcloud_waveform_handler))
         .route("/api/soundcloud/like", post(soundcloud_like_handler))
+        .route("/api/ia/discover", get(ia_discover_handler))
+        .route("/api/ia/item", get(ia_item_handler))
+        .route("/api/ia/search", get(ia_search_handler))
+        .route("/api/video/local", get(local_video_handler))
+        .route("/api/video/subtitles", get(video_subtitles_handler))
         .route("/api/dvd/stream", get(dvd_stream_handler))
         .route("/ws", get(ws_handler))
         .nest_service("/art", ServeDir::new(art_cache_dir));
@@ -924,6 +929,150 @@ async fn dvd_stream_handler(
         .unwrap()
 }
 
+async fn ia_discover_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let hub = params
+        .get("hub")
+        .cloned()
+        .unwrap_or_else(|| "trending".to_string());
+    let sub = params.get("sub").cloned();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::internet_archive_api::fetch_discover_hub(&cfg, &hub, sub.as_deref())
+    })
+    .await;
+    match res {
+        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "data": items })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+    }
+}
+
+async fn ia_item_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::internet_archive_api::fetch_item_detail(&cfg, &id)
+    })
+    .await;
+    match res {
+        Ok(Ok(detail)) => Json(serde_json::json!({ "ok": true, "data": detail })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn ia_search_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let q = params.get("q").cloned().unwrap_or_default();
+    let mediatype = params.get("mediatype").cloned();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::internet_archive_api::search_catalog(&cfg, &q, mediatype.as_deref())
+    })
+    .await;
+    match res {
+        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "data": items })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+    }
+}
+
+async fn local_video_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    let raw_path = params.get("path").cloned().unwrap_or_default();
+    let clean_path = raw_path
+        .strip_prefix("video://local/")
+        .or_else(|| raw_path.strip_prefix("file://"))
+        .unwrap_or(&raw_path)
+        .to_string();
+    let want_meta = params.get("meta").map(|v| v == "1").unwrap_or(false);
+    let path_buf = simp_core::library::vdf::normalize_platform_path(&clean_path);
+
+    if want_meta {
+        let ep = simp_core::sinks::internet_archive_api::build_local_video_episode(&path_buf, 1);
+        return Json(serde_json::json!({ "ok": true, "data": ep })).into_response();
+    }
+
+    if !path_buf.is_file() {
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("Video file not found"))
+            .unwrap();
+    }
+
+    match tower_http::services::ServeFile::new(path_buf)
+        .try_call(req)
+        .await
+    {
+        Ok(resp) => resp.into_response(),
+        Err(e) => axum::response::Response::builder()
+            .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+            .body(axum::body::Body::from(e.to_string()))
+            .unwrap(),
+    }
+}
+
+async fn video_subtitles_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let cfg = state.settings.lock().unwrap().clone();
+    let source = params.get("source").cloned().unwrap_or_default();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let file = params.get("file").cloned().unwrap_or_default();
+    let src_url = params.get("url").cloned();
+    let src_path = params.get("path").cloned();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let raw_text = if source == "local" && !file.is_empty() {
+            let norm = simp_core::library::vdf::normalize_platform_path(&file);
+            std::fs::read_to_string(norm)?
+        } else if let Some(p) = src_path {
+            let norm = simp_core::library::vdf::normalize_platform_path(&p);
+            std::fs::read_to_string(norm)?
+        } else if source == "ia" && !id.is_empty() && !file.is_empty() {
+            let creds =
+                simp_core::sinks::internet_archive_api::resolve_internet_archive_credentials(&cfg);
+            let dl_url = format!(
+                "https://archive.org/download/{}/{}",
+                simp_core::sinks::internet_archive_api::url_encode_component(&id),
+                simp_core::sinks::internet_archive_api::url_encode_path_preserve_slashes(&file)
+            );
+            simp_core::sinks::internet_archive_api::ia_http_get_text(&creds, &dl_url)?
+        } else if let Some(u) = src_url {
+            let creds =
+                simp_core::sinks::internet_archive_api::resolve_internet_archive_credentials(&cfg);
+            simp_core::sinks::internet_archive_api::ia_http_get_text(&creds, &u)?
+        } else {
+            anyhow::bail!("Missing subtitle url or path");
+        };
+        Ok(simp_core::sinks::internet_archive_api::convert_srt_to_webvtt(&raw_text))
+    })
+    .await;
+
+    match res {
+        Ok(Ok(vtt)) => axum::response::Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "text/vtt; charset=utf-8")
+            .body(axum::body::Body::from(vtt))
+            .unwrap(),
+        _ => axum::response::Response::builder()
+            .status(axum::http::StatusCode::NOT_FOUND)
+            .header(axum::http::header::CONTENT_TYPE, "text/vtt; charset=utf-8")
+            .body(axum::body::Body::from("WEBVTT\n\n"))
+            .unwrap(),
+    }
+}
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<DaemonIpcState>,
@@ -985,6 +1134,8 @@ async fn handle_ws_client(socket: WebSocket, state: DaemonIpcState) {
                                 | AudioCommand::ConfigureSoundCloud { .. }
                                 | AudioCommand::SetSoundCloudTokens { .. }
                                 | AudioCommand::DisconnectSoundCloud
+                                | AudioCommand::ConfigureInternetArchive { .. }
+                                | AudioCommand::DisconnectInternetArchive
                                 | AudioCommand::FactoryReset
                         );
                         let _ = state.cmd_tx.send(command);
@@ -1333,6 +1484,22 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                     "lan_ips": lan_ips,
                     "pair_url": pair_url,
                     "status_error": status_error,
+                }),
+                error: None,
+            }
+        }
+        LibraryQuery::GetInternetArchiveConfig => {
+            let cfg = state.settings.lock().unwrap().clone();
+            let ia = simp_core::sinks::internet_archive_api::resolve_ia_config(&cfg);
+            ServerEnvelope::QueryResponse {
+                req_id,
+                ok: true,
+                data: serde_json::json!({
+                    "enabled": ia.enabled,
+                    "internet_archive_authenticated": ia.enabled,
+                    "username": ia.username,
+                    "has_access_key": !ia.access_key.is_empty(),
+                    "has_secret_key": !ia.secret_key.is_empty(),
                 }),
                 error: None,
             }
