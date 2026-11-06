@@ -63,6 +63,7 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
     dvdAudioTracks[0]?.stream_index ?? initialAudioIndex
   );
   const [subIdx, setSubIdx] = useState<string>(initialSubtitleIndex);
+  const [subBlobUrl, setSubBlobUrl] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [hudVisible, setHudVisible] = useState<boolean>(true);
 
@@ -75,6 +76,14 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
   const activeQualities = activeEpisode?.qualities ?? [];
   const activeQuality = activeQualities[qualityIdx] ?? activeQualities[0];
   const activeSubtitles = activeEpisode?.subtitles ?? [];
+
+  const isTranscodedDirectStream =
+    isDirectVideo &&
+    Boolean(
+      activeQuality?.stream_url &&
+        (activeQuality.stream_url.includes('/api/video/ia_stream') ||
+          activeQuality.stream_url.includes('transcode=1'))
+    );
 
   const daemonOrigin =
     typeof window !== 'undefined' && window.location.port === '18888'
@@ -93,7 +102,13 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
   );
 
   const streamUrl = isDirectVideo
-    ? resolveUrl(activeQuality?.stream_url ?? '')
+    ? (() => {
+        const base = resolveUrl(activeQuality?.stream_url ?? '');
+        if (isTranscodedDirectStream && seekMs !== null && seekMs > 0) {
+          return `${base}${base.includes('?') ? '&' : '?'}seek_ms=${Math.floor(seekMs)}`;
+        }
+        return base;
+      })()
     : `${daemonOrigin}/api/dvd/stream?device=${encodeURIComponent(
         devicePath
       )}&title=${titleInfo?.title_number ?? 1}&chapter=${chapter}&audio=${audioIdx}&sub=${encodeURIComponent(
@@ -103,7 +118,7 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
   const totalDurationMs = Math.max(
     1000,
     isDirectVideo
-      ? nativeDurationMs || activeEpisode?.duration_ms || 1000
+      ? activeEpisode?.duration_ms || nativeDurationMs || 1000
       : titleInfo?.duration_ms ||
           dvdChapters.reduce((acc, ch) => Math.max(acc, ch.start_ms + ch.duration_ms), 0) ||
           1000
@@ -111,7 +126,12 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
 
   const livePositionMs = Math.min(
     totalDurationMs,
-    Math.max(0, isDirectVideo ? videoElapsedMs : baseOffsetMs + videoElapsedMs)
+    Math.max(
+      0,
+      isDirectVideo && !isTranscodedDirectStream
+        ? videoElapsedMs
+        : baseOffsetMs + videoElapsedMs
+    )
   );
   const displayPositionMs = scrubPreviewMs !== null ? scrubPreviewMs : livePositionMs;
 
@@ -153,21 +173,51 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
 
   useEffect(() => {
     setStreamError(null);
-    if (!isDirectVideo) {
+    if (!isDirectVideo || isTranscodedDirectStream) {
       setVideoElapsedMs(0);
     }
-  }, [streamUrl, isDirectVideo]);
+  }, [streamUrl, isDirectVideo, isTranscodedDirectStream]);
+
+  // Fetch active subtitle track into a same-origin Blob URL so <track> works without crossOrigin on <video>
+  useEffect(() => {
+    if (!isDirectVideo || subIdx === 'off') {
+      setSubBlobUrl(null);
+      return;
+    }
+    const targetSub = activeSubtitles.find((s) => s.id === subIdx);
+    if (!targetSub) {
+      setSubBlobUrl(null);
+      return;
+    }
+    let cancelled = false;
+    let createdUrl: string | null = null;
+    fetch(resolveUrl(targetSub.vtt_url))
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error('Subtitle fetch failed'))))
+      .then((vttText) => {
+        if (cancelled) return;
+        const blob = new Blob([vttText], { type: 'text/vtt;charset=utf-8' });
+        createdUrl = URL.createObjectURL(blob);
+        setSubBlobUrl(createdUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setSubBlobUrl(null);
+      });
+    return () => {
+      cancelled = true;
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl);
+      }
+    };
+  }, [isDirectVideo, subIdx, activeSubtitles, resolveUrl]);
 
   // Synchronize HTML5 <track> textTrack mode when subtitle selection changes in direct video mode
   useEffect(() => {
     if (!isDirectVideo || !videoRef.current) return;
     const tracks = videoRef.current.textTracks;
     for (let i = 0; i < tracks.length; i++) {
-      const t = tracks[i];
-      const matchSub = activeSubtitles[i];
-      t.mode = matchSub && matchSub.id === subIdx ? 'showing' : 'hidden';
+      tracks[i].mode = subIdx !== 'off' && subBlobUrl ? 'showing' : 'hidden';
     }
-  }, [isDirectVideo, subIdx, activeSubtitles, streamUrl]);
+  }, [isDirectVideo, subIdx, subBlobUrl, streamUrl]);
 
   // Place gamepad focus marker on the Play/Pause button when the Theatre Player opens
   useEffect(() => {
@@ -194,7 +244,7 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
       wakeHud();
       const clamped = Math.max(0, Math.min(totalDurationMs - 500, Math.floor(targetMs)));
       setScrubPreviewMs(null);
-      if (isDirectVideo) {
+      if (isDirectVideo && !isTranscodedDirectStream) {
         if (videoRef.current) {
           videoRef.current.currentTime = clamped / 1000;
         }
@@ -205,7 +255,7 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
         setSeekMs(clamped);
       }
     },
-    [totalDurationMs, isDirectVideo, wakeHud]
+    [totalDurationMs, isDirectVideo, isTranscodedDirectStream, wakeHud]
   );
 
   const jumpToChapter = useCallback(
@@ -228,6 +278,8 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
       setScrubPreviewMs(null);
       setEpisodeIdx(nextEpIdx);
       setQualityIdx(0);
+      setSeekMs(null);
+      setBaseOffsetMs(0);
       setVideoElapsedMs(0);
       setNativeDurationMs(0);
       pendingResumeSecRef.current = null;
@@ -254,10 +306,30 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
     wakeHud();
     if (isDirectVideo) {
       if (activeQualities.length <= 1) return;
-      if (videoRef.current && videoRef.current.currentTime > 1) {
-        pendingResumeSecRef.current = videoRef.current.currentTime;
+      const nextIdx = (qualityIdx + 1) % activeQualities.length;
+      const nextQual = activeQualities[nextIdx];
+      const nextIsTranscoded = Boolean(
+        nextQual?.stream_url &&
+          (nextQual.stream_url.includes('/api/video/ia_stream') ||
+            nextQual.stream_url.includes('transcode=1'))
+      );
+      if (livePositionMs > 1000) {
+        if (nextIsTranscoded) {
+          setBaseOffsetMs(livePositionMs);
+          setSeekMs(Math.floor(livePositionMs));
+          setVideoElapsedMs(0);
+          pendingResumeSecRef.current = null;
+        } else {
+          pendingResumeSecRef.current = livePositionMs / 1000;
+          setBaseOffsetMs(0);
+          setSeekMs(null);
+        }
+      } else {
+        setBaseOffsetMs(0);
+        setSeekMs(null);
+        pendingResumeSecRef.current = null;
       }
-      setQualityIdx((prev) => (prev + 1) % activeQualities.length);
+      setQualityIdx(nextIdx);
       return;
     }
     if (dvdAudioTracks.length <= 1) return;
@@ -268,7 +340,9 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
   }, [
     wakeHud,
     isDirectVideo,
-    activeQualities.length,
+    activeQualities,
+    qualityIdx,
+    livePositionMs,
     dvdAudioTracks,
     audioIdx,
     preservePositionForStreamSwitch,
@@ -430,14 +504,44 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
       } else if (e.key === ' ') {
         e.preventDefault();
         togglePlayPause();
+      } else if (e.key === 'x' || e.key === 'X') {
+        e.preventDefault();
+        cycleAudioOrQuality();
+      } else if (e.key === 'y' || e.key === 'Y' || e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        cycleSubtitleTrack();
+      } else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.key === 'm' || e.key === 'M') {
+        e.preventDefault();
+        toggleMute();
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        jumpToTimeMs(livePositionMs - 15000);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        jumpToTimeMs(livePositionMs + 30000);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, togglePlayPause, wakeHud]);
+  }, [
+    onClose,
+    togglePlayPause,
+    cycleAudioOrQuality,
+    cycleSubtitleTrack,
+    toggleFullscreen,
+    toggleMute,
+    jumpToTimeMs,
+    livePositionMs,
+    wakeHud,
+  ]);
 
   const currentAudioOrQualityLabel = isDirectVideo
-    ? activeQuality?.label || 'Standard'
+    ? `${activeQuality?.label || 'Standard'}${
+        activeQualities.length > 1 ? ` (${qualityIdx + 1}/${activeQualities.length})` : ''
+      }`
     : dvdAudioTracks.find((a) => a.stream_index === audioIdx)?.label ||
       dvdAudioTracks[0]?.label ||
       'Default';
@@ -583,7 +687,6 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
           ref={videoRef}
           key={streamUrl}
           src={streamUrl}
-          crossOrigin="anonymous"
           autoPlay
           playsInline
           onClick={togglePlayPause}
@@ -594,7 +697,7 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
             if (Number.isFinite(dur) && dur > 0) {
               setNativeDurationMs(Math.floor(dur * 1000));
             }
-            if (pendingResumeSecRef.current !== null) {
+            if (!isTranscodedDirectStream && pendingResumeSecRef.current !== null) {
               e.currentTarget.currentTime = pendingResumeSecRef.current;
               pendingResumeSecRef.current = null;
             }
@@ -623,7 +726,9 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
             }
             setStreamError(
               isDirectVideo
-                ? 'Video stream unavailable for this format. Press X to switch quality.'
+                ? activeQualities.length > 1
+                  ? 'Video stream unavailable for this format. Press X to switch quality.'
+                  : 'Video stream unavailable (check network or install ffmpeg for compatibility).'
                 : 'DVD stream interrupted. Select another chapter or verify ffmpeg / libdvdcss.'
             );
           }}
@@ -636,17 +741,16 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
             cursor: hudVisible ? 'pointer' : 'none',
           }}
         >
-          {isDirectVideo &&
-            activeSubtitles.map((sub) => (
-              <track
-                key={sub.id}
-                kind="subtitles"
-                src={resolveUrl(sub.vtt_url)}
-                srcLang={sub.lang_code || 'en'}
-                label={sub.label}
-                default={sub.id === subIdx}
-              />
-            ))}
+          {isDirectVideo && subIdx !== 'off' && subBlobUrl && (
+            <track
+              key={`${subIdx}-${subBlobUrl}`}
+              kind="subtitles"
+              src={subBlobUrl}
+              srcLang="en"
+              label={currentSubLabel}
+              default
+            />
+          )}
         </video>
 
         {streamError && (

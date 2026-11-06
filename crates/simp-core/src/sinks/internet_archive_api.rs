@@ -353,7 +353,7 @@ pub fn fetch_discover_hub(
     let (query, sort) = match hub {
         "trending" => match sub.as_str() {
             "movies" => (
-                "mediatype:movies AND format:MP4 AND -collection:inlibrary AND -collection:printdisabled",
+                "mediatype:movies AND -collection:inlibrary AND -collection:printdisabled AND -collection:television",
                 "week desc",
             ),
             "audio" => (
@@ -361,55 +361,55 @@ pub fn fetch_discover_hub(
                 "week desc",
             ),
             "all_time" => (
-                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary",
+                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary AND -collection:television",
                 "downloads desc",
             ),
             _ => (
-                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary",
+                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary AND -collection:television",
                 "week desc",
             ),
         },
         "films" => match sub.as_str() {
             "noir" => (
-                "collection:Film_Noir AND mediatype:movies AND format:MP4",
+                "collection:Film_Noir AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
             "scifi_horror" => (
-                "collection:SciFi_Horror AND mediatype:movies AND format:MP4",
+                "collection:SciFi_Horror AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
             "comedy" => (
-                "collection:comedy_films AND mediatype:movies AND format:MP4",
+                "collection:comedy_films AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
             "silent" => (
-                "collection:silent_films AND mediatype:movies AND format:MP4",
+                "collection:silent_films AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
             _ => (
-                "(collection:feature_films OR collection:Film_Noir OR collection:SciFi_Horror) AND mediatype:movies AND format:MP4",
+                "(collection:feature_films OR collection:Film_Noir OR collection:SciFi_Horror OR collection:comedy_films) AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
         },
         "tv" => match sub.as_str() {
             "cartoons" => (
-                "collection:animationandcartoons AND mediatype:movies AND format:MP4",
+                "collection:animationandcartoons AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
             "chronicles" => (
-                "collection:computerchronicles AND mediatype:movies AND format:MP4",
+                "collection:computerchronicles AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
             "classic_tv" => (
-                "collection:classic_tv AND mediatype:movies AND format:MP4",
+                "collection:classic_tv AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
             "prelinger" => (
-                "collection:prelinger AND mediatype:movies AND format:MP4",
+                "collection:prelinger AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
             _ => (
-                "(collection:animationandcartoons OR collection:computerchronicles OR collection:classic_tv) AND mediatype:movies AND format:MP4",
+                "(collection:animationandcartoons OR collection:computerchronicles OR collection:classic_tv) AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
         },
@@ -436,7 +436,7 @@ pub fn fetch_discover_hub(
             ),
         },
         _ => (
-            "(collection:feature_films OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary",
+            "(collection:feature_films OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary AND -collection:television",
             "week desc",
         ),
     };
@@ -524,9 +524,9 @@ pub fn search_catalog(
     let creds = resolve_internet_archive_credentials(settings);
     let escaped = trimmed.replace('"', " ");
     let type_clause = match media_filter.unwrap_or("all") {
-        "video" | "movies" => "mediatype:movies AND format:MP4",
+        "video" | "movies" => "mediatype:movies AND -collection:television",
         "audio" => "(mediatype:etree OR mediatype:audio)",
-        _ => "(mediatype:movies OR mediatype:etree OR mediatype:audio)",
+        _ => "(mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:television",
     };
     let query = format!(
         "({escaped}) AND {type_clause} AND -collection:inlibrary AND -collection:printdisabled"
@@ -567,12 +567,23 @@ fn clean_stem_for_grouping(filename: &str) -> String {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(filename);
-    let lower = base.to_lowercase();
-    for suffix in ["_512kb", ".ia", "_ia", "_h264", "_vbr", "_64kb"] {
-        if let Some(stripped) = lower.strip_suffix(suffix) {
-            if !stripped.is_empty() {
-                return stripped.to_string();
+    let mut lower = base.to_lowercase();
+    loop {
+        let mut changed = false;
+        for suffix in [
+            "_512kb", "_256kb", "_128kb", "_64kb", ".ia", "_ia", "_h264", "_x264", "_vbr",
+            "_edit", "_hi", "_low", "_hq", "_lq", ".asr", "_asr", ".en", "_en",
+        ] {
+            if let Some(stripped) = lower.strip_suffix(suffix) {
+                if !stripped.is_empty() {
+                    lower = stripped.to_string();
+                    changed = true;
+                    break;
+                }
             }
+        }
+        if !changed {
+            break;
         }
     }
     lower
@@ -597,8 +608,8 @@ fn humanize_episode_stem(stem: &str, fallback_title: &str, index: usize, total: 
 
 /// Parses an Internet Archive Metadata Read API (`https://archive.org/metadata/{identifier}`) JSON
 /// payload into a structured `ArchiveItemDetail` containing:
-/// - Grouped `VideoEpisodeItem`s (with prioritized `HD MP4` -> `SD 512Kb MP4` -> `WebM/OGV` quality variants
-///   and matched `.srt`/`.vtt` subtitles) for video items, and
+/// - Grouped `VideoEpisodeItem`s (with prioritized `HD MP4` -> `SD 512Kb MP4` -> `WebM/OGV` -> `Compatibility MP4 (ffmpeg)`
+///   quality variants and matched `.srt`/`.vtt` subtitles) for video items, and
 /// - Deduplicated `TrackMetadata` items for audio / `etree` live concert items.
 pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveItemDetail> {
     let meta = root.get("metadata").unwrap_or(&Value::Null);
@@ -646,6 +657,13 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
         let Some(name) = f.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
+        let is_private = f
+            .get("private")
+            .and_then(|v| v.as_str().map(|s| s == "true" || s == "1").or_else(|| v.as_bool()))
+            .unwrap_or(false);
+        if is_private {
+            continue;
+        }
         let lower = name.to_lowercase();
         let fmt = f
             .get("format")
@@ -656,6 +674,7 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
             || lower.ends_with(".vtt")
             || fmt.contains("subrip")
             || fmt.contains("webvtt")
+            || fmt.contains("text tracks")
         {
             let stem = clean_stem_for_grouping(name);
             let label = f
@@ -663,7 +682,9 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| {
-                    if lower.contains(".en.") || lower.contains("_en.") {
+                    if lower.contains(".asr.") || lower.contains("_asr.") {
+                        "English (Auto)".to_string()
+                    } else if lower.contains(".en.") || lower.contains("_en.") {
                         "English".to_string()
                     } else {
                         Path::new(name)
@@ -678,21 +699,37 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
                 url_encode_component(identifier),
                 url_encode_component(name)
             );
-            item_subtitles.push((
-                stem,
-                VideoSubtitleVariant {
-                    id: name.to_string(),
-                    lang_code: "en".to_string(),
-                    label,
-                    vtt_url,
-                },
-            ));
+            // Deduplicate `.vtt` vs `.srt` for the same stem + label (prefer `.vtt`)
+            if let Some(existing) = item_subtitles
+                .iter_mut()
+                .find(|(s_stem, sub)| *s_stem == stem && sub.label.eq_ignore_ascii_case(&label))
+            {
+                if lower.ends_with(".vtt") && !existing.1.id.to_lowercase().ends_with(".vtt") {
+                    existing.1 = VideoSubtitleVariant {
+                        id: name.to_string(),
+                        lang_code: "en".to_string(),
+                        label,
+                        vtt_url,
+                    };
+                }
+            } else {
+                item_subtitles.push((
+                    stem,
+                    VideoSubtitleVariant {
+                        id: name.to_string(),
+                        lang_code: "en".to_string(),
+                        label,
+                        vtt_url,
+                    },
+                ));
+            }
         }
     }
 
-    // 2. Group video derivative files (`.mp4`, `.webm`, `.ogv`) by canonical stem
+    // 2. Group video derivative files (`.mp4`, `.webm`, `.ogv`, `.m4v`, `.mkv`, `.avi`, `.mpeg`) by canonical stem
     struct RawVideoCandidate {
         stem: String,
+        raw_filename: String,
         display_title: Option<String>,
         duration_ms: u32,
         rank: u8,
@@ -704,14 +741,24 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
         let Some(name) = f.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
+        let is_private = f
+            .get("private")
+            .and_then(|v| v.as_str().map(|s| s == "true" || s == "1").or_else(|| v.as_bool()))
+            .unwrap_or(false);
+        if is_private {
+            continue;
+        }
         let lower = name.to_lowercase();
-        if lower.ends_with(".thumbs.mp4") || lower.contains("__ia_thumb") {
+        if lower.ends_with(".thumbs.mp4")
+            || lower.contains("__ia_thumb")
+            || lower.contains(".thumbs/")
+        {
             continue;
         }
         let fmt = f.get("format").and_then(|v| v.as_str()).unwrap_or("");
         let fmt_lower = fmt.to_lowercase();
 
-        let is_video = lower.ends_with(".mp4")
+        let is_browser_video = lower.ends_with(".mp4")
             || lower.ends_with(".m4v")
             || lower.ends_with(".webm")
             || lower.ends_with(".ogv")
@@ -720,7 +767,15 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
             || fmt_lower.contains("ogg video")
             || fmt_lower.contains("webm");
 
-        if !is_video {
+        let is_legacy_container = lower.ends_with(".mkv")
+            || lower.ends_with(".avi")
+            || lower.ends_with(".mov")
+            || lower.ends_with(".mpg")
+            || lower.ends_with(".mpeg")
+            || fmt_lower.contains("matroska")
+            || fmt_lower.contains("mpeg2");
+
+        if !is_browser_video && !is_legacy_container {
             continue;
         }
 
@@ -737,6 +792,14 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
             .and_then(|v| v.as_str())
             .map(parse_duration_seconds_str)
             .unwrap_or(0);
+        let height = f
+            .get("height")
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .or_else(|| v.as_u64().map(|n| n as u32))
+            })
+            .unwrap_or(0);
         let display_title = f
             .get("title")
             .and_then(|v| v.as_str())
@@ -747,21 +810,40 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
             || fmt_lower.contains("512kb")
         {
             (2u8, "SD MP4 (512Kb)".to_string(), "mp4".to_string())
-        } else if lower.ends_with(".mp4")
-            || lower.ends_with(".m4v")
-            || fmt_lower.contains("h.264")
-            || fmt_lower.contains("mpeg4")
-        {
-            let is_ia_deriv = lower.ends_with(".ia.mp4") || fmt_lower.contains("ia");
-            if is_ia_deriv {
+        } else if lower.ends_with("_256kb.mp4") || fmt_lower.contains("256kb") {
+            (6u8, "Low MP4 (256Kb)".to_string(), "mp4".to_string())
+        } else if lower.ends_with("_64kb.mp4") || fmt_lower.contains("64kb") {
+            (7u8, "Low MP4 (64Kb)".to_string(), "mp4".to_string())
+        } else if fmt_lower.contains("h.264") || lower.ends_with(".ia.mp4") {
+            if lower.ends_with(".ia.mp4") || fmt_lower.contains("hd") || height >= 720 {
                 (0u8, "HD MP4 (H.264)".to_string(), "mp4".to_string())
             } else {
-                (1u8, "MP4 (Original)".to_string(), "mp4".to_string())
+                (1u8, "MP4 (H.264)".to_string(), "mp4".to_string())
             }
         } else if lower.ends_with(".webm") || fmt_lower.contains("webm") {
             (3u8, "WebM".to_string(), "webm".to_string())
+        } else if lower.ends_with(".mp4")
+            || lower.ends_with(".m4v")
+            || fmt_lower.contains("mpeg4")
+        {
+            let tag = if lower.ends_with(".m4v") { "m4v" } else { "mp4" };
+            let lbl = if lower.ends_with("_edit.mp4") || fmt_lower.contains("hires") {
+                "MP4 (HiRes)".to_string()
+            } else if lower.ends_with(".m4v") {
+                "M4V (Original)".to_string()
+            } else {
+                "MP4 (Original)".to_string()
+            };
+            (4u8, lbl, tag.to_string())
+        } else if lower.ends_with(".ogv") || fmt_lower.contains("ogg video") {
+            (5u8, "OGV (Ogg Video)".to_string(), "ogv".to_string())
         } else {
-            (4u8, "OGV (Ogg Video)".to_string(), "ogv".to_string())
+            let ext = Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("video")
+                .to_lowercase();
+            (8u8, format!("Original ({})", ext.to_uppercase()), ext)
         };
 
         let stream_url = format!(
@@ -772,6 +854,7 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
 
         video_candidates.push(RawVideoCandidate {
             stem,
+            raw_filename: name.to_string(),
             display_title,
             duration_ms,
             rank,
@@ -806,11 +889,39 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
             .find_map(|c| c.display_title.clone())
             .unwrap_or_else(|| humanize_episode_stem(&stem, &title, idx, total_video_groups));
 
+        let best_source_file = group
+            .first()
+            .map(|c| c.raw_filename.clone())
+            .unwrap_or_default();
+
         let mut qualities: Vec<VideoQualityVariant> = Vec::new();
         for c in group {
-            if !qualities.iter().any(|q| q.stream_url == c.variant.stream_url) {
-                qualities.push(c.variant);
+            // Skip raw `.mpeg`/`.avi`/`.mkv` direct URLs if we already have browser-native `.mp4`/`.webm`/`.ogv` variants
+            if c.rank >= 8 && !qualities.is_empty() {
+                continue;
             }
+            if !qualities.iter().any(|q| q.stream_url == c.variant.stream_url) {
+                let mut variant = c.variant;
+                if qualities.iter().any(|q| q.label == variant.label) {
+                    variant.label = format!("{} ({})", variant.label, variant.format.to_uppercase());
+                }
+                qualities.push(variant);
+            }
+        }
+
+        // Always append a daemon-assisted `Compatibility MP4 (ffmpeg)` stream option so every item
+        // has at least 2 switchable qualities (`X`) and a guaranteed H.264+AAC fallback for legacy codecs
+        if !best_source_file.is_empty() {
+            qualities.push(VideoQualityVariant {
+                label: "Compatibility MP4 (ffmpeg)".to_string(),
+                format: "mp4".to_string(),
+                stream_url: format!(
+                    "/api/video/ia_stream?id={}&file={}",
+                    url_encode_component(identifier),
+                    url_encode_component(&best_source_file)
+                ),
+                size_bytes: None,
+            });
         }
 
         let mut subs: Vec<VideoSubtitleVariant> = item_subtitles
@@ -1046,12 +1157,24 @@ pub fn build_local_video_episode(file_path: &Path, episode_number: u16) -> Video
     let size_bytes = std::fs::metadata(file_path).ok().map(|m| m.len());
 
     let stream_url = format!("/api/video/local?path={}", url_encode_component(&file_str));
-    let qualities = vec![VideoQualityVariant {
-        label: format!("Local {}", ext.to_uppercase()),
-        format: ext,
-        stream_url,
-        size_bytes,
-    }];
+    let transcode_url = format!(
+        "/api/video/local?path={}&transcode=1",
+        url_encode_component(&file_str)
+    );
+    let qualities = vec![
+        VideoQualityVariant {
+            label: format!("Local {}", ext.to_uppercase()),
+            format: ext,
+            stream_url,
+            size_bytes,
+        },
+        VideoQualityVariant {
+            label: "Compatibility MP4 (ffmpeg)".to_string(),
+            format: "mp4".to_string(),
+            stream_url: transcode_url,
+            size_bytes: None,
+        },
+    ];
 
     let mut subtitles = Vec::new();
     if let Some(parent) = file_path.parent() {
@@ -1157,10 +1280,11 @@ mod tests {
         assert_eq!(detail.episodes.len(), 1);
         let ep = &detail.episodes[0];
         assert_eq!(ep.duration_ms, 4_500_000);
-        assert_eq!(ep.qualities.len(), 3);
-        assert_eq!(ep.qualities[0].label, "MP4 (Original)");
+        assert_eq!(ep.qualities.len(), 4);
+        assert_eq!(ep.qualities[0].label, "MP4 (H.264)");
         assert_eq!(ep.qualities[1].label, "SD MP4 (512Kb)");
         assert_eq!(ep.qualities[2].label, "OGV (Ogg Video)");
+        assert_eq!(ep.qualities[3].label, "Compatibility MP4 (ffmpeg)");
         assert_eq!(ep.subtitles.len(), 1);
         assert_eq!(ep.subtitles[0].label, "English");
     }
