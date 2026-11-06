@@ -123,7 +123,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <strong style={{ fontSize: 15 }}>Audio Sources, Folders & Auth</strong>
+          <strong style={{ fontSize: 15 }}>Folders & Connected Accounts</strong>
           <button
             onClick={() => setSourceModalOpen(false)}
             style={{

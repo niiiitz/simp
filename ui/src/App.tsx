@@ -214,44 +214,127 @@ const ConsoleMainApp: React.FC = () => {
     }
   }, [snap?.daemon_version]);
 
+  const resolveDaemonBaseUrl = useCallback(() => {
+    if (typeof window !== 'undefined' && window.location?.hostname) {
+      const host = window.location.hostname;
+      if (
+        window.location.protocol === 'http:' &&
+        host !== 'steamloopback.host' &&
+        host !== '127.0.0.1' &&
+        host !== 'localhost'
+      ) {
+        const port = window.location.port === '1420' ? '18888' : window.location.port || '18888';
+        return `http://${host}:${port}`;
+      }
+    }
+    return 'http://127.0.0.1:18888';
+  }, []);
+
+  const compareSemverStrings = useCallback((currentRaw: string, candidateRaw: string): boolean => {
+    const parseTuple = (v: string): [number, number, number, number, number] => {
+      const cleaned = v.trim().replace(/^v/i, '');
+      const [core, pre = ''] = cleaned.split('-', 2);
+      const parts = core.split('.').map((n) => parseInt(n, 10) || 0);
+      const major = parts[0] || 0;
+      const minor = parts[1] || 0;
+      const patch = parts[2] || 0;
+      if (!pre) return [major, minor, patch, 1, 0];
+      const preParts = pre.split('.');
+      const preNum = parseInt(preParts[preParts.length - 1] || '0', 10) || 0;
+      return [major, minor, patch, 0, preNum];
+    };
+    const cur = parseTuple(currentRaw);
+    const cand = parseTuple(candidateRaw);
+    for (let i = 0; i < 5; i++) {
+      if (cand[i] !== cur[i]) return cand[i] > cur[i];
+    }
+    return false;
+  }, []);
+
   const checkSimpUpdates = useCallback(async (_silent = false) => {
     setUpdateStatus((prev) => ({ ...prev, checking: true, error: undefined }));
+    const base = resolveDaemonBaseUrl();
     try {
-      const resp = await fetch(`/api/update/check?t=${Date.now()}`, { cache: 'no-store' });
-      const data = await resp.json();
-      if (data.ok) {
-        setUpdateStatus({
-          current_version: data.current_version,
-          latest_version: data.latest_version,
-          latest_tag: data.latest_tag,
-          update_available: Boolean(data.update_available),
-          target_arch: data.target_arch,
-          checking: false,
-        });
-      } else {
-        setUpdateStatus((prev) => ({
-          ...prev,
-          current_version: data.current_version || prev.current_version,
-          target_arch: data.target_arch || prev.target_arch,
-          checking: false,
-          error: data.error || 'Update check failed',
-        }));
+      const resp = await fetch(`${base}/api/update/check?t=${Date.now()}`, { cache: 'no-store' });
+      const text = await resp.text();
+      if (text.trim().startsWith('{')) {
+        const data = JSON.parse(text);
+        if (data.ok) {
+          setUpdateStatus({
+            current_version: data.current_version,
+            latest_version: data.latest_version,
+            latest_tag: data.latest_tag,
+            update_available: Boolean(data.update_available),
+            target_arch: data.target_arch,
+            checking: false,
+          });
+          return;
+        } else if (data.error && !String(data.error).includes('<!DOCTYPE')) {
+          setUpdateStatus((prev) => ({
+            ...prev,
+            current_version: data.current_version || prev.current_version,
+            target_arch: data.target_arch || prev.target_arch,
+            checking: false,
+            error: data.error,
+          }));
+          return;
+        }
       }
+
+      // Fallback: query GitHub Releases API directly if the daemon endpoint returned HTML or was unreachable
+      const ghResp = await fetch('https://api.github.com/repos/niiiitz/simp/releases?per_page=10', {
+        headers: { Accept: 'application/vnd.github+json' },
+        cache: 'no-store',
+      });
+      const ghText = await ghResp.text();
+      if (!ghText.trim().startsWith('[')) {
+        throw new Error('Could not query GitHub Releases API');
+      }
+      const releases = JSON.parse(ghText) as Array<{ tag_name?: string; draft?: boolean }>;
+      const valid = releases.filter((r) => !r.draft && r.tag_name);
+      if (valid.length === 0) {
+        throw new Error('No published releases found on GitHub');
+      }
+      const newestTag = String(valid[0].tag_name || '');
+      const latestVer = newestTag.replace(/^v/i, '');
+      setUpdateStatus((prev) => {
+        const curVer = prev.current_version || snap?.daemon_version || '';
+        const isNewer = curVer ? compareSemverStrings(curVer, latestVer) : false;
+        return {
+          ...prev,
+          current_version: curVer || undefined,
+          latest_version: latestVer,
+          latest_tag: newestTag,
+          update_available: isNewer,
+          checking: false,
+          error: undefined,
+        };
+      });
     } catch (e: any) {
+      const rawMsg = String(e?.message || 'Could not reach update server');
+      const cleanMsg =
+        rawMsg.includes('<!DOCTYPE') || rawMsg.includes('Unexpected token')
+          ? 'Daemon binary needs restart to enable self-update endpoint'
+          : rawMsg;
       setUpdateStatus((prev) => ({
         ...prev,
         checking: false,
-        error: e?.message || 'Could not reach daemon',
+        error: cleanMsg,
       }));
     }
-  }, []);
+  }, [resolveDaemonBaseUrl, compareSemverStrings, snap?.daemon_version]);
 
   const applySimpUpdate = useCallback(async () => {
     setUpdateStatus((prev) => ({ ...prev, applying: true, error: undefined }));
     showToast('Downloading & installing latest SIMP release from GitHub...');
+    const base = resolveDaemonBaseUrl();
     try {
-      const resp = await fetch('/api/update/apply', { method: 'POST', cache: 'no-store' });
-      const data = await resp.json();
+      const resp = await fetch(`${base}/api/update/apply`, { method: 'POST', cache: 'no-store' });
+      const text = await resp.text();
+      if (!text.trim().startsWith('{')) {
+        throw new Error('Daemon binary does not support /api/update/apply yet — rebuild or restart simp --daemon');
+      }
+      const data = JSON.parse(text);
       if (data.ok) {
         const nextVer = String(data.updated_version || '').replace(/^v/, '');
         if (nextVer) {
@@ -265,7 +348,7 @@ const ConsoleMainApp: React.FC = () => {
         await new Promise((r) => window.setTimeout(r, 950));
         for (let attempt = 0; attempt < 15; attempt++) {
           try {
-            const hr = await fetch(`/health?t=${Date.now()}`, { cache: 'no-store' });
+            const hr = await fetch(`${base}/health?t=${Date.now()}`, { cache: 'no-store' });
             if (hr.ok) {
               const hj = await hr.json();
               const reported = String(hj?.version || '').replace(/^v/, '');
@@ -297,7 +380,7 @@ const ConsoleMainApp: React.FC = () => {
       }));
       showToast('Update failed — check network connection');
     }
-  }, [showToast]);
+  }, [resolveDaemonBaseUrl, showToast]);
 
   const dismissConsole = useCallback(() => {
     if (window.parent && window.parent !== window) {
@@ -1278,7 +1361,7 @@ const ConsoleMainApp: React.FC = () => {
             }}
           >
             <span>
-              🌙 SIMP OLED Sleep • {snap?.is_playing && track ? `▶ ${track.title}` : 'Standby'}
+              🌙 SIMP Screen Sleep • {snap?.is_playing && track ? `▶ ${track.title}` : 'Standby'}
             </span>
             <span style={{ fontSize: 11 }}>Tap anywhere or press any button to wake</span>
           </div>

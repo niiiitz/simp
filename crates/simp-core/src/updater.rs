@@ -112,7 +112,8 @@ fn fetch_github_releases_bytes(api_url: &str) -> Result<Vec<u8>> {
         None,
         12,
     ) {
-        if !bytes.is_empty() {
+        let trimmed = bytes.iter().copied().skip_while(|b| b.is_ascii_whitespace()).next();
+        if trimmed == Some(b'[') {
             return Ok(bytes);
         }
     }
@@ -135,12 +136,18 @@ fn fetch_github_releases_bytes(api_url: &str) -> Result<Vec<u8>> {
     ]);
     crate::configure_background_command(&mut cmd);
     if let Ok(out) = cmd.output() {
-        if out.status.success() && !out.stdout.is_empty() {
+        let trimmed = out
+            .stdout
+            .iter()
+            .copied()
+            .skip_while(|b| b.is_ascii_whitespace())
+            .next();
+        if out.status.success() && trimmed == Some(b'[') {
             return Ok(out.stdout);
         }
     }
 
-    Err(anyhow!("GitHub API request failed for {api_url}"))
+    Err(anyhow!("GitHub Releases API request failed for {api_url}"))
 }
 
 /// Queries GitHub Releases (`niiiitz/simp` or configured `github_releases_api_url` in `settings.vdf`)

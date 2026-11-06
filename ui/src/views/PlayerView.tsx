@@ -383,7 +383,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           flexDirection: 'column',
           gap: 22,
           minWidth: 0,
-          overflow: 'hidden',
+          overflow: 'visible',
           position: 'relative',
         }}
       >
@@ -421,130 +421,141 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           </p>
         </div>
 
-        {/* Ephemeral SoundCloud Timed Comment Speech Bubbles (Synced to Track Playhead) */}
-        {isSoundCloudTrack && scCommentsEnabled && activeBubbles.length > 0 && (
-          <div
-            style={{
-              display: 'flex',
-              gap: 10,
-              flexWrap: 'wrap',
-              pointerEvents: 'none',
-              marginBottom: -10,
-              marginTop: -6,
-              minHeight: 46,
-            }}
-          >
-            {activeBubbles.map((b) => (
-              <div
-                key={b.comment.id}
-                style={{
-                  position: 'relative',
-                  maxWidth: '48%',
-                  minWidth: 200,
-                  padding: '8px 12px',
-                  borderRadius: 14,
-                  borderBottomLeftRadius: b.slot === 0 ? 4 : 14,
-                  borderBottomRightRadius: b.slot === 1 ? 4 : 14,
-                  background: 'rgba(16, 14, 22, 0.94)',
-                  border: '1px solid rgba(251, 146, 60, 0.45)',
-                  boxShadow: '0 8px 22px rgba(0, 0, 0, 0.75)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                }}
-              >
-                {b.comment.avatar_url ? (
-                  <img
-                    src={b.comment.avatar_url}
-                    alt=""
-                    style={{
-                      width: 28,
-                      height: 28,
-                      borderRadius: 99,
-                      objectFit: 'cover',
-                      border: '1px solid #ea580c',
-                      flexShrink: 0,
-                    }}
-                  />
-                ) : (
+        <div style={{ position: 'relative', width: '100%' }}>
+          {/* Ephemeral SoundCloud Timed Comment Speech Bubbles (Out-of-flow overlay above scrub rail — never shifts track metadata) */}
+          {isSoundCloudTrack && scCommentsEnabled && activeBubbles.length > 0 && (
+            <div
+              style={{
+                position: 'absolute',
+                bottom: 'calc(100% - 10px)',
+                left: 14,
+                right: 14,
+                display: 'flex',
+                justifyContent: 'flex-start',
+                gap: 10,
+                pointerEvents: 'none',
+                zIndex: 25,
+              }}
+            >
+              {activeBubbles.map((b) => {
+                const dur = track?.duration_ms || 0;
+                const pct =
+                  dur > 0 && Number.isFinite(b.comment.timestamp_ms)
+                    ? Math.max(0, Math.min(54, (b.comment.timestamp_ms / dur) * 100))
+                    : 0;
+                return (
                   <div
+                    key={b.comment.id}
                     style={{
-                      width: 28,
-                      height: 28,
-                      borderRadius: 99,
-                      background: '#27150c',
-                      border: '1px solid #ea580c',
+                      marginLeft: b.slot === 0 && activeBubbles.length === 1 ? `${pct}%` : 0,
+                      maxWidth: activeBubbles.length > 1 ? '48%' : '68%',
+                      minWidth: 190,
+                      padding: '6px 11px',
+                      borderRadius: 12,
+                      borderBottomLeftRadius: b.slot === 0 ? 3 : 12,
+                      borderBottomRightRadius: b.slot === 1 ? 3 : 12,
+                      background: 'rgba(14, 12, 20, 0.96)',
+                      border: '1px solid rgba(251, 146, 60, 0.55)',
+                      boxShadow: '0 8px 22px rgba(0, 0, 0, 0.85)',
                       display: 'flex',
                       alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: 13,
-                      flexShrink: 0,
+                      gap: 9,
                     }}
                   >
-                    💬
+                    {b.comment.avatar_url ? (
+                      <img
+                        src={b.comment.avatar_url}
+                        alt=""
+                        style={{
+                          width: 24,
+                          height: 24,
+                          borderRadius: 99,
+                          objectFit: 'cover',
+                          border: '1px solid #ea580c',
+                          flexShrink: 0,
+                        }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: 24,
+                          height: 24,
+                          borderRadius: 99,
+                          background: '#27150c',
+                          border: '1px solid #ea580c',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: 12,
+                          flexShrink: 0,
+                        }}
+                      >
+                        💬
+                      </div>
+                    )}
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          fontSize: 10,
+                          fontFamily: 'monospace',
+                          color: '#fdba74',
+                          fontWeight: 800,
+                        }}
+                      >
+                        <span
+                          style={{
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          @{b.comment.username}
+                        </span>
+                        <span
+                          style={{
+                            padding: '1px 5px',
+                            borderRadius: 5,
+                            background: '#27150c',
+                            border: '1px solid #7c2d12',
+                            color: '#fb923c',
+                            fontSize: 9,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {formatCommentTs(b.comment.timestamp_ms)}
+                        </span>
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 11.5,
+                          color: '#f4f4f6',
+                          marginTop: 1,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        “{b.comment.body.slice(0, 110)}”
+                      </div>
+                    </div>
                   </div>
-                )}
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      fontSize: 11,
-                      fontFamily: 'monospace',
-                      color: '#fdba74',
-                      fontWeight: 800,
-                    }}
-                  >
-                    <span
-                      style={{
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      @{b.comment.username}
-                    </span>
-                    <span
-                      style={{
-                        padding: '1px 5px',
-                        borderRadius: 5,
-                        background: '#27150c',
-                        border: '1px solid #7c2d12',
-                        color: '#fb923c',
-                        fontSize: 10,
-                        flexShrink: 0,
-                      }}
-                    >
-                      {formatCommentTs(b.comment.timestamp_ms)}
-                    </span>
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: '#e4e4ec',
-                      marginTop: 2,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    “{b.comment.body.slice(0, 110)}”
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+                );
+              })}
+            </div>
+          )}
 
-        <ProgressBarRaf
-          durationMs={track?.duration_ms ?? 0}
-          waveformBars={isSoundCloudTrack ? scWaveformBars : null}
-          commentTimestampsMs={
-            isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
-          }
-          onPlayheadTick={isSoundCloudTrack ? handlePlayheadTick : undefined}
-        />
+          <ProgressBarRaf
+            durationMs={track?.duration_ms ?? 0}
+            waveformBars={isSoundCloudTrack ? scWaveformBars : null}
+            commentTimestampsMs={
+              isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
+            }
+            onPlayheadTick={isSoundCloudTrack ? handlePlayheadTick : undefined}
+          />
+        </div>
 
         {/* Symmetrical Transport Row: Rewind (L2) | Prev (◄) | Play/Pause (A) | Next (►) | Fast-Forward (R2) */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>

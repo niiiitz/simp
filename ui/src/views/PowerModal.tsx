@@ -136,7 +136,7 @@ export const PowerModal: React.FC<PowerModalProps> = ({
           </button>
         </div>
 
-        {/* 0. Storage Mounts, Sources & Apple Music Authentication Node */}
+        {/* 0. Folders & Connected Accounts Node */}
         <button
           data-default-focus="true"
           onClick={() => {
@@ -160,10 +160,10 @@ export const PowerModal: React.FC<PowerModalProps> = ({
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
             <span style={{ fontSize: 13, fontWeight: 800 }}>
-              ⚙ Storage Mounts, Sources & Apple Music Auth
+              ⚙ Folders & Connected Accounts
             </span>
             <span style={{ fontSize: 11, color: '#8e8e99' }}>
-              Manage local folders, optical disc drive, and Apple Music account pairing
+              Manage local folders, optical disc drive, Apple Music, and SoundCloud accounts
             </span>
           </div>
           <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#67e8f9', fontWeight: 800 }}>
@@ -194,7 +194,7 @@ export const PowerModal: React.FC<PowerModalProps> = ({
           >
             <span style={{ fontSize: 13, fontWeight: 800 }}>🌙 Sleep Screen</span>
             <span style={{ fontSize: 11, color: '#8e8e99' }}>
-              True-black OLED screen • Wakes on any button
+              True-black screen • Wakes on any button
             </span>
           </button>
 
@@ -250,7 +250,7 @@ export const PowerModal: React.FC<PowerModalProps> = ({
           </button>
         </div>
 
-        {/* 1b. Gamepad-Accessible OLED Screen Brightness Control (`Start` menu) */}
+        {/* 1b. Gamepad-Accessible Screen Brightness Control (`Start` menu) */}
         <div
           style={{
             padding: '10px 14px',
@@ -270,7 +270,7 @@ export const PowerModal: React.FC<PowerModalProps> = ({
             }}
           >
             <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
-              🔅 OLED Active Luminance ({brightnessPct}%)
+              🔅 Screen Brightness ({brightnessPct}%)
             </span>
             <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#71717a' }}>
               Idle Dim: {Math.round(brightnessPct * 0.5)}%
@@ -623,7 +623,7 @@ export const PowerModal: React.FC<PowerModalProps> = ({
                   ⚠️ Confirm Hard Reset?
                 </div>
                 <div style={{ fontSize: 11, color: '#fca5a5', lineHeight: 1.4 }}>
-                  This will sign out of Apple Music, clear all playlists, pinned albums, cached tracks, and reset all SIMP settings to factory defaults.
+                  This will sign out of Apple Music and SoundCloud, clear all playlists, pinned albums, cached tracks, and reset all SIMP settings to factory defaults.
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button
