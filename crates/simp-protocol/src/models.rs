@@ -8,6 +8,8 @@ pub enum ActiveEngine {
     AppleMusic,
     #[serde(rename = "soundcloud")]
     SoundCloud,
+    #[serde(rename = "internet_archive")]
+    InternetArchive,
     #[default]
     None,
 }
@@ -52,7 +54,7 @@ pub struct PlaylistRecord {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub origin: String, // "simp_mixed" | "apple_remote" | "soundcloud_remote"
+    pub origin: String, // "simp_mixed" | "apple_remote" | "soundcloud_remote" | "archive_remote"
     pub cover_art_url: Option<String>,
     pub track_count: usize,
     pub updated_at: i64,
@@ -62,6 +64,8 @@ pub struct PlaylistRecord {
     pub has_apple: bool,
     #[serde(default)]
     pub has_soundcloud: bool,
+    #[serde(default)]
+    pub has_archive: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -117,6 +121,63 @@ pub struct DvdTitleInfo {
     pub chapters: Vec<DvdChapterInfo>,
     pub audio_tracks: Vec<DvdAudioTrack>,
     pub subtitle_tracks: Vec<DvdSubtitleTrack>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct VideoQualityVariant {
+    pub label: String,
+    pub format: String,
+    pub stream_url: String,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct VideoSubtitleVariant {
+    pub id: String,
+    pub lang_code: String,
+    pub label: String,
+    pub vtt_url: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct VideoEpisodeItem {
+    pub episode_number: u16,
+    pub label: String,
+    pub duration_ms: u32,
+    pub qualities: Vec<VideoQualityVariant>,
+    pub subtitles: Vec<VideoSubtitleVariant>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ArchiveItemSummary {
+    pub identifier: String,
+    pub title: String,
+    pub creator: String,
+    pub mediatype: String, // "movies" | "audio" | "etree"
+    #[serde(default)]
+    pub year: Option<i32>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub art_url: Option<String>,
+    #[serde(default)]
+    pub downloads: u64,
+    #[serde(default)]
+    pub views_7d: u64,
+    #[serde(default)]
+    pub views_30d: u64,
+    #[serde(default)]
+    pub runtime_label: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ArchiveItemDetail {
+    pub summary: ArchiveItemSummary,
+    #[serde(default)]
+    pub episodes: Vec<VideoEpisodeItem>,
+    #[serde(default)]
+    pub tracks: Vec<TrackMetadata>,
 }
 
 /// Ephemeral Optical Disc (`cdda://` Audio CD or `dvd://` DVD-Video) status & resolved metadata
@@ -266,6 +327,14 @@ pub struct ServiceSettings {
     pub soundcloud_auth_mode: String,
     #[serde(default)]
     pub soundcloud_username: String,
+    #[serde(default)]
+    pub internet_archive_enabled: bool,
+    #[serde(default)]
+    pub internet_archive_username: String,
+    #[serde(default)]
+    pub internet_archive_access_key: String,
+    #[serde(default)]
+    pub internet_archive_secret_key: String,
 }
 
 impl Default for SimpSettings {
@@ -312,6 +381,10 @@ impl Default for SimpSettings {
                 soundcloud_token_expires_at: 0,
                 soundcloud_auth_mode: String::new(),
                 soundcloud_username: String::new(),
+                internet_archive_enabled: false,
+                internet_archive_username: String::new(),
+                internet_archive_access_key: String::new(),
+                internet_archive_secret_key: String::new(),
             },
             provisioning: ProvisioningSettings::default(),
         }

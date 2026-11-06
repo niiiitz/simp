@@ -1,4 +1,4 @@
-export type ActiveEngine = 'local' | 'apple_music' | 'soundcloud' | 'none';
+export type ActiveEngine = 'local' | 'apple_music' | 'soundcloud' | 'internet_archive' | 'none';
 export type RepeatMode = 'off' | 'queue' | 'track';
 
 export interface TrackMetadata {
@@ -36,6 +36,7 @@ export interface PlaylistRecord {
   has_local?: boolean;
   has_apple?: boolean;
   has_soundcloud?: boolean;
+  has_archive?: boolean;
 }
 
 export interface MountStatus {
@@ -67,8 +68,59 @@ export interface SimpStateSnapshot {
   power: PowerState;
   apple_authenticated: boolean;
   soundcloud_authenticated?: boolean;
+  internet_archive_authenticated?: boolean;
   brightness_pct?: number;
   daemon_version?: string;
+}
+
+export interface InternetArchiveConfig {
+  enabled: boolean;
+  internet_archive_authenticated: boolean;
+  username: string;
+  has_access_key: boolean;
+  has_secret_key: boolean;
+}
+
+export interface VideoQualityVariant {
+  label: string;
+  format: string;
+  stream_url: string;
+  size_bytes?: number | null;
+}
+
+export interface VideoSubtitleVariant {
+  id: string;
+  lang_code: string;
+  label: string;
+  vtt_url: string;
+}
+
+export interface VideoEpisodeItem {
+  episode_number: number;
+  label: string;
+  duration_ms: number;
+  qualities: VideoQualityVariant[];
+  subtitles: VideoSubtitleVariant[];
+}
+
+export interface ArchiveItemSummary {
+  identifier: string;
+  title: string;
+  creator: string;
+  mediatype: string;
+  year?: number | null;
+  description: string;
+  art_url?: string | null;
+  downloads: number;
+  views_7d: number;
+  views_30d: number;
+  runtime_label?: string | null;
+}
+
+export interface ArchiveItemDetail {
+  summary: ArchiveItemSummary;
+  episodes: VideoEpisodeItem[];
+  tracks: TrackMetadata[];
 }
 
 export interface SoundCloudAuthConfig {

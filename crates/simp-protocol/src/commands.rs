@@ -57,6 +57,18 @@ pub enum AudioCommand {
     },
     #[serde(rename = "disconnect_soundcloud")]
     DisconnectSoundCloud,
+    #[serde(rename = "configure_internet_archive")]
+    ConfigureInternetArchive {
+        enabled: bool,
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        access_key: String,
+        #[serde(default)]
+        secret_key: String,
+    },
+    #[serde(rename = "disconnect_internet_archive")]
+    DisconnectInternetArchive,
     ImportCatalogTracks {
         source: String,
         album: Option<AlbumRecord>,
@@ -132,6 +144,8 @@ pub enum LibraryQuery {
     GetAppleMusicAuthConfig,
     #[serde(rename = "get_soundcloud_auth_config")]
     GetSoundCloudAuthConfig,
+    #[serde(rename = "get_internet_archive_config")]
+    GetInternetArchiveConfig,
     ScanOpticalDisc {
         #[serde(default)]
         device_path: Option<String>,

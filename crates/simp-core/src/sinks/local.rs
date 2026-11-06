@@ -149,8 +149,10 @@ impl LocalAudioEngine {
         let sink = self.sink.as_ref().unwrap();
         sink.stop();
 
-        let is_progressive_stream =
-            uri.starts_with("applemusic:") || uri.starts_with("soundcloud:");
+        let is_progressive_stream = uri.starts_with("applemusic:")
+            || uri.starts_with("soundcloud:")
+            || uri.starts_with("ia:audio:")
+            || uri.starts_with("ia://audio/");
         if uri.starts_with("cdda://") {
             let source = crate::sinks::cdda::CddaTrackSource::open_uri(uri)
                 .with_context(|| format!("Failed to open Audio CD track: {uri}"))?;
@@ -184,6 +186,20 @@ impl LocalAudioEngine {
                     self.user_paused.clone(),
                 )
                 .with_context(|| format!("Failed to load native SoundCloud stream: {uri}"))?;
+            sink.append(source);
+        } else if uri.starts_with("ia:audio:") || uri.starts_with("ia://audio/") {
+            let settings = load_local_settings_vdf();
+            let source =
+                crate::sinks::internet_archive::spawn_progressive_internet_archive_rodio_source(
+                    settings,
+                    uri.to_string(),
+                    start_pos_ms,
+                    epoch,
+                    self.active_epoch.clone(),
+                    self.tracker.clone(),
+                    self.user_paused.clone(),
+                )
+                .with_context(|| format!("Failed to load native Internet Archive stream: {uri}"))?;
             sink.append(source);
         } else {
             let file_path_str = uri.strip_prefix("file://").unwrap_or(uri);

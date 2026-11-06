@@ -4,6 +4,8 @@ pub mod apple_native;
 pub mod cdda;
 #[cfg(feature = "experimental-dvd")]
 pub mod dvd;
+pub mod internet_archive;
+pub mod internet_archive_api;
 pub mod local;
 pub mod soundcloud;
 pub mod soundcloud_api;

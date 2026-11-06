@@ -5,7 +5,7 @@
 
   **A lightweight, controller-friendly music player for SteamOS, Bazzite, Linux desktops, and SteamVR.**
 
-  [![Status: v0.1.0-alpha.56](https://img.shields.io/badge/status-v0.1.0--alpha.56-ff6a00?style=flat-square)](#)
+  [![Status: v0.1.0-alpha.57](https://img.shields.io/badge/status-v0.1.0--alpha.57-ff6a00?style=flat-square)](#)
   [![Target: SteamOS / Linux / SteamVR](https://img.shields.io/badge/target-SteamOS%20%7C%20Linux%20%7C%20SteamVR-000000?style=flat-square)](#)
   [![Backend: 100% Native Rust](https://img.shields.io/badge/backend-Native%20Rust-dea584?style=flat-square)](#)
 </div>
@@ -117,10 +117,20 @@ npm run dev:ui
 
 ---
 
+## Attributions & Provenance
+
+SIMP stands on the shoulders of open-source maintainers, archival institutions, and open technical specifications. In particular:
+
+* **Internet Archive Integration:** Huge thanks to **Jake Johnson ([@jjjake](https://github.com/jjjake))** and the contributors to the [`internetarchive`](https://github.com/jjjake/internetarchive) Python library & CLI, as well as the **[Internet Archive (`archive.org`)](https://archive.org/developers/)** engineering team, whose documentation and client architecture served as the blueprint for SIMP's native Rust Internet Archive client.
+* **Console UX Inspiration:** Inspired by Sony's classic PlayStation 3 **XrossMediaBar (XMB)** spatial controller navigation.
+* **Full Provenance Ledger:** See **[`ATTRIBUTIONS.md`](ATTRIBUTIONS.md)** for complete credits and technical provenance across `Symphonia`, `Rodio`, `Lofty`, VideoLAN (`libdvdcss` / `libdvdread`), `MusicBrainz` & `Cover Art Archive`, Chromium `CDM_10` / ISO `CENC`, `libcurl`, Valve `OpenVR`, and `Decky Loader`.
+
+---
+
 ## Disclaimer
 
 > **Trademark & Non-Affiliation Notice:**
-> **SIMP (Simple Integrated Media Player)** is an independent, third-party open-source project and is **not** affiliated with, endorsed by, sponsored by, or officially connected to **Valve Corporation**, **Apple Inc.**, **SoundCloud**, **MetaBrainz Foundation**, or any of their subsidiaries or affiliates.
+> **SIMP (Simple Integrated Media Player)** is an independent, third-party open-source project and is **not** affiliated with, endorsed by, sponsored by, or officially connected to **Valve Corporation**, **Apple Inc.**, **SoundCloud**, **Internet Archive**, **MetaBrainz Foundation**, or any of their subsidiaries or affiliates.
 >
 > * **Steam**, **SteamOS**, **Steam Deck**, **SteamVR**, and **Steam Frame** are trademarks and/or registered trademarks of **Valve Corporation**.
 > * **Apple**, **Apple Music**, and **MusicKit** are trademarks of **Apple Inc.**

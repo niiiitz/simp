@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { DvdTitleInfo } from '@simp/client';
+import { DvdTitleInfo, VideoEpisodeItem } from '@simp/client';
 
-interface DvdPlayerModalProps {
-  devicePath: string;
+export interface DvdPlayerModalProps {
+  mode?: 'dvd' | 'ia_video' | 'local_video';
+  devicePath?: string;
   discTitle: string;
-  titleInfo: DvdTitleInfo;
+  titleInfo?: DvdTitleInfo;
+  episodes?: VideoEpisodeItem[];
+  initialEpisodeIndex?: number;
   initialChapter?: number;
   initialAudioIndex?: number;
-  initialSubtitleIndex?: string; // 'off' or stream_index string
+  initialSubtitleIndex?: string; // 'off' or stream_index / subtitle id
   onClose: () => void;
 }
 
@@ -23,50 +26,100 @@ const formatDuration = (ms: number): string => {
 };
 
 export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
-  devicePath,
+  mode = 'dvd',
+  devicePath = '/dev/sr0',
   discTitle,
   titleInfo,
+  episodes = [],
+  initialEpisodeIndex = 0,
   initialChapter = 1,
   initialAudioIndex = 0,
   initialSubtitleIndex = 'off',
   onClose,
 }) => {
-  const initialChapterStartMs =
-    titleInfo.chapters.find((c) => c.chapter_number === initialChapter)?.start_ms ?? 0;
+  const isDirectVideo = mode === 'ia_video' || mode === 'local_video' || !titleInfo;
+  const dvdChapters = titleInfo?.chapters ?? [];
+  const dvdAudioTracks = titleInfo?.audio_tracks ?? [];
+  const dvdSubtitleTracks = titleInfo?.subtitle_tracks ?? [];
 
+  const initialChapterStartMs =
+    dvdChapters.find((c) => c.chapter_number === initialChapter)?.start_ms ?? 0;
+
+  const [episodeIdx, setEpisodeIdx] = useState<number>(
+    Math.max(0, Math.min(episodes.length - 1, initialEpisodeIndex))
+  );
+  const [qualityIdx, setQualityIdx] = useState<number>(0);
   const [chapter, setChapter] = useState<number>(initialChapter);
   const [seekMs, setSeekMs] = useState<number | null>(null);
-  const [baseOffsetMs, setBaseOffsetMs] = useState<number>(initialChapterStartMs);
+  const [baseOffsetMs, setBaseOffsetMs] = useState<number>(
+    isDirectVideo ? 0 : initialChapterStartMs
+  );
   const [videoElapsedMs, setVideoElapsedMs] = useState<number>(0);
+  const [nativeDurationMs, setNativeDurationMs] = useState<number>(0);
   const [scrubPreviewMs, setScrubPreviewMs] = useState<number | null>(null);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [audioIdx, setAudioIdx] = useState<number>(
-    titleInfo.audio_tracks[0]?.stream_index ?? initialAudioIndex
+    dvdAudioTracks[0]?.stream_index ?? initialAudioIndex
   );
   const [subIdx, setSubIdx] = useState<string>(initialSubtitleIndex);
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [hudVisible, setHudVisible] = useState<boolean>(true);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const modalRootRef = useRef<HTMLDivElement | null>(null);
+  const pendingResumeSecRef = useRef<number | null>(null);
+  const hudTimerRef = useRef<number | null>(null);
+
+  const activeEpisode: VideoEpisodeItem | undefined = episodes[episodeIdx] ?? episodes[0];
+  const activeQualities = activeEpisode?.qualities ?? [];
+  const activeQuality = activeQualities[qualityIdx] ?? activeQualities[0];
+  const activeSubtitles = activeEpisode?.subtitles ?? [];
+
+  const daemonOrigin =
+    typeof window !== 'undefined' && window.location.port === '18888'
+      ? window.location.origin
+      : 'http://127.0.0.1:18888';
+
+  const resolveUrl = useCallback(
+    (rawUrl: string): string => {
+      if (!rawUrl) return '';
+      if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
+        return rawUrl;
+      }
+      return `${daemonOrigin}${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`;
+    },
+    [daemonOrigin]
+  );
+
+  const streamUrl = isDirectVideo
+    ? resolveUrl(activeQuality?.stream_url ?? '')
+    : `${daemonOrigin}/api/dvd/stream?device=${encodeURIComponent(
+        devicePath
+      )}&title=${titleInfo?.title_number ?? 1}&chapter=${chapter}&audio=${audioIdx}&sub=${encodeURIComponent(
+        subIdx
+      )}${seekMs !== null && seekMs > 0 ? `&seek_ms=${Math.floor(seekMs)}` : ''}`;
 
   const totalDurationMs = Math.max(
     1000,
-    titleInfo.duration_ms ||
-      titleInfo.chapters.reduce((acc, ch) => Math.max(acc, ch.start_ms + ch.duration_ms), 0) ||
-      1000
+    isDirectVideo
+      ? nativeDurationMs || activeEpisode?.duration_ms || 1000
+      : titleInfo?.duration_ms ||
+          dvdChapters.reduce((acc, ch) => Math.max(acc, ch.start_ms + ch.duration_ms), 0) ||
+          1000
   );
 
   const livePositionMs = Math.min(
     totalDurationMs,
-    Math.max(0, baseOffsetMs + videoElapsedMs)
+    Math.max(0, isDirectVideo ? videoElapsedMs : baseOffsetMs + videoElapsedMs)
   );
   const displayPositionMs = scrubPreviewMs !== null ? scrubPreviewMs : livePositionMs;
 
   // Keep active chapter badge synchronized as playback progresses across chapter boundaries
   const activeChapterNumber = React.useMemo(() => {
-    if (!titleInfo.chapters.length) return chapter;
-    let current = titleInfo.chapters[0].chapter_number;
-    for (const ch of titleInfo.chapters) {
+    if (!dvdChapters.length) return chapter;
+    let current = dvdChapters[0].chapter_number;
+    for (const ch of dvdChapters) {
       if (displayPositionMs >= ch.start_ms) {
         current = ch.chapter_number;
       } else {
@@ -74,25 +127,49 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
       }
     }
     return current;
-  }, [titleInfo.chapters, displayPositionMs, chapter]);
+  }, [dvdChapters, displayPositionMs, chapter]);
 
-  const daemonOrigin =
-    typeof window !== 'undefined' && window.location.port === '18888'
-      ? window.location.origin
-      : 'http://127.0.0.1:18888';
+  const wakeHud = useCallback(() => {
+    setHudVisible(true);
+    if (hudTimerRef.current !== null) {
+      window.clearTimeout(hudTimerRef.current);
+      hudTimerRef.current = null;
+    }
+    if (!isPaused) {
+      hudTimerRef.current = window.setTimeout(() => {
+        setHudVisible(false);
+      }, 3500);
+    }
+  }, [isPaused]);
 
-  const streamUrl = `${daemonOrigin}/api/dvd/stream?device=${encodeURIComponent(
-    devicePath
-  )}&title=${titleInfo.title_number}&chapter=${chapter}&audio=${audioIdx}&sub=${encodeURIComponent(
-    subIdx
-  )}${seekMs !== null && seekMs > 0 ? `&seek_ms=${Math.floor(seekMs)}` : ''}`;
+  useEffect(() => {
+    wakeHud();
+    return () => {
+      if (hudTimerRef.current !== null) {
+        window.clearTimeout(hudTimerRef.current);
+      }
+    };
+  }, [isPaused, wakeHud]);
 
   useEffect(() => {
     setStreamError(null);
-    setVideoElapsedMs(0);
-  }, [streamUrl]);
+    if (!isDirectVideo) {
+      setVideoElapsedMs(0);
+    }
+  }, [streamUrl, isDirectVideo]);
 
-  // Place gamepad focus marker on the Play/Pause button when the DVD Player opens
+  // Synchronize HTML5 <track> textTrack mode when subtitle selection changes in direct video mode
+  useEffect(() => {
+    if (!isDirectVideo || !videoRef.current) return;
+    const tracks = videoRef.current.textTracks;
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i];
+      const matchSub = activeSubtitles[i];
+      t.mode = matchSub && matchSub.id === subIdx ? 'showing' : 'hidden';
+    }
+  }, [isDirectVideo, subIdx, activeSubtitles, streamUrl]);
+
+  // Place gamepad focus marker on the Play/Pause button when the Theatre Player opens
   useEffect(() => {
     const t = window.setTimeout(() => {
       const defaultBtn = modalRootRef.current?.querySelector<HTMLElement>(
@@ -114,31 +191,53 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
 
   const jumpToTimeMs = useCallback(
     (targetMs: number) => {
+      wakeHud();
       const clamped = Math.max(0, Math.min(totalDurationMs - 500, Math.floor(targetMs)));
       setScrubPreviewMs(null);
-      setBaseOffsetMs(clamped);
-      setVideoElapsedMs(0);
-      setSeekMs(clamped);
+      if (isDirectVideo) {
+        if (videoRef.current) {
+          videoRef.current.currentTime = clamped / 1000;
+        }
+        setVideoElapsedMs(clamped);
+      } else {
+        setBaseOffsetMs(clamped);
+        setVideoElapsedMs(0);
+        setSeekMs(clamped);
+      }
     },
-    [totalDurationMs]
+    [totalDurationMs, isDirectVideo, wakeHud]
   );
 
   const jumpToChapter = useCallback(
     (chapterNum: number) => {
-      const chInfo = titleInfo.chapters.find((c) => c.chapter_number === chapterNum);
+      wakeHud();
+      const chInfo = dvdChapters.find((c) => c.chapter_number === chapterNum);
       setScrubPreviewMs(null);
       setChapter(chapterNum);
       setSeekMs(null);
       setBaseOffsetMs(chInfo?.start_ms ?? 0);
       setVideoElapsedMs(0);
     },
-    [titleInfo.chapters]
+    [dvdChapters, wakeHud]
+  );
+
+  const jumpToEpisode = useCallback(
+    (nextEpIdx: number) => {
+      wakeHud();
+      if (nextEpIdx < 0 || nextEpIdx >= episodes.length) return;
+      setScrubPreviewMs(null);
+      setEpisodeIdx(nextEpIdx);
+      setQualityIdx(0);
+      setVideoElapsedMs(0);
+      setNativeDurationMs(0);
+      pendingResumeSecRef.current = null;
+    },
+    [episodes.length, wakeHud]
   );
 
   const preservePositionForStreamSwitch = useCallback(() => {
-    const activeCh = titleInfo.chapters.find((c) => c.chapter_number === activeChapterNumber);
+    const activeCh = dvdChapters.find((c) => c.chapter_number === activeChapterNumber);
     const chStart = activeCh?.start_ms ?? 0;
-    // If within the first 6 seconds of the active chapter, start cleanly from the chapter boundary
     if (livePositionMs - chStart < 6000) {
       setChapter(activeChapterNumber);
       setBaseOffsetMs(chStart);
@@ -149,26 +248,59 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
       setSeekMs(Math.floor(livePositionMs));
     }
     setVideoElapsedMs(0);
-  }, [titleInfo.chapters, activeChapterNumber, livePositionMs]);
+  }, [dvdChapters, activeChapterNumber, livePositionMs]);
 
-  const cycleAudioTrack = useCallback(() => {
-    if (titleInfo.audio_tracks.length <= 1) return;
-    const curPos = titleInfo.audio_tracks.findIndex((a) => a.stream_index === audioIdx);
-    const nextPos = (curPos + 1) % titleInfo.audio_tracks.length;
+  const cycleAudioOrQuality = useCallback(() => {
+    wakeHud();
+    if (isDirectVideo) {
+      if (activeQualities.length <= 1) return;
+      if (videoRef.current && videoRef.current.currentTime > 1) {
+        pendingResumeSecRef.current = videoRef.current.currentTime;
+      }
+      setQualityIdx((prev) => (prev + 1) % activeQualities.length);
+      return;
+    }
+    if (dvdAudioTracks.length <= 1) return;
+    const curPos = dvdAudioTracks.findIndex((a) => a.stream_index === audioIdx);
+    const nextPos = (curPos + 1) % dvdAudioTracks.length;
     preservePositionForStreamSwitch();
-    setAudioIdx(titleInfo.audio_tracks[nextPos].stream_index);
-  }, [titleInfo.audio_tracks, audioIdx, preservePositionForStreamSwitch]);
+    setAudioIdx(dvdAudioTracks[nextPos].stream_index);
+  }, [
+    wakeHud,
+    isDirectVideo,
+    activeQualities.length,
+    dvdAudioTracks,
+    audioIdx,
+    preservePositionForStreamSwitch,
+  ]);
 
   const cycleSubtitleTrack = useCallback(() => {
-    if (titleInfo.subtitle_tracks.length === 0) return;
-    const options = ['off', ...titleInfo.subtitle_tracks.map((s) => String(s.stream_index))];
+    wakeHud();
+    if (isDirectVideo) {
+      if (activeSubtitles.length === 0) return;
+      const options = ['off', ...activeSubtitles.map((s) => s.id)];
+      const curPos = options.indexOf(subIdx);
+      const nextPos = (curPos + 1) % options.length;
+      setSubIdx(options[nextPos]);
+      return;
+    }
+    if (dvdSubtitleTracks.length === 0) return;
+    const options = ['off', ...dvdSubtitleTracks.map((s) => String(s.stream_index))];
     const curPos = options.indexOf(subIdx);
     const nextPos = (curPos + 1) % options.length;
     preservePositionForStreamSwitch();
     setSubIdx(options[nextPos]);
-  }, [titleInfo.subtitle_tracks, subIdx, preservePositionForStreamSwitch]);
+  }, [
+    wakeHud,
+    isDirectVideo,
+    activeSubtitles,
+    dvdSubtitleTracks,
+    subIdx,
+    preservePositionForStreamSwitch,
+  ]);
 
   const togglePlayPause = useCallback(() => {
+    wakeHud();
     const el = videoRef.current;
     if (!el) return;
     if (el.paused) {
@@ -176,16 +308,18 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
     } else {
       el.pause();
     }
-  }, []);
+  }, [wakeHud]);
 
   const toggleMute = useCallback(() => {
+    wakeHud();
     const el = videoRef.current;
     if (!el) return;
     el.muted = !el.muted;
     setIsMuted(el.muted);
-  }, []);
+  }, [wakeHud]);
 
   const toggleFullscreen = useCallback(() => {
+    wakeHud();
     const el = modalRootRef.current || videoRef.current;
     if (!el) return;
     if (document.fullscreenElement) {
@@ -193,11 +327,12 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
     } else {
       el.requestFullscreen?.().catch(() => {});
     }
-  }, []);
+  }, [wakeHud]);
 
   // Listen for direct controller buttons (`A`, `B`, `X`, `Y`, `L1`, `R1`, `L2`, `R2`, `Select`, Scrubber D-Pad)
   useEffect(() => {
     const onGamepadOp = (ev: Event) => {
+      wakeHud();
       const op = (ev as CustomEvent<{ op: string }>).detail?.op;
       switch (op) {
         case 'close':
@@ -207,21 +342,33 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
           togglePlayPause();
           break;
         case 'cycle-audio':
-          cycleAudioTrack();
+          cycleAudioOrQuality();
           break;
         case 'cycle-subtitles':
           cycleSubtitleTrack();
           break;
         case 'prev-chapter':
-          if (titleInfo.chapters.length > 1) {
+          if (isDirectVideo) {
+            if (episodes.length > 1) {
+              jumpToEpisode(Math.max(0, episodeIdx - 1));
+            } else {
+              jumpToTimeMs(livePositionMs - 30000);
+            }
+          } else if (dvdChapters.length > 1) {
             jumpToChapter(Math.max(1, activeChapterNumber - 1));
           } else {
             jumpToTimeMs(livePositionMs - 30000);
           }
           break;
         case 'next-chapter':
-          if (titleInfo.chapters.length > 1) {
-            jumpToChapter(Math.min(titleInfo.chapters.length, activeChapterNumber + 1));
+          if (isDirectVideo) {
+            if (episodes.length > 1) {
+              jumpToEpisode(Math.min(episodes.length - 1, episodeIdx + 1));
+            } else {
+              jumpToTimeMs(livePositionMs + 30000);
+            }
+          } else if (dvdChapters.length > 1) {
+            jumpToChapter(Math.min(dvdChapters.length, activeChapterNumber + 1));
           } else {
             jumpToTimeMs(livePositionMs + 30000);
           }
@@ -255,14 +402,19 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
     window.addEventListener('simp-dvd-gamepad-op', onGamepadOp);
     return () => window.removeEventListener('simp-dvd-gamepad-op', onGamepadOp);
   }, [
+    wakeHud,
     onClose,
     togglePlayPause,
-    cycleAudioTrack,
+    cycleAudioOrQuality,
     cycleSubtitleTrack,
+    isDirectVideo,
+    episodes.length,
+    episodeIdx,
+    jumpToEpisode,
     jumpToChapter,
     jumpToTimeMs,
     toggleFullscreen,
-    titleInfo.chapters.length,
+    dvdChapters.length,
     activeChapterNumber,
     livePositionMs,
     totalDurationMs,
@@ -271,6 +423,7 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      wakeHud();
       if (e.key === 'Escape') {
         e.preventDefault();
         onClose();
@@ -281,65 +434,83 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, togglePlayPause]);
+  }, [onClose, togglePlayPause, wakeHud]);
 
-  const currentAudioLabel =
-    titleInfo.audio_tracks.find((a) => a.stream_index === audioIdx)?.label ||
-    titleInfo.audio_tracks[0]?.label ||
-    'Default';
+  const currentAudioOrQualityLabel = isDirectVideo
+    ? activeQuality?.label || 'Standard'
+    : dvdAudioTracks.find((a) => a.stream_index === audioIdx)?.label ||
+      dvdAudioTracks[0]?.label ||
+      'Default';
 
   const currentSubLabel =
     subIdx === 'off'
       ? 'Off'
-      : titleInfo.subtitle_tracks.find((s) => String(s.stream_index) === subIdx)?.label ||
-        `Track ${subIdx}`;
+      : isDirectVideo
+        ? activeSubtitles.find((s) => s.id === subIdx)?.label || 'Captions'
+        : dvdSubtitleTracks.find((s) => String(s.stream_index) === subIdx)?.label ||
+          `Track ${subIdx}`;
 
   const progressPct = Math.min(100, Math.max(0, (displayPositionMs / totalDurationMs) * 100));
+
+  const subtitleLabelText = isDirectVideo
+    ? activeEpisode
+      ? `${activeEpisode.label}${episodes.length > 1 ? ` • Part ${episodeIdx + 1}/${episodes.length}` : ''} • ${formatDuration(displayPositionMs)} / ${formatDuration(totalDurationMs)}`
+      : `${formatDuration(displayPositionMs)} / ${formatDuration(totalDurationMs)}`
+    : `Title ${titleInfo?.title_number ?? 1} • Chapter ${activeChapterNumber}/${Math.max(1, dvdChapters.length)} • ${titleInfo?.aspect_ratio ?? '16:9'} • ${formatDuration(displayPositionMs)} / ${formatDuration(totalDurationMs)}`;
+
+  const hudTransitionStyle: React.CSSProperties = {
+    opacity: hudVisible || isPaused ? 1 : 0,
+    pointerEvents: hudVisible || isPaused ? 'auto' : 'none',
+    transition: 'opacity 220ms ease',
+  };
 
   return (
     <div
       ref={modalRootRef}
       data-modal-root="true"
       data-dvd-modal="true"
+      onMouseMove={wakeHud}
+      onClick={wakeHud}
       style={{
         position: 'fixed',
         inset: 0,
         zIndex: 9999,
-        background: 'rgba(4, 6, 12, 0.96)',
+        background: '#03050a',
         display: 'flex',
         flexDirection: 'column',
         padding: '14px 18px',
         color: '#f8fafc',
       }}
     >
-      {/* Top Theatre Header */}
+      {/* Top Theatre Header (Auto-hides after 3.5s during playback) */}
       <div
         style={{
+          ...hudTransitionStyle,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           gap: '12px',
           paddingBottom: '10px',
-          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
           flexWrap: 'wrap',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
           <button
             data-gamepad-item
             onClick={onClose}
             style={{
-              background: 'rgba(255,255,255,0.1)',
-              border: '1px solid rgba(255,255,255,0.2)',
+              background: 'rgba(255,255,255,0.08)',
+              border: '1px solid rgba(255,255,255,0.18)',
               color: '#f8fafc',
-              borderRadius: '8px',
+              borderRadius: '7px',
               padding: '6px 12px',
               fontSize: '12px',
-              fontWeight: 700,
+              fontWeight: 600,
               cursor: 'pointer',
             }}
           >
-            ← Back (B)
+            Back (B)
           </button>
           <div style={{ minWidth: 0 }}>
             <div
@@ -351,23 +522,19 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
                 textOverflow: 'ellipsis',
               }}
             >
-              📀 {discTitle} — {titleInfo.label}
+              {discTitle}
+              {!isDirectVideo && titleInfo?.label ? ` — ${titleInfo.label}` : ''}
             </div>
-            <div style={{ fontSize: '11px', color: '#94a3b8' }}>
-              Title {titleInfo.title_number} • Chapter {activeChapterNumber}/
-              {Math.max(1, titleInfo.chapters.length)} • {titleInfo.aspect_ratio} •{' '}
-              {formatDuration(displayPositionMs)} / {formatDuration(totalDurationMs)}
-            </div>
+            <div style={{ fontSize: '11px', color: '#94a3b8' }}>{subtitleLabelText}</div>
           </div>
         </div>
 
-        {/* Controller-Friendly Audio (X), Subtitle (Y) & Fullscreen (Select) Cycle Buttons */}
+        {/* Controller-Friendly Quality/Audio (X), Subtitle (Y) & Fullscreen Cycle Buttons */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          {titleInfo.audio_tracks.length > 0 && (
+          {(isDirectVideo ? activeQualities.length > 0 : dvdAudioTracks.length > 0) && (
             <button
               data-gamepad-item
-              onClick={cycleAudioTrack}
-              title="Click or press X on controller to cycle audio tracks"
+              onClick={cycleAudioOrQuality}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -375,26 +542,29 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
                 fontSize: '11px',
                 fontWeight: 600,
                 color: '#e2e8f0',
-                background: 'rgba(255,255,255,0.08)',
+                background: 'rgba(255,255,255,0.07)',
                 padding: '5px 10px',
                 borderRadius: '6px',
-                border: '1px solid rgba(255,255,255,0.16)',
-                cursor: titleInfo.audio_tracks.length > 1 ? 'pointer' : 'default',
+                border: '1px solid rgba(255,255,255,0.15)',
+                cursor:
+                  (isDirectVideo ? activeQualities.length : dvdAudioTracks.length) > 1
+                    ? 'pointer'
+                    : 'default',
               }}
             >
-              <span>🔊 Audio (X):</span>
-              <span style={{ color: '#38bdf8', fontWeight: 700 }}>{currentAudioLabel}</span>
-              {titleInfo.audio_tracks.length > 1 && (
-                <span style={{ fontSize: '10px', color: '#94a3b8' }}>▸</span>
-              )}
+              <span style={{ color: '#94a3b8' }}>
+                {isDirectVideo ? 'Quality (X):' : 'Audio (X):'}
+              </span>
+              <span style={{ color: '#38bdf8', fontWeight: 700 }}>
+                {currentAudioOrQualityLabel}
+              </span>
             </button>
           )}
 
-          {titleInfo.subtitle_tracks.length > 0 && (
+          {(isDirectVideo ? activeSubtitles.length > 0 : dvdSubtitleTracks.length > 0) && (
             <button
               data-gamepad-item
               onClick={cycleSubtitleTrack}
-              title="Click or press Y on controller to cycle subtitle tracks"
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -403,28 +573,25 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
                 fontWeight: 600,
                 color: '#e2e8f0',
                 background:
-                  subIdx !== 'off'
-                    ? 'rgba(56, 189, 248, 0.16)'
-                    : 'rgba(255,255,255,0.08)',
+                  subIdx !== 'off' ? 'rgba(56, 189, 248, 0.14)' : 'rgba(255,255,255,0.07)',
                 padding: '5px 10px',
                 borderRadius: '6px',
                 border:
                   subIdx !== 'off'
-                    ? '1px solid rgba(56, 189, 248, 0.45)'
-                    : '1px solid rgba(255,255,255,0.16)',
+                    ? '1px solid rgba(56, 189, 248, 0.42)'
+                    : '1px solid rgba(255,255,255,0.15)',
                 cursor: 'pointer',
               }}
             >
-              <span>💬 Subtitles (Y):</span>
+              <span style={{ color: '#94a3b8' }}>Subtitles (Y):</span>
               <span
                 style={{
-                  color: subIdx !== 'off' ? '#38bdf8' : '#94a3b8',
+                  color: subIdx !== 'off' ? '#38bdf8' : '#cbd5e1',
                   fontWeight: 700,
                 }}
               >
                 {currentSubLabel}
               </span>
-              <span style={{ fontSize: '10px', color: '#94a3b8' }}>▸</span>
             </button>
           )}
 
@@ -432,9 +599,9 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
             data-gamepad-item
             onClick={toggleFullscreen}
             style={{
-              background: 'rgba(56, 189, 248, 0.14)',
-              border: '1px solid rgba(56, 189, 248, 0.35)',
-              color: '#38bdf8',
+              background: 'rgba(255,255,255,0.07)',
+              border: '1px solid rgba(255,255,255,0.15)',
+              color: '#cbd5e1',
               borderRadius: '6px',
               padding: '5px 10px',
               fontSize: '11px',
@@ -442,7 +609,7 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
               cursor: 'pointer',
             }}
           >
-            ⛶ Fullscreen
+            Fullscreen
           </button>
         </div>
       </div>
@@ -456,77 +623,117 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
           alignItems: 'center',
           justifyContent: 'center',
           position: 'relative',
-          margin: '10px 0 6px 0',
+          margin: '8px 0',
           background: '#000',
-          borderRadius: '10px',
+          borderRadius: '8px',
           overflow: 'hidden',
-          border: '1px solid rgba(255,255,255,0.08)',
         }}
       >
         <video
           ref={videoRef}
           key={streamUrl}
           src={streamUrl}
+          crossOrigin="anonymous"
           autoPlay
           playsInline
           onClick={togglePlayPause}
           onPlay={() => setIsPaused(false)}
           onPause={() => setIsPaused(true)}
+          onLoadedMetadata={(e) => {
+            const dur = e.currentTarget.duration;
+            if (Number.isFinite(dur) && dur > 0) {
+              setNativeDurationMs(Math.floor(dur * 1000));
+            }
+            if (pendingResumeSecRef.current !== null) {
+              e.currentTarget.currentTime = pendingResumeSecRef.current;
+              pendingResumeSecRef.current = null;
+            }
+          }}
+          onDurationChange={(e) => {
+            const dur = e.currentTarget.duration;
+            if (Number.isFinite(dur) && dur > 0) {
+              setNativeDurationMs(Math.floor(dur * 1000));
+            }
+          }}
           onTimeUpdate={(e) => {
             const sec = e.currentTarget.currentTime;
             if (Number.isFinite(sec) && sec >= 0) {
               setVideoElapsedMs(Math.floor(sec * 1000));
             }
           }}
-          onError={() =>
+          onEnded={() => {
+            if (isDirectVideo && episodes.length > 1 && episodeIdx + 1 < episodes.length) {
+              jumpToEpisode(episodeIdx + 1);
+            }
+          }}
+          onError={() => {
+            if (isDirectVideo && qualityIdx + 1 < activeQualities.length) {
+              setQualityIdx((prev) => prev + 1);
+              return;
+            }
             setStreamError(
-              'DVD stream interrupted or failed to start. Try selecting another chapter/track or verify ffmpeg and VLC / libdvdcss are available.'
-            )
-          }
+              isDirectVideo
+                ? 'Video stream unavailable for this format. Press X to switch quality.'
+                : 'DVD stream interrupted. Select another chapter or verify ffmpeg / libdvdcss.'
+            );
+          }}
           style={{
             width: '100%',
             height: '100%',
             maxHeight: '100%',
             objectFit: 'contain',
             background: '#000',
-            cursor: 'pointer',
+            cursor: hudVisible ? 'pointer' : 'none',
           }}
-        />
+        >
+          {isDirectVideo &&
+            activeSubtitles.map((sub) => (
+              <track
+                key={sub.id}
+                kind="subtitles"
+                src={resolveUrl(sub.vtt_url)}
+                srcLang={sub.lang_code || 'en'}
+                label={sub.label}
+                default={sub.id === subIdx}
+              />
+            ))}
+        </video>
+
         {streamError && (
           <div
             style={{
               position: 'absolute',
-              bottom: '20px',
+              bottom: '16px',
               left: '20px',
               right: '20px',
               background: 'rgba(127, 29, 29, 0.92)',
-              border: '1px solid rgba(248, 113, 113, 0.45)',
+              border: '1px solid rgba(248, 113, 113, 0.4)',
               color: '#fecaca',
-              padding: '10px 14px',
-              borderRadius: '8px',
+              padding: '9px 14px',
+              borderRadius: '7px',
               fontSize: '12px',
               textAlign: 'center',
             }}
           >
-            ⚠️ {streamError}
+            {streamError}
           </div>
         )}
       </div>
 
-      {/* Full-Duration DVD Timeline Scrubber & Transport Controls */}
+      {/* Auto-Hiding Bottom Scrubber & Single-Rail Transport Controls */}
       <div
         style={{
+          ...hudTransitionStyle,
           display: 'flex',
           flexDirection: 'column',
-          gap: '6px',
-          padding: '8px 12px',
-          background: 'rgba(15, 23, 42, 0.85)',
-          border: '1px solid rgba(255,255,255,0.1)',
-          borderRadius: '10px',
-          marginBottom: titleInfo.chapters.length > 1 ? '8px' : '0',
+          gap: '7px',
+          padding: '9px 14px',
+          background: 'rgba(11, 17, 30, 0.9)',
+          border: '1px solid rgba(255,255,255,0.09)',
+          borderRadius: '9px',
         }}
       >
-        {/* Full-Length Scrubber Bar with Chapter Tick Marks */}
+        {/* Full-Length Scrubber Bar */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <span
             style={{
@@ -542,13 +749,12 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
           </span>
 
           <div style={{ position: 'relative', flex: 1, display: 'flex', alignItems: 'center' }}>
-            {/* Visual Track Fill + Chapter Markers */}
             <div
               style={{
                 position: 'absolute',
                 left: 0,
                 right: 0,
-                height: '6px',
+                height: '5px',
                 borderRadius: '999px',
                 background: 'rgba(255,255,255,0.14)',
                 overflow: 'hidden',
@@ -566,23 +772,24 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
                 }}
               />
             </div>
-            {titleInfo.chapters.slice(1).map((ch) => {
-              const pct = Math.min(99.5, Math.max(0.5, (ch.start_ms / totalDurationMs) * 100));
-              return (
-                <div
-                  key={`tick-${ch.chapter_number}`}
-                  title={`Chapter ${ch.chapter_number} (${formatDuration(ch.start_ms)})`}
-                  style={{
-                    position: 'absolute',
-                    left: `${pct}%`,
-                    width: '2px',
-                    height: '10px',
-                    background: 'rgba(255,255,255,0.45)',
-                    pointerEvents: 'none',
-                  }}
-                />
-              );
-            })}
+            {!isDirectVideo &&
+              dvdChapters.slice(1).map((ch) => {
+                const pct = Math.min(99.5, Math.max(0.5, (ch.start_ms / totalDurationMs) * 100));
+                return (
+                  <div
+                    key={`tick-${ch.chapter_number}`}
+                    title={`Chapter ${ch.chapter_number} (${formatDuration(ch.start_ms)})`}
+                    style={{
+                      position: 'absolute',
+                      left: `${pct}%`,
+                      width: '2px',
+                      height: '9px',
+                      background: 'rgba(255,255,255,0.42)',
+                      pointerEvents: 'none',
+                    }}
+                  />
+                );
+              })}
             <input
               data-gamepad-item
               data-dvd-scrubber="true"
@@ -617,7 +824,7 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
           </span>
         </div>
 
-        {/* Transport Buttons Row */}
+        {/* Single Horizontal D-Pad Transport Rail */}
         <div
           style={{
             display: 'flex',
@@ -633,8 +840,8 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
               data-default-focus="true"
               onClick={togglePlayPause}
               style={{
-                background: 'rgba(56, 189, 248, 0.2)',
-                border: '1px solid rgba(56, 189, 248, 0.45)',
+                background: 'rgba(56, 189, 248, 0.18)',
+                border: '1px solid rgba(56, 189, 248, 0.42)',
                 color: '#f8fafc',
                 borderRadius: '6px',
                 padding: '4px 12px',
@@ -643,14 +850,14 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
                 cursor: 'pointer',
               }}
             >
-              {isPaused ? '▶ Play (A)' : '⏸ Pause (A)'}
+              {isPaused ? 'Play (A)' : 'Pause (A)'}
             </button>
             <button
               data-gamepad-item
               onClick={() => jumpToTimeMs(livePositionMs - 15000)}
               style={{
-                background: 'rgba(255,255,255,0.07)',
-                border: '1px solid rgba(255,255,255,0.15)',
+                background: 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.14)',
                 color: '#cbd5e1',
                 borderRadius: '6px',
                 padding: '4px 9px',
@@ -658,14 +865,14 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
                 cursor: 'pointer',
               }}
             >
-              ↺ -15s (L2)
+              -15s (L2)
             </button>
             <button
               data-gamepad-item
               onClick={() => jumpToTimeMs(livePositionMs + 30000)}
               style={{
-                background: 'rgba(255,255,255,0.07)',
-                border: '1px solid rgba(255,255,255,0.15)',
+                background: 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.14)',
                 color: '#cbd5e1',
                 borderRadius: '6px',
                 padding: '4px 9px',
@@ -673,17 +880,55 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
                 cursor: 'pointer',
               }}
             >
-              +30s (R2) ↻
+              +30s (R2)
             </button>
-            {titleInfo.chapters.length > 1 && (
+
+            {isDirectVideo && episodes.length > 1 && (
+              <>
+                <button
+                  data-gamepad-item
+                  disabled={episodeIdx <= 0}
+                  onClick={() => jumpToEpisode(Math.max(0, episodeIdx - 1))}
+                  style={{
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.14)',
+                    color: episodeIdx <= 0 ? '#475569' : '#cbd5e1',
+                    borderRadius: '6px',
+                    padding: '4px 9px',
+                    fontSize: '11px',
+                    cursor: episodeIdx <= 0 ? 'default' : 'pointer',
+                  }}
+                >
+                  Prev Part (L1)
+                </button>
+                <button
+                  data-gamepad-item
+                  disabled={episodeIdx >= episodes.length - 1}
+                  onClick={() => jumpToEpisode(Math.min(episodes.length - 1, episodeIdx + 1))}
+                  style={{
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.14)',
+                    color: episodeIdx >= episodes.length - 1 ? '#475569' : '#cbd5e1',
+                    borderRadius: '6px',
+                    padding: '4px 9px',
+                    fontSize: '11px',
+                    cursor: episodeIdx >= episodes.length - 1 ? 'default' : 'pointer',
+                  }}
+                >
+                  Next Part (R1)
+                </button>
+              </>
+            )}
+
+            {!isDirectVideo && dvdChapters.length > 1 && (
               <>
                 <button
                   data-gamepad-item
                   disabled={activeChapterNumber <= 1}
                   onClick={() => jumpToChapter(Math.max(1, activeChapterNumber - 1))}
                   style={{
-                    background: 'rgba(255,255,255,0.07)',
-                    border: '1px solid rgba(255,255,255,0.15)',
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.14)',
                     color: activeChapterNumber <= 1 ? '#475569' : '#cbd5e1',
                     borderRadius: '6px',
                     padding: '4px 9px',
@@ -691,27 +936,25 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
                     cursor: activeChapterNumber <= 1 ? 'default' : 'pointer',
                   }}
                 >
-                  ⏮ Prev Ch (L1)
+                  Prev Ch (L1)
                 </button>
                 <button
                   data-gamepad-item
-                  disabled={activeChapterNumber >= titleInfo.chapters.length}
+                  disabled={activeChapterNumber >= dvdChapters.length}
                   onClick={() =>
-                    jumpToChapter(Math.min(titleInfo.chapters.length, activeChapterNumber + 1))
+                    jumpToChapter(Math.min(dvdChapters.length, activeChapterNumber + 1))
                   }
                   style={{
-                    background: 'rgba(255,255,255,0.07)',
-                    border: '1px solid rgba(255,255,255,0.15)',
-                    color:
-                      activeChapterNumber >= titleInfo.chapters.length ? '#475569' : '#cbd5e1',
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.14)',
+                    color: activeChapterNumber >= dvdChapters.length ? '#475569' : '#cbd5e1',
                     borderRadius: '6px',
                     padding: '4px 9px',
                     fontSize: '11px',
-                    cursor:
-                      activeChapterNumber >= titleInfo.chapters.length ? 'default' : 'pointer',
+                    cursor: activeChapterNumber >= dvdChapters.length ? 'default' : 'pointer',
                   }}
                 >
-                  Next Ch (R1) ⏭
+                  Next Ch (R1)
                 </button>
               </>
             )}
@@ -721,8 +964,8 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
             data-gamepad-item
             onClick={toggleMute}
             style={{
-              background: 'rgba(255,255,255,0.07)',
-              border: '1px solid rgba(255,255,255,0.15)',
+              background: 'rgba(255,255,255,0.06)',
+              border: '1px solid rgba(255,255,255,0.14)',
               color: isMuted ? '#f87171' : '#cbd5e1',
               borderRadius: '6px',
               padding: '4px 10px',
@@ -730,52 +973,93 @@ export const DvdPlayerModal: React.FC<DvdPlayerModalProps> = ({
               cursor: 'pointer',
             }}
           >
-            {isMuted ? '🔇 Muted' : '🔊 Audio On'}
+            {isMuted ? 'Muted' : 'Mute'}
           </button>
         </div>
-      </div>
 
-      {/* Bottom Chapter Jump Bar */}
-      {titleInfo.chapters.length > 1 && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            overflowX: 'auto',
-            paddingTop: '2px',
-          }}
-        >
-          <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 600, flexShrink: 0 }}>
-            Chapters:
-          </span>
-          {titleInfo.chapters.map((ch) => {
-            const active = ch.chapter_number === activeChapterNumber;
-            return (
-              <button
-                key={ch.chapter_number}
-                data-gamepad-item
-                onClick={() => jumpToChapter(ch.chapter_number)}
-                style={{
-                  background: active ? 'rgba(56, 189, 248, 0.22)' : 'rgba(255,255,255,0.06)',
-                  border: active
-                    ? '1px solid rgba(56, 189, 248, 0.55)'
-                    : '1px solid rgba(255,255,255,0.12)',
-                  color: active ? '#38bdf8' : '#cbd5e1',
-                  borderRadius: '6px',
-                  padding: '4px 9px',
-                  fontSize: '11px',
-                  fontWeight: active ? 700 : 500,
-                  cursor: 'pointer',
-                  flexShrink: 0,
-                }}
-              >
-                Ch {ch.chapter_number} ({formatDuration(ch.start_ms)})
-              </button>
-            );
-          })}
-        </div>
-      )}
+        {/* Compact Episode / Chapter Strip when multi-part */}
+        {isDirectVideo && episodes.length > 1 && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              overflowX: 'auto',
+              paddingTop: '2px',
+            }}
+          >
+            <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 600, flexShrink: 0 }}>
+              Parts:
+            </span>
+            {episodes.map((ep, idx) => {
+              const active = idx === episodeIdx;
+              return (
+                <button
+                  key={ep.episode_number}
+                  data-gamepad-item
+                  onClick={() => jumpToEpisode(idx)}
+                  style={{
+                    background: active ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255,255,255,0.05)',
+                    border: active
+                      ? '1px solid rgba(56, 189, 248, 0.5)'
+                      : '1px solid rgba(255,255,255,0.12)',
+                    color: active ? '#38bdf8' : '#cbd5e1',
+                    borderRadius: '6px',
+                    padding: '3px 8px',
+                    fontSize: '11px',
+                    fontWeight: active ? 700 : 500,
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                  }}
+                >
+                  {idx + 1}. {ep.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {!isDirectVideo && dvdChapters.length > 1 && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              overflowX: 'auto',
+              paddingTop: '2px',
+            }}
+          >
+            <span style={{ fontSize: '11px', color: '#94a3b8', fontWeight: 600, flexShrink: 0 }}>
+              Chapters:
+            </span>
+            {dvdChapters.map((ch) => {
+              const active = ch.chapter_number === activeChapterNumber;
+              return (
+                <button
+                  key={ch.chapter_number}
+                  data-gamepad-item
+                  onClick={() => jumpToChapter(ch.chapter_number)}
+                  style={{
+                    background: active ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255,255,255,0.05)',
+                    border: active
+                      ? '1px solid rgba(56, 189, 248, 0.5)'
+                      : '1px solid rgba(255,255,255,0.12)',
+                    color: active ? '#38bdf8' : '#cbd5e1',
+                    borderRadius: '6px',
+                    padding: '3px 8px',
+                    fontSize: '11px',
+                    fontWeight: active ? 700 : 500,
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                  }}
+                >
+                  Ch {ch.chapter_number} ({formatDuration(ch.start_ms)})
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
