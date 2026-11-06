@@ -840,9 +840,18 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   const searchLower = browserSearch.trim().toLowerCase();
 
   // Source-aware SIMP Playlist membership (`has_local`, `has_apple`, `has_soundcloud`, & `has_archive`)
+  // When searching (`searchLower`), user-created `★ SIMP Hybrid Playlists` (`origin === 'simp_local'`)
+  // are always included across all source pills if their title/description matches the search query.
   const filteredPlaylists = useMemo(
     () =>
       playlists.filter((pl) => {
+        if (searchLower) {
+          const matchesQuery =
+            pl.name.toLowerCase().includes(searchLower) ||
+            Boolean(pl.description && pl.description.toLowerCase().includes(searchLower));
+          if (!matchesQuery) return false;
+          if (pl.origin === 'simp_local') return true;
+        }
         if (browserSourceFilter === 'local') {
           if (
             pl.origin === 'apple_remote' ||
@@ -872,12 +881,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           if (pl.origin === 'simp_local' && pl.track_count > 0 && !pl.has_archive) {
             return false;
           }
-        }
-        if (searchLower) {
-          return (
-            pl.name.toLowerCase().includes(searchLower) ||
-            (pl.description && pl.description.toLowerCase().includes(searchLower))
-          );
         }
         return true;
       }),
@@ -1145,64 +1148,20 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   };
 
   const openLocalVideoFile = useCallback(
-    async (t: TrackMetadata) => {
-      try {
-        const resp = await fetch(
-          resolveDaemonUrl(`/api/video/local?path=${encodeURIComponent(t.uri)}&meta=1`)
-        );
-        const d = await resp.json();
-        const episodes: VideoEpisodeItem[] =
-          d?.ok && Array.isArray(d.episodes) && d.episodes.length > 0
-            ? d.episodes
-            : d?.ok && d?.data && d.data.qualities
-              ? [d.data]
-              : [
-                  {
-                    episode_number: 1,
-                    label: t.title,
-                    duration_ms: t.duration_ms || 0,
-                    qualities: [
-                      {
-                        label: 'Original',
-                        stream_url: `/api/video/local?path=${encodeURIComponent(t.uri)}`,
-                        format: 'Local File',
-                        size_bytes: null,
-                      },
-                    ],
-                    subtitles: [],
-                  },
-                ];
-        setActiveVideoModal({
-          mode: 'local_video',
-          title: t.album ? `${t.album} — ${t.title}` : t.title,
-          episodes,
-          initialEpisodeIndex: 0,
-        });
-      } catch {
-        setActiveVideoModal({
-          mode: 'local_video',
-          title: t.title,
-          episodes: [
-            {
-              episode_number: 1,
-              label: t.title,
-              duration_ms: t.duration_ms || 0,
-              qualities: [
-                {
-                  label: 'Original',
-                  stream_url: `/api/video/local?path=${encodeURIComponent(t.uri)}`,
-                  format: 'Local File',
-                  size_bytes: null,
-                },
-              ],
-              subtitles: [],
-            },
-          ],
-          initialEpisodeIndex: 0,
-        });
-      }
+    (t: TrackMetadata) => {
+      const videoUri = t.uri.startsWith('video://local/')
+        ? t.uri
+        : `video://local/${encodeURIComponent(t.uri)}`;
+      const meta: TrackMetadata = {
+        ...t,
+        uri: videoUri,
+        source: 'local_video',
+      };
+      setPlayingContextId(`local_video:${videoUri}`);
+      defaultSimpClient.loadQueue([videoUri], 0, [meta]);
+      setView('lock');
     },
-    [resolveDaemonUrl]
+    [setPlayingContextId, setView]
   );
 
   const openIaItem = useCallback(
@@ -1219,6 +1178,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           return;
         }
         setActiveIaDetail(detail);
+        const itemTracks = detail.tracks || [];
         pushCurrentNavState();
         setBrowserTarget({
           kind: 'ia_item',
@@ -1229,21 +1189,18 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           }`,
           art_url: detail.summary.art_url,
         });
-        setBrowserTracks(detail.tracks || []);
+        setBrowserTracks(itemTracks);
         setRightPaneMode('tracks');
         focusRightPaneFirstTrack();
 
-        if (
-          detail.episodes &&
-          detail.episodes.length > 0 &&
-          (watchImmediately || (detail.tracks || []).length === 0)
-        ) {
-          setActiveVideoModal({
-            mode: 'ia_video',
-            title: detail.summary.title,
-            episodes: detail.episodes,
-            initialEpisodeIndex: 0,
-          });
+        if (watchImmediately && itemTracks.length > 0) {
+          setPlayingContextId(`ia_item:${detail.summary.identifier}`);
+          defaultSimpClient.loadQueue(
+            itemTracks.map((t) => t.uri),
+            0,
+            itemTracks
+          );
+          setView('lock');
         }
       } catch {
         showToast('Failed to fetch Internet Archive item');
@@ -1257,6 +1214,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       setBrowserTarget,
       setBrowserTracks,
       focusRightPaneFirstTrack,
+      setPlayingContextId,
+      setView,
       showToast,
     ]
   );
@@ -1275,13 +1234,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           tracksToPin = detail?.tracks || [];
         }
         if (!tracksToPin || tracksToPin.length === 0) {
-          showToast('Only audio collections can be pinned as playlists');
+          showToast('No playable video or audio streams found in this item');
           return;
         }
         const pinId = `archive:item:${item.identifier}`;
+        const isVideo = item.mediatype === 'movies' || tracksToPin.some((t) => t.source === 'ia_video');
         const record: PlaylistRecord = {
           id: pinId,
-          name: `🏛️ ${item.title}`,
+          name: `${isVideo ? '🎬' : '🏛️'} ${item.title}`,
           description: `${item.creator}${item.year ? ` • ${item.year}` : ''}`,
           origin: 'archive_remote',
           cover_art_url: item.art_url || tracksToPin[0]?.art_url || null,
@@ -1297,9 +1257,81 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           playlist: record,
           tracks: tracksToPin,
         });
-        showToast(`Pinned "${item.title}" (${tracksToPin.length} tracks) to SIMP`);
+        showToast(
+          `Pinned "${item.title}" (${tracksToPin.length} ${
+            tracksToPin.length === 1 ? 'item' : 'items'
+          }) to SIMP`
+        );
       } catch {
         showToast('Could not pin Internet Archive item');
+      } finally {
+        setIaLoading(false);
+      }
+    },
+    [resolveDaemonUrl, showToast]
+  );
+
+  const handlePinArchiveCollection = useCallback(
+    async (collectionKey: string, collectionLabel: string, items: ArchiveItemSummary[]) => {
+      if (items.length === 0) return;
+      setIaLoading(true);
+      try {
+        const tracksToPin: TrackMetadata[] = [];
+        for (let idx = 0; idx < items.length; idx++) {
+          const it = items[idx];
+          if (it.mediatype === 'movies') {
+            tracksToPin.push({
+              uri: `ia:video:${encodeURIComponent(it.identifier)}/0`,
+              title: it.title,
+              artists: [it.creator || 'Internet Archive'],
+              album: collectionLabel,
+              album_id: `ia:${it.identifier}`,
+              track_number: idx + 1,
+              disc_number: 1,
+              art_url: it.art_url,
+              duration_ms: 0,
+              source: 'ia_video',
+            });
+          } else {
+            // For audio items in a collection, fetch the first playable track (or full item tracks if few)
+            try {
+              const resp = await fetch(
+                resolveDaemonUrl(`/api/ia/item?id=${encodeURIComponent(it.identifier)}`)
+              );
+              const d = await resp.json();
+              const detail: ArchiveItemDetail | undefined = d?.detail || d?.data;
+              if (detail?.tracks && detail.tracks.length > 0) {
+                tracksToPin.push(...detail.tracks.slice(0, 3));
+              }
+            } catch {}
+          }
+        }
+        if (tracksToPin.length === 0) {
+          showToast('Could not resolve playable items for this Archive collection');
+          return;
+        }
+        const pinId = `archive:collection:${collectionKey}`;
+        const record: PlaylistRecord = {
+          id: pinId,
+          name: `🏛️ ${collectionLabel}`,
+          description: `Pinned Internet Archive Collection (${tracksToPin.length} items)`,
+          origin: 'archive_remote',
+          cover_art_url: items[0]?.art_url || tracksToPin[0]?.art_url || null,
+          track_count: tracksToPin.length,
+          updated_at: Math.floor(Date.now() / 1000),
+          has_local: false,
+          has_apple: false,
+          has_soundcloud: false,
+          has_archive: true,
+        };
+        defaultSimpClient.importCatalogTracks({
+          source: 'internet_archive',
+          playlist: record,
+          tracks: tracksToPin,
+        });
+        showToast(`Pinned collection "${collectionLabel}" (${tracksToPin.length} items) to SIMP`);
+      } catch {
+        showToast('Could not pin Internet Archive collection');
       } finally {
         setIaLoading(false);
       }
@@ -1320,14 +1352,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         if (tracks.length > 0) {
           await handleAddTracksToPlaylist(
             tracks.map((t) => t.uri),
-            `all ${tracks.length} tracks from "${item.title}"`,
+            `${tracks.length === 1 ? `"${tracks[0].title}"` : `all ${tracks.length} items from "${item.title}"`}`,
             tracks
           );
         } else {
-          showToast('No audio tracks found in this Internet Archive item');
+          showToast('No playable video or audio streams found in this item');
         }
       } catch {
-        showToast('Could not add Internet Archive item tracks');
+        showToast('Could not add Internet Archive item');
       } finally {
         setIaLoading(false);
       }
@@ -2903,82 +2935,55 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             >
               {isVideo ? 'VIDEO' : 'AUDIO'}
             </span>
-            {isVideo ? (
-              <span
-                role="button"
-                data-tile-aux="true"
-                data-tile-select="true"
-                title="Watch directly in Universal Theatre Player (SELECT)"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openIaItem(item, true);
-                }}
-                style={{
-                  padding: '2px 6px',
-                  borderRadius: 6,
-                  background: '#0f222a',
-                  border: '1px solid #2aa3c4',
-                  color: '#67e8f9',
-                  fontSize: 10,
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                }}
-              >
-                ▶
-              </span>
-            ) : (
-              <>
-                <span
-                  role="button"
-                  data-tile-aux="true"
-                  data-tile-select="true"
-                  title="Add audio tracks to active ★ SIMP Hybrid Playlist (SELECT)"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleAddArchiveItemToHybrid(item);
-                  }}
-                  style={{
-                    padding: '2px 6px',
-                    borderRadius: 6,
-                    background: '#0f222a',
-                    border: '1px solid #2aa3c4',
-                    color: '#67e8f9',
-                    fontSize: 10,
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                  }}
-                >
-                  +
-                </span>
-                <span
-                  role="button"
-                  data-tile-aux="true"
-                  data-tile-y="true"
-                  title={isPinned ? 'Unpin from SIMP (Y)' : 'Pin to SIMP (Y)'}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (isPinned) {
-                      handleDeletePlaylist(`archive:item:${item.identifier}`, item.title);
-                    } else {
-                      handlePinArchiveItem(item);
-                    }
-                  }}
-                  style={{
-                    padding: '2px 6px',
-                    borderRadius: 6,
-                    background: isPinned ? '#0f222a' : '#261a0b',
-                    border: isPinned ? '1px solid #2aa3c4' : '1px solid #78350f',
-                    color: isPinned ? '#67e8f9' : '#fde68a',
-                    fontSize: 10,
-                    fontFamily: 'monospace',
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {isPinned ? '✓ 📌' : '📌'}
-                </span>
-              </>
-            )}
+            <span
+              role="button"
+              data-tile-aux="true"
+              data-tile-select="true"
+              title="Add to active ★ SIMP Hybrid Playlist (SELECT)"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleAddArchiveItemToHybrid(item);
+              }}
+              style={{
+                padding: '2px 6px',
+                borderRadius: 6,
+                background: '#0f222a',
+                border: '1px solid #2aa3c4',
+                color: '#67e8f9',
+                fontSize: 10,
+                fontWeight: 800,
+                cursor: 'pointer',
+              }}
+            >
+              +
+            </span>
+            <span
+              role="button"
+              data-tile-aux="true"
+              data-tile-y="true"
+              title={isPinned ? 'Unpin from SIMP (Y)' : 'Pin to SIMP (Y)'}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (isPinned) {
+                  handleDeletePlaylist(`archive:item:${item.identifier}`, item.title);
+                } else {
+                  handlePinArchiveItem(item);
+                }
+              }}
+              style={{
+                padding: '2px 6px',
+                borderRadius: 6,
+                background: isPinned ? '#0f222a' : '#261a0b',
+                border: isPinned ? '1px solid #2aa3c4' : '1px solid #78350f',
+                color: isPinned ? '#67e8f9' : '#fde68a',
+                fontSize: 10,
+                fontFamily: 'monospace',
+                fontWeight: 800,
+                cursor: 'pointer',
+              }}
+            >
+              {isPinned ? '✓ 📌' : '📌'}
+            </span>
           </div>
         </div>
         <div style={{ minWidth: 0, width: '100%' }}>
@@ -4479,16 +4484,17 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 )}
 
                 {/* 1B. Matching Unpinned Apple Library Playlists */}
-                {browserSourceFilter !== 'local' && filteredCloudPlaylists.length > 0 && (
-                  <>
-                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                      ☁️ MATCHING APPLE LIBRARY PLAYLISTS ({filteredCloudPlaylists.length})
-                    </div>
-                    <div style={tileGridStyle}>
-                      {filteredCloudPlaylists.slice(0, 50).map(renderCloudPlaylistCard)}
-                    </div>
-                  </>
-                )}
+                {(browserSourceFilter === 'all' || browserSourceFilter === 'apple_music') &&
+                  filteredCloudPlaylists.length > 0 && (
+                    <>
+                      <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
+                        ☁️ MATCHING APPLE LIBRARY PLAYLISTS ({filteredCloudPlaylists.length})
+                      </div>
+                      <div style={tileGridStyle}>
+                        {filteredCloudPlaylists.slice(0, 50).map(renderCloudPlaylistCard)}
+                      </div>
+                    </>
+                  )}
 
                 {/* 1C. Matching Local & Pinned Albums */}
                 {albums.length > 0 && (
@@ -4503,27 +4509,30 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 )}
 
                 {/* 1C-2. Matching Local Tracks & Local Videos */}
-                {localSearchTracks.length > 0 && (
-                  <>
-                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                      LOCAL TRACKS & VIDEOS ({localSearchTracks.length})
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      {localSearchTracks.map((s) =>
-                        renderSingleSongRow(
-                          s,
-                          localSearchTracks.filter(
-                            (tr) => tr.source !== 'local_video' && !tr.uri.startsWith('video://local/')
-                          ),
-                          'local_search'
-                        )
-                      )}
-                    </div>
-                  </>
-                )}
+                {(browserSourceFilter === 'all' || browserSourceFilter === 'local') &&
+                  localSearchTracks.length > 0 && (
+                    <>
+                      <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                        LOCAL TRACKS & VIDEOS ({localSearchTracks.length})
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {localSearchTracks.map((s) =>
+                          renderSingleSongRow(
+                            s,
+                            localSearchTracks.filter(
+                              (tr) =>
+                                tr.source !== 'local_video' && !tr.uri.startsWith('video://local/')
+                            ),
+                            'local_search'
+                          )
+                        )}
+                      </div>
+                    </>
+                  )}
 
                 {/* 1D. Personal Apple Cloud Library ("Your Library") & Public Catalog Search Results */}
-                {browserSourceFilter !== 'local' && snap?.apple_authenticated && (
+                {(browserSourceFilter === 'all' || browserSourceFilter === 'apple_music') &&
+                  snap?.apple_authenticated && (
                   <>
                     {catalogSearchResults.albums.some((a) => a.kind === 'library') && (
                       <>
@@ -4591,8 +4600,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 )}
 
                 {/* 1E. SoundCloud Catalog Search Results (Sets & Tracks) */}
-                {browserSourceFilter !== 'local' &&
-                  browserSourceFilter !== 'apple_music' &&
+                {(browserSourceFilter === 'all' || browserSourceFilter === 'soundcloud') &&
                   (scCatalogSearchResults.playlists.length > 0 ||
                     scCatalogSearchResults.songs.length > 0) && (
                     <>
@@ -4636,9 +4644,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   )}
 
                 {/* 1F. Internet Archive Search Results (Films, TV, Concerts & Audio) */}
-                {browserSourceFilter !== 'local' &&
-                  browserSourceFilter !== 'apple_music' &&
-                  browserSourceFilter !== 'soundcloud' &&
+                {(browserSourceFilter === 'all' || browserSourceFilter === 'internet_archive') &&
                   iaSearchResults.length > 0 && (
                     <>
                       <div
@@ -6012,22 +6018,57 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           );
                         })}
                       </div>
-                      <button
-                        data-right-filter-pill="true"
-                        onClick={() => loadIaDiscover(iaSubTab, iaSubFilter)}
-                        style={{
-                          padding: '4px 9px',
-                          borderRadius: 6,
-                          background: '#161620',
-                          border: '1px solid #2a2a38',
-                          color: '#fde68a',
-                          fontSize: 11,
-                          fontWeight: 700,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        ↻ Refresh
-                      </button>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {iaItems.length > 0 &&
+                          (() => {
+                            const collKey = `${iaSubTab}:${iaSubFilter}`;
+                            const collId = `archive:collection:${collKey}`;
+                            const isCollPinned = playlists.some((p) => p.id === collId);
+                            const collTitle = `${activeHubLabel}${
+                              iaSubFilter !== 'all' ? ` (${iaSubFilter.replace('_', ' ')})` : ''
+                            }`;
+                            return (
+                              <button
+                                data-right-filter-pill="true"
+                                onClick={() => {
+                                  if (isCollPinned) {
+                                    handleDeletePlaylist(collId, collTitle);
+                                  } else {
+                                    handlePinArchiveCollection(collKey, collTitle, iaItems);
+                                  }
+                                }}
+                                style={{
+                                  padding: '4px 10px',
+                                  borderRadius: 6,
+                                  background: isCollPinned ? '#0f222a' : '#261a0b',
+                                  border: isCollPinned ? '1px solid #2aa3c4' : '1px solid #d97706',
+                                  color: isCollPinned ? '#67e8f9' : '#fde68a',
+                                  fontSize: 11,
+                                  fontWeight: 800,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                {isCollPinned ? '✓ 📌 Pinned Collection' : '📌 Pin Collection'}
+                              </button>
+                            );
+                          })()}
+                        <button
+                          data-right-filter-pill="true"
+                          onClick={() => loadIaDiscover(iaSubTab, iaSubFilter)}
+                          style={{
+                            padding: '4px 9px',
+                            borderRadius: 6,
+                            background: '#161620',
+                            border: '1px solid #2a2a38',
+                            color: '#fde68a',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          ↻ Refresh
+                        </button>
+                      </div>
                     </div>
 
                     {iaItems.length > 0 ? (
@@ -6245,25 +6286,24 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         opticalDisc.dvd_titles &&
                         opticalDisc.dvd_titles.length > 0
                       ) {
-                        setActiveDvdPlayback({
-                          titleInfo: opticalDisc.dvd_titles[0],
-                          chapter: 1,
-                          audioIdx: dvdAudioChoice,
-                          subIdx: dvdSubChoice,
-                        });
-                        return;
-                      }
-                      if (
-                        browserTarget.kind === 'ia_item' &&
-                        activeIaDetail &&
-                        activeIaDetail.episodes.length > 0
-                      ) {
-                        setActiveVideoModal({
-                          mode: 'ia_video',
-                          title: activeIaDetail.summary.title,
-                          episodes: activeIaDetail.episodes,
-                          initialEpisodeIndex: 0,
-                        });
+                        const tInfo = opticalDisc.dvd_titles[0];
+                        const dev = opticalDisc.device_path || '/dev/sr0';
+                        const dvdUri = `dvd://${dev}/${tInfo.title_number}`;
+                        const meta: TrackMetadata = {
+                          uri: dvdUri,
+                          title: `${opticalDisc.album_title || 'DVD Video'} — ${tInfo.label}`,
+                          artists: ['Optical DVD Video'],
+                          album: opticalDisc.album_title || 'DVD Video',
+                          album_id: null,
+                          track_number: tInfo.title_number,
+                          disc_number: 1,
+                          art_url: opticalDisc.art_url || null,
+                          duration_ms: tInfo.duration_ms,
+                          source: 'dvd',
+                        };
+                        setPlayingContextId(`dvd:${dvdUri}`);
+                        defaultSimpClient.loadQueue([dvdUri], 0, [meta]);
+                        setView('lock');
                         return;
                       }
                       const ctxKey = `${browserTarget.kind}:${browserTarget.id}`;
@@ -6339,95 +6379,26 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               )}
             </div>
 
-            {/* Internet Archive Video Episodes & Parts Browser */}
+            {/* Internet Archive Description Banner */}
             {browserTarget?.kind === 'ia_item' &&
               activeIaDetail &&
-              activeIaDetail.episodes.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {activeIaDetail.summary.description && (
-                    <div
-                      style={{
-                        padding: '10px 12px',
-                        borderRadius: 10,
-                        background: '#0c0d14',
-                        border: '1px solid #1e202c',
-                        fontSize: 12,
-                        color: '#a1a1aa',
-                        lineHeight: 1.45,
-                        display: '-webkit-box',
-                        WebkitLineClamp: 3,
-                        WebkitBoxOrient: 'vertical',
-                        overflow: 'hidden',
-                      }}
-                    >
-                      {activeIaDetail.summary.description}
-                    </div>
-                  )}
-                  {activeIaDetail.episodes.map((ep, epIdx) => {
-                    const totalSec = Math.floor((ep.duration_ms || 0) / 1000);
-                    const mins = Math.floor(totalSec / 60);
-                    const secs = totalSec % 60;
-                    return (
-                      <div
-                        key={`${ep.episode_number}-${epIdx}`}
-                        style={{
-                          padding: '10px 12px',
-                          borderRadius: 12,
-                          background: '#0a0a0e',
-                          border: '1px solid #181822',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          gap: 10,
-                        }}
-                      >
-                        <div style={{ minWidth: 0, flex: 1 }}>
-                          <div
-                            style={{
-                              fontSize: 13,
-                              fontWeight: 800,
-                              color: '#f8fafc',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            🎬 {ep.label}
-                          </div>
-                          <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
-                            {totalSec > 0 ? `${mins}m ${String(secs).padStart(2, '0')}s • ` : ''}
-                            {ep.qualities.map((q) => q.label).join(' / ')}
-                            {ep.subtitles.length > 0 ? ` • CC (${ep.subtitles.length})` : ''}
-                          </div>
-                        </div>
-                        <button
-                          data-right-track="true"
-                          onClick={() =>
-                            setActiveVideoModal({
-                              mode: 'ia_video',
-                              title: activeIaDetail.summary.title,
-                              episodes: activeIaDetail.episodes,
-                              initialEpisodeIndex: epIdx,
-                            })
-                          }
-                          style={{
-                            minHeight: 36,
-                            padding: '0 14px',
-                            borderRadius: 8,
-                            background: '#261a0b',
-                            border: '1px solid #f59e0b',
-                            color: '#fde68a',
-                            fontSize: 12,
-                            fontWeight: 800,
-                            cursor: 'pointer',
-                            flexShrink: 0,
-                          }}
-                        >
-                          ▶ Watch
-                        </button>
-                      </div>
-                    );
-                  })}
+              activeIaDetail.summary.description && (
+                <div
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: 10,
+                    background: '#0c0d14',
+                    border: '1px solid #1e202c',
+                    fontSize: 12,
+                    color: '#a1a1aa',
+                    lineHeight: 1.45,
+                    display: '-webkit-box',
+                    WebkitLineClamp: 3,
+                    WebkitBoxOrient: 'vertical',
+                    overflow: 'hidden',
+                  }}
+                >
+                  {activeIaDetail.summary.description}
                 </div>
               )}
 
@@ -6581,14 +6552,25 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         </div>
                         <button
                           data-right-track="true"
-                          onClick={() =>
-                            setActiveDvdPlayback({
-                              titleInfo: tInfo,
-                              chapter: 1,
-                              audioIdx: dvdAudioChoice,
-                              subIdx: dvdSubChoice,
-                            })
-                          }
+                          onClick={() => {
+                            const dev = opticalDisc.device_path || '/dev/sr0';
+                            const dvdUri = `dvd://${dev}/${tInfo.title_number}`;
+                            const meta: TrackMetadata = {
+                              uri: dvdUri,
+                              title: `${opticalDisc.album_title || 'DVD Video'} — ${tInfo.label}`,
+                              artists: ['Optical DVD Video'],
+                              album: opticalDisc.album_title || 'DVD Video',
+                              album_id: null,
+                              track_number: tInfo.title_number,
+                              disc_number: 1,
+                              art_url: opticalDisc.art_url || null,
+                              duration_ms: tInfo.duration_ms,
+                              source: 'dvd',
+                            };
+                            setPlayingContextId(`dvd:${dvdUri}`);
+                            defaultSimpClient.loadQueue([dvdUri], 0, [meta]);
+                            setView('lock');
+                          }}
                           style={{
                             minHeight: 36,
                             padding: '0 14px',
@@ -6736,7 +6718,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                             ? '#251018'
                             : t.source === 'soundcloud'
                             ? '#2c140a'
-                            : t.source === 'internet_archive' || t.source === 'cdda'
+                            : t.source === 'internet_archive' ||
+                              t.source === 'ia_video' ||
+                              t.source === 'cdda'
                             ? '#261a0d'
                             : '#101822',
                         color:
@@ -6744,7 +6728,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                             ? '#fda4af'
                             : t.source === 'soundcloud'
                             ? '#fdba74'
-                            : t.source === 'internet_archive' || t.source === 'cdda'
+                            : t.source === 'internet_archive' ||
+                              t.source === 'ia_video' ||
+                              t.source === 'cdda'
                             ? '#fcd34d'
                             : '#67e8f9',
                       }}
@@ -6753,6 +6739,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         ? '🍎 Apple'
                         : t.source === 'soundcloud'
                         ? '☁️ SC'
+                        : t.source === 'ia_video'
+                        ? '🎬 Archive'
                         : t.source === 'internet_archive'
                         ? '🏛️ Archive'
                         : t.source === 'local_video' || t.uri.startsWith('video://local/')

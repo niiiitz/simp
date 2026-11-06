@@ -1070,7 +1070,7 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
         }
     });
 
-    let tracks: Vec<TrackMetadata> = chosen_audio
+    let mut tracks: Vec<TrackMetadata> = chosen_audio
         .into_iter()
         .enumerate()
         .map(|(idx, (_, _, mut t))| {
@@ -1080,6 +1080,29 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
             t
         })
         .collect();
+
+    // If this is a video item with no audio-only tracks, synthesize first-class `TrackMetadata`
+    // entries (`ia:video:{identifier}/{idx}`) for each video episode so films and episodes can be
+    // queued directly in the main orchestrator, pinned to the library, and mixed into Hybrid Playlists.
+    if tracks.is_empty() && !episodes.is_empty() {
+        tracks = episodes
+            .iter()
+            .enumerate()
+            .map(|(idx, ep)| TrackMetadata {
+                uri: format!("ia:video:{}/{}", url_encode_component(identifier), idx),
+                title: ep.label.clone(),
+                artists: vec![creator.clone()],
+                album: title.clone(),
+                album_id: Some(format!("ia:{identifier}")),
+                track_number: Some(ep.episode_number as u32),
+                disc_number: Some(1),
+                art_url: art_url.clone(),
+                duration_ms: ep.duration_ms,
+                source: "ia_video".to_string(),
+                mount_root: None,
+            })
+            .collect();
+    }
 
     Ok(ArchiveItemDetail {
         summary: ArchiveItemSummary {

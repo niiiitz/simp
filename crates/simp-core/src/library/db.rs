@@ -428,7 +428,10 @@ impl LibraryDatabase {
              JOIN tracks t ON t.album_id = a.id
              LEFT JOIN storage_mounts m ON t.mount_root = m.mount_root
              WHERE (t.mount_root IS NULL OR m.is_online = 1)
-               AND (?1 IS NULL OR (?1 = 'local' AND t.source != 'apple_music' AND t.source != 'soundcloud' AND t.source != 'internet_archive') OR t.source = ?1)
+               AND (?1 IS NULL
+                    OR (?1 = 'local' AND t.source != 'apple_music' AND t.source != 'soundcloud' AND t.source != 'internet_archive' AND t.source != 'ia_video')
+                    OR (?1 = 'internet_archive' AND (t.source = 'internet_archive' OR t.source = 'ia_video'))
+                    OR t.source = ?1)
                AND (?2 IS NULL OR t.mount_root = ?2)
                AND (a.title LIKE ?3 OR a.album_artist LIKE ?3)
              GROUP BY a.id
@@ -507,7 +510,10 @@ impl LibraryDatabase {
              FROM tracks t
              LEFT JOIN storage_mounts m ON t.mount_root = m.mount_root
              WHERE (t.mount_root IS NULL OR m.is_online = 1)
-               AND (?1 IS NULL OR (?1 = 'local' AND t.source != 'apple_music' AND t.source != 'soundcloud' AND t.source != 'internet_archive') OR t.source = ?1)
+               AND (?1 IS NULL
+                    OR (?1 = 'local' AND t.source != 'apple_music' AND t.source != 'soundcloud' AND t.source != 'internet_archive' AND t.source != 'ia_video')
+                    OR (?1 = 'internet_archive' AND (t.source = 'internet_archive' OR t.source = 'ia_video'))
+                    OR t.source = ?1)
                AND (?2 IS NULL OR t.mount_root = ?2)
                AND (t.title LIKE ?3 OR t.album_title LIKE ?3 OR t.artists_json LIKE ?3)
              ORDER BY t.album_title COLLATE NOCASE ASC, COALESCE(t.disc_number, 1) ASC, COALESCE(t.track_number, 999) ASC
@@ -805,6 +811,9 @@ impl LibraryDatabase {
                 && t.source != "apple_music"
                 && t.source != "soundcloud"
                 && t.source != "internet_archive"
+                && t.source != "ia_video"
+                && t.source != "local_video"
+                && t.source != "dvd"
             {
                 let alb_id = t.album_id.clone().unwrap_or_else(|| {
                     let hash_key = format!(
@@ -876,6 +885,9 @@ impl LibraryDatabase {
             params![playlist_origin],
         )?;
         conn.execute("DELETE FROM tracks WHERE source = ?1", params![source])?;
+        if source == "internet_archive" {
+            conn.execute("DELETE FROM tracks WHERE source = 'ia_video'", [])?;
+        }
         conn.execute(
             "DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)",
             [],
