@@ -176,14 +176,35 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return () => window.removeEventListener('resize', onResize);
   }, [isVideoTrack]);
 
-  // Listen for `SELECT` button (`simp-player-actions-toggle`) on Player screen
+  // Listen for `SELECT` button (`simp-player-actions-toggle`) and `F` key (`simp-player-fullscreen-toggle`) on Player screen
   useEffect(() => {
     const onToggleActions = () => {
       setPlayerActionsOpen((prev) => !prev);
     };
+    const onToggleFullscreen = () => {
+      if (isVideoTrack) {
+        setVideoTheatreExpanded((prev) => {
+          const next = !prev;
+          if (!next && document.fullscreenElement) {
+            document.exitFullscreen().catch(() => {});
+          }
+          return next;
+        });
+      } else {
+        if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        } else {
+          document.documentElement.requestFullscreen?.().catch(() => {});
+        }
+      }
+    };
     window.addEventListener('simp-player-actions-toggle', onToggleActions);
-    return () => window.removeEventListener('simp-player-actions-toggle', onToggleActions);
-  }, []);
+    window.addEventListener('simp-player-fullscreen-toggle', onToggleFullscreen);
+    return () => {
+      window.removeEventListener('simp-player-actions-toggle', onToggleActions);
+      window.removeEventListener('simp-player-fullscreen-toggle', onToggleFullscreen);
+    };
+  }, [isVideoTrack]);
 
   // 4-Second (`4000ms`) Floating Controls & Scrub Bar Auto-Hide Timer in Expanded Theatre Mode
   const wakeFloatingHud = useCallback(() => {

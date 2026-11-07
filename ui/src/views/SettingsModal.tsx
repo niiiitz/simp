@@ -34,6 +34,7 @@ export interface SimpUpdateStatus {
   latest_tag?: string;
   update_available?: boolean;
   target_arch?: string;
+  channel?: string;
   checking?: boolean;
   applying?: boolean;
   error?: string;
@@ -1269,7 +1270,40 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {updateStatus.error && (
               <div style={{ fontSize: 10.5, color: '#fca5a5' }}>{updateStatus.error}</div>
             )}
-            <div style={{ display: 'flex', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                disabled={Boolean(updateStatus.checking || updateStatus.applying)}
+                onClick={async () => {
+                  const nextChannel =
+                    (updateStatus.channel || 'alpha').toLowerCase() === 'stable'
+                      ? 'alpha'
+                      : 'stable';
+                  try {
+                    await fetch('http://127.0.0.1:18888/api/update/channel', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ channel: nextChannel }),
+                    });
+                    showToast(
+                      nextChannel === 'stable'
+                        ? 'Update channel set to Stable (official releases only)'
+                        : 'Update channel set to Alpha (includes pre-releases)'
+                    );
+                    checkSimpUpdates(false);
+                  } catch {
+                    showToast('Failed to switch update channel');
+                  }
+                }}
+                style={pillToggleStyle(
+                  (updateStatus.channel || 'alpha').toLowerCase() === 'stable',
+                  '#6ee7b7'
+                )}
+              >
+                {(updateStatus.channel || 'alpha').toLowerCase() === 'stable'
+                  ? '🛡️ Channel: Stable'
+                  : '🧪 Channel: Alpha'}
+              </button>
               <button
                 type="button"
                 disabled={Boolean(updateStatus.checking || updateStatus.applying)}

@@ -23,3 +23,12 @@ mimalloc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc.workspace = true
+cocoa.workspace = true
+core-foundation.workspace = true
+core-graphics.workspace = true
+block.workspace = true
+dispatch.workspace = true
+
+

@@ -1,6 +1,11 @@
+#![allow(unexpected_cfgs)]
+
 use std::net::{SocketAddr, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+#[cfg(target_os = "macos")]
+pub mod macos_app;
 
 /// Ensures `simp --daemon` is listening on `127.0.0.1:18888`.
 /// If not running, spawns `simp --daemon` as a detached background process.
@@ -49,33 +54,40 @@ pub fn ensure_daemon_running() {
 }
 
 pub fn run_ui() {
-    ensure_daemon_running();
     let ui_url = "http://127.0.0.1:18888";
-    println!("SIMP daemon verified online at {ui_url} (IPC: ws://127.0.0.1:18888/ws)");
-
-    if std::env::var("SIMP_NO_WINDOW").ok().as_deref() == Some("1") {
-        return;
-    }
-
-    let profile_dir_path = simp_core::simp_data_dir().join("window-profile");
-    let _ = std::fs::create_dir_all(&profile_dir_path);
-    // Create the Chromium "First Run" sentinel file and clear any stale Crash/Singleton locks
-    let _ = std::fs::File::create(profile_dir_path.join("First Run"));
-    for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"] {
-        let _ = std::fs::remove_file(profile_dir_path.join(lock_name));
-    }
-    let user_data_arg = format!("--user-data-dir={}", profile_dir_path.to_string_lossy());
-
-    #[cfg(target_os = "windows")]
-    {
-        run_windows_ui(ui_url, &profile_dir_path, &user_data_arg);
-        return;
-    }
 
     #[cfg(target_os = "macos")]
     {
-        run_macos_ui(ui_url, &user_data_arg);
-        return;
+        if std::env::var("SIMP_NO_WINDOW").ok().as_deref() == Some("1") {
+            ensure_daemon_running();
+            return;
+        }
+        macos_app::run_macos_native_app(ui_url);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        ensure_daemon_running();
+        println!("SIMP daemon verified online at {ui_url} (IPC: ws://127.0.0.1:18888/ws)");
+
+        if std::env::var("SIMP_NO_WINDOW").ok().as_deref() == Some("1") {
+            return;
+        }
+
+        let profile_dir_path = simp_core::simp_data_dir().join("window-profile");
+        let _ = std::fs::create_dir_all(&profile_dir_path);
+        // Create the Chromium "First Run" sentinel file and clear any stale Crash/Singleton locks
+        let _ = std::fs::File::create(profile_dir_path.join("First Run"));
+        for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"] {
+            let _ = std::fs::remove_file(profile_dir_path.join(lock_name));
+        }
+        let user_data_arg = format!("--user-data-dir={}", profile_dir_path.to_string_lossy());
+
+        #[cfg(target_os = "windows")]
+        {
+            run_windows_ui(ui_url, &profile_dir_path, &user_data_arg);
+            return;
+        }
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -233,55 +245,4 @@ fn run_windows_ui(ui_url: &str, profile_dir: &std::path::Path, user_data_arg: &s
     let _ = fallback.spawn();
 }
 
-#[cfg(target_os = "macos")]
-fn run_macos_ui(ui_url: &str, user_data_arg: &str) {
-    use std::path::PathBuf;
-
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    let mut app_roots = vec![PathBuf::from("/Applications")];
-    if let Ok(home) = std::env::var("HOME") {
-        app_roots.push(PathBuf::from(home).join("Applications"));
-    }
-
-    let rel_paths = [
-        "Google Chrome.app/Contents/MacOS/Google Chrome",
-        "Brave Browser.app/Contents/MacOS/Brave Browser",
-        "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        "Chromium.app/Contents/MacOS/Chromium",
-    ];
-
-    for rel in rel_paths {
-        for root in &app_roots {
-            let p = root.join(rel);
-            if p.is_file() && !candidates.contains(&p) {
-                candidates.push(p);
-            }
-        }
-    }
-
-    for bin in candidates {
-        let mut cmd = Command::new(&bin);
-        cmd.arg(format!("--app={ui_url}"))
-            .arg("--window-size=1280,800")
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
-            .arg("--autoplay-policy=no-user-gesture-required")
-            .arg("--disable-features=HardwareMediaKeyHandling,MediaSessionService")
-            .arg(user_data_arg)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if cmd.spawn().is_ok() {
-            return;
-        }
-    }
-
-    // Fallback: open in default macOS browser via `open`
-    let _ = Command::new("open")
-        .arg(ui_url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-}
 

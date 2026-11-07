@@ -982,6 +982,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   const searchLower = browserSearch.trim().toLowerCase();
 
   // Source-aware & media-type-aware SIMP Album filtering
+  // In `📌 My SIMP Library` (when not in `💾 Local` source mode and not searching), only show pinned albums.
+  // In `💾 Local` source mode or when searching, show all matching local albums so they can be browsed & pinned.
   const filteredAlbums = useMemo(
     () =>
       albums.filter((alb) => {
@@ -989,9 +991,18 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         const isApple = alb.id.startsWith('applemusic:album:');
         if (isApple && !isSourceIncluded('apple_music')) return false;
         if (!isApple && !isSourceIncluded('local')) return false;
+        if (searchLower) {
+          const matchTitle = alb.title.toLowerCase().includes(searchLower);
+          const matchArtist = alb.album_artist.toLowerCase().includes(searchLower);
+          if (!matchTitle && !matchArtist) return false;
+          return true;
+        }
+        if (!isApple && browserSourceFilter !== 'local') {
+          return playlists.some((p) => p.id === `local:album:${alb.id}`);
+        }
         return true;
       }),
-    [albums, mediaTypeFilter, isSourceIncluded]
+    [albums, mediaTypeFilter, isSourceIncluded, searchLower, browserSourceFilter, playlists]
   );
 
   // Source-aware & media-type-aware Recently Played filtering
@@ -1082,6 +1093,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           if (!matchesQuery) return false;
           if (pl.origin === 'simp_local') return true;
         }
+        if (pl.origin === 'local_pinned') return isSourceIncluded('local');
         if (pl.origin === 'apple_remote') return isSourceIncluded('apple_music');
         if (pl.origin === 'soundcloud_remote') return isSourceIncluded('soundcloud');
         if (pl.origin === 'archive_remote') return isSourceIncluded('internet_archive');
@@ -1100,9 +1112,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   );
 
   const cleanCollectionTitle = (raw: string): string =>
-    raw.replace(/^[\s📌🍎☁️🏛️🎵💿]+/u, '').trim() || raw;
+    raw.replace(/^[\s📌💾🍎☁️🏛️🎵💿]+/u, '').trim() || raw;
 
   const formatPlaylistSourceBadge = (pl: PlaylistRecord): string => {
+    if (pl.origin === 'local_pinned') {
+      return '💾';
+    }
     if (pl.origin === 'soundcloud_remote') {
       return '☁️';
     }
@@ -1131,6 +1146,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     () =>
       filteredPlaylists.filter(
         (p) =>
+          p.origin === 'local_pinned' ||
           p.origin === 'apple_remote' ||
           p.origin === 'soundcloud_remote' ||
           p.origin === 'archive_remote'
@@ -1691,6 +1707,56 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     [handleAddTracksToPlaylist]
   );
 
+  const handleTogglePinLocalAlbum = useCallback(
+    async (alb: AlbumRecord, preloadedTracks?: TrackMetadata[]) => {
+      const pinId = `local:album:${alb.id}`;
+      const cleanTitle = cleanCollectionTitle(alb.title);
+      const isAlreadyPinned = playlists.some((p) => p.id === pinId);
+      if (isAlreadyPinned) {
+        handleDeletePlaylist(pinId, cleanTitle);
+        return;
+      }
+      try {
+        let items = preloadedTracks;
+        if (!items || items.length === 0) {
+          items = await defaultSimpClient.query<TrackMetadata[]>('get_album_tracks', {
+            album_id: alb.id,
+          });
+        }
+        if (!items || items.length === 0) {
+          showToast('No tracks found for this local album');
+          return;
+        }
+        const record: PlaylistRecord = {
+          id: pinId,
+          name: `💾 ${cleanTitle}`,
+          description: alb.album_artist,
+          origin: 'local_pinned',
+          cover_art_url: alb.art_url || items[0]?.art_url || null,
+          track_count: items.length,
+          updated_at: Math.floor(Date.now() / 1000),
+          has_local: true,
+          has_apple: false,
+          has_soundcloud: false,
+          has_archive: false,
+        };
+        defaultSimpClient.importCatalogTracks({
+          source: 'local',
+          playlist: record,
+          tracks: items,
+        });
+        showToast(
+          `Pinned "${cleanTitle}" (${items.length} ${
+            items.length === 1 ? 'track' : 'tracks'
+          }) to SIMP Library`
+        );
+      } catch {
+        showToast('Could not pin local album to SIMP Library');
+      }
+    },
+    [playlists, handleDeletePlaylist, showToast]
+  );
+
   const handleAddCloudPlaylistToHybrid = useCallback(
     async (pl: AppleCloudPlaylistSummary) => {
       setCloudLoading(true);
@@ -1881,6 +1947,13 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       activeIaDetail &&
       playlists.some((p) => p.id === `archive:item:${activeIaDetail.summary.identifier}`);
 
+    const isLocalAlbumPinned =
+      rightPaneMode === 'tracks' &&
+      browserTarget?.kind === 'album' &&
+      selectedAlbumObj &&
+      !selectedAlbumObj.id.startsWith('applemusic:album:') &&
+      playlists.some((p) => p.id === `local:album:${selectedAlbumObj.id}`);
+
     const gpSelectBadge = (
       <span
         className="simp-gp-badge"
@@ -2014,7 +2087,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
           {canAddAllTracks && (
             <button
-              data-tile-aux="true"
               data-collection-select="true"
               onClick={() =>
                 handleAddTracksToPlaylist(
@@ -2046,7 +2118,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             <>
               {browserTarget.kind === 'cloud_playlist' && activeCloudPlaylist && (
                 <button
-                  data-tile-aux="true"
                   data-collection-y="true"
                   onClick={() => {
                     if (isCloudPlaylistPinned) {
@@ -2079,7 +2150,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
               {browserTarget.kind === 'soundcloud_playlist' && activeScPlaylist && (
                 <button
-                  data-tile-aux="true"
                   data-collection-y="true"
                   onClick={() => {
                     if (isScPlaylistPinned) {
@@ -2112,7 +2182,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
               {browserTarget.kind === 'cloud_album' && activeCloudAlbum && (
                 <button
-                  data-tile-aux="true"
                   data-collection-y="true"
                   onClick={() => {
                     if (isCloudAlbumPinned) {
@@ -2145,7 +2214,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
               {browserTarget.kind === 'ia_item' && activeIaDetail && browserTracks.length > 0 && (
                 <button
-                  data-tile-aux="true"
                   data-collection-y="true"
                   onClick={() => {
                     if (isArchiveItemPinned) {
@@ -2178,7 +2246,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
               {browserTarget.kind === 'playlist' && selectedPlaylistObj && (
                 <button
-                  data-tile-aux="true"
                   data-collection-y="true"
                   onClick={() => {
                     handleDeletePlaylist(selectedPlaylistObj.id, selectedPlaylistObj.name);
@@ -2215,7 +2282,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 selectedAlbumObj &&
                 selectedAlbumObj.id.startsWith('applemusic:album:') && (
                   <button
-                    data-tile-aux="true"
                     data-collection-y="true"
                     onClick={() => {
                       handleDeleteAlbum(selectedAlbumObj.id, selectedAlbumObj.title);
@@ -2237,6 +2303,33 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   >
                     {gpYBadge}
                     <span>✕ Unpin Album</span>
+                  </button>
+                )}
+
+              {browserTarget.kind === 'album' &&
+                selectedAlbumObj &&
+                !selectedAlbumObj.id.startsWith('applemusic:album:') && (
+                  <button
+                    data-collection-y="true"
+                    onClick={() => {
+                      handleTogglePinLocalAlbum(selectedAlbumObj, browserTracks);
+                    }}
+                    title="Pin or Unpin this local album in SIMP Library"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      padding: '3px 9px',
+                      borderRadius: 6,
+                      background: isLocalAlbumPinned ? '#0f222a' : '#121820',
+                      border: isLocalAlbumPinned ? '1px solid #2aa3c4' : '1px solid #283848',
+                      color: isLocalAlbumPinned ? '#67e8f9' : '#bfeaf5',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {gpYBadge}
+                    <span>{isLocalAlbumPinned ? '✓ Pinned (Unpin)' : '📌 Pin Album to SIMP'}</span>
                   </button>
                 )}
             </>
@@ -2447,9 +2540,11 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     );
   };
 
-  // Reusable Visual Tile for Local & Pinned Albums (in `📌 My SIMP Library`)
+  // Reusable Visual Tile for Local & Pinned Albums (in `📌 My SIMP Library` and `💾 Local`)
   const renderSimpAlbumCard = (alb: AlbumRecord) => {
     const isAppleAlbum = alb.id.startsWith('applemusic:album:');
+    const isLocalPinned =
+      !isAppleAlbum && playlists.some((p) => p.id === `local:album:${alb.id}`);
     const isSelected =
       rightPaneMode === 'tracks' && browserTarget?.kind === 'album' && browserTarget.id === alb.id;
     const cleanTitle = cleanCollectionTitle(alb.title);
@@ -2539,7 +2634,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               >
                 +
               </span>
-              {isAppleAlbum && (
+              {isAppleAlbum ? (
                 <span
                   role="button"
                   data-tile-aux="true"
@@ -2561,6 +2656,33 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   }}
                 >
                   ✕
+                </span>
+              ) : (
+                <span
+                  role="button"
+                  data-tile-aux="true"
+                  data-tile-y="true"
+                  title={
+                    isLocalPinned
+                      ? 'Unpin Local Album from SIMP Library (Y)'
+                      : 'Pin Local Album to SIMP Library (Y)'
+                  }
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleTogglePinLocalAlbum(alb);
+                  }}
+                  style={{
+                    padding: '2px 6px',
+                    borderRadius: 6,
+                    background: isLocalPinned ? '#0f222a' : '#121820',
+                    border: isLocalPinned ? '1px solid #2aa3c4' : '1px solid #283848',
+                    color: isLocalPinned ? '#67e8f9' : '#bfeaf5',
+                    fontSize: 10,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {isLocalPinned ? '✓' : '📌'}
                 </span>
               )}
             </div>
@@ -4251,7 +4373,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 ? [
                     {
                       id: 'pinned' as const,
-                      label: `📌 SIMP Library (${filteredPlaylists.length + albums.length})`,
+                      label: `📌 SIMP Library (${filteredPlaylists.length + pinnedAppleAlbumCount})`,
                       isSimp: true,
                     },
                     {
@@ -4269,8 +4391,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       id: 'pinned' as const,
                       label:
                         browserSourceFilter === 'local'
-                          ? `📌 Local SIMP Library (${filteredPlaylists.length + albums.length})`
-                          : `📌 My SIMP Library (${filteredPlaylists.length + albums.length})`,
+                          ? `💾 All Local Albums (${filteredAlbums.length})`
+                          : `📌 My SIMP Library (${filteredPlaylists.length + pinnedAppleAlbumCount})`,
                       isSimp: true,
                     },
                   ]
@@ -4873,6 +4995,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 >
                   {isLocalPlaylist
                     ? `${isActiveTarget ? '★ ' : '🎵 '}${cleanTitle}`
+                    : pl.origin === 'local_pinned'
+                    ? `💾 ${cleanTitle}`
                     : pl.origin === 'soundcloud_remote'
                     ? `☁️ ${cleanTitle}`
                     : pl.origin === 'archive_remote'
@@ -5515,11 +5639,11 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                               id: 'hybrid',
                               label: `★ SIMP Playlists (${hybridPlaylistsList.length})`,
                             },
-                            ...(browserSourceFilter !== 'local'
+                            ...(browserSourceFilter !== 'local' || pinnedPlaylistsList.length > 0
                               ? [
                                   {
                                     id: 'pinned' as const,
-                                    label: `📌 Pinned Playlists (${pinnedPlaylistsList.length})`,
+                                    label: `📌 Pinned (${pinnedPlaylistsList.length})`,
                                   },
                                 ]
                               : []),

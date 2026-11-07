@@ -30,4 +30,7 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
 

@@ -129,7 +129,12 @@ fn is_evdev_gamepad_candidate(idx: usize) -> bool {
 /// on Steam Deck and Steam Frame (`aarch64`) receive controller navigation and transport actions over the
 /// local WebSocket (`PlaybackEvent::GamepadInput`).
 pub fn spawn_linux_gamepad_reader(broadcast_tx: broadcast::Sender<PlaybackEvent>) {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_iokit::spawn_macos_iokit_gamepad_reader(broadcast_tx);
+        return;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = broadcast_tx;
     #[cfg(target_os = "linux")]
     {
@@ -741,6 +746,306 @@ fn read_steam_deck_hidraw_loop(
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub fn map_hid_button_usage_to_action(usage_page: u32, usage: u32) -> Option<&'static str> {
+    match usage_page {
+        0x09 => match usage {
+            1 => Some("activate"),   // A / Cross
+            2 => Some("back"),       // B / Circle
+            3 => Some("shuffle"),    // X / Square
+            4 => Some("repeat"),     // Y / Triangle
+            5 => Some("l1"),         // L1 / LB
+            6 => Some("r1"),         // R1 / RB
+            7 => Some("l2"),         // L2 / LT (digital)
+            8 => Some("r2"),         // R2 / RT (digital)
+            9 | 11 => Some("sources"), // Select / View / Share
+            10 | 12 => Some("power"),  // Start / Menu / Options (leave 13/14 Home/Guide unbound for OS)
+            _ => None,
+        },
+        0x01 => match usage {
+            0x90 => Some("up"),             // D-pad Up
+            0x91 => Some("down"),           // D-pad Down
+            0x92 => Some("right"),          // D-pad Right
+            0x93 => Some("left"),           // D-pad Left
+            _ => None,
+        },
+        0x0C => match usage {
+            0x0040 | 0x0041 => Some("power"),   // Consumer Menu (Xbox Series Bluetooth Start)
+            0x0224 | 0x00B2 => Some("sources"), // Consumer AC Back / Record (Xbox View/Share)
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Maps an 8-way HID Hat Switch integer value (`0..=7` or `1..=8` within `logical_min..=logical_max`)
+/// to `(dx, dy)` in `-1..=1`. Returns `(0, 0)` when centered/neutral.
+#[cfg(any(target_os = "macos", test))]
+pub fn map_hid_hat_switch_to_dir(val: isize, min: isize, max: isize) -> (i8, i8) {
+    if max <= min || val < min || val > max {
+        return (0, 0);
+    }
+    let idx = val - min;
+    match idx {
+        0 => (0, -1),  // N  (Up)
+        1 => (1, -1),  // NE (Up-Right)
+        2 => (1, 0),   // E  (Right)
+        3 => (1, 1),   // SE (Down-Right)
+        4 => (0, 1),   // S  (Down)
+        5 => (-1, 1),  // SW (Down-Left)
+        6 => (-1, 0),  // W  (Left)
+        7 => (-1, -1), // NW (Up-Left)
+        _ => (0, 0),
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_iokit {
+    use super::*;
+    use core_foundation::array::CFArray;
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
+    use core_foundation::string::CFString;
+    use std::collections::HashMap;
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOHIDManagerCreate(allocator: *const c_void, options: u32) -> *mut c_void;
+        fn IOHIDManagerSetDeviceMatchingMultiple(manager: *mut c_void, multiple: *const c_void);
+        fn IOHIDManagerRegisterInputValueCallback(
+            manager: *mut c_void,
+            callback: extern "C" fn(*mut c_void, i32, *mut c_void, *mut c_void),
+            context: *mut c_void,
+        );
+        fn IOHIDManagerScheduleWithRunLoop(
+            manager: *mut c_void,
+            run_loop: *mut c_void,
+            run_loop_mode: *const c_void,
+        );
+        fn IOHIDManagerOpen(manager: *mut c_void, options: u32) -> i32;
+
+        fn IOHIDValueGetElement(value: *mut c_void) -> *mut c_void;
+        fn IOHIDValueGetIntegerValue(value: *mut c_void) -> isize;
+        fn IOHIDElementGetUsagePage(element: *mut c_void) -> u32;
+        fn IOHIDElementGetUsage(element: *mut c_void) -> u32;
+        fn IOHIDElementGetLogicalMin(element: *mut c_void) -> isize;
+        fn IOHIDElementGetLogicalMax(element: *mut c_void) -> isize;
+    }
+
+    struct MacGamepadState {
+        broadcast_tx: broadcast::Sender<PlaybackEvent>,
+        button_states: HashMap<(u32, u32), bool>,
+        hat_dir: (i8, i8),
+        stick_x_dir: i8,
+        stick_y_dir: i8,
+        lt_pressed: bool,
+        rt_pressed: bool,
+    }
+
+    extern "C" fn hid_input_value_callback(
+        context: *mut c_void,
+        _result: i32,
+        _sender: *mut c_void,
+        value: *mut c_void,
+    ) {
+        if context.is_null() || value.is_null() {
+            return;
+        }
+        unsafe {
+            let elem = IOHIDValueGetElement(value);
+            if elem.is_null() {
+                return;
+            }
+            let usage_page = IOHIDElementGetUsagePage(elem);
+            let usage = IOHIDElementGetUsage(elem);
+            let raw_val = IOHIDValueGetIntegerValue(value);
+            let min_val = IOHIDElementGetLogicalMin(elem);
+            let max_val = IOHIDElementGetLogicalMax(elem);
+
+            let state_mutex = &*(context as *const Mutex<MacGamepadState>);
+            let Ok(mut st) = state_mutex.lock() else {
+                return;
+            };
+
+            // 1. Digital buttons (`kHIDPage_Button = 0x09`, `kHIDPage_Consumer = 0x0C`, or D-Pad discrete usages)
+            if let Some(action) = map_hid_button_usage_to_action(usage_page, usage) {
+                let pressed = raw_val > 0;
+                let prev = st.button_states.insert((usage_page, usage), pressed).unwrap_or(false);
+                if pressed && !prev {
+                    let _ = st.broadcast_tx.send(PlaybackEvent::GamepadInput {
+                        action: action.to_string(),
+                    });
+                }
+                return;
+            }
+
+            if usage_page != 0x01 && usage_page != 0x02 {
+                return;
+            }
+
+            // 2. 8-Way Hat Switch D-Pad (`kHIDUsage_GD_Hatswitch = 0x39`)
+            if usage_page == 0x01 && usage == 0x39 {
+                let (nx, ny) = map_hid_hat_switch_to_dir(raw_val, min_val, max_val);
+                let (px, py) = st.hat_dir;
+                st.hat_dir = (nx, ny);
+                if nx != px && nx != 0 {
+                    let act = if nx < 0 { "left" } else { "right" };
+                    let _ = st.broadcast_tx.send(PlaybackEvent::GamepadInput {
+                        action: act.to_string(),
+                    });
+                }
+                if ny != py && ny != 0 {
+                    let act = if ny < 0 { "up" } else { "down" };
+                    let _ = st.broadcast_tx.send(PlaybackEvent::GamepadInput {
+                        action: act.to_string(),
+                    });
+                }
+                return;
+            }
+
+            // 3. Left Thumbstick X (`0x30`) and Y (`0x31`) with deadzone hysteresis
+            if usage_page == 0x01 && (usage == 0x30 || usage == 0x31) && max_val > min_val {
+                let span = (max_val - min_val) as f64;
+                let norm = (((raw_val - min_val) as f64 / span) * 2.0) - 1.0; // -1.0 .. 1.0
+                if usage == 0x30 {
+                    let next_dir = if norm <= -0.52 {
+                        -1
+                    } else if norm >= 0.52 {
+                        1
+                    } else if norm.abs() < 0.28 {
+                        0
+                    } else {
+                        st.stick_x_dir
+                    };
+                    if next_dir != st.stick_x_dir {
+                        st.stick_x_dir = next_dir;
+                        if next_dir < 0 {
+                            let _ = st.broadcast_tx.send(PlaybackEvent::GamepadInput {
+                                action: "left".to_string(),
+                            });
+                        } else if next_dir > 0 {
+                            let _ = st.broadcast_tx.send(PlaybackEvent::GamepadInput {
+                                action: "right".to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    let next_dir = if norm <= -0.52 {
+                        -1
+                    } else if norm >= 0.52 {
+                        1
+                    } else if norm.abs() < 0.28 {
+                        0
+                    } else {
+                        st.stick_y_dir
+                    };
+                    if next_dir != st.stick_y_dir {
+                        st.stick_y_dir = next_dir;
+                        if next_dir < 0 {
+                            let _ = st.broadcast_tx.send(PlaybackEvent::GamepadInput {
+                                action: "up".to_string(),
+                            });
+                        } else if next_dir > 0 {
+                            let _ = st.broadcast_tx.send(PlaybackEvent::GamepadInput {
+                                action: "down".to_string(),
+                            });
+                        }
+                    }
+                }
+                return;
+            }
+
+            // 4. Analog Triggers (`Z = 0x32` / `Brake = 0xC5` for L2/LT, `Rz = 0x35` / `Accelerator = 0xC4` for R2/RT)
+            if max_val > min_val {
+                let ratio = (raw_val - min_val) as f64 / (max_val - min_val) as f64;
+                if (usage_page == 0x01 && usage == 0x32) || (usage_page == 0x02 && usage == 0xC5) {
+                    if ratio > 0.65 && !st.lt_pressed {
+                        st.lt_pressed = true;
+                        let _ = st.broadcast_tx.send(PlaybackEvent::GamepadInput {
+                            action: "l2".to_string(),
+                        });
+                    } else if ratio < 0.30 {
+                        st.lt_pressed = false;
+                    }
+                } else if (usage_page == 0x01 && usage == 0x35)
+                    || (usage_page == 0x02 && usage == 0xC4)
+                {
+                    if ratio > 0.65 && !st.rt_pressed {
+                        st.rt_pressed = true;
+                        let _ = st.broadcast_tx.send(PlaybackEvent::GamepadInput {
+                            action: "r2".to_string(),
+                        });
+                    } else if ratio < 0.30 {
+                        st.rt_pressed = false;
+                    }
+                }
+            }
+        }
+    }
+
+    fn make_matching_dict(usage_page: i32, usage: i32) -> CFDictionary<CFString, CFType> {
+        let k_page = CFString::from_static_string("DeviceUsagePage");
+        let k_usage = CFString::from_static_string("DeviceUsage");
+        let v_page = CFNumber::from(usage_page).as_CFType();
+        let v_usage = CFNumber::from(usage).as_CFType();
+        CFDictionary::from_CFType_pairs(&[(k_page, v_page), (k_usage, v_usage)])
+    }
+
+    pub fn spawn_macos_iokit_gamepad_reader(broadcast_tx: broadcast::Sender<PlaybackEvent>) {
+        let _ = std::thread::Builder::new()
+            .name("simp-macos-iokit-gamepad".to_string())
+            .spawn(move || unsafe {
+                let mgr = IOHIDManagerCreate(std::ptr::null(), 0);
+                if mgr.is_null() {
+                    return;
+                }
+
+                // Match GenericDesktop (0x01): Joystick (0x04), GamePad (0x05), MultiAxisController (0x08)
+                let d_gamepad = make_matching_dict(0x01, 0x05);
+                let d_joystick = make_matching_dict(0x01, 0x04);
+                let d_multiaxis = make_matching_dict(0x01, 0x08);
+                let criteria = CFArray::from_CFTypes(&[
+                    d_gamepad.as_CFType(),
+                    d_joystick.as_CFType(),
+                    d_multiaxis.as_CFType(),
+                ]);
+
+                IOHIDManagerSetDeviceMatchingMultiple(mgr, criteria.as_concrete_TypeRef() as *const c_void);
+
+                let ctx = Box::into_raw(Box::new(Mutex::new(MacGamepadState {
+                    broadcast_tx,
+                    button_states: HashMap::new(),
+                    hat_dir: (0, 0),
+                    stick_x_dir: 0,
+                    stick_y_dir: 0,
+                    lt_pressed: false,
+                    rt_pressed: false,
+                })));
+
+                IOHIDManagerRegisterInputValueCallback(
+                    mgr,
+                    hid_input_value_callback,
+                    ctx as *mut c_void,
+                );
+                let rl = CFRunLoop::get_current();
+                IOHIDManagerScheduleWithRunLoop(
+                    mgr,
+                    rl.as_concrete_TypeRef() as *mut c_void,
+                    kCFRunLoopDefaultMode as *const c_void,
+                );
+
+                if IOHIDManagerOpen(mgr, 0) == 0 {
+                    tracing::info!("macOS IOKit IOHIDManager gamepad reader active (Xbox / DualSense / 8BitDo)");
+                    CFRunLoop::run_current();
+                }
+            });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -771,5 +1076,21 @@ mod tests {
         assert_eq!(extract_steam_deck_hidraw_start_pressed(&report), Some(false));
         report[9] = 0x40; // BIT(6) = BTN_START
         assert_eq!(extract_steam_deck_hidraw_start_pressed(&report), Some(true));
+
+        // Verify macOS IOKit HID button & hat-switch normalization
+        assert_eq!(map_hid_button_usage_to_action(0x09, 1), Some("activate"));
+        assert_eq!(map_hid_button_usage_to_action(0x09, 2), Some("back"));
+        assert_eq!(map_hid_button_usage_to_action(0x09, 3), Some("shuffle"));
+        assert_eq!(map_hid_button_usage_to_action(0x09, 4), Some("repeat"));
+        assert_eq!(map_hid_button_usage_to_action(0x09, 5), Some("l1"));
+        assert_eq!(map_hid_button_usage_to_action(0x09, 6), Some("r1"));
+        assert_eq!(map_hid_button_usage_to_action(0x09, 10), Some("power"));
+        assert_eq!(map_hid_button_usage_to_action(0x09, 13), None);
+        assert_eq!(map_hid_button_usage_to_action(0x0C, 0x0040), Some("power"));
+        assert_eq!(map_hid_hat_switch_to_dir(0, 0, 7), (0, -1));
+        assert_eq!(map_hid_hat_switch_to_dir(2, 0, 7), (1, 0));
+        assert_eq!(map_hid_hat_switch_to_dir(4, 0, 7), (0, 1));
+        assert_eq!(map_hid_hat_switch_to_dir(6, 0, 7), (-1, 0));
+        assert_eq!(map_hid_hat_switch_to_dir(8, 0, 7), (0, 0));
     }
 }

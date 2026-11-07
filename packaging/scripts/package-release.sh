@@ -103,13 +103,27 @@ if os.path.isfile(readme_path):
         readme_src = f.read()
     shield_ver = raw_ver.replace("-", "--")
     readme_next = re.sub(
-        r"\[!\[Status: v[^\]]+\]\(https://img\.shields\.io/badge/status-v[^)]+\)\]\(#\)",
-        f"[![Status: v{raw_ver}](https://img.shields.io/badge/status-v{shield_ver}-ff6a00?style=flat-square)](#)",
+        r"\[!\[Status: v[^\]]+\]\(https://img\.shields\.io/badge/status-v[^)]+\)\]\([^)]+\)",
+        f"[![Status: v{raw_ver}](https://img.shields.io/badge/status-v{shield_ver}-ff6a00?style=flat-square)](https://github.com/niiiitz/simp/releases)",
         readme_src,
     )
     if readme_next != readme_src:
         with open(readme_path, "w", encoding="utf-8") as f:
             f.write(readme_next)
+
+# 6. Sync packaging/macos/SIMP.xcodeproj/project.pbxproj version
+pbx_path = "packaging/macos/SIMP.xcodeproj/project.pbxproj"
+if os.path.isfile(pbx_path):
+    with open(pbx_path, "r", encoding="utf-8") as f:
+        pbx_src = f.read()
+    pbx_next = re.sub(
+        r'(CURRENT_PROJECT_VERSION|MARKETING_VERSION) = "[^"]+";',
+        rf'\1 = "{raw_ver}";',
+        pbx_src,
+    )
+    if pbx_next != pbx_src:
+        with open(pbx_path, "w", encoding="utf-8") as f:
+            f.write(pbx_next)
 
 print(f"v{raw_ver}", end="")
 PY

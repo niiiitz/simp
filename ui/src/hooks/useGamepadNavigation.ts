@@ -74,6 +74,7 @@ export function useGamepadNavigation({
   const lastWebGamepadTsRef = useRef<number>(0);
   const lastGamepadInputTsRef = useRef<number>(0);
   const lastBrowserFocusRef = useRef<HTMLElement | null>(null);
+  const preMuteVolumeRef = useRef<number>(0.85);
 
   // Adaptive Input Modality (`data-simp-input="pointer" | "gamepad"`):
   // Default to `gamepad` inside SteamUI's `/simp-console` iframe and `pointer` in standalone desktop windows,
@@ -1016,6 +1017,55 @@ export function useGamepadNavigation({
         pendingModifierKey = null;
       }
 
+      // Cmd/Ctrl + F or `/` jumps directly to the Library & Queue Search input
+      if (
+        e.key === '/' ||
+        ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F'))
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSourceModalOpen(false);
+        setPowerModalOpen(false);
+        setView('browser');
+        window.setTimeout(() => {
+          const searchInput = document.querySelector<HTMLInputElement>(
+            '[data-osk-input="search"]'
+          );
+          searchInput?.focus();
+          searchInput?.select();
+        }, 40);
+        return;
+      }
+
+      // Cmd/Ctrl + Arrow keys for desktop media transport (Previous/Next Track & Volume Up/Down)
+      if (e.metaKey || e.ctrlKey) {
+        if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          e.stopPropagation();
+          defaultSimpClient.next();
+          return;
+        }
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          e.stopPropagation();
+          defaultSimpClient.previous();
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          e.stopPropagation();
+          handleGamepadAction('vol_up');
+          return;
+        }
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          e.stopPropagation();
+          handleGamepadAction('vol_down');
+          return;
+        }
+        return;
+      }
+
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         e.stopPropagation();
@@ -1046,34 +1096,86 @@ export function useGamepadNavigation({
           return;
         }
         handleGamepadAction('back');
-      } else if (e.key === ' ' || e.key === 'y' || e.key === 'Y') {
-        // In Steam KDE Desktop Mode, the physical `Y` button sends `Space` (`' '`).
-        // Intercept in capture phase so `Space` triggers the `Y` action instead of clicking focused buttons like `A`.
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        const isModalOpen =
+          sourceModalOpen ||
+          powerModalOpen ||
+          !!oskTarget ||
+          !!document.querySelector('[data-player-actions-modal="true"]');
+        // 100% Play/Pause in the Player tab (`view === 'lock'`, both Card and Fullscreen/Expanded Video)
+        // and whenever using desktop pointer mode (`data-simp-input !== 'gamepad'`).
+        // Only preserve the Steam KDE Lizard Mode `Y` alias (`repeat`) when browsing in gamepad mode.
+        if (
+          (view === 'lock' && !isModalOpen) ||
+          document.documentElement.dataset.simpInput !== 'gamepad'
+        ) {
+          defaultSimpClient.togglePlayPause();
+        } else {
+          handleGamepadAction('repeat');
+        }
+      } else if (e.key === 'k' || e.key === 'K') {
+        e.preventDefault();
+        e.stopPropagation();
+        defaultSimpClient.togglePlayPause();
+      } else if (e.key === 'y' || e.key === 'Y') {
         e.preventDefault();
         e.stopPropagation();
         handleGamepadAction('repeat');
+      } else if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        e.stopPropagation();
+        defaultSimpClient.cycleRepeat();
       } else if (e.key === 'Tab') {
         // In Steam KDE Desktop Mode, the physical `SELECT` (View) button sends `Tab`.
         e.preventDefault();
         e.stopPropagation();
         handleGamepadAction('sources');
-      } else if (e.key === 'x' || e.key === 'X') {
+      } else if (e.key === 'x' || e.key === 'X' || e.key === 's' || e.key === 'S') {
         e.preventDefault();
         e.stopPropagation();
         handleGamepadAction('shuffle');
-      } else if (e.key === 'PageUp' || e.key === '[') {
+      } else if (e.key === 'm' || e.key === 'M') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (currentVolume > 0.001) {
+          preMuteVolumeRef.current = currentVolume;
+          applyVolume(0);
+        } else {
+          applyVolume(preMuteVolumeRef.current > 0.05 ? preMuteVolumeRef.current : 0.85);
+        }
+      } else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (view === 'lock') {
+          window.dispatchEvent(new CustomEvent('simp-player-fullscreen-toggle'));
+        } else if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        } else {
+          document.documentElement.requestFullscreen?.().catch(() => {});
+        }
+      } else if (e.key === 'n' || e.key === 'N' || e.key === '>') {
+        e.preventDefault();
+        e.stopPropagation();
+        defaultSimpClient.next();
+      } else if (e.key === 'b' || e.key === 'B' || e.key === '<') {
+        e.preventDefault();
+        e.stopPropagation();
+        defaultSimpClient.previous();
+      } else if (e.key === 'PageUp' || e.key === '[' || e.key === '1') {
         e.preventDefault();
         e.stopPropagation();
         handleGamepadAction('l1');
-      } else if (e.key === 'PageDown' || e.key === ']') {
+      } else if (e.key === 'PageDown' || e.key === ']' || e.key === '2') {
         e.preventDefault();
         e.stopPropagation();
         handleGamepadAction('r1');
-      } else if (e.key === '-') {
+      } else if (e.key === '-' || e.key === 'j' || e.key === 'J') {
         e.preventDefault();
         e.stopPropagation();
         handleGamepadAction('l2');
-      } else if (e.key === '=' || e.key === '+') {
+      } else if (e.key === '=' || e.key === '+' || e.key === 'l' || e.key === 'L') {
         e.preventDefault();
         e.stopPropagation();
         handleGamepadAction('r2');

@@ -225,12 +225,18 @@ pub struct ProvisioningSettings {
     pub widevine_cdm_url_x86_64_linux: String,
     #[serde(default = "default_widevine_url_aarch64_linux")]
     pub widevine_cdm_url_aarch64_linux: String,
+    #[serde(default = "default_widevine_url_aarch64_macos")]
+    pub widevine_cdm_url_aarch64_macos: String,
+    #[serde(default = "default_widevine_url_x86_64_macos")]
+    pub widevine_cdm_url_x86_64_macos: String,
     #[serde(default)]
     pub widevine_cdm_custom_path: String,
     #[serde(default = "default_github_releases_api_url")]
     pub github_releases_api_url: String,
     #[serde(default = "default_release_asset_template")]
     pub release_asset_template: String,
+    #[serde(default = "default_update_channel")]
+    pub update_channel: String,
 }
 
 fn default_widevine_version() -> String {
@@ -245,6 +251,14 @@ pub fn default_widevine_url_aarch64_linux() -> String {
     "https://archive.raspberrypi.com/debian/pool/main/w/widevine/libwidevinecdm0_4.10.2662.3+1_arm64.deb".to_string()
 }
 
+pub fn default_widevine_url_aarch64_macos() -> String {
+    "https://dl.google.com/widevine-cdm/4.10.2710.0-mac-arm64.zip".to_string()
+}
+
+pub fn default_widevine_url_x86_64_macos() -> String {
+    "https://dl.google.com/widevine-cdm/4.10.2710.0-mac-x64.zip".to_string()
+}
+
 fn default_github_releases_api_url() -> String {
     "https://api.github.com/repos/niiiitz/simp/releases?per_page=8".to_string()
 }
@@ -253,15 +267,26 @@ fn default_release_asset_template() -> String {
     "https://github.com/niiiitz/simp/releases/download/{tag}/simp-steamos-userland-{arch}.tar.gz".to_string()
 }
 
+pub fn default_update_channel() -> String {
+    if env!("CARGO_PKG_VERSION").contains('-') {
+        "alpha".to_string()
+    } else {
+        "stable".to_string()
+    }
+}
+
 impl Default for ProvisioningSettings {
     fn default() -> Self {
         Self {
             widevine_cdm_version: default_widevine_version(),
             widevine_cdm_url_x86_64_linux: default_widevine_url_x86_64_linux(),
             widevine_cdm_url_aarch64_linux: default_widevine_url_aarch64_linux(),
+            widevine_cdm_url_aarch64_macos: default_widevine_url_aarch64_macos(),
+            widevine_cdm_url_x86_64_macos: default_widevine_url_x86_64_macos(),
             widevine_cdm_custom_path: String::new(),
             github_releases_api_url: default_github_releases_api_url(),
             release_asset_template: default_release_asset_template(),
+            update_channel: default_update_channel(),
         }
     }
 }

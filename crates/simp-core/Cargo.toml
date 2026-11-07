@@ -34,3 +34,12 @@ sha1.workspace = true
 dbus.workspace = true
 dbus-crossroads.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc.workspace = true
+cocoa.workspace = true
+core-foundation.workspace = true
+core-graphics.workspace = true
+block.workspace = true
+dispatch.workspace = true
+
+

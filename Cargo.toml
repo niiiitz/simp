@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.61"
+version = "0.1.0-alpha.62"
 edition = "2021"
 license = "LicenseRef-Proprietary"
 authors = ["niiiitz"]
@@ -41,6 +41,12 @@ libc = "0.2"
 sha1 = "0.10"
 dbus = "0.9"
 dbus-crossroads = "0.5"
+objc = "0.2.7"
+cocoa = "0.24.1"
+core-foundation = "0.9.4"
+core-graphics = "0.22.3"
+block = "0.1.6"
+dispatch = "0.2.0"
 
 # Micro-Footprint Release Profile for SteamOS / gamescope
 [profile.release]

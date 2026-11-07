@@ -79,34 +79,31 @@ check_cmd = [
 rel_raw = subprocess.check_output(check_cmd, text=True)
 rel = json.loads(rel_raw)
 
+is_prerelease = any(tok in tag.lower() for tok in ("-alpha", "-beta", "-rc"))
+rel_payload = {
+    "tag_name": tag,
+    "name": f"SIMP {tag}",
+    "body": notes,
+    "draft": False,
+    "prerelease": is_prerelease,
+}
+if not is_prerelease:
+    rel_payload["make_latest"] = "true"
+
 if "id" in rel:
     rel_id = rel["id"]
-    print(f"Updating existing release {tag} (ID {rel_id}, prerelease=false)...")
+    print(f"Updating existing release {tag} (ID {rel_id}, prerelease={is_prerelease})...")
     rel = api_call(
         "PATCH",
         f"https://api.github.com/repos/{repo}/releases/{rel_id}",
-        {
-            "tag_name": tag,
-            "name": f"SIMP {tag}",
-            "body": notes,
-            "draft": False,
-            "prerelease": False,
-            "make_latest": "true",
-        },
+        rel_payload,
     )
 else:
-    print(f"Creating release {tag} (prerelease=false, make_latest=true)...")
+    print(f"Creating release {tag} (prerelease={is_prerelease})...")
     rel = api_call(
         "POST",
         f"https://api.github.com/repos/{repo}/releases",
-        {
-            "tag_name": tag,
-            "name": f"SIMP {tag}",
-            "body": notes,
-            "draft": False,
-            "prerelease": False,
-            "make_latest": "true",
-        },
+        rel_payload,
     )
     rel_id = rel["id"]
 
@@ -118,6 +115,8 @@ assets = [
     ("dist/simp-steamos-userland.tar.gz", "application/gzip"),
     ("dist/simp-decky.zip", "application/zip"),
     ("dist/simp-windows-portable-x86_64.zip", "application/zip"),
+    ("dist/SIMP-macos-arm64.zip", "application/zip"),
+    ("dist/SIMP-macos-x86_64.zip", "application/zip"),
 ]
 
 for path, ctype in assets:

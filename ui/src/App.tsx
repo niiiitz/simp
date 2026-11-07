@@ -342,6 +342,7 @@ const ConsoleMainApp: React.FC = () => {
             latest_tag: data.latest_tag,
             update_available: Boolean(data.update_available),
             target_arch: data.target_arch,
+            channel: data.channel || 'alpha',
             checking: false,
           });
           return;
@@ -350,6 +351,7 @@ const ConsoleMainApp: React.FC = () => {
             ...prev,
             current_version: data.current_version || prev.current_version,
             target_arch: data.target_arch || prev.target_arch,
+            channel: data.channel || prev.channel || 'alpha',
             checking: false,
             error: data.error,
           }));
