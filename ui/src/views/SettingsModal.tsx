@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AppleMusicAuthConfig,
   defaultSimpClient,
@@ -20,6 +20,32 @@ import {
 import { OskTargetKind } from '../hooks/useGamepadNavigation';
 import { BrowserTarget } from './PlayerView';
 
+interface DaemonPerfSnapshot {
+  cpu_percent: number;
+  rss_mb: number;
+  platform: string;
+  audio_backend: string;
+  portable_mode?: boolean;
+}
+
+export interface SimpUpdateStatus {
+  current_version?: string;
+  latest_version?: string;
+  latest_tag?: string;
+  update_available?: boolean;
+  target_arch?: string;
+  checking?: boolean;
+  applying?: boolean;
+  error?: string;
+}
+
+export interface SourceVisibilityPrefs {
+  internet_archive: boolean;
+  apple_music: boolean;
+  soundcloud: boolean;
+  optical_drive: boolean;
+}
+
 export interface SettingsModalProps {
   snap: SimpStateSnapshot | null;
   customFolderPath: string;
@@ -30,6 +56,15 @@ export interface SettingsModalProps {
   setView: React.Dispatch<React.SetStateAction<'lock' | 'browser'>>;
   setSourceModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setPowerModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  setIsSleeping: React.Dispatch<React.SetStateAction<boolean>>;
+  dismissConsole: () => void;
+  brightnessPct: number;
+  setBrightnessPct: React.Dispatch<React.SetStateAction<number>>;
+  updateStatus: SimpUpdateStatus;
+  checkSimpUpdates: (silent?: boolean) => Promise<void>;
+  applySimpUpdate: () => Promise<void>;
+  confirmHardReset: boolean;
+  setConfirmHardReset: React.Dispatch<React.SetStateAction<boolean>>;
   opticalDisc: OpticalDiscStatus | null;
   cdScanning: boolean;
   handleScanOpticalDisc: (forceRefresh?: boolean, silent?: boolean) => Promise<void>;
@@ -53,6 +88,8 @@ export interface SettingsModalProps {
   setSoundCloudSubTab: React.Dispatch<
     React.SetStateAction<'pinned' | 'likes_sets' | 'stream_radio' | 'trending'>
   >;
+  sourceVisibility: SourceVisibilityPrefs;
+  setSourceVisibility: React.Dispatch<React.SetStateAction<SourceVisibilityPrefs>>;
   refreshLibraryData: () => void;
   showToast: (msg: string) => void;
 }
@@ -67,6 +104,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   setView,
   setSourceModalOpen,
   setPowerModalOpen,
+  setIsSleeping,
+  dismissConsole,
+  brightnessPct,
+  setBrightnessPct,
+  updateStatus,
+  checkSimpUpdates,
+  applySimpUpdate,
+  confirmHardReset,
+  setConfirmHardReset,
   opticalDisc,
   cdScanning,
   handleScanOpticalDisc,
@@ -84,19 +130,37 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   setBrowserSourceFilter,
   setAppleSubTab,
   setSoundCloudSubTab,
+  sourceVisibility,
+  setSourceVisibility,
   refreshLibraryData,
   showToast,
 }) => {
-  const [pairHelpOpen, setPairHelpOpen] = React.useState(false);
-  const [iaUsername, setIaUsername] = React.useState('');
-  const [iaAccessKey, setIaAccessKey] = React.useState('');
-  const [iaSecretKey, setIaSecretKey] = React.useState('');
-  const [iaKeysOpen, setIaKeysOpen] = React.useState(false);
-  const [iaEnabledLocal, setIaEnabledLocal] = React.useState(
+  // Nested Accordion State
+  const [foldersAccountsOpen, setFoldersAccountsOpen] = useState(true);
+  const [iaAuthOpen, setIaAuthOpen] = useState(false);
+  const [appleAuthOpen, setAppleAuthOpen] = useState(false);
+  const [scAuthOpen, setScAuthOpen] = useState(false);
+  const [foldersOpen, setFoldersOpen] = useState(false);
+  const [addPathOpen, setAddPathOpen] = useState(false);
+  const [perfMetricsOpen, setPerfMetricsOpen] = useState(false);
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
+
+  const [iaUsername, setIaUsername] = useState('');
+  const [iaAccessKey, setIaAccessKey] = useState('');
+  const [iaSecretKey, setIaSecretKey] = useState('');
+  const [iaEnabledLocal, setIaEnabledLocal] = useState(
     !!snap?.internet_archive_authenticated
   );
+  const [iaSafeSearch, setIaSafeSearch] = useState(false);
+  const [perfSnap, setPerfSnap] = useState<DaemonPerfSnapshot | null>(null);
 
-  React.useEffect(() => {
+  const closeSettingsDrawer = () => {
+    setSourceModalOpen(false);
+    setPowerModalOpen(false);
+    setConfirmHardReset(false);
+  };
+
+  useEffect(() => {
     setIaEnabledLocal(!!snap?.internet_archive_authenticated);
     defaultSimpClient
       .getInternetArchiveConfig()
@@ -104,58 +168,151 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         if (cfg) {
           setIaEnabledLocal(!!cfg.enabled);
           setIaUsername(cfg.username || '');
+          setIaSafeSearch(!!cfg.safe_search);
         }
       })
       .catch(() => {});
   }, [snap?.internet_archive_authenticated]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const fetchPerf = async () => {
+      try {
+        const res = await fetch('http://127.0.0.1:18888/api/v1/system/perf');
+        if (res.ok) {
+          const data = (await res.json()) as DaemonPerfSnapshot;
+          if (!cancelled) setPerfSnap(data);
+        }
+      } catch {
+        // Ignore transient offline error
+      }
+    };
+    fetchPerf();
+    const timer = window.setInterval(fetchPerf, 1800);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const toggleSourceVisible = (key: keyof SourceVisibilityPrefs) => {
+    setSourceVisibility((prev) => {
+      const nextVal = !prev[key];
+      const next = { ...prev, [key]: nextVal };
+      try {
+        window.localStorage.setItem('simp_source_visibility_v1', JSON.stringify(next));
+      } catch {}
+      if (key === 'internet_archive') {
+        defaultSimpClient.configureInternetArchive({
+          enabled: nextVal,
+          username: iaUsername.trim(),
+          safe_search: iaSafeSearch,
+        });
+        setIaEnabledLocal(nextVal);
+      }
+      return next;
+    });
+  };
+
+  // Determine if a sub-level is open so `B` / `ESC` walks back one level before closing the drawer
+  const hasNestedChildOpen =
+    confirmHardReset ||
+    addPathOpen ||
+    iaAuthOpen ||
+    appleAuthOpen ||
+    scAuthOpen ||
+    foldersOpen ||
+    perfMetricsOpen ||
+    upgradeOpen;
+
+  const handleWalkBackNested = () => {
+    if (confirmHardReset) {
+      setConfirmHardReset(false);
+    } else if (addPathOpen) {
+      setAddPathOpen(false);
+    } else if (iaAuthOpen) {
+      setIaAuthOpen(false);
+    } else if (appleAuthOpen) {
+      setAppleAuthOpen(false);
+    } else if (scAuthOpen) {
+      setScAuthOpen(false);
+    } else if (foldersOpen) {
+      setFoldersOpen(false);
+    } else if (perfMetricsOpen) {
+      setPerfMetricsOpen(false);
+    } else if (upgradeOpen) {
+      setUpgradeOpen(false);
+    }
+  };
+
   return (
     <div
-      onClick={() => setSourceModalOpen(false)}
+      onClick={closeSettingsDrawer}
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(0,0,0,0.85)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '16px',
-        boxSizing: 'border-box',
-        zIndex: 50,
+        background: 'rgba(0, 0, 0, 0.72)',
+        zIndex: 55,
       }}
     >
+      {/* Hidden walk-back hook button triggered by `useGamepadNavigation` when `B` / `ESC` is pressed */}
+      {hasNestedChildOpen && (
+        <button
+          type="button"
+          data-settings-walk-back="true"
+          onClick={handleWalkBackNested}
+          style={{ display: 'none' }}
+        />
+      )}
+
       <div
         data-modal-root="true"
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: '100%',
-          maxWidth: 580,
-          maxHeight: '86vh',
+          position: 'fixed',
+          top: 58,
+          left: 16,
+          width: 'min(480px, calc(100vw - 32px))',
+          maxHeight: 'calc(100vh - 76px)',
           overflowY: 'auto',
           WebkitOverflowScrolling: 'touch',
           touchAction: 'pan-y',
-          background: '#0a0a0e',
-          border: '2px solid #262632',
-          borderRadius: 20,
-          padding: 22,
+          background: '#09090f',
+          border: '2px solid #2aa3c4',
+          borderRadius: 18,
+          padding: 16,
           boxSizing: 'border-box',
+          boxShadow: '0 20px 52px rgba(0, 0, 0, 0.92)',
           display: 'flex',
           flexDirection: 'column',
-          gap: 14,
+          gap: 10,
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <strong style={{ fontSize: 15 }}>Folders & Connected Accounts</strong>
+        {/* Header Row */}
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            paddingBottom: 8,
+            borderBottom: '1px solid #1e1e2a',
+          }}
+        >
+          <strong style={{ fontSize: 14, color: '#bfeaf5' }}>
+            ☰ Settings Menu<span className="simp-gp-badge"> (START)</span>
+          </strong>
           <button
-            onClick={() => setSourceModalOpen(false)}
+            type="button"
+            onClick={closeSettingsDrawer}
             style={{
-              minHeight: 44,
-              padding: '0 14px',
-              borderRadius: 10,
+              minHeight: 34,
+              padding: '0 12px',
+              borderRadius: 8,
               background: '#16161f',
               border: '1px solid #2e2e3a',
               color: '#d4d4dc',
               fontFamily: 'monospace',
+              fontSize: 12,
               cursor: 'pointer',
             }}
           >
@@ -163,901 +320,156 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </button>
         </div>
 
-        {/* Custom Local / WSL2 Folder Picker */}
-        <div
-          style={{
-            padding: 14,
-            borderRadius: 14,
-            background: '#0f0f16',
-            border: '1px solid #242432',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 10,
-          }}
-        >
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#2aa3c4' }}>
-            ➕ Add Local / Windows / USB Music Folder
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              type="text"
-              data-osk-input="folder"
-              placeholder="/mnt/c/Users/<you>/Music or /home/deck/Music (Press A for Keyboard)"
-              value={customFolderPath}
-              onChange={(e) => setCustomFolderPath(e.target.value)}
-              onClick={() => {
-                setOskTarget('folder');
-                if (window.parent && window.parent !== window) {
-                  window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleAddFolder(customFolderPath);
-              }}
-              style={{
-                flex: 1,
-                minHeight: 42,
-                padding: '0 12px',
-                borderRadius: 10,
-                background: '#07070a',
-                border: '1px solid #2e2e3c',
-                color: '#d4d4dc',
-                fontSize: 12,
-                fontFamily: 'monospace',
-              }}
-            />
-            <button
-              onClick={() => handleAddFolder(customFolderPath)}
-              style={{
-                minHeight: 42,
-                padding: '0 16px',
-                borderRadius: 10,
-                background: '#0f222a',
-                color: '#bfeaf5',
-                border: '1px solid #2aa3c4',
-                fontWeight: 800,
-                fontSize: 12,
-                cursor: 'pointer',
-              }}
-            >
-              Add & Scan
-            </button>
-          </div>
-
-          {/* 1-Tap Preset Paths */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {[
-              { label: 'Steam OSTs (C:)', path: '/mnt/c/Program Files (x86)/Steam/steamapps/music' },
-              { label: 'Apple Music (C:)', path: '/mnt/c/Users/niiii/Music/Apple Music/Media/Music' },
-              { label: 'Windows Public Music', path: '/mnt/c/Users/Public/Music' },
-              { label: 'SteamOS ~/Music', path: '/home/deck/Music' },
-            ].map((preset) => (
-              <button
-                key={preset.path}
-                onClick={() => handleAddFolder(preset.path)}
-                style={{
-                  padding: '5px 10px',
-                  borderRadius: 8,
-                  background: '#161622',
-                  border: '1px solid #2b2b3c',
-                  color: '#c8c8d2',
-                  fontSize: 11,
-                  cursor: 'pointer',
-                }}
-              >
-                + {preset.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Active Mounts List with 1-Tap Remove inside Modal */}
-          {snap?.mounts && snap.mounts.length > 0 && (
-            <div
-              style={{
-                maxHeight: 160,
-                overflowY: 'auto',
-                WebkitOverflowScrolling: 'touch',
-                touchAction: 'pan-y',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 4,
-                marginTop: 4,
-              }}
-            >
-              {snap.mounts.map((m) => (
-                <div
-                  key={m.mount_root}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '6px 10px',
-                    borderRadius: 8,
-                    background: '#08080c',
-                    border: '1px solid #1c1c26',
-                    fontSize: 11,
-                  }}
-                >
-                  <span
-                    style={{
-                      fontFamily: 'monospace',
-                      color: m.is_online ? '#c8c8d2' : '#71717a',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {m.is_online ? '🟢' : '⚫'} {m.mount_root} ({m.track_count} tracks)
-                  </span>
-                  <button
-                    onClick={() => handleRemoveFolder(m.mount_root, m.label)}
-                    style={{
-                      padding: '2px 8px',
-                      borderRadius: 6,
-                      background: '#1f1216',
-                      border: '1px solid #4c2228',
-                      color: '#f87171',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      flexShrink: 0,
-                    }}
-                  >
-                    Remove ✕
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <button
-          type="button"
-          data-default-focus="true"
-          onClick={() => {
-            setView('browser');
-            setSourceModalOpen(false);
-          }}
-          style={{
-            width: '100%',
-            minHeight: 54,
-            padding: '10px 14px',
-            borderRadius: 12,
-            background: '#0d1b22',
-            border: '1px solid #2aa3c4',
-            color: '#f4f4f6',
-            textAlign: 'left',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            cursor: 'pointer',
-          }}
-        >
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 700 }}>
-              📁 Local, Steam OSTs & Removable USB/SD
-            </div>
-            <div style={{ fontSize: 12, color: '#8e8e99' }}>
-              {snap?.mounts.length ?? 0} local folders indexed • Browse in Library
-            </div>
-          </div>
-          <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2aa3c4' }}>Browse →</span>
-        </button>
-
-        {/* External USB / Optical CD-ROM Drive (Red Book CD-DA + DVD-Video) */}
-        <div
-          style={{
-            padding: '12px 14px',
-            borderRadius: 12,
-            background:
-              opticalDisc?.is_audio_cd || opticalDisc?.is_dvd_video
-                ? '#1b140c'
-                : '#101016',
-            border:
-              opticalDisc?.is_audio_cd || opticalDisc?.is_dvd_video
-                ? '1px solid #f59e0b'
-                : '1px solid #24242e',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            gap: 10,
-            flexWrap: 'wrap',
-          }}
-        >
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#fcd34d' }}>
-              💿 Optical CD-ROM & DVD-Video Drive
-            </div>
-            <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
-              {cdScanning
-                ? '⏳ Reading Optical Disc (CD TOC / DVD-Video)...'
-                : opticalDisc?.status_message ||
-                  'Connect an external USB CD/DVD drive — no sudo required'}
-            </div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <button
-              onClick={() => handleScanOpticalDisc(true, false)}
-              disabled={cdScanning}
-              style={{
-                minHeight: 36,
-                padding: '0 12px',
-                borderRadius: 8,
-                background: '#1f160d',
-                border: '1px solid #f59e0b',
-                color: '#fcd34d',
-                fontSize: 11,
-                fontWeight: 800,
-                cursor: 'pointer',
-              }}
-            >
-              {cdScanning ? 'Scanning...' : '🔄 Scan Disc'}
-            </button>
-            {(opticalDisc?.is_audio_cd || opticalDisc?.is_dvd_video) && (
-              <button
-                onClick={() => {
-                  if (opticalDisc.is_dvd_video) {
-                    setBrowserTarget({
-                      kind: 'cdda',
-                      id: opticalDisc.disc_id || opticalDisc.device_path || '/dev/sr0',
-                      title: `📀 ${opticalDisc.album_title || 'DVD Video'}`,
-                      subtitle: `${opticalDisc.artist_name || 'DVD-Video'}${
-                        opticalDisc.release_year ? ` • ${opticalDisc.release_year}` : ''
-                      }`,
-                      art_url: opticalDisc.art_url,
-                    });
-                    setBrowserTracks([]);
-                  } else {
-                    setBrowserTarget({
-                      kind: 'cdda',
-                      id: opticalDisc.disc_id || opticalDisc.device_path || '/dev/sr0',
-                      title: `💿 ${opticalDisc.album_title || 'Audio CD'}`,
-                      subtitle: `${opticalDisc.artist_name || 'Unknown Artist'}${
-                        opticalDisc.release_year ? ` • ${opticalDisc.release_year}` : ''
-                      }`,
-                      art_url: opticalDisc.art_url,
-                    });
-                    setBrowserTracks(opticalDisc.tracks);
-                  }
-                  setView('browser');
-                  setSourceModalOpen(false);
-                }}
-                style={{
-                  minHeight: 36,
-                  padding: '0 12px',
-                  borderRadius: 8,
-                  background: '#0f222a',
-                  border: '1px solid #2aa3c4',
-                  color: '#bfeaf5',
-                  fontSize: 11,
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                }}
-              >
-                {opticalDisc.is_dvd_video
-                  ? `▶ Open DVD (${opticalDisc.dvd_titles?.length || 0})`
-                  : `▶ Open CD (${opticalDisc.tracks.length})`}
-              </button>
-            )}
-            {opticalDisc?.drive_present && (
-              <button
-                onClick={handleEjectOpticalDisc}
-                style={{
-                  minHeight: 36,
-                  padding: '0 10px',
-                  borderRadius: 8,
-                  background: '#1f1216',
-                  border: '1px solid #4c2228',
-                  color: '#fca5a5',
-                  fontSize: 11,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                }}
-              >
-                ⏏ Eject
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Apple Music (MusicKit v3 + Companion QR Pairing) */}
-        <div
-          style={{
-            padding: '12px 14px',
-            borderRadius: 12,
-            background: snap?.apple_authenticated ? '#141018' : '#121218',
-            border: snap?.apple_authenticated ? '1px solid #f43f5e' : '1px solid #24242e',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 10,
-          }}
-        >
+        {/* Row 1: [BRIGHTNESS SLIDER] [SLEEP SCREEN] */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1.35fr 1fr', gap: 8 }}>
           <div
             style={{
+              padding: '8px 10px',
+              borderRadius: 12,
+              background: '#0e0e16',
+              border: '1px solid #222230',
               display: 'flex',
+              flexDirection: 'column',
               justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: 10,
-              flexWrap: 'wrap',
+              gap: 6,
             }}
           >
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 700 }}>
-                🍎 Apple Music
-              </div>
-              <div style={{ fontSize: 11, color: '#8e8e99' }}>
-                {snap?.apple_authenticated
-                  ? '🟢 Connected — Browse Cloud Playlists, Radio & Full Albums'
-                  : appleAuthCfg?.configured
-                  ? 'Sign in with your Apple ID or scan the Companion QR code'
-                  : 'Apple Music Developer Token not loaded'}
-              </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: 11.5, fontWeight: 800, color: '#bfeaf5' }}>
+                🔅 Brightness
+              </span>
+              <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#67e8f9' }}>
+                {brightnessPct}%
+              </span>
             </div>
-
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              {appleAuthCfg?.configured && !snap?.apple_authenticated && (
-                <button
-                  disabled={appleBusy}
-                  onClick={async () => {
-                    setAppleBusy(true);
-                    try {
-                      await authorizeAppleMusic(showToast);
-                      const updated = await defaultSimpClient.getAppleMusicAuthConfig();
-                      setAppleAuthCfg(updated);
-                      refreshLibraryData();
-                    } catch (err: any) {
-                      showToast(err?.message || 'Apple Music auth failed');
-                    } finally {
-                      setAppleBusy(false);
-                    }
-                  }}
-                  style={{
-                    minHeight: 36,
-                    padding: '0 12px',
-                    borderRadius: 8,
-                    background: '#31101b',
-                    border: '1px solid #f43f5e',
-                    color: '#fda4af',
-                    fontSize: 11,
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {appleBusy ? 'Working...' : 'Authorize Apple ID'}
-                </button>
-              )}
-
-              {snap?.apple_authenticated && (
-                <>
-                  <button
-                    onClick={() => {
-                      setBrowserSourceFilter('apple_music');
-                      setAppleSubTab('cloud_playlists');
-                      setView('browser');
-                      setSourceModalOpen(false);
-                    }}
-                    style={{
-                      minHeight: 36,
-                      padding: '0 10px',
-                      borderRadius: 8,
-                      background: '#0f222a',
-                      border: '1px solid #2aa3c4',
-                      color: '#bfeaf5',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    ☁️ Cloud Hub
-                  </button>
-                  <button
-                    onClick={async () => {
-                      await disconnectAppleMusicCleanSlate(showToast);
-                      const updated = await defaultSimpClient
-                        .getAppleMusicAuthConfig()
-                        .catch(() => null);
-                      if (updated) setAppleAuthCfg(updated);
-                    }}
-                    style={{
-                      minHeight: 36,
-                      padding: '0 10px',
-                      borderRadius: 8,
-                      background: '#1f1216',
-                      border: '1px solid #4c2228',
-                      color: '#f87171',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Disconnect & Wipe Auth
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Console-Style LAN QR Companion Pairing Banner */}
-          {appleAuthCfg?.configured && !snap?.apple_authenticated && (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 14,
-                padding: '10px 12px',
-                borderRadius: 10,
-                background: '#0a0a10',
-                border: '1px solid #282838',
-              }}
-            >
-              <QrCodeSvg
-                value={appleAuthCfg.pair_url || 'http://steamdeck.local:18888/pair'}
-                size={96}
+              <button
+                type="button"
+                data-default-focus="true"
+                onClick={() => setBrightnessPct((b) => Math.max(25, b - 10))}
+                style={smallStepBtnStyle}
+              >
+                −
+              </button>
+              <input
+                type="range"
+                min={25}
+                max={100}
+                step={5}
+                value={brightnessPct}
+                onChange={(e) => setBrightnessPct(Number(e.target.value))}
+                style={{
+                  flex: 1,
+                  accentColor: '#2aa3c4',
+                  cursor: 'pointer',
+                  minWidth: 0,
+                }}
               />
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: '#fda4af' }}>
-                  📱 Scan to Pair with iPhone / Android / PC
-                </div>
-                <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.4 }}>
-                  Sign in on your phone or PC where Face ID, Passkeys, and YubiKey / FIDO2 work natively. Having FIDO2 or security key issues? Visit the <code>/pair</code> URL below for troubleshooting & token tools.
-                </div>
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontFamily: 'monospace',
-                    color: '#67e8f9',
-                    marginTop: 2,
-                  }}
-                >
-                  {appleAuthCfg.pair_url || 'http://steamdeck.local:18888/pair'}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {snap?.apple_authenticated && (
-            <div style={{ fontSize: 11, color: '#71717a' }}>
-              Need to re-pair or use FIDO2 / token troubleshooting? Open{' '}
-              <span style={{ fontFamily: 'monospace', color: '#67e8f9' }}>
-                {appleAuthCfg?.pair_url || 'http://127.0.0.1:18888/pair'}
-              </span>{' '}
-              or use the <strong>⏻ Power Menu</strong>.
-            </div>
-          )}
-        </div>
-
-        {/* SoundCloud (OAuth 2.1 PKCE + Client Credentials Public Discovery) */}
-        <div
-          style={{
-            padding: '12px 14px',
-            borderRadius: 12,
-            background:
-              snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated
-                ? '#18110c'
-                : '#121218',
-            border:
-              snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated
-                ? '1px solid #ea580c'
-                : '1px solid #24242e',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 10,
-          }}
-        >
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: 10,
-              flexWrap: 'wrap',
-            }}
-          >
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#fdba74' }}>
-                ☁️ SoundCloud
-              </div>
-              <div style={{ fontSize: 11, color: '#8e8e99' }}>
-                {snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated
-                  ? soundcloudAuthCfg?.username
-                    ? `🟢 Connected (@${soundcloudAuthCfg.username}) — Likes, Sets, Stream, Radio & DJ Mixes`
-                    : '🟢 Public Discovery Active (Client Credentials) — Trending, Search, Radio & DJ Mixes'
-                  : soundcloudAuthCfg?.configured
-                  ? 'Sign in with SoundCloud (OAuth 2.1 PKCE) or enable Public Discovery'
-                  : 'Configure SOUNDCLOUD_CLIENT_ID & SOUNDCLOUD_CLIENT_SECRET in .env or /pair'}
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              {soundcloudAuthCfg?.configured && (
-                <button
-                  disabled={soundcloudBusy}
-                  onClick={async () => {
-                    setSoundcloudBusy(true);
-                    try {
-                      await startSoundCloudOAuthLogin(showToast);
-                      const updated = await defaultSimpClient.getSoundCloudAuthConfig();
-                      setSoundcloudAuthCfg(updated);
-                      refreshLibraryData();
-                    } catch (err: any) {
-                      showToast(err?.message || 'SoundCloud OAuth failed');
-                    } finally {
-                      setSoundcloudBusy(false);
-                    }
-                  }}
-                  style={{
-                    minHeight: 36,
-                    padding: '0 12px',
-                    borderRadius: 8,
-                    background: '#2c140a',
-                    border: '1px solid #ea580c',
-                    color: '#fdba74',
-                    fontSize: 11,
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {soundcloudBusy
-                    ? 'Working...'
-                    : soundcloudAuthCfg?.username
-                    ? `Re-Auth (@${soundcloudAuthCfg.username})`
-                    : 'Sign in with SoundCloud'}
-                </button>
-              )}
-
-              {soundcloudAuthCfg?.configured &&
-                !(snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated) && (
-                  <button
-                    disabled={soundcloudBusy}
-                    onClick={async () => {
-                      setSoundcloudBusy(true);
-                      try {
-                        await enableSoundCloudPublicMode(showToast);
-                        const updated = await defaultSimpClient.getSoundCloudAuthConfig();
-                        setSoundcloudAuthCfg(updated);
-                        refreshLibraryData();
-                      } catch (err: any) {
-                        showToast(err?.message || 'SoundCloud Public Mode failed');
-                      } finally {
-                        setSoundcloudBusy(false);
-                      }
-                    }}
-                    style={{
-                      minHeight: 36,
-                      padding: '0 10px',
-                      borderRadius: 8,
-                      background: '#161622',
-                      border: '1px solid #2e2e40',
-                      color: '#cbd5e1',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    ⚡ Public Mode
-                  </button>
-                )}
-
-              {(snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated) && (
-                <>
-                  <button
-                    onClick={() => {
-                      setBrowserSourceFilter('soundcloud');
-                      setSoundCloudSubTab(
-                        soundcloudAuthCfg?.username ? 'likes_sets' : 'trending'
-                      );
-                      setView('browser');
-                      setSourceModalOpen(false);
-                    }}
-                    style={{
-                      minHeight: 36,
-                      padding: '0 10px',
-                      borderRadius: 8,
-                      background: '#0f222a',
-                      border: '1px solid #2aa3c4',
-                      color: '#bfeaf5',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    ☁️ SoundCloud Hub
-                  </button>
-                  <button
-                    onClick={async () => {
-                      await disconnectSoundCloudCleanSlate(showToast);
-                      const updated = await defaultSimpClient
-                        .getSoundCloudAuthConfig()
-                        .catch(() => null);
-                      if (updated) setSoundcloudAuthCfg(updated);
-                    }}
-                    style={{
-                      minHeight: 36,
-                      padding: '0 10px',
-                      borderRadius: 8,
-                      background: '#1f1216',
-                      border: '1px solid #4c2228',
-                      color: '#f87171',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Disconnect
-                  </button>
-                </>
-              )}
+              <button
+                type="button"
+                onClick={() => setBrightnessPct((b) => Math.min(100, b + 10))}
+                style={smallStepBtnStyle}
+              >
+                +
+              </button>
             </div>
           </div>
 
-          <div style={{ fontSize: 11, color: '#71717a' }}>
-            Redirect URI:{' '}
-            <span style={{ fontFamily: 'monospace', color: '#fdba74' }}>
-              {soundcloudAuthCfg?.redirect_uri ||
-                'http://127.0.0.1:18888/api/soundcloud/callback'}
+          <button
+            type="button"
+            onClick={() => {
+              closeSettingsDrawer();
+              setIsSleeping(true);
+            }}
+            style={{
+              minHeight: 56,
+              padding: '8px 12px',
+              borderRadius: 12,
+              background: '#0d1b22',
+              border: '1px solid #2aa3c4',
+              color: '#bfeaf5',
+              textAlign: 'left',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              gap: 3,
+              cursor: 'pointer',
+            }}
+          >
+            <span style={{ fontSize: 12.5, fontWeight: 800 }}>🌙 Sleep Screen</span>
+            <span style={{ fontSize: 10.5, color: '#8e8e99' }}>True-black OLED saver</span>
+          </button>
+        </div>
+
+        {/* Row 2: [POWER OFF] [RESET SERVICE] */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <button
+            type="button"
+            onClick={() => {
+              defaultSimpClient.shutdownDaemon();
+              closeSettingsDrawer();
+              window.setTimeout(() => dismissConsole(), 250);
+            }}
+            style={{
+              minHeight: 50,
+              padding: '8px 12px',
+              borderRadius: 12,
+              background: '#221014',
+              border: '1px solid #7f1d1d',
+              color: '#fca5a5',
+              textAlign: 'left',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              gap: 2,
+              cursor: 'pointer',
+            }}
+          >
+            <span style={{ fontSize: 12.5, fontWeight: 800 }}>⏻ Power Off</span>
+            <span style={{ fontSize: 10.5, color: '#fca5a5', opacity: 0.8 }}>
+              Stop daemon & exit
             </span>
-          </div>
-        </div>
+          </button>
 
-        {/* Internet Archive (Free Digital Library Card — Public Domain Movies, TV, Concerts & Audio) */}
-        <div
-          style={{
-            padding: '12px 14px',
-            borderRadius: 12,
-            background: iaEnabledLocal ? '#101815' : '#121218',
-            border: iaEnabledLocal ? '1px solid #34d399' : '1px solid #24242e',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 10,
-          }}
-        >
-          <div
+          <button
+            type="button"
+            onClick={() => {
+              defaultSimpClient.pause();
+              defaultSimpClient.restartDaemon();
+              showToast('Restarting SIMP background service...');
+              closeSettingsDrawer();
+              if (window.parent && window.parent !== window) {
+                window.setTimeout(() => dismissConsole(), 300);
+              } else {
+                window.setTimeout(() => window.location.reload(), 900);
+              }
+            }}
             style={{
+              minHeight: 50,
+              padding: '8px 12px',
+              borderRadius: 12,
+              background: '#151320',
+              border: '1px solid #3b3354',
+              color: '#ddd6fe',
+              textAlign: 'left',
               display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: 10,
-              flexWrap: 'wrap',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              gap: 2,
+              cursor: 'pointer',
             }}
           >
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#6ee7b7' }}>
-                🏛️ Internet Archive — Free Digital Library Card
-              </div>
-              <div style={{ fontSize: 11, color: '#8e8e99' }}>
-                {iaEnabledLocal
-                  ? iaUsername.trim()
-                    ? `🟢 Active (@${iaUsername.trim()}) — Feature Films, Classic TV, Live Concerts & Audio`
-                    : '🟢 Active — Stream Public Domain Films, TV, Animation, Live Concerts & Audio'
-                  : 'No subscription required — 1-click access to archive.org video & audio collections'}
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              {!iaEnabledLocal ? (
-                <button
-                  onClick={() => {
-                    defaultSimpClient.configureInternetArchive({
-                      enabled: true,
-                      username: iaUsername.trim(),
-                    });
-                    setIaEnabledLocal(true);
-                    showToast('Internet Archive Library Card enabled');
-                    refreshLibraryData();
-                  }}
-                  style={{
-                    minHeight: 36,
-                    padding: '0 12px',
-                    borderRadius: 8,
-                    background: '#0d261e',
-                    border: '1px solid #34d399',
-                    color: '#a7f3d0',
-                    fontSize: 11,
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Enable Free Library Card
-                </button>
-              ) : (
-                <>
-                  <button
-                    onClick={() => {
-                      setBrowserSourceFilter('internet_archive');
-                      setView('browser');
-                      setSourceModalOpen(false);
-                    }}
-                    style={{
-                      minHeight: 36,
-                      padding: '0 10px',
-                      borderRadius: 8,
-                      background: '#0f222a',
-                      border: '1px solid #2aa3c4',
-                      color: '#bfeaf5',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Open Archive
-                  </button>
-                  <button
-                    onClick={() => {
-                      defaultSimpClient.disconnectInternetArchive();
-                      setIaEnabledLocal(false);
-                      setIaUsername('');
-                      showToast('Internet Archive disconnected');
-                      refreshLibraryData();
-                    }}
-                    style={{
-                      minHeight: 36,
-                      padding: '0 10px',
-                      borderRadius: 8,
-                      background: '#1f1216',
-                      border: '1px solid #4c2228',
-                      color: '#f87171',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Disconnect
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {iaEnabledLocal && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <input
-                  type="text"
-                  placeholder="Optional @username on archive.org (syncs fav-@username)"
-                  value={iaUsername}
-                  onChange={(e) => setIaUsername(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      defaultSimpClient.configureInternetArchive({
-                        enabled: true,
-                        username: iaUsername.trim(),
-                        ...(iaAccessKey.trim() ? { access_key: iaAccessKey.trim() } : {}),
-                        ...(iaSecretKey.trim() ? { secret_key: iaSecretKey.trim() } : {}),
-                      });
-                      showToast(
-                        iaUsername.trim()
-                          ? `Saved Internet Archive @${iaUsername.trim()}`
-                          : 'Updated Internet Archive settings'
-                      );
-                    }
-                  }}
-                  style={{
-                    flex: 1,
-                    minWidth: 180,
-                    minHeight: 34,
-                    padding: '0 10px',
-                    borderRadius: 8,
-                    background: '#080b0a',
-                    border: '1px solid #243830',
-                    color: '#d4d4dc',
-                    fontSize: 11,
-                    fontFamily: 'monospace',
-                  }}
-                />
-                <button
-                  onClick={() => {
-                    defaultSimpClient.configureInternetArchive({
-                      enabled: true,
-                      username: iaUsername.trim(),
-                      ...(iaAccessKey.trim() ? { access_key: iaAccessKey.trim() } : {}),
-                      ...(iaSecretKey.trim() ? { secret_key: iaSecretKey.trim() } : {}),
-                    });
-                    showToast(
-                      iaUsername.trim()
-                        ? `Saved Internet Archive @${iaUsername.trim()}`
-                        : 'Updated Internet Archive settings'
-                    );
-                  }}
-                  style={{
-                    minHeight: 34,
-                    padding: '0 12px',
-                    borderRadius: 8,
-                    background: '#132a22',
-                    border: '1px solid #34d399',
-                    color: '#a7f3d0',
-                    fontSize: 11,
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Save
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIaKeysOpen((v) => !v)}
-                  style={{
-                    minHeight: 34,
-                    padding: '0 10px',
-                    borderRadius: 8,
-                    background: '#0e1412',
-                    border: '1px solid #243830',
-                    color: '#9ca3af',
-                    fontSize: 11,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {iaKeysOpen ? '▾ Hide S3 Keys' : '▸ Optional S3 Keys'}
-                </button>
-              </div>
-
-              {iaKeysOpen && (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 6,
-                    padding: '8px 10px',
-                    borderRadius: 8,
-                    background: '#080b0a',
-                    border: '1px solid #1e2e28',
-                  }}
-                >
-                  <div style={{ fontSize: 10, color: '#9ca3af' }}>
-                    Optional IAS3 keys from <code>archive.org/account/s3.php</code> for higher rate
-                    limits (`Authorization: LOW access:secret`).
-                  </div>
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    <input
-                      type="text"
-                      placeholder="IAS3 Access Key"
-                      value={iaAccessKey}
-                      onChange={(e) => setIaAccessKey(e.target.value)}
-                      style={{
-                        flex: 1,
-                        minWidth: 140,
-                        minHeight: 32,
-                        padding: '0 8px',
-                        borderRadius: 6,
-                        background: '#050706',
-                        border: '1px solid #243830',
-                        color: '#d4d4dc',
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                      }}
-                    />
-                    <input
-                      type="password"
-                      placeholder="IAS3 Secret Key"
-                      value={iaSecretKey}
-                      onChange={(e) => setIaSecretKey(e.target.value)}
-                      style={{
-                        flex: 1,
-                        minWidth: 140,
-                        minHeight: 32,
-                        padding: '0 8px',
-                        borderRadius: 6,
-                        background: '#050706',
-                        border: '1px solid #243830',
-                        color: '#d4d4dc',
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+            <span style={{ fontSize: 12.5, fontWeight: 800 }}>🔄 Reset Service</span>
+            <span style={{ fontSize: 10.5, color: '#a1a1aa' }}>Restart audio daemon</span>
+          </button>
         </div>
 
-        {/* Collapsible Phone / PC Companion Pairing & Diagnostics (/pair) */}
+        {/* Row 3: [Folders & Accounts] + */}
         <div
           style={{
-            borderRadius: 12,
+            borderRadius: 14,
             background: '#0d0d14',
-            border: '1px solid #262636',
+            border: '1px solid #222230',
             display: 'flex',
             flexDirection: 'column',
             overflow: 'hidden',
@@ -1065,139 +477,890 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         >
           <button
             type="button"
-            onClick={() => setPairHelpOpen((v) => !v)}
-            style={{
-              width: '100%',
-              minHeight: 44,
-              padding: '10px 14px',
-              background: 'transparent',
-              border: 'none',
-              color: '#a1a1aa',
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: 'pointer',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              textAlign: 'left',
-            }}
+            onClick={() => setFoldersAccountsOpen((v) => !v)}
+            style={sectionHeaderBtnStyle}
           >
-            <span>🛠️ Companion Pairing & Auth Diagnostics (/pair)</span>
-            <span style={{ fontFamily: 'monospace', color: '#67e8f9' }}>
-              {pairHelpOpen ? '▾ Hide' : '▸ Show QR'}
+            <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
+              📁 Folders & Accounts
+            </span>
+            <span style={{ fontFamily: 'monospace', fontSize: 14, color: '#67e8f9', fontWeight: 900 }}>
+              {foldersAccountsOpen ? '−' : '+'}
             </span>
           </button>
 
-          {pairHelpOpen && (
+          {foldersAccountsOpen && (
             <div
               style={{
-                padding: '0 14px 14px',
+                padding: '6px 10px 10px',
                 display: 'flex',
-                alignItems: 'center',
-                gap: 14,
-                borderTop: '1px solid #1c1c28',
-                paddingTop: 12,
+                flexDirection: 'column',
+                gap: 8,
+                borderTop: '1px solid #1a1a26',
               }}
             >
-              <QrCodeSvg
-                value={appleAuthCfg?.pair_url || 'http://steamdeck.local:18888/pair'}
-                size={84}
-              />
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 5, flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: '#67e8f9' }}>
-                  📱 Remote Phone / PC Companion Portal
+              {/* + Internet Archive [Show/Hide, Safe Search, Sign In] */}
+              <div style={nestedCardStyle}>
+                <div style={nestedHeaderRowStyle}>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: '#6ee7b7' }}>
+                    + 🏛️ Internet Archive
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      onClick={() => toggleSourceVisible('internet_archive')}
+                      style={pillToggleStyle(sourceVisibility.internet_archive, '#34d399')}
+                    >
+                      {sourceVisibility.internet_archive ? '👁 Show' : '🚫 Hide'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextSafe = !iaSafeSearch;
+                        setIaSafeSearch(nextSafe);
+                        defaultSimpClient.configureInternetArchive({
+                          enabled: sourceVisibility.internet_archive || iaEnabledLocal,
+                          username: iaUsername.trim(),
+                          safe_search: nextSafe,
+                        });
+                        showToast(
+                          nextSafe
+                            ? '🛡️ Archive Safe Search enabled'
+                            : '🛡️ Archive Safe Search disabled'
+                        );
+                        refreshLibraryData();
+                      }}
+                      style={pillToggleStyle(iaSafeSearch, '#38bdf8')}
+                    >
+                      🛡️ Safe: {iaSafeSearch ? 'On' : 'Off'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIaAuthOpen((v) => !v)}
+                      style={pillToggleStyle(iaAuthOpen || Boolean(iaUsername.trim()), '#a7f3d0')}
+                    >
+                      {iaUsername.trim() ? `@${iaUsername.trim()}` : 'Sign In'} {iaAuthOpen ? '▾' : '▸'}
+                    </button>
+                  </div>
                 </div>
-                <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.4 }}>
-                  Scan with your phone or visit on a PC to pair Apple Music / SoundCloud or access{' '}
-                  <strong>FIDO2 / YubiKey & Token Debug</strong> tools.
+
+                {iaAuthOpen && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6,
+                      paddingTop: 6,
+                      borderTop: '1px solid #1c2824',
+                    }}
+                  >
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <input
+                        type="text"
+                        placeholder="Archive.org @username (syncs fav-@username)"
+                        value={iaUsername}
+                        onChange={(e) => setIaUsername(e.target.value)}
+                        style={compactInputStyle}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          defaultSimpClient.configureInternetArchive({
+                            enabled: true,
+                            username: iaUsername.trim(),
+                            safe_search: iaSafeSearch,
+                            ...(iaAccessKey.trim() ? { access_key: iaAccessKey.trim() } : {}),
+                            ...(iaSecretKey.trim() ? { secret_key: iaSecretKey.trim() } : {}),
+                          });
+                          setIaEnabledLocal(true);
+                          setSourceVisibility((p) => ({ ...p, internet_archive: true }));
+                          showToast(
+                            iaUsername.trim()
+                              ? `Saved Internet Archive @${iaUsername.trim()}`
+                              : 'Saved Internet Archive settings'
+                          );
+                          refreshLibraryData();
+                        }}
+                        style={compactPrimaryBtnStyle}
+                      >
+                        Save
+                      </button>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <input
+                        type="text"
+                        placeholder="Optional IAS3 Access Key"
+                        value={iaAccessKey}
+                        onChange={(e) => setIaAccessKey(e.target.value)}
+                        style={compactInputStyle}
+                      />
+                      <input
+                        type="password"
+                        placeholder="Optional IAS3 Secret Key"
+                        value={iaSecretKey}
+                        onChange={(e) => setIaSecretKey(e.target.value)}
+                        style={compactInputStyle}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* + Apple Music [Show/Hide, Sign In] */}
+              <div style={nestedCardStyle}>
+                <div style={nestedHeaderRowStyle}>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: '#fda4af' }}>
+                    + 🍎 Apple Music
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => toggleSourceVisible('apple_music')}
+                      style={pillToggleStyle(sourceVisibility.apple_music, '#f43f5e')}
+                    >
+                      {sourceVisibility.apple_music ? '👁 Show' : '🚫 Hide'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAppleAuthOpen((v) => !v)}
+                      style={pillToggleStyle(!!snap?.apple_authenticated || appleAuthOpen, '#fda4af')}
+                    >
+                      {snap?.apple_authenticated ? '🟢 Connected' : 'Sign In'} {appleAuthOpen ? '▾' : '▸'}
+                    </button>
+                  </div>
                 </div>
-                <div
+
+                {appleAuthOpen && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                      paddingTop: 6,
+                      borderTop: '1px solid #281820',
+                    }}
+                  >
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {!snap?.apple_authenticated ? (
+                        <button
+                          type="button"
+                          disabled={appleBusy}
+                          onClick={async () => {
+                            setAppleBusy(true);
+                            try {
+                              await authorizeAppleMusic(showToast);
+                              const updated = await defaultSimpClient.getAppleMusicAuthConfig();
+                              setAppleAuthCfg(updated);
+                              refreshLibraryData();
+                            } catch (err: any) {
+                              showToast(err?.message || 'Apple Music auth failed');
+                            } finally {
+                              setAppleBusy(false);
+                            }
+                          }}
+                          style={{
+                            ...compactPrimaryBtnStyle,
+                            background: '#31101b',
+                            borderColor: '#f43f5e',
+                            color: '#fda4af',
+                          }}
+                        >
+                          {appleBusy ? 'Working...' : 'Authorize Apple ID'}
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBrowserSourceFilter('apple_music');
+                              setAppleSubTab('cloud_playlists');
+                              setView('browser');
+                              closeSettingsDrawer();
+                            }}
+                            style={compactPrimaryBtnStyle}
+                          >
+                            Open Cloud Hub
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await disconnectAppleMusicCleanSlate(showToast);
+                              const updated = await defaultSimpClient
+                                .getAppleMusicAuthConfig()
+                                .catch(() => null);
+                              if (updated) setAppleAuthCfg(updated);
+                            }}
+                            style={compactDangerBtnStyle}
+                          >
+                            Disconnect
+                          </button>
+                        </>
+                      )}
+                    </div>
+
+                    {appleAuthCfg?.pair_url && (
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 10,
+                          padding: 8,
+                          borderRadius: 8,
+                          background: '#08080c',
+                          border: '1px solid #222230',
+                        }}
+                      >
+                        <QrCodeSvg value={appleAuthCfg.pair_url} size={68} />
+                        <div style={{ minWidth: 0, flex: 1, fontSize: 10.5, color: '#a1a1aa' }}>
+                          <div style={{ fontWeight: 800, color: '#fda4af', marginBottom: 2 }}>
+                            📱 Companion Pairing QR
+                          </div>
+                          <div>Scan on phone/PC for Face ID, Passkey, or FIDO2 sign-in:</div>
+                          <div
+                            style={{
+                              fontFamily: 'monospace',
+                              color: '#67e8f9',
+                              marginTop: 2,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                          >
+                            {appleAuthCfg.pair_url}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* + SoundCloud [Show/Hide, Sign In] */}
+              <div style={nestedCardStyle}>
+                <div style={nestedHeaderRowStyle}>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: '#fdba74' }}>
+                    + ☁️ SoundCloud
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => toggleSourceVisible('soundcloud')}
+                      style={pillToggleStyle(sourceVisibility.soundcloud, '#ea580c')}
+                    >
+                      {sourceVisibility.soundcloud ? '👁 Show' : '🚫 Hide'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setScAuthOpen((v) => !v)}
+                      style={pillToggleStyle(
+                        Boolean(
+                          snap?.soundcloud_authenticated ||
+                            soundcloudAuthCfg?.soundcloud_authenticated ||
+                            scAuthOpen
+                        ),
+                        '#fdba74'
+                      )}
+                    >
+                      {soundcloudAuthCfg?.username
+                        ? `@${soundcloudAuthCfg.username}`
+                        : snap?.soundcloud_authenticated ||
+                          soundcloudAuthCfg?.soundcloud_authenticated
+                        ? '🟢 Public'
+                        : 'Sign In'}{' '}
+                      {scAuthOpen ? '▾' : '▸'}
+                    </button>
+                  </div>
+                </div>
+
+                {scAuthOpen && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: 6,
+                      paddingTop: 6,
+                      borderTop: '1px solid #281c14',
+                    }}
+                  >
+                    <button
+                      type="button"
+                      disabled={soundcloudBusy}
+                      onClick={async () => {
+                        setSoundcloudBusy(true);
+                        try {
+                          await startSoundCloudOAuthLogin(showToast);
+                          const updated = await defaultSimpClient.getSoundCloudAuthConfig();
+                          setSoundcloudAuthCfg(updated);
+                          refreshLibraryData();
+                        } catch (err: any) {
+                          showToast(err?.message || 'SoundCloud OAuth failed');
+                        } finally {
+                          setSoundcloudBusy(false);
+                        }
+                      }}
+                      style={{
+                        ...compactPrimaryBtnStyle,
+                        background: '#2c140a',
+                        borderColor: '#ea580c',
+                        color: '#fdba74',
+                      }}
+                    >
+                      {soundcloudBusy ? 'Working...' : 'OAuth Sign In'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={soundcloudBusy}
+                      onClick={async () => {
+                        setSoundcloudBusy(true);
+                        try {
+                          await enableSoundCloudPublicMode(showToast);
+                          const updated = await defaultSimpClient.getSoundCloudAuthConfig();
+                          setSoundcloudAuthCfg(updated);
+                          refreshLibraryData();
+                        } catch (err: any) {
+                          showToast(err?.message || 'Public Mode failed');
+                        } finally {
+                          setSoundcloudBusy(false);
+                        }
+                      }}
+                      style={compactPrimaryBtnStyle}
+                    >
+                      ⚡ Public Mode
+                    </button>
+                    {(snap?.soundcloud_authenticated ||
+                      soundcloudAuthCfg?.soundcloud_authenticated) && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await disconnectSoundCloudCleanSlate(showToast);
+                          const updated = await defaultSimpClient
+                            .getSoundCloudAuthConfig()
+                            .catch(() => null);
+                          if (updated) setSoundcloudAuthCfg(updated);
+                        }}
+                        style={compactDangerBtnStyle}
+                      >
+                        Disconnect
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* + Optical Drive [Show/Hide] */}
+              <div style={nestedCardStyle}>
+                <div style={nestedHeaderRowStyle}>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: '#fcd34d' }}>
+                    + 💿 Optical Drive
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      onClick={() => toggleSourceVisible('optical_drive')}
+                      style={pillToggleStyle(sourceVisibility.optical_drive, '#f59e0b')}
+                    >
+                      {sourceVisibility.optical_drive ? '👁 Show' : '🚫 Hide'}
+                    </button>
+                    {sourceVisibility.optical_drive && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={cdScanning}
+                          onClick={() => handleScanOpticalDisc(true, false)}
+                          style={pillToggleStyle(false, '#fcd34d')}
+                        >
+                          {cdScanning ? '⏳...' : '🔄 Scan'}
+                        </button>
+                        {opticalDisc?.drive_present && (
+                          <button
+                            type="button"
+                            onClick={handleEjectOpticalDisc}
+                            style={pillToggleStyle(false, '#fca5a5')}
+                          >
+                            ⏏ Eject
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* + Folders */}
+              <div style={nestedCardStyle}>
+                <div style={nestedHeaderRowStyle}>
+                  <button
+                    type="button"
+                    onClick={() => setFoldersOpen((v) => !v)}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#67e8f9',
+                      fontSize: 12,
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      padding: 0,
+                      textAlign: 'left',
+                    }}
+                  >
+                    {foldersOpen ? '−' : '+'} 📁 Folders ({snap?.mounts?.length || 0})
+                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFoldersOpen(true);
+                        setAddPathOpen((v) => !v);
+                      }}
+                      style={pillToggleStyle(addPathOpen, '#2aa3c4')}
+                    >
+                      + Add local path
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        defaultSimpClient.rescanStorage();
+                        showToast('Rescanning local folders...');
+                      }}
+                      style={pillToggleStyle(false, '#bfeaf5')}
+                    >
+                      🔄 Rescan
+                    </button>
+                  </div>
+                </div>
+
+                {foldersOpen && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6,
+                      paddingTop: 6,
+                      borderTop: '1px solid #1e1e2c',
+                    }}
+                  >
+                    {addPathOpen && (
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <input
+                          type="text"
+                          data-osk-input="folder"
+                          placeholder="/path/to/music-or-videos"
+                          value={customFolderPath}
+                          onChange={(e) => setCustomFolderPath(e.target.value)}
+                          onClick={() => {
+                            setOskTarget('folder');
+                            if (window.parent && window.parent !== window) {
+                              window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleAddFolder(customFolderPath);
+                          }}
+                          style={compactInputStyle}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleAddFolder(customFolderPath)}
+                          style={compactPrimaryBtnStyle}
+                        >
+                          Add
+                        </button>
+                      </div>
+                    )}
+
+                    {snap?.mounts && snap.mounts.length > 0 ? (
+                      <div
+                        style={{
+                          maxHeight: 150,
+                          overflowY: 'auto',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 4,
+                        }}
+                      >
+                        {snap.mounts.map((m) => (
+                          <div
+                            key={m.mount_root}
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: 8,
+                              padding: '5px 8px',
+                              borderRadius: 8,
+                              background: '#08080c',
+                              border: '1px solid #1c1c26',
+                              fontSize: 11,
+                            }}
+                          >
+                            <span
+                              style={{
+                                fontFamily: 'monospace',
+                                color: m.is_online ? '#c8c8d2' : '#71717a',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              + {m.mount_root} ({m.track_count})
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveFolder(m.mount_root, m.label)}
+                              style={compactDangerBtnStyle}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11, color: '#71717a' }}>No mounted local paths</div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* + [ Reset DB (Preserves Auth) ] & + [ HARD RESET ] */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    defaultSimpClient.resetDatabaseCache();
+                    showToast('Cleared DB cache & rescanning folders...');
+                    closeSettingsDrawer();
+                    window.setTimeout(() => refreshLibraryData(), 600);
+                  }}
                   style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 8,
-                    flexWrap: 'wrap',
-                    marginTop: 2,
+                    minHeight: 40,
+                    padding: '6px 10px',
+                    borderRadius: 10,
+                    background: '#14141e',
+                    border: '1px solid #2c2c3c',
+                    color: '#d4d4dc',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
                   }}
                 >
-                  <span
-                    style={{
-                      fontSize: 11,
-                      fontFamily: 'monospace',
-                      color: '#fda4af',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                    }}
-                  >
-                    {appleAuthCfg?.pair_url || 'http://127.0.0.1:18888/pair'}
-                  </span>
-                  <a
-                    href="/pair"
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{
-                      padding: '5px 10px',
-                      borderRadius: 8,
-                      background: '#171724',
-                      border: '1px solid #2aa3c4',
-                      color: '#bfeaf5',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      textDecoration: 'none',
-                    }}
-                  >
-                    Open /pair ↗
-                  </a>
+                  🧹 Reset DB (Preserves Auth)
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setConfirmHardReset((v) => !v)}
+                  style={{
+                    minHeight: 40,
+                    padding: '6px 10px',
+                    borderRadius: 10,
+                    background: '#221115',
+                    border: '1px solid #5c222d',
+                    color: '#f87171',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  ⚠️ Hard Reset
+                </button>
+              </div>
+
+              {confirmHardReset && (
+                <div
+                  style={{
+                    padding: 10,
+                    borderRadius: 10,
+                    background: '#2a0e13',
+                    border: '1px solid #ef4444',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ fontSize: 11.5, fontWeight: 800, color: '#fecaca' }}>
+                    ⚠️ Confirm Hard Reset (Wipes Auth, Playlists & Settings)?
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        defaultSimpClient.factoryReset();
+                        closeSettingsDrawer();
+                        showToast('Factory reset complete');
+                        window.setTimeout(() => refreshLibraryData(), 600);
+                      }}
+                      style={{
+                        flex: 1,
+                        minHeight: 34,
+                        borderRadius: 8,
+                        background: '#dc2626',
+                        border: '1px solid #f87171',
+                        color: '#fff',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Yes, Hard Reset
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmHardReset(false)}
+                      style={{
+                        minHeight: 34,
+                        padding: '0 12px',
+                        borderRadius: 8,
+                        background: '#181822',
+                        border: '1px solid #2e2e3c',
+                        color: '#d4d4dc',
+                        fontSize: 11,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Row 4: [Perf Metrics] */}
+        <div
+          style={{
+            borderRadius: 14,
+            background: '#0d0d14',
+            border: '1px solid #222230',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setPerfMetricsOpen((v) => !v)}
+            style={sectionHeaderBtnStyle}
+          >
+            <span style={{ fontSize: 12.5, fontWeight: 800, color: '#d4d4dc' }}>
+              📊 Perf Metrics{' '}
+              {perfSnap ? (
+                <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#6ee7b7' }}>
+                  ({perfSnap.cpu_percent.toFixed(1)}% CPU • {perfSnap.rss_mb.toFixed(1)} MB)
+                </span>
+              ) : null}
+            </span>
+            <span style={{ fontFamily: 'monospace', fontSize: 14, color: '#67e8f9', fontWeight: 900 }}>
+              {perfMetricsOpen ? '−' : '+'}
+            </span>
+          </button>
+
+          {perfMetricsOpen && (
+            <div
+              style={{
+                padding: '8px 12px 10px',
+                borderTop: '1px solid #1a1a26',
+                fontFamily: 'monospace',
+                fontSize: 11,
+                color: '#a1a1aa',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4,
+              }}
+            >
+              <div>
+                CPU: <strong style={{ color: '#6ee7b7' }}>{perfSnap?.cpu_percent.toFixed(1) ?? '0.0'}%</strong>{' '}
+                • RAM (RSS): <strong style={{ color: '#67e8f9' }}>{perfSnap?.rss_mb.toFixed(1) ?? '0.0'} MB</strong>
+              </div>
+              <div>
+                Audio Backend: <strong>{perfSnap?.audio_backend || 'PipeWire / Native'}</strong> •{' '}
+                {perfSnap?.platform || 'Linux'}
               </div>
             </div>
           )}
         </div>
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+        {/* Row 5: [Upgrade Check] */}
+        <div
+          style={{
+            borderRadius: 14,
+            background: '#0d0d14',
+            border: updateStatus.update_available ? '1px solid #2aa3c4' : '1px solid #222230',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
           <button
+            type="button"
             onClick={() => {
-              defaultSimpClient.rescanStorage();
-              showToast('Rescanning local folders...');
-              setSourceModalOpen(false);
+              const next = !upgradeOpen;
+              setUpgradeOpen(next);
+              if (next) checkSimpUpdates(false);
             }}
-            style={{
-              minHeight: 44,
-              padding: '0 16px',
-              borderRadius: 12,
-              background: '#16161f',
-              border: '1px solid #2e2e3a',
-              color: '#d4d4dc',
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: 'pointer',
-            }}
+            style={sectionHeaderBtnStyle}
           >
-            🔄 Rescan Local Folders
+            <span style={{ fontSize: 12.5, fontWeight: 800, color: '#bfeaf5' }}>
+              ⬆️ Upgrade Check{' '}
+              {updateStatus.current_version ? (
+                <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#8e8e99' }}>
+                  (v{updateStatus.current_version})
+                </span>
+              ) : null}
+            </span>
+            <span style={{ fontFamily: 'monospace', fontSize: 14, color: '#67e8f9', fontWeight: 900 }}>
+              {upgradeOpen ? '−' : '+'}
+            </span>
           </button>
-          <button
-            onClick={() => {
-              setSourceModalOpen(false);
-              setPowerModalOpen(true);
-            }}
-            style={{
-              minHeight: 44,
-              padding: '0 16px',
-              borderRadius: 12,
-              background: '#12121a',
-              border: '1px solid #2e2e3a',
-              color: '#9ca3af',
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: 'pointer',
-            }}
-          >
-            ⏻ Power & System Menu →
-          </button>
+
+          {upgradeOpen && (
+            <div
+              style={{
+                padding: '8px 12px 10px',
+                borderTop: '1px solid #1a1a26',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+              }}
+            >
+              <div style={{ fontSize: 11, color: '#9ca3af' }}>
+                {updateStatus.applying
+                  ? 'Downloading & installing release bundle...'
+                  : updateStatus.checking
+                  ? 'Checking GitHub Releases...'
+                  : updateStatus.error
+                  ? `⚠️ ${updateStatus.error}`
+                  : updateStatus.update_available
+                  ? `🟢 New release ${updateStatus.latest_tag} available!`
+                  : updateStatus.latest_tag
+                  ? `Up to date (${updateStatus.latest_tag})`
+                  : 'Check GitHub Releases for updates'}
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  type="button"
+                  disabled={Boolean(updateStatus.checking || updateStatus.applying)}
+                  onClick={() => checkSimpUpdates(false)}
+                  style={compactPrimaryBtnStyle}
+                >
+                  {updateStatus.checking ? 'Checking...' : '🔍 Check Now'}
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(updateStatus.applying)}
+                  onClick={applySimpUpdate}
+                  style={{
+                    ...compactPrimaryBtnStyle,
+                    background: updateStatus.update_available ? '#0f2936' : '#181824',
+                  }}
+                >
+                  {updateStatus.applying
+                    ? '⏳ Updating...'
+                    : updateStatus.update_available
+                    ? `⬆️ Install ${updateStatus.latest_tag}`
+                    : `🔄 Reinstall ${updateStatus.latest_tag || 'Latest'}`}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 };
 
+const smallStepBtnStyle: React.CSSProperties = {
+  width: 28,
+  height: 28,
+  borderRadius: 7,
+  background: '#161622',
+  border: '1px solid #2b2b3c',
+  color: '#d4d4dc',
+  fontSize: 13,
+  fontWeight: 800,
+  cursor: 'pointer',
+  flexShrink: 0,
+};
+
+const sectionHeaderBtnStyle: React.CSSProperties = {
+  width: '100%',
+  minHeight: 42,
+  padding: '8px 12px',
+  background: 'transparent',
+  border: 'none',
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  cursor: 'pointer',
+  textAlign: 'left',
+};
+
+const nestedCardStyle: React.CSSProperties = {
+  padding: '8px 10px',
+  borderRadius: 10,
+  background: '#11111a',
+  border: '1px solid #222232',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+};
+
+const nestedHeaderRowStyle: React.CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  gap: 8,
+  flexWrap: 'wrap',
+};
+
+function pillToggleStyle(active: boolean, accent: string): React.CSSProperties {
+  return {
+    minHeight: 28,
+    padding: '0 9px',
+    borderRadius: 7,
+    background: active ? 'rgba(42, 163, 196, 0.16)' : '#171722',
+    border: active ? `1px solid ${accent}` : '1px solid #2a2a3a',
+    color: active ? accent : '#a1a1aa',
+    fontSize: 10.5,
+    fontWeight: 800,
+    cursor: 'pointer',
+  };
+}
+
+const compactInputStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 120,
+  minHeight: 32,
+  padding: '0 9px',
+  borderRadius: 7,
+  background: '#07070b',
+  border: '1px solid #2a2a3a',
+  color: '#d4d4dc',
+  fontSize: 11,
+  fontFamily: 'monospace',
+};
+
+const compactPrimaryBtnStyle: React.CSSProperties = {
+  minHeight: 32,
+  padding: '0 11px',
+  borderRadius: 7,
+  background: '#0f222a',
+  border: '1px solid #2aa3c4',
+  color: '#bfeaf5',
+  fontSize: 11,
+  fontWeight: 800,
+  cursor: 'pointer',
+};
+
+const compactDangerBtnStyle: React.CSSProperties = {
+  minHeight: 28,
+  padding: '0 9px',
+  borderRadius: 7,
+  background: '#221115',
+  border: '1px solid #5c222d',
+  color: '#fca5a5',
+  fontSize: 10.5,
+  fontWeight: 700,
+  cursor: 'pointer',
+};

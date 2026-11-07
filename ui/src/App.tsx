@@ -39,8 +39,7 @@ import {
 import { OskTargetKind, useGamepadNavigation } from './hooks/useGamepadNavigation';
 import { BrowserTarget, isUiVideoTrack, PlayerView } from './views/PlayerView';
 import { LibraryBrowserView } from './views/LibraryBrowserView';
-import { SettingsModal } from './views/SettingsModal';
-import { PowerModal, SimpUpdateStatus } from './views/PowerModal';
+import { SettingsModal, SimpUpdateStatus, SourceVisibilityPrefs } from './views/SettingsModal';
 
 const isCompanionPairRoute =
   typeof window !== 'undefined' &&
@@ -65,9 +64,21 @@ const ConsoleMainApp: React.FC = () => {
   // Library & Playlist Browser state
   const [albums, setAlbums] = useState<AlbumRecord[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRecord[]>([]);
-  const [browserSourceFilter, setBrowserSourceFilter] = useState<
+  const [browserSourceFilter, setBrowserSourceFilterState] = useState<
     'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive'
   >('all');
+  const [selectedSources, setSelectedSources] = useState<
+    Array<'local' | 'apple_music' | 'soundcloud' | 'internet_archive'>
+  >([]);
+  const setBrowserSourceFilter: React.Dispatch<
+    React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive'>
+  > = useCallback((action) => {
+    setBrowserSourceFilterState((prev) => {
+      const next = typeof action === 'function' ? action(prev) : action;
+      setSelectedSources(next === 'all' ? [] : [next]);
+      return next;
+    });
+  }, []);
   const [browserSearch, setBrowserSearch] = useState('');
   const [browserTarget, setBrowserTarget] = useState<BrowserTarget | null>(null);
   const [browserTracks, setBrowserTracks] = useState<TrackMetadata[]>([]);
@@ -75,6 +86,67 @@ const ConsoleMainApp: React.FC = () => {
   // Optical CD-ROM (`cdda://`) drive status (scanned only on-demand / when CD source is in view & awake)
   const [opticalDisc, setOpticalDisc] = useState<OpticalDiscStatus | null>(null);
   const [cdScanning, setCdScanning] = useState(false);
+
+  // Source Visibility preferences (Show / Hide Internet Archive, Apple Music, SoundCloud, Optical Drive)
+  const [sourceVisibility, setSourceVisibility] = useState<SourceVisibilityPrefs>(() => {
+    try {
+      const raw = window.localStorage.getItem('simp_source_visibility_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return {
+          internet_archive: parsed.internet_archive !== false,
+          apple_music: parsed.apple_music !== false,
+          soundcloud: parsed.soundcloud !== false,
+          optical_drive: parsed.optical_drive !== false,
+        };
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+    return {
+      internet_archive: true,
+      apple_music: true,
+      soundcloud: true,
+      optical_drive: true,
+    };
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('simp_source_visibility_v1', JSON.stringify(sourceVisibility));
+    } catch {
+      // Ignore storage access errors
+    }
+  }, [sourceVisibility]);
+
+  // Recently Played history (`simp_recently_played_v1`, max 24 items)
+  const [recentlyPlayed, setRecentlyPlayed] = useState<TrackMetadata[]>(() => {
+    try {
+      const raw = window.localStorage.getItem('simp_recently_played_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed.slice(0, 24);
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+    return [];
+  });
+
+  useEffect(() => {
+    const cur = snap?.current_track;
+    if (!cur?.uri || !snap?.is_playing) return;
+    setRecentlyPlayed((prev) => {
+      if (prev[0]?.uri === cur.uri) return prev;
+      const next = [cur, ...prev.filter((t) => t.uri !== cur.uri)].slice(0, 24);
+      try {
+        window.localStorage.setItem('simp_recently_played_v1', JSON.stringify(next));
+      } catch {
+        // Ignore storage access errors
+      }
+      return next;
+    });
+  }, [snap?.current_track?.uri, snap?.is_playing]);
 
   // Apple Music Cloud Hub state
   const [appleSubTab, setAppleSubTab] = useState<'pinned' | 'cloud_playlists' | 'radio' | 'new'>('pinned');
@@ -588,7 +660,7 @@ const ConsoleMainApp: React.FC = () => {
 
   // Perform a single non-intrusive optical drive check when opening the Browser or Sources modal while awake
   useEffect(() => {
-    if (isSleeping || isDimmed) return;
+    if (isSleeping || isDimmed || !sourceVisibility.optical_drive) return;
     const isCdActiveInView =
       sourceModalOpen || (view === 'browser' && browserTarget?.kind === 'cdda');
     const isStreamingCd =
@@ -609,6 +681,7 @@ const ConsoleMainApp: React.FC = () => {
     browserTarget?.kind,
     isSleeping,
     isDimmed,
+    sourceVisibility.optical_drive,
     opticalDisc,
     snap?.is_playing,
     snap?.current_track?.source,
@@ -754,15 +827,24 @@ const ConsoleMainApp: React.FC = () => {
       setScCatalogSearchResults({ songs: [], playlists: [] });
       return;
     }
-    if (browserSourceFilter === 'local') {
+    const isAppleIncluded =
+      sourceVisibility.apple_music &&
+      (selectedSources.length === 0
+        ? browserSourceFilter === 'all' || browserSourceFilter === 'apple_music'
+        : selectedSources.includes('apple_music'));
+    const isScIncluded =
+      sourceVisibility.soundcloud &&
+      (selectedSources.length === 0
+        ? browserSourceFilter === 'all' || browserSourceFilter === 'soundcloud'
+        : selectedSources.includes('soundcloud'));
+    if (!isAppleIncluded && !isScIncluded) {
+      setCatalogSearchResults({ songs: [], albums: [], playlists: [], stations: [] });
+      setScCatalogSearchResults({ songs: [], playlists: [] });
       return;
     }
     const timer = window.setTimeout(() => {
       const promises: Promise<any>[] = [];
-      if (
-        (browserSourceFilter === 'all' || browserSourceFilter === 'apple_music') &&
-        snap?.apple_authenticated
-      ) {
+      if (isAppleIncluded && snap?.apple_authenticated) {
         promises.push(
           searchAppleMusicCatalog(term)
             .then((res) => setCatalogSearchResults(res))
@@ -772,7 +854,7 @@ const ConsoleMainApp: React.FC = () => {
         setCatalogSearchResults({ songs: [], albums: [], playlists: [], stations: [] });
       }
       if (
-        (browserSourceFilter === 'all' || browserSourceFilter === 'soundcloud') &&
+        isScIncluded &&
         (snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated)
       ) {
         promises.push(
@@ -792,6 +874,9 @@ const ConsoleMainApp: React.FC = () => {
   }, [
     browserSearch,
     browserSourceFilter,
+    selectedSources,
+    sourceVisibility.apple_music,
+    sourceVisibility.soundcloud,
     snap?.apple_authenticated,
     snap?.soundcloud_authenticated,
     soundcloudAuthCfg?.soundcloud_authenticated,
@@ -1502,43 +1587,56 @@ const ConsoleMainApp: React.FC = () => {
         }}
       >
         <button
-          onClick={() => setSourceModalOpen(true)}
+          onClick={() => {
+            setVolumePopoverOpen(false);
+            setBrightnessPopoverOpen(false);
+            setPowerModalOpen(false);
+            setSourceModalOpen((v) => !v);
+          }}
+          title="Settings, Folders & Accounts, Power & System Menu (START)"
           style={{
             minHeight: 44,
-            padding: '0 14px 0 8px',
+            padding: '0 14px 0 10px',
             borderRadius: 12,
-            background: '#0a0a0e',
-            border: '1px solid #22222c',
-            color: '#d4d4dc',
+            background: sourceModalOpen ? '#0f222a' : '#0a0a0e',
+            border: sourceModalOpen ? '1px solid #2aa3c4' : '1px solid #22222c',
+            color: sourceModalOpen ? '#bfeaf5' : '#d4d4dc',
             display: 'flex',
             alignItems: 'center',
             gap: 10,
             fontSize: 13,
-            fontWeight: 700,
+            fontWeight: 800,
             cursor: 'pointer',
           }}
         >
+          <span style={{ fontSize: 16, lineHeight: 1 }}>☰</span>
           <img
             src="/favicon.png"
             alt="SIMP"
             style={{
-              width: 28,
-              height: 28,
-              borderRadius: 7,
+              width: 24,
+              height: 24,
+              borderRadius: 6,
               objectFit: 'cover',
               border: '1px solid #2e2e3c',
             }}
           />
+          <span>Settings</span>
           <span
+            className="simp-gp-badge"
             style={{
-              width: 8,
-              height: 8,
-              borderRadius: 99,
-              background: '#0d9488',
+              padding: '2px 6px',
+              borderRadius: 6,
+              background: '#14141e',
+              border: '1px solid #2a2a38',
+              color: '#9ca3af',
+              fontSize: 10,
+              fontFamily: 'monospace',
+              fontWeight: 700,
             }}
-          />
-          <span>Source: {track?.source?.toUpperCase() || 'LOCAL / USB'}</span>
-          <span style={{ color: '#71717a' }}>▾</span>
+          >
+            START
+          </span>
         </button>
 
         <div
@@ -1848,28 +1946,6 @@ const ConsoleMainApp: React.FC = () => {
               </div>
             )}
           </div>
-
-          <button
-            onClick={() => {
-              setVolumePopoverOpen(false);
-              setBrightnessPopoverOpen(false);
-              setSourceModalOpen(false);
-              setPowerModalOpen(true);
-            }}
-            title="Power, Sleep & System Menu"
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: 12,
-              background: '#0a0a0e',
-              border: '1px solid #22222c',
-              color: '#c8c8d2',
-              fontSize: 16,
-              cursor: 'pointer',
-            }}
-          >
-            ⏻
-          </button>
         </div>
       </header>
 
@@ -1908,6 +1984,9 @@ const ConsoleMainApp: React.FC = () => {
           playlists={playlists}
           browserSourceFilter={browserSourceFilter}
           setBrowserSourceFilter={setBrowserSourceFilter}
+          selectedSources={selectedSources}
+          setSelectedSources={setSelectedSources}
+          setBrowserSourceFilterRaw={setBrowserSourceFilterState}
           browserSearch={browserSearch}
           setBrowserSearch={setBrowserSearch}
           browserTarget={browserTarget}
@@ -1984,11 +2063,13 @@ const ConsoleMainApp: React.FC = () => {
           handleOpenSoundCloudPlaylist={handleOpenSoundCloudPlaylist}
           handlePinSoundCloudPlaylist={handlePinSoundCloudPlaylist}
           handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
+          sourceVisibility={sourceVisibility}
+          recentlyPlayed={recentlyPlayed}
           showToast={showToast}
         />
 
-      {/* Source Selection, Custom Folder Picker & Authentication Pop-Up Modal */}
-      {sourceModalOpen && (
+      {/* Unified Top-Left Hamburger (☰ / START) Nested Settings Drawer */}
+      {(sourceModalOpen || powerModalOpen) && (
         <SettingsModal
           snap={snap}
           customFolderPath={customFolderPath}
@@ -1999,6 +2080,17 @@ const ConsoleMainApp: React.FC = () => {
           setView={setView}
           setSourceModalOpen={setSourceModalOpen}
           setPowerModalOpen={setPowerModalOpen}
+          setIsSleeping={setIsSleeping}
+          dismissConsole={dismissConsole}
+          brightnessPct={brightnessPct}
+          setBrightnessPct={setBrightnessPct}
+          updateStatus={updateStatus}
+          checkSimpUpdates={checkSimpUpdates}
+          applySimpUpdate={applySimpUpdate}
+          confirmHardReset={confirmHardReset}
+          setConfirmHardReset={setConfirmHardReset}
+          sourceVisibility={sourceVisibility}
+          setSourceVisibility={setSourceVisibility}
           opticalDisc={opticalDisc}
           cdScanning={cdScanning}
           handleScanOpticalDisc={handleScanOpticalDisc}
@@ -2016,26 +2108,6 @@ const ConsoleMainApp: React.FC = () => {
           setBrowserSourceFilter={setBrowserSourceFilter}
           setAppleSubTab={setAppleSubTab}
           setSoundCloudSubTab={setSoundCloudSubTab}
-          refreshLibraryData={refreshLibraryData}
-          showToast={showToast}
-        />
-      )}
-
-      {/* Dedicated Power, Sleep, Reset, Pairing & System Maintenance Modal */}
-      {powerModalOpen && (
-        <PowerModal
-          setPowerModalOpen={setPowerModalOpen}
-          setSourceModalOpen={setSourceModalOpen}
-          setIsSleeping={setIsSleeping}
-          dismissConsole={dismissConsole}
-          brightnessPct={brightnessPct}
-          setBrightnessPct={setBrightnessPct}
-          updateStatus={updateStatus}
-          checkSimpUpdates={checkSimpUpdates}
-          applySimpUpdate={applySimpUpdate}
-          appleAuthCfg={appleAuthCfg}
-          confirmHardReset={confirmHardReset}
-          setConfirmHardReset={setConfirmHardReset}
           refreshLibraryData={refreshLibraryData}
           showToast={showToast}
         />

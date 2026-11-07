@@ -66,6 +66,8 @@ pub enum AudioCommand {
         access_key: String,
         #[serde(default)]
         secret_key: String,
+        #[serde(default)]
+        safe_search: Option<bool>,
     },
     #[serde(rename = "disconnect_internet_archive")]
     DisconnectInternetArchive,

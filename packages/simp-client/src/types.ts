@@ -62,6 +62,7 @@ export interface SimpStateSnapshot {
   repeat_mode: RepeatMode;
   current_track: TrackMetadata | null;
   up_next: TrackMetadata[];
+  queue?: TrackMetadata[];
   queue_length: number;
   queue_index: number;
   mounts: MountStatus[];
@@ -79,6 +80,7 @@ export interface InternetArchiveConfig {
   username: string;
   has_access_key: boolean;
   has_secret_key: boolean;
+  safe_search?: boolean;
 }
 
 export interface VideoQualityVariant {
@@ -115,6 +117,7 @@ export interface ArchiveItemSummary {
   views_7d: number;
   views_30d: number;
   runtime_label?: string | null;
+  item_count?: number | null;
 }
 
 export interface ArchiveItemDetail {

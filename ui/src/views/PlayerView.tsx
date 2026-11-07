@@ -89,14 +89,16 @@ function formatCommentTs(ms: number | null): string {
   return `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
 }
 
-function computePlayerViewportScale(): number {
+function computePlayerViewportScale(isVideo = false): number {
   if (typeof window === 'undefined') return 1;
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   if (vw <= 1340 && vh <= 840) return 1;
-  const scaleX = (vw - 96) / 1060;
-  const scaleY = (vh - 130) / 500;
-  return Math.min(2.35, Math.max(1, Math.min(scaleX, scaleY)));
+  const baseWidth = isVideo ? 1140 : 1060;
+  const scaleX = (vw - 192) / baseWidth;
+  const scaleY = (vh - 150) / 520;
+  const maxScale = isVideo ? 1.75 : 1.95;
+  return Math.min(maxScale, Math.max(1, Math.min(scaleX, scaleY)));
 }
 
 export const PlayerView: React.FC<PlayerViewProps> = ({
@@ -129,7 +131,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const [scWaveformBars, setScWaveformBars] = useState<number[] | null>(null);
   const [activeBubbles, setActiveBubbles] = useState<ActiveCommentBubble[]>([]);
   const [playerActionsOpen, setPlayerActionsOpen] = useState<boolean>(false);
-  const [playerScale, setPlayerScale] = useState<number>(computePlayerViewportScale);
+  const [playerScale, setPlayerScale] = useState<number>(() =>
+    computePlayerViewportScale(isVideoTrack)
+  );
   const shownCommentIdsRef = useRef<Set<string>>(new Set());
   const lastPlayheadMsRef = useRef<number>(0);
 
@@ -152,10 +156,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const [dvdSeekOffsetSec, setDvdSeekOffsetSec] = useState<number>(0);
 
   useEffect(() => {
-    const onResize = () => setPlayerScale(computePlayerViewportScale());
+    setPlayerScale(computePlayerViewportScale(isVideoTrack));
+    const onResize = () => setPlayerScale(computePlayerViewportScale(isVideoTrack));
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, []);
+  }, [isVideoTrack]);
 
   // Listen for `SELECT` button (`simp-player-actions-toggle`) on Player screen
   useEffect(() => {
@@ -477,11 +482,20 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     setPlayerActionsOpen(false);
   }, []);
 
-  // Focus first item when Player Track Actions Overlay opens
+  // Focus first item in Left Column when Player Track Actions Overlay opens, and scroll current queue item into view
   useEffect(() => {
     if (!playerActionsOpen) return;
     const t = window.setTimeout(() => {
+      const currentQueueEl = document.querySelector<HTMLElement>(
+        '[data-player-actions-modal="true"] [data-queue-current="true"]'
+      );
+      if (currentQueueEl) {
+        currentQueueEl.scrollIntoView({ block: 'center', inline: 'nearest' });
+      }
       const firstBtn =
+        document.querySelector<HTMLElement>(
+          '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-default-focus="true"]:not([disabled])'
+        ) ||
         document.querySelector<HTMLElement>(
           '[data-player-actions-modal="true"] button[data-default-focus="true"]:not([disabled])'
         ) ||
@@ -678,6 +692,97 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 
   const primaryArtist = track?.artists?.[0]?.trim() || '';
 
+  // Build unified Queue / Episodes / DVD Titles list for the right column of the SELECT modal
+  const queueModalItems = useMemo(() => {
+    if (snap?.queue && snap.queue.length > 1) {
+      return snap.queue.map((qt, idx) => ({
+        key: `${idx}:${qt.uri}`,
+        index: idx,
+        title: qt.title || `Track ${idx + 1}`,
+        subtitle: qt.artists?.join(', ') || qt.album || '',
+        durationMs: qt.duration_ms || 0,
+        isCurrent: idx === (snap.queue_index ?? 0),
+        onSelect: () => {
+          setPlayerActionsOpen(false);
+          defaultSimpClient.loadQueue(
+            snap.queue!.map((t) => t.uri),
+            idx,
+            snap.queue!
+          );
+        },
+      }));
+    }
+    if (isVideoTrack && iaDetail && iaDetail.episodes.length > 1) {
+      return iaDetail.episodes.map((ep, idx) => {
+        const epUri = `ia:video:${encodeURIComponent(iaDetail.summary.identifier)}/${idx}`;
+        return {
+          key: epUri,
+          index: idx,
+          title: ep.label,
+          subtitle: iaDetail.summary.title,
+          durationMs: ep.duration_ms || 0,
+          isCurrent: track?.uri === epUri,
+          onSelect: () => {
+            setPlayerActionsOpen(false);
+            const allTracks: TrackMetadata[] = iaDetail.episodes.map((itemEp, i) => ({
+              uri: `ia:video:${encodeURIComponent(iaDetail.summary.identifier)}/${i}`,
+              title: itemEp.label,
+              artists: [iaDetail.summary.creator],
+              album: iaDetail.summary.title,
+              album_id: `ia:${iaDetail.summary.identifier}`,
+              track_number: itemEp.episode_number,
+              disc_number: 1,
+              art_url: iaDetail.summary.art_url,
+              duration_ms: itemEp.duration_ms,
+              source: 'ia_video',
+            }));
+            defaultSimpClient.loadQueue(
+              allTracks.map((t) => t.uri),
+              idx,
+              allTracks
+            );
+          },
+        };
+      });
+    }
+    if (isVideoTrack && dvdTitles.length > 1) {
+      const dev = opticalDisc?.device_path || '/dev/sr0';
+      return dvdTitles.map((t: DvdTitleInfo, idx) => {
+        const dvdUri = `dvd://${dev}/${t.title_number}`;
+        return {
+          key: dvdUri,
+          index: idx,
+          title: `Title ${t.title_number}: ${t.label || 'DVD Video'}`,
+          subtitle: `${Math.round(t.duration_ms / 60000)}m • ${t.aspect_ratio}`,
+          durationMs: t.duration_ms || 0,
+          isCurrent: track?.uri === dvdUri,
+          onSelect: () => {
+            setPlayerActionsOpen(false);
+            const meta: TrackMetadata = {
+              uri: dvdUri,
+              title: `${opticalDisc?.album_title || 'DVD'} — Title ${t.title_number}`,
+              artists: ['Optical DVD Video'],
+              album: opticalDisc?.album_title || 'DVD Video',
+              album_id: null,
+              track_number: t.title_number,
+              disc_number: 1,
+              art_url: opticalDisc?.art_url || null,
+              duration_ms: t.duration_ms,
+              source: 'dvd',
+            };
+            defaultSimpClient.loadQueue([dvdUri], 0, [meta]);
+          },
+        };
+      });
+    }
+    return [];
+  }, [snap?.queue, snap?.queue_index, isVideoTrack, iaDetail, dvdTitles, opticalDisc, track?.uri]);
+
+  const currentQueueIdx = useMemo(() => {
+    const found = queueModalItems.findIndex((item) => item.isCurrent);
+    return found >= 0 ? found : 0;
+  }, [queueModalItems]);
+
   return (
     <main
       style={{
@@ -686,7 +791,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: '0 28px',
+        padding: '0 48px',
         width: '100%',
         overflow: 'hidden',
         position: 'relative',
@@ -910,28 +1015,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                   </div>
                 )}
 
-                {/* Corner badge in Card View hinting click/button to expand */}
-                {!videoTheatreExpanded && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      bottom: 10,
-                      right: 10,
-                      padding: '4px 9px',
-                      borderRadius: 8,
-                      background: 'rgba(10, 10, 16, 0.82)',
-                      border: '1px solid rgba(42, 163, 196, 0.55)',
-                      color: '#bfeaf5',
-                      fontSize: 11,
-                      fontFamily: 'monospace',
-                      fontWeight: 700,
-                      pointerEvents: 'none',
-                    }}
-                  >
-                    ⛶ Theatre
-                  </div>
-                )}
-
                 {/* Floating 4-Second Auto-Hide Theatre HUD & Scrub Bar when in Expanded Theatre Mode */}
                 {videoTheatreExpanded && (
                   <div
@@ -1118,7 +1201,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         onClick={() => defaultSimpClient.seekRelative(10_000)}
                       />
                       <TransportIconButton
-                        icon="⋯"
+                        icon="🎛️"
                         badge="SELECT"
                         active={playerActionsOpen}
                         onClick={() => setPlayerActionsOpen((v) => !v)}
@@ -1181,7 +1264,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               />
             )}
             <TransportIconButton
-              icon="⋯"
+              icon="🎛️"
               badge="SELECT"
               active={playerActionsOpen}
               onClick={() => setPlayerActionsOpen((v) => !v)}
@@ -1479,14 +1562,14 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         </div>
       </div>
 
-      {/* Unified Controller-First `SELECT` Track Actions Overlay Menu */}
+      {/* Unified Two-Column Controller-First `SELECT` Track & Queue Actions Overlay Menu */}
       {playerActionsOpen && (
         <div
           onClick={() => setPlayerActionsOpen(false)}
           style={{
             position: 'fixed',
             inset: 0,
-            background: 'rgba(0, 0, 0, 0.82)',
+            background: 'rgba(0, 0, 0, 0.84)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -1501,9 +1584,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             onClick={(e) => e.stopPropagation()}
             style={{
               width: '100%',
-              maxWidth: 460,
-              maxHeight: '90vh',
-              overflowY: 'auto',
+              maxWidth: queueModalItems.length > 0 ? 840 : 460,
+              maxHeight: '88vh',
+              overflow: 'hidden',
               background: '#0a0a10',
               border: '2px solid #2aa3c4',
               borderRadius: 20,
@@ -1512,7 +1595,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               boxShadow: '0 18px 48px rgba(0, 0, 0, 0.9)',
               display: 'flex',
               flexDirection: 'column',
-              gap: 10,
+              gap: 12,
             }}
           >
             <div
@@ -1522,6 +1605,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 alignItems: 'center',
                 paddingBottom: 8,
                 borderBottom: '1px solid #1e1e2a',
+                flexShrink: 0,
               }}
             >
               <div style={{ minWidth: 0, flex: 1, marginRight: 10 }}>
@@ -1562,362 +1646,367 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               </button>
             </div>
 
-            {/* Video-Specific Modality Controls when playing a Video Track */}
-            {isVideoTrack && (
-              <>
-                <button
-                  type="button"
-                  data-default-focus="true"
-                  onClick={toggleTheatreFullscreen}
-                  style={{
-                    ...actionRowBtnStyle,
-                    background: videoTheatreExpanded ? '#0f222a' : '#101018',
-                    border: videoTheatreExpanded ? '1px solid #2aa3c4' : '1px solid #222230',
-                  }}
-                >
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
-                      {videoTheatreExpanded
-                        ? '🗗 Exit Fullscreen Theatre to Card View'
-                        : '⛶ Expand to Fullscreen Theatre'}
-                    </span>
-                    <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                      {videoTheatreExpanded
-                        ? 'Return to split-card player layout'
-                        : 'Fill screen with video stage and 4-second auto-hiding HUD'}
-                    </span>
-                  </div>
-                  <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9' }}>
-                    {videoTheatreExpanded ? 'CARD' : 'THEATRE'}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={cycleVideoQuality}
-                  style={actionRowBtnStyle}
-                >
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
-                      🎞️ Stream Quality / Audio: {activeQuality?.label || 'Default'}
-                    </span>
-                    <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                      {videoQualities.length > 1
-                        ? `Cycle across ${videoQualities.length} available formats (includes ffmpeg compatibility)`
-                        : 'Single stream format available'}
-                    </span>
-                  </div>
-                  <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>
-                    {selectedQualityIdx + 1}/{Math.max(1, videoQualities.length)}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={cycleVideoSubtitles}
-                  style={actionRowBtnStyle}
-                >
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
-                      💬 Subtitles / CC: {activeSubtitle ? activeSubtitle.label : 'Off'}
-                    </span>
-                    <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                      {videoSubtitles.length > 0
-                        ? `${videoSubtitles.length} subtitle track(s) available`
-                        : 'No subtitle tracks attached to this item'}
-                    </span>
-                  </div>
-                  <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>
-                    {activeSubtitle ? 'ON' : 'OFF'}
-                  </span>
-                </button>
-
-                {iaDetail && iaDetail.episodes.length > 1 && (
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 6,
-                      padding: 10,
-                      borderRadius: 12,
-                      background: '#0d0d14',
-                      border: '1px solid #1e1e2a',
-                    }}
-                  >
-                    <span style={{ fontSize: 11, fontWeight: 800, color: '#9ca3af' }}>
-                      📑 EPISODES / PARTS ({iaDetail.episodes.length})
-                    </span>
-                    <div
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: queueModalItems.length > 0 ? '1fr 1fr' : '1fr',
+                gap: 16,
+                minHeight: 0,
+                flex: 1,
+                overflow: 'hidden',
+              }}
+            >
+              {/* Left Column: Settings & Track Actions (D-Pad Up/Down stays here without crossing hundreds of tracks) */}
+              <div
+                data-player-actions-col="left"
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 9,
+                  overflowY: 'auto',
+                  paddingRight: 2,
+                }}
+              >
+                {isVideoTrack && (
+                  <>
+                    <button
+                      type="button"
+                      data-default-focus="true"
+                      onClick={toggleTheatreFullscreen}
                       style={{
-                        display: 'flex',
-                        flexWrap: 'wrap',
-                        gap: 6,
-                        maxHeight: 110,
-                        overflowY: 'auto',
+                        ...actionRowBtnStyle,
+                        background: videoTheatreExpanded ? '#0f222a' : '#101018',
+                        border: videoTheatreExpanded ? '1px solid #2aa3c4' : '1px solid #222230',
                       }}
                     >
-                      {iaDetail.episodes.map((ep, idx) => {
-                        const epUri = `ia:video:${encodeURIComponent(iaDetail.summary.identifier)}/${idx}`;
-                        const isCur = track?.uri === epUri;
-                        return (
-                          <button
-                            key={epUri}
-                            type="button"
-                            onClick={() => {
-                              setPlayerActionsOpen(false);
-                              const allTracks: TrackMetadata[] = iaDetail.episodes.map(
-                                (itemEp, i) => ({
-                                  uri: `ia:video:${encodeURIComponent(iaDetail.summary.identifier)}/${i}`,
-                                  title: itemEp.label,
-                                  artists: [iaDetail.summary.creator],
-                                  album: iaDetail.summary.title,
-                                  album_id: `ia:${iaDetail.summary.identifier}`,
-                                  track_number: itemEp.episode_number,
-                                  disc_number: 1,
-                                  art_url: iaDetail.summary.art_url,
-                                  duration_ms: itemEp.duration_ms,
-                                  source: 'ia_video',
-                                })
-                              );
-                              defaultSimpClient.loadQueue(
-                                allTracks.map((t) => t.uri),
-                                idx,
-                                allTracks
-                              );
-                            }}
-                            style={{
-                              padding: '5px 10px',
-                              borderRadius: 8,
-                              background: isCur ? '#0f222a' : '#161622',
-                              border: isCur ? '1px solid #2aa3c4' : '1px solid #2a2a38',
-                              color: isCur ? '#7dd3fc' : '#d4d4dc',
-                              fontSize: 11.5,
-                              fontWeight: isCur ? 800 : 600,
-                              cursor: 'pointer',
-                            }}
-                          >
-                            {idx + 1}. {ep.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
+                          {videoTheatreExpanded
+                            ? '🗗 Exit Fullscreen Theatre to Card View'
+                            : '⛶ Expand to Fullscreen Theatre'}
+                        </span>
+                        <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                          {videoTheatreExpanded
+                            ? 'Return to split-card player layout'
+                            : 'Fill screen with video stage and 4-second auto-hiding HUD'}
+                        </span>
+                      </div>
+                      <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9' }}>
+                        {videoTheatreExpanded ? 'CARD' : 'THEATRE'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={cycleVideoQuality}
+                      style={actionRowBtnStyle}
+                    >
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
+                          🎞️ Stream Quality / Audio: {activeQuality?.label || 'Default'}
+                        </span>
+                        <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                          {videoQualities.length > 1
+                            ? `Cycle across ${videoQualities.length} available formats (MP4 prioritized)`
+                            : 'Single stream format available'}
+                        </span>
+                      </div>
+                      <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>
+                        {selectedQualityIdx + 1}/{Math.max(1, videoQualities.length)}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={cycleVideoSubtitles}
+                      style={actionRowBtnStyle}
+                    >
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
+                          💬 Subtitles / CC: {activeSubtitle ? activeSubtitle.label : 'Off'}
+                        </span>
+                        <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                          {videoSubtitles.length > 0
+                            ? `${videoSubtitles.length} subtitle track(s) available`
+                            : 'No subtitle tracks attached to this item'}
+                        </span>
+                      </div>
+                      <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>
+                        {activeSubtitle ? 'ON' : 'OFF'}
+                      </span>
+                    </button>
+                  </>
                 )}
 
-                {dvdTitles.length > 0 && (
+                {/* 1. Open Collection / Album / Playlist in Library */}
+                <button
+                  type="button"
+                  data-default-focus={!isVideoTrack ? 'true' : undefined}
+                  onClick={handleOpenCurrentCollection}
+                  style={actionRowBtnStyle}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
+                      💿 Open Collection in Library
+                    </span>
+                    <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                      Jump to the active album, archive item, playlist, or queue in the Right Pane
+                    </span>
+                  </div>
+                  <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>→</span>
+                </button>
+
+                {/* 2. Favorite / Like Track (Unified across SoundCloud + ❤️ Favorites SIMP Hybrid Playlist) */}
+                {track && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPlayerActionsOpen(false);
+                      if (track.source === 'soundcloud') {
+                        likeSoundCloudTrack(track.uri, showToast);
+                      }
+                      if (handleFavoriteTrack) {
+                        handleFavoriteTrack(track);
+                      }
+                    }}
+                    style={actionRowBtnStyle}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fda4af' }}>
+                        ❤️ Favorite {isVideoTrack ? 'Video / Episode' : 'Track'}
+                      </span>
+                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                        {track.source === 'soundcloud'
+                          ? 'Like on SoundCloud & save to ★ Favorites playlist'
+                          : 'Save to your ★ Favorites SIMP Hybrid Playlist'}
+                      </span>
+                    </div>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#fda4af' }}>+ ❤️</span>
+                  </button>
+                )}
+
+                {/* 3. Add to ★ SIMP Hybrid Playlist */}
+                {track && handleAddTracksToPlaylist && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPlayerActionsOpen(false);
+                      handleAddTracksToPlaylist([track.uri], `"${track.title}"`, [track]);
+                    }}
+                    style={actionRowBtnStyle}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
+                        ★ Add to Hybrid Playlist…
+                      </span>
+                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                        Mix movies, episodes, Local, Apple Music & SoundCloud tracks in any SIMP playlist
+                      </span>
+                    </div>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9' }}>+ ★</span>
+                  </button>
+                )}
+
+                {/* 4. Start Track Radio / Station */}
+                {track && !isVideoTrack && (track.source === 'soundcloud' || primaryArtist) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPlayerActionsOpen(false);
+                      if (track.source === 'soundcloud' && handleStartSoundCloudTrackRadio) {
+                        handleStartSoundCloudTrackRadio(track);
+                      } else if (primaryArtist && handleMoreByArtist) {
+                        handleMoreByArtist(primaryArtist);
+                      }
+                    }}
+                    style={actionRowBtnStyle}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
+                        📻 {track.source === 'soundcloud' ? 'Start Track Radio' : `Artist Mix: ${primaryArtist}`}
+                      </span>
+                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                        {track.source === 'soundcloud'
+                          ? `Continuous SoundCloud station seeded from "${track.title}"`
+                          : `Browse tracks, albums & stations for ${primaryArtist}`}
+                      </span>
+                    </div>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#fdba74' }}>▶</span>
+                  </button>
+                )}
+
+                {/* 5. More by Artist / Creator */}
+                {primaryArtist && handleMoreByArtist && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPlayerActionsOpen(false);
+                      setVideoTheatreExpanded(false);
+                      handleMoreByArtist(primaryArtist);
+                    }}
+                    style={actionRowBtnStyle}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#d4d4dc' }}>
+                        👤 More by {primaryArtist}
+                      </span>
+                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                        Search active source for {primaryArtist}
+                      </span>
+                    </div>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#9ca3af' }}>🔍</span>
+                  </button>
+                )}
+
+                {/* 6. Toggle Timed Comments (SoundCloud only) */}
+                {isSoundCloudTrack && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      toggleScComments();
+                    }}
+                    style={{
+                      ...actionRowBtnStyle,
+                      background: scCommentsEnabled ? '#1f120b' : '#101018',
+                      border: scCommentsEnabled ? '1px solid #ea580c' : '1px solid #222230',
+                    }}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
+                        💬 Timed Comment Bubbles: {scCommentsEnabled ? 'ON' : 'OFF'}
+                      </span>
+                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                        {scComments.length} timed comments on this track
+                      </span>
+                    </div>
+                    <span
+                      style={{
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        color: scCommentsEnabled ? '#fdba74' : '#71717a',
+                      }}
+                    >
+                      {scCommentsEnabled ? 'ON' : 'OFF'}
+                    </span>
+                  </button>
+                )}
+              </div>
+
+              {/* Right Column: Queue / Episodes / DVD Titles Browser (D-Pad Right jumps straight to current item) */}
+              {queueModalItems.length > 0 && (
+                <div
+                  data-player-actions-col="right"
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    background: '#0d0d15',
+                    border: '1px solid #1e1e2c',
+                    borderRadius: 14,
+                    padding: 12,
+                    minHeight: 0,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      paddingBottom: 8,
+                      marginBottom: 8,
+                      borderBottom: '1px solid #1e1e2c',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
+                      📑 {isVideoTrack ? 'EPISODES / QUEUE' : 'ACTIVE QUEUE'} (
+                      {currentQueueIdx + 1} / {queueModalItems.length})
+                    </span>
+                    <span
+                      className="simp-gp-badge"
+                      style={{ fontSize: 10.5, fontFamily: 'monospace', color: '#7dd3fc' }}
+                    >
+                      ◄ Settings | ► Queue
+                    </span>
+                  </div>
+
                   <div
                     style={{
                       display: 'flex',
                       flexDirection: 'column',
                       gap: 6,
-                      padding: 10,
-                      borderRadius: 12,
-                      background: '#0d0d14',
-                      border: '1px solid #1e1e2a',
+                      overflowY: 'auto',
+                      flex: 1,
+                      paddingRight: 4,
                     }}
                   >
-                    <span style={{ fontSize: 11, fontWeight: 800, color: '#9ca3af' }}>
-                      💿 DVD TITLES ({dvdTitles.length})
-                    </span>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {dvdTitles.map((t: DvdTitleInfo) => {
-                        const dev = opticalDisc?.device_path || '/dev/sr0';
-                        const dvdUri = `dvd://${dev}/${t.title_number}`;
-                        const isCur = track?.uri === dvdUri;
-                        return (
-                          <button
-                            key={dvdUri}
-                            type="button"
-                            onClick={() => {
-                              setPlayerActionsOpen(false);
-                              const meta: TrackMetadata = {
-                                uri: dvdUri,
-                                title: `${opticalDisc?.album_title || 'DVD'} — Title ${t.title_number}`,
-                                artists: ['Optical DVD Video'],
-                                album: opticalDisc?.album_title || 'DVD Video',
-                                album_id: null,
-                                track_number: t.title_number,
-                                disc_number: 1,
-                                art_url: opticalDisc?.art_url || null,
-                                duration_ms: t.duration_ms,
-                                source: 'dvd',
-                              };
-                              defaultSimpClient.loadQueue([dvdUri], 0, [meta]);
-                            }}
+                    {queueModalItems.map((item) => (
+                      <button
+                        key={item.key}
+                        type="button"
+                        data-queue-current={item.isCurrent ? 'true' : undefined}
+                        onClick={item.onSelect}
+                        style={{
+                          width: '100%',
+                          padding: '8px 11px',
+                          borderRadius: 10,
+                          background: item.isCurrent ? '#0f222a' : '#12121c',
+                          border: item.isCurrent ? '1px solid #2aa3c4' : '1px solid #222230',
+                          color: item.isCurrent ? '#7dd3fc' : '#d4d4dc',
+                          textAlign: 'left',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 10,
+                          cursor: 'pointer',
+                          flexShrink: 0,
+                        }}
+                      >
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div
                             style={{
-                              padding: '5px 10px',
-                              borderRadius: 8,
-                              background: isCur ? '#0f222a' : '#161622',
-                              border: isCur ? '1px solid #2aa3c4' : '1px solid #2a2a38',
-                              color: isCur ? '#7dd3fc' : '#d4d4dc',
-                              fontSize: 11.5,
-                              fontWeight: isCur ? 800 : 600,
-                              cursor: 'pointer',
+                              fontSize: 12.5,
+                              fontWeight: item.isCurrent ? 800 : 600,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
                             }}
                           >
-                            Title {t.title_number} ({Math.round(t.duration_ms / 60000)}m)
-                          </button>
-                        );
-                      })}
-                    </div>
+                            {item.isCurrent ? '▶ ' : `${item.index + 1}. `}
+                            {item.title}
+                          </div>
+                          {item.subtitle && (
+                            <div
+                              style={{
+                                fontSize: 10.5,
+                                color: item.isCurrent ? '#67e8f9' : '#71717a',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                marginTop: 1,
+                              }}
+                            >
+                              {item.subtitle}
+                            </div>
+                          )}
+                        </div>
+                        <span
+                          style={{
+                            fontSize: 10.5,
+                            fontFamily: 'monospace',
+                            color: item.isCurrent ? '#67e8f9' : '#71717a',
+                            flexShrink: 0,
+                          }}
+                        >
+                          #{item.index + 1}
+                        </span>
+                      </button>
+                    ))}
                   </div>
-                )}
-              </>
-            )}
-
-            {/* 1. Open Collection / Album / Playlist in Library */}
-            <button
-              type="button"
-              data-default-focus={!isVideoTrack ? 'true' : undefined}
-              onClick={handleOpenCurrentCollection}
-              style={actionRowBtnStyle}
-            >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
-                  💿 Open Collection in Library
-                </span>
-                <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                  Jump to the active album, archive item, playlist, or queue in the Right Pane
-                </span>
-              </div>
-              <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>→</span>
-            </button>
-
-            {/* 2. Favorite / Like Track (Unified across SoundCloud + ❤️ Favorites SIMP Hybrid Playlist) */}
-            {track && (
-              <button
-                type="button"
-                onClick={() => {
-                  setPlayerActionsOpen(false);
-                  if (track.source === 'soundcloud') {
-                    likeSoundCloudTrack(track.uri, showToast);
-                  }
-                  if (handleFavoriteTrack) {
-                    handleFavoriteTrack(track);
-                  }
-                }}
-                style={actionRowBtnStyle}
-              >
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <span style={{ fontSize: 13, fontWeight: 800, color: '#fda4af' }}>
-                    ❤️ Favorite {isVideoTrack ? 'Video / Episode' : 'Track'}
-                  </span>
-                  <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                    {track.source === 'soundcloud'
-                      ? 'Like on SoundCloud & save to ★ Favorites playlist'
-                      : 'Save to your ★ Favorites SIMP Hybrid Playlist'}
-                  </span>
                 </div>
-                <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#fda4af' }}>+ ❤️</span>
-              </button>
-            )}
-
-            {/* 3. Add to ★ SIMP Hybrid Playlist */}
-            {track && handleAddTracksToPlaylist && (
-              <button
-                type="button"
-                onClick={() => {
-                  setPlayerActionsOpen(false);
-                  handleAddTracksToPlaylist([track.uri], `"${track.title}"`, [track]);
-                }}
-                style={actionRowBtnStyle}
-              >
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
-                    ★ Add to Hybrid Playlist…
-                  </span>
-                  <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                    Mix movies, episodes, Local, Apple Music & SoundCloud tracks in any SIMP playlist
-                  </span>
-                </div>
-                <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9' }}>+ ★</span>
-              </button>
-            )}
-
-            {/* 4. Start Track Radio / Station */}
-            {track && !isVideoTrack && (track.source === 'soundcloud' || primaryArtist) && (
-              <button
-                type="button"
-                onClick={() => {
-                  setPlayerActionsOpen(false);
-                  if (track.source === 'soundcloud' && handleStartSoundCloudTrackRadio) {
-                    handleStartSoundCloudTrackRadio(track);
-                  } else if (primaryArtist && handleMoreByArtist) {
-                    handleMoreByArtist(primaryArtist);
-                  }
-                }}
-                style={actionRowBtnStyle}
-              >
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <span style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
-                    📻 {track.source === 'soundcloud' ? 'Start Track Radio' : `Artist Mix: ${primaryArtist}`}
-                  </span>
-                  <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                    {track.source === 'soundcloud'
-                      ? `Continuous SoundCloud station seeded from "${track.title}"`
-                      : `Browse tracks, albums & stations for ${primaryArtist}`}
-                  </span>
-                </div>
-                <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#fdba74' }}>▶</span>
-              </button>
-            )}
-
-            {/* 5. More by Artist / Creator */}
-            {primaryArtist && handleMoreByArtist && (
-              <button
-                type="button"
-                onClick={() => {
-                  setPlayerActionsOpen(false);
-                  setVideoTheatreExpanded(false);
-                  handleMoreByArtist(primaryArtist);
-                }}
-                style={actionRowBtnStyle}
-              >
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <span style={{ fontSize: 13, fontWeight: 800, color: '#d4d4dc' }}>
-                    👤 More by {primaryArtist}
-                  </span>
-                  <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                    Search active source for {primaryArtist}
-                  </span>
-                </div>
-                <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#9ca3af' }}>🔍</span>
-              </button>
-            )}
-
-            {/* 6. Toggle Timed Comments (SoundCloud only) */}
-            {isSoundCloudTrack && (
-              <button
-                type="button"
-                onClick={() => {
-                  toggleScComments();
-                }}
-                style={{
-                  ...actionRowBtnStyle,
-                  background: scCommentsEnabled ? '#1f120b' : '#101018',
-                  border: scCommentsEnabled ? '1px solid #ea580c' : '1px solid #222230',
-                }}
-              >
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <span style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
-                    💬 Timed Comment Bubbles: {scCommentsEnabled ? 'ON' : 'OFF'}
-                  </span>
-                  <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                    {scComments.length} timed comments on this track
-                  </span>
-                </div>
-                <span
-                  style={{
-                    fontFamily: 'monospace',
-                    fontSize: 11,
-                    fontWeight: 800,
-                    color: scCommentsEnabled ? '#fdba74' : '#71717a',
-                  }}
-                >
-                  {scCommentsEnabled ? 'ON' : 'OFF'}
-                </span>
-              </button>
-            )}
+              )}
+            </div>
           </div>
         </div>
       )}

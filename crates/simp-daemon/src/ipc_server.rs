@@ -1608,6 +1608,7 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                     "username": ia.username,
                     "has_access_key": !ia.access_key.is_empty(),
                     "has_secret_key": !ia.secret_key.is_empty(),
+                    "safe_search": ia.safe_search,
                 }),
                 error: None,
             }

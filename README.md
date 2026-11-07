@@ -5,7 +5,7 @@
 
   **A lightweight, controller-first audio & video player for SteamOS, Linux, Windows, and SteamVR.**
 
-  [![Status: v0.1.0-alpha.58](https://img.shields.io/badge/status-v0.1.0--alpha.58-ff6a00?style=flat-square)](#)
+  [![Status: v0.1.0-alpha.59](https://img.shields.io/badge/status-v0.1.0--alpha.59-ff6a00?style=flat-square)](#)
   [![Target: SteamOS / Linux / Windows / SteamVR](https://img.shields.io/badge/target-SteamOS%20%7C%20Linux%20%7C%20Windows%20%7C%20SteamVR-000000?style=flat-square)](#)
   [![Backend: 100% Native Rust](https://img.shields.io/badge/backend-Native%20Rust-dea584?style=flat-square)](#)
 </div>

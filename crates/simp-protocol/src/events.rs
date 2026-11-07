@@ -68,6 +68,8 @@ pub enum ServerEnvelope {
         repeat_mode: RepeatMode,
         current_track: Option<TrackMetadata>,
         up_next: Vec<TrackMetadata>,
+        #[serde(default)]
+        queue: Vec<TrackMetadata>,
         queue_length: usize,
         queue_index: usize,
         mounts: Vec<MountStatus>,

@@ -35,6 +35,7 @@ pub struct InternetArchiveCredentials {
     pub username: String,
     pub access_key: String,
     pub secret_key: String,
+    pub safe_search: bool,
 }
 
 pub fn resolve_internet_archive_credentials(
@@ -52,6 +53,7 @@ pub fn resolve_internet_archive_credentials(
         .internet_archive_secret_key
         .trim()
         .to_string();
+    let safe_search = settings.services.internet_archive_safe_search;
 
     if let Ok(v) = std::env::var("IA_USERNAME") {
         if username.is_empty() && !v.trim().is_empty() {
@@ -77,6 +79,7 @@ pub fn resolve_internet_archive_credentials(
         username: username.trim_start_matches('@').to_string(),
         access_key,
         secret_key,
+        safe_search,
     }
 }
 
@@ -225,6 +228,7 @@ pub fn build_advancedsearch_url(query: &str, sort: &str, rows: usize, page: usiz
         "https://archive.org/advancedsearch.php?q={encoded_q}\
          &fl%5B%5D=identifier&fl%5B%5D=title&fl%5B%5D=creator&fl%5B%5D=mediatype&fl%5B%5D=description\
          &fl%5B%5D=year&fl%5B%5D=date&fl%5B%5D=downloads&fl%5B%5D=week&fl%5B%5D=month&fl%5B%5D=runtime\
+         &fl%5B%5D=item_count&fl%5B%5D=files_count\
          &sort%5B%5D={encoded_sort}&rows={rows}&page={page}&output=json"
     )
 }
@@ -279,6 +283,11 @@ fn parse_search_doc(doc: &Value) -> Option<ArchiveItemSummary> {
     } else {
         Some(runtime_raw)
     };
+    let item_count = doc
+        .get("item_count")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .filter(|&n| n > 0);
 
     Some(ArchiveItemSummary {
         art_url: Some(format!(
@@ -295,6 +304,7 @@ fn parse_search_doc(doc: &Value) -> Option<ArchiveItemSummary> {
         views_7d,
         views_30d,
         runtime_label,
+        item_count,
     })
 }
 
@@ -350,7 +360,7 @@ pub fn fetch_discover_hub(
         return fetch_user_favorites(&creds);
     }
 
-    let (query, sort) = match hub {
+    let (base_query, sort) = match hub {
         "trending" => match sub.as_str() {
             "movies" => (
                 "mediatype:movies AND -collection:inlibrary AND -collection:printdisabled AND -collection:television",
@@ -361,11 +371,11 @@ pub fn fetch_discover_hub(
                 "week desc",
             ),
             "all_time" => (
-                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary AND -collection:television",
+                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary AND -collection:television",
                 "downloads desc",
             ),
             _ => (
-                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary AND -collection:television",
+                "(collection:feature_films OR collection:classic_tv OR collection:animationandcartoons OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary AND -collection:television",
                 "week desc",
             ),
         },
@@ -379,15 +389,15 @@ pub fn fetch_discover_hub(
                 "week desc",
             ),
             "comedy" => (
-                "collection:comedy_films AND mediatype:movies AND -collection:inlibrary",
-                "week desc",
+                "(collection:Comedy_Films OR (collection:feature_films AND (subject:comedy OR subject:Comedy OR title:comedy))) AND mediatype:movies AND -collection:inlibrary",
+                "downloads desc",
             ),
             "silent" => (
-                "collection:silent_films AND mediatype:movies AND -collection:inlibrary",
-                "week desc",
+                "(collection:silent_films OR (collection:feature_films AND subject:silent)) AND mediatype:movies AND -collection:inlibrary",
+                "downloads desc",
             ),
             _ => (
-                "(collection:feature_films OR collection:Film_Noir OR collection:SciFi_Horror OR collection:comedy_films) AND mediatype:movies AND -collection:inlibrary",
+                "(collection:feature_films OR collection:Film_Noir OR collection:SciFi_Horror OR collection:Comedy_Films) AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
         },
@@ -396,20 +406,16 @@ pub fn fetch_discover_hub(
                 "collection:animationandcartoons AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
-            "chronicles" => (
-                "collection:computerchronicles AND mediatype:movies AND -collection:inlibrary",
-                "week desc",
-            ),
             "classic_tv" => (
                 "collection:classic_tv AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
             "scifi_tv" => (
-                "(collection:classic_tv OR collection:television) AND (subject:sci-fi OR subject:science OR subject:space OR title:trek OR title:twilight) AND mediatype:movies",
-                "week desc",
+                "(collection:classic_tv OR collection:feature_films) AND (subject:sci-fi OR subject:mystery OR subject:adventure) AND mediatype:movies AND -collection:inlibrary",
+                "downloads desc",
             ),
             _ => (
-                "(collection:animationandcartoons OR collection:computerchronicles OR collection:classic_tv) AND mediatype:movies AND -collection:inlibrary",
+                "(collection:animationandcartoons OR collection:classic_tv) AND mediatype:movies AND -collection:inlibrary",
                 "week desc",
             ),
         },
@@ -436,12 +442,18 @@ pub fn fetch_discover_hub(
             ),
         },
         _ => (
-            "(collection:feature_films OR collection:computerchronicles OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary AND -collection:television",
+            "(collection:feature_films OR collection:classic_tv OR collection:etree) AND (mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:inlibrary AND -collection:television",
             "week desc",
         ),
     };
 
-    execute_archive_search(&creds, query, sort, 40)
+    let query = if creds.safe_search {
+        format!("{base_query} AND -collection:erotica AND -subject:adult AND -subject:erotica AND -subject:nsfw")
+    } else {
+        base_query.to_string()
+    };
+
+    execute_archive_search(&creds, &query, sort, 40)
 }
 
 /// Fetches a user's public/account Internet Archive Favorites (`fav-{username}`).
@@ -506,6 +518,7 @@ pub fn fetch_user_favorites(
             views_7d: 0,
             views_30d: 0,
             runtime_label: None,
+            item_count: None,
         });
     }
     Ok(out)
@@ -528,8 +541,13 @@ pub fn search_catalog(
         "audio" => "(mediatype:etree OR mediatype:audio)",
         _ => "(mediatype:movies OR mediatype:etree OR mediatype:audio) AND -collection:television",
     };
+    let safe_clause = if creds.safe_search {
+        " AND -collection:erotica AND -subject:adult AND -subject:erotica AND -subject:nsfw"
+    } else {
+        ""
+    };
     let query = format!(
-        "({escaped}) AND {type_clause} AND -collection:inlibrary AND -collection:printdisabled"
+        "({escaped}) AND {type_clause} AND -collection:inlibrary AND -collection:printdisabled{safe_clause}"
     );
     execute_archive_search(&creds, &query, "downloads desc", 36)
 }
@@ -811,17 +829,15 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
         {
             (2u8, "SD MP4 (512Kb)".to_string(), "mp4".to_string())
         } else if lower.ends_with("_256kb.mp4") || fmt_lower.contains("256kb") {
-            (6u8, "Low MP4 (256Kb)".to_string(), "mp4".to_string())
+            (4u8, "Low MP4 (256Kb)".to_string(), "mp4".to_string())
         } else if lower.ends_with("_64kb.mp4") || fmt_lower.contains("64kb") {
-            (7u8, "Low MP4 (64Kb)".to_string(), "mp4".to_string())
+            (5u8, "Low MP4 (64Kb)".to_string(), "mp4".to_string())
         } else if fmt_lower.contains("h.264") || lower.ends_with(".ia.mp4") {
             if lower.ends_with(".ia.mp4") || fmt_lower.contains("hd") || height >= 720 {
                 (0u8, "HD MP4 (H.264)".to_string(), "mp4".to_string())
             } else {
                 (1u8, "MP4 (H.264)".to_string(), "mp4".to_string())
             }
-        } else if lower.ends_with(".webm") || fmt_lower.contains("webm") {
-            (3u8, "WebM".to_string(), "webm".to_string())
         } else if lower.ends_with(".mp4")
             || lower.ends_with(".m4v")
             || fmt_lower.contains("mpeg4")
@@ -834,9 +850,11 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
             } else {
                 "MP4 (Original)".to_string()
             };
-            (4u8, lbl, tag.to_string())
+            (3u8, lbl, tag.to_string())
+        } else if lower.ends_with(".webm") || fmt_lower.contains("webm") {
+            (6u8, "WebM".to_string(), "webm".to_string())
         } else if lower.ends_with(".ogv") || fmt_lower.contains("ogg video") {
-            (5u8, "OGV (Ogg Video)".to_string(), "ogv".to_string())
+            (7u8, "OGV (Ogg Video)".to_string(), "ogv".to_string())
         } else {
             let ext = Path::new(name)
                 .extension()
@@ -909,10 +927,12 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
             }
         }
 
-        // Always append a daemon-assisted `Compatibility MP4 (ffmpeg)` stream option so every item
-        // has at least 2 switchable qualities (`X`) and a guaranteed H.264+AAC fallback for legacy codecs
+        // Always provide a daemon-assisted `Compatibility MP4 (ffmpeg)` stream option so every item
+        // has at least 2 switchable qualities (`X`) and a guaranteed H.264+AAC fallback for legacy codecs.
+        // If no native MP4 variant exists (only `.ogv`/`.webm`/legacy), insert `Compatibility MP4 (ffmpeg)`
+        // at index 0 so `<video>` always tries an MP4 stream first!
         if !best_source_file.is_empty() {
-            qualities.push(VideoQualityVariant {
+            let compat_variant = VideoQualityVariant {
                 label: "Compatibility MP4 (ffmpeg)".to_string(),
                 format: "mp4".to_string(),
                 stream_url: format!(
@@ -921,7 +941,15 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
                     url_encode_component(&best_source_file)
                 ),
                 size_bytes: None,
-            });
+            };
+            let has_native_mp4 = qualities
+                .iter()
+                .any(|q| q.format == "mp4" || q.format == "m4v");
+            if has_native_mp4 {
+                qualities.push(compat_variant);
+            } else {
+                qualities.insert(0, compat_variant);
+            }
         }
 
         let mut subs: Vec<VideoSubtitleVariant> = item_subtitles
@@ -1104,6 +1132,14 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
             .collect();
     }
 
+    let resolved_count = if !episodes.is_empty() {
+        Some(episodes.len() as u32)
+    } else if !tracks.is_empty() {
+        Some(tracks.len() as u32)
+    } else {
+        None
+    };
+
     Ok(ArchiveItemDetail {
         summary: ArchiveItemSummary {
             identifier: identifier.to_string(),
@@ -1121,6 +1157,7 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
             } else {
                 Some(runtime_raw)
             },
+            item_count: resolved_count,
         },
         episodes,
         tracks,

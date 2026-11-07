@@ -34,7 +34,11 @@ import {
   SoundCloudPlaylistSummary,
 } from '../drivers/SoundCloudDriver';
 import { OskTargetKind } from '../hooks/useGamepadNavigation';
-import { BrowserTarget } from './PlayerView';
+import { BrowserTarget, isUiVideoTrack } from './PlayerView';
+import { SourceVisibilityPrefs } from './SettingsModal';
+
+const iaItemCountCache = new Map<string, number>();
+const iaItemCountPending = new Set<string>();
 
 export interface LibraryBrowserViewProps {
   hidden?: boolean;
@@ -44,6 +48,13 @@ export interface LibraryBrowserViewProps {
   playlists: PlaylistRecord[];
   browserSourceFilter: 'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive';
   setBrowserSourceFilter: React.Dispatch<
+    React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive'>
+  >;
+  selectedSources: Array<'local' | 'apple_music' | 'soundcloud' | 'internet_archive'>;
+  setSelectedSources: React.Dispatch<
+    React.SetStateAction<Array<'local' | 'apple_music' | 'soundcloud' | 'internet_archive'>>
+  >;
+  setBrowserSourceFilterRaw: React.Dispatch<
     React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive'>
   >;
   browserSearch: string;
@@ -147,6 +158,8 @@ export interface LibraryBrowserViewProps {
     preloadedTracks?: TrackMetadata[]
   ) => Promise<void>;
   handleStartSoundCloudTrackRadio: (seedTrack: TrackMetadata) => void;
+  sourceVisibility: SourceVisibilityPrefs;
+  recentlyPlayed: TrackMetadata[];
   showToast: (msg: string) => void;
 }
 
@@ -291,6 +304,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   playlists,
   browserSourceFilter,
   setBrowserSourceFilter,
+  selectedSources,
+  setSelectedSources,
+  setBrowserSourceFilterRaw,
   browserSearch,
   setBrowserSearch,
   browserTarget,
@@ -367,6 +383,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   handleOpenSoundCloudPlaylist,
   handlePinSoundCloudPlaylist,
   handleStartSoundCloudTrackRadio,
+  sourceVisibility,
+  recentlyPlayed,
   showToast,
 }) => {
   // Left Sidebar Collapsible Section States (persisted in localStorage)
@@ -464,13 +482,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
   // Right Pane State: 'browse' (4-Column-Max Visual Card Grid for the active Place) vs 'tracks' (Selected Collection Tracklist)
   const [rightPaneMode, setRightPaneMode] = useState<'browse' | 'tracks'>('browse');
+  const [mediaTypeFilter, setMediaTypeFilter] = useState<'all' | 'video' | 'audio'>('all');
+  const [iaResolvedCounts, setIaResolvedCounts] = useState<Record<string, number>>({});
   const [activeMountRoot, setActiveMountRoot] = useState<string | null>(null);
   const [mountAlbums, setMountAlbums] = useState<AlbumRecord[]>([]);
   const [mountTracks, setMountTracks] = useState<TrackMetadata[]>([]);
   const [localVideos, setLocalVideos] = useState<TrackMetadata[]>([]);
   const [localSearchTracks, setLocalSearchTracks] = useState<TrackMetadata[]>([]);
   const [simpHubFilter, setSimpHubFilter] = useState<
-    'all' | 'hybrid' | 'pinned' | 'albums' | 'videos'
+    'all' | 'recent' | 'hybrid' | 'pinned' | 'albums' | 'videos'
   >('all');
   const [cloudPage, setCloudPage] = useState<number>(0);
   const [cloudAlpha, setCloudAlpha] = useState<AlphaBucket>('all');
@@ -486,8 +506,25 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   );
   const recentLoadedRef = useRef(false);
 
+  const isSourceIncluded = useCallback(
+    (src: 'local' | 'apple_music' | 'soundcloud' | 'internet_archive'): boolean => {
+      if (src === 'apple_music' && !sourceVisibility.apple_music) return false;
+      if (src === 'soundcloud' && !sourceVisibility.soundcloud) return false;
+      if (src === 'internet_archive' && !sourceVisibility.internet_archive) return false;
+      if (selectedSources.length > 0) {
+        return selectedSources.includes(src);
+      }
+      return browserSourceFilter === 'all' || browserSourceFilter === src;
+    },
+    [sourceVisibility, selectedSources, browserSourceFilter]
+  );
+
   useEffect(() => {
-    if (!snap?.apple_authenticated || browserSourceFilter === 'local' || browserSourceFilter === 'soundcloud') return;
+    if (
+      !snap?.apple_authenticated ||
+      !isSourceIncluded('apple_music')
+    )
+      return;
     if (appleSubTab !== 'radio' && appleSubTab !== 'pinned') return;
     if (recentLoadedRef.current && recentlyAddedCloudAlbums.length > 0) return;
     recentLoadedRef.current = true;
@@ -498,19 +535,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       .catch(() => {
         recentLoadedRef.current = false;
       });
-  }, [snap?.apple_authenticated, browserSourceFilter, appleSubTab, recentlyAddedCloudAlbums.length]);
+  }, [snap?.apple_authenticated, isSourceIncluded, appleSubTab, recentlyAddedCloudAlbums.length]);
 
-  // Clear activeMountRoot if user switches source filter to Apple Music, SoundCloud, or Internet Archive
+  // Clear activeMountRoot if user switches source filter away from Local
   useEffect(() => {
-    if (
-      (browserSourceFilter === 'apple_music' ||
-        browserSourceFilter === 'soundcloud' ||
-        browserSourceFilter === 'internet_archive') &&
-      activeMountRoot
-    ) {
+    if (!isSourceIncluded('local') && activeMountRoot) {
       setActiveMountRoot(null);
     }
-  }, [browserSourceFilter, activeMountRoot]);
+  }, [isSourceIncluded, activeMountRoot]);
 
   const resolveDaemonUrl = useCallback((path: string): string => {
     if (typeof window !== 'undefined' && window.location?.hostname) {
@@ -559,18 +591,21 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
   useEffect(() => {
     if (browserSourceFilter !== 'internet_archive' || iaSubTab === 'pinned') return;
-    if (!snap?.internet_archive_authenticated) return;
+    if (!snap?.internet_archive_authenticated || !sourceVisibility.internet_archive) return;
     loadIaDiscover(iaSubTab, iaSubFilter);
-  }, [browserSourceFilter, iaSubTab, iaSubFilter, snap?.internet_archive_authenticated, loadIaDiscover]);
+  }, [
+    browserSourceFilter,
+    iaSubTab,
+    iaSubFilter,
+    snap?.internet_archive_authenticated,
+    sourceVisibility.internet_archive,
+    loadIaDiscover,
+  ]);
 
   // Debounced Internet Archive Search
   useEffect(() => {
     const q = browserSearch.trim();
-    if (!q || !snap?.internet_archive_authenticated) {
-      setIaSearchResults([]);
-      return;
-    }
-    if (browserSourceFilter !== 'all' && browserSourceFilter !== 'internet_archive') {
+    if (!q || !snap?.internet_archive_authenticated || !isSourceIncluded('internet_archive')) {
       setIaSearchResults([]);
       return;
     }
@@ -590,7 +625,53 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         .catch(() => {});
     }, 280);
     return () => window.clearTimeout(timer);
-  }, [browserSearch, browserSourceFilter, snap?.internet_archive_authenticated, resolveDaemonUrl]);
+  }, [browserSearch, isSourceIncluded, snap?.internet_archive_authenticated, resolveDaemonUrl]);
+
+  // Lazy background item/episode count resolver for visible Internet Archive tiles
+  useEffect(() => {
+    const visibleList = browserSearch.trim() ? iaSearchResults : iaItems;
+    if (visibleList.length === 0) return;
+    const candidates = visibleList.filter(
+      (it) =>
+        it.item_count === undefined &&
+        it.item_count !== null &&
+        !iaItemCountCache.has(it.identifier) &&
+        !iaItemCountPending.has(it.identifier)
+    );
+    if (candidates.length === 0) return;
+
+    let cancelled = false;
+    const runResolve = async () => {
+      for (const it of candidates.slice(0, 16)) {
+        if (cancelled) break;
+        iaItemCountPending.add(it.identifier);
+        try {
+          const resp = await fetch(
+            resolveDaemonUrl(`/api/ia/item?id=${encodeURIComponent(it.identifier)}`)
+          );
+          const d = await resp.json();
+          const detail: ArchiveItemDetail | undefined = d?.detail || d?.data;
+          if (!cancelled && d?.ok && detail) {
+            const count =
+              detail.episodes && detail.episodes.length > 0
+                ? detail.episodes.length
+                : detail.tracks
+                ? detail.tracks.length
+                : 1;
+            iaItemCountCache.set(it.identifier, count);
+            setIaResolvedCounts((prev) => ({ ...prev, [it.identifier]: count }));
+          }
+        } catch {
+          // Ignore individual metadata failures
+        }
+        await new Promise((r) => window.setTimeout(r, 180));
+      }
+    };
+    runResolve();
+    return () => {
+      cancelled = true;
+    };
+  }, [iaItems, iaSearchResults, browserSearch, resolveDaemonUrl]);
 
   // Auto-load Internet Archive item detail when jumping directly from Player ('Open Collection')
   useEffect(() => {
@@ -664,7 +745,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   // Query matching Local tracks & videos when searching in `all` or `local`
   useEffect(() => {
     const q = browserSearch.trim();
-    if (!q || (browserSourceFilter !== 'all' && browserSourceFilter !== 'local')) {
+    if (!q || !isSourceIncluded('local')) {
       setLocalSearchTracks([]);
       return;
     }
@@ -680,7 +761,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         if (Array.isArray(res)) setLocalSearchTracks(res);
       })
       .catch(() => {});
-  }, [browserSearch, browserSourceFilter]);
+  }, [browserSearch, isSourceIncluded]);
 
   // Auto-focus Right Pane when selecting a Place ('tile') or Collection ('track')
   const pendingRightFocusRef = useRef<'track' | 'tile' | null>(null);
@@ -839,12 +920,100 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
   const searchLower = browserSearch.trim().toLowerCase();
 
+  // Source-aware & media-type-aware SIMP Album filtering
+  const filteredAlbums = useMemo(
+    () =>
+      albums.filter((alb) => {
+        if (mediaTypeFilter === 'video') return false;
+        const isApple = alb.id.startsWith('applemusic:album:');
+        if (isApple && !isSourceIncluded('apple_music')) return false;
+        if (!isApple && !isSourceIncluded('local')) return false;
+        return true;
+      }),
+    [albums, mediaTypeFilter, isSourceIncluded]
+  );
+
+  // Source-aware & media-type-aware Recently Played filtering
+  const filteredRecentlyPlayed = useMemo(
+    () =>
+      recentlyPlayed.filter((tr) => {
+        const isVid = isUiVideoTrack(tr);
+        if (mediaTypeFilter === 'video' && !isVid) return false;
+        if (mediaTypeFilter === 'audio' && isVid) return false;
+        if (tr.source === 'apple_music' && !isSourceIncluded('apple_music')) return false;
+        if (tr.source === 'soundcloud' && !isSourceIncluded('soundcloud')) return false;
+        if (
+          (tr.source === 'internet_archive' || tr.source === 'ia_video') &&
+          !isSourceIncluded('internet_archive')
+        )
+          return false;
+        if (
+          (tr.source === 'local' ||
+            tr.source === 'local_video' ||
+            tr.source === 'steam_ost' ||
+            tr.source === 'removable' ||
+            tr.source === 'cdda' ||
+            tr.source === 'dvd') &&
+          !isSourceIncluded('local')
+        )
+          return false;
+        if (searchLower) {
+          const matchTitle = tr.title.toLowerCase().includes(searchLower);
+          const matchArtist = tr.artists.some((a) => a.toLowerCase().includes(searchLower));
+          const matchAlbum = tr.album ? tr.album.toLowerCase().includes(searchLower) : false;
+          if (!matchTitle && !matchArtist && !matchAlbum) return false;
+        }
+        return true;
+      }),
+    [recentlyPlayed, mediaTypeFilter, isSourceIncluded, searchLower]
+  );
+
+  const filteredLocalSearchTracks = useMemo(
+    () =>
+      localSearchTracks.filter((tr) => {
+        const isVid = isUiVideoTrack(tr);
+        if (mediaTypeFilter === 'video' && !isVid) return false;
+        if (mediaTypeFilter === 'audio' && isVid) return false;
+        return true;
+      }),
+    [localSearchTracks, mediaTypeFilter]
+  );
+
+  const filteredIaItems = useMemo(
+    () =>
+      iaItems.filter((it) => {
+        if (mediaTypeFilter === 'video' && it.mediatype !== 'movies') return false;
+        if (mediaTypeFilter === 'audio' && it.mediatype === 'movies') return false;
+        return true;
+      }),
+    [iaItems, mediaTypeFilter]
+  );
+
+  const filteredIaSearchResults = useMemo(
+    () =>
+      iaSearchResults.filter((it) => {
+        if (mediaTypeFilter === 'video' && it.mediatype !== 'movies') return false;
+        if (mediaTypeFilter === 'audio' && it.mediatype === 'movies') return false;
+        return true;
+      }),
+    [iaSearchResults, mediaTypeFilter]
+  );
+
   // Source-aware SIMP Playlist membership (`has_local`, `has_apple`, `has_soundcloud`, & `has_archive`)
   // When searching (`searchLower`), user-created `★ SIMP Hybrid Playlists` (`origin === 'simp_local'`)
   // are always included across all source pills if their title/description matches the search query.
   const filteredPlaylists = useMemo(
     () =>
       playlists.filter((pl) => {
+        if (mediaTypeFilter === 'video') {
+          const isVideoPl =
+            pl.name.startsWith('🎬') ||
+            pl.origin === 'archive_remote' ||
+            (pl.origin === 'simp_local' && (pl.has_archive || pl.has_local));
+          if (!isVideoPl) return false;
+        } else if (mediaTypeFilter === 'audio') {
+          if (pl.name.startsWith('🎬')) return false;
+        }
         if (searchLower) {
           const matchesQuery =
             pl.name.toLowerCase().includes(searchLower) ||
@@ -852,39 +1021,21 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           if (!matchesQuery) return false;
           if (pl.origin === 'simp_local') return true;
         }
-        if (browserSourceFilter === 'local') {
-          if (
-            pl.origin === 'apple_remote' ||
-            pl.origin === 'soundcloud_remote' ||
-            pl.origin === 'archive_remote'
-          )
-            return false;
-          // Exclude user-created SIMP playlists that contain ONLY cloud tracks
-          if (
-            pl.track_count > 0 &&
-            (pl.has_apple || pl.has_soundcloud || pl.has_archive) &&
-            !pl.has_local
-          )
-            return false;
-        } else if (browserSourceFilter === 'apple_music') {
-          if (pl.origin === 'soundcloud_remote' || pl.origin === 'archive_remote') return false;
-          if (pl.origin === 'simp_local' && pl.track_count > 0 && !pl.has_apple) {
-            return false;
-          }
-        } else if (browserSourceFilter === 'soundcloud') {
-          if (pl.origin === 'apple_remote' || pl.origin === 'archive_remote') return false;
-          if (pl.origin === 'simp_local' && pl.track_count > 0 && !pl.has_soundcloud) {
-            return false;
-          }
-        } else if (browserSourceFilter === 'internet_archive') {
-          if (pl.origin === 'apple_remote' || pl.origin === 'soundcloud_remote') return false;
-          if (pl.origin === 'simp_local' && pl.track_count > 0 && !pl.has_archive) {
+        if (pl.origin === 'apple_remote') return isSourceIncluded('apple_music');
+        if (pl.origin === 'soundcloud_remote') return isSourceIncluded('soundcloud');
+        if (pl.origin === 'archive_remote') return isSourceIncluded('internet_archive');
+        if (pl.origin === 'simp_local' && pl.track_count > 0) {
+          const matchesLocal = pl.has_local && isSourceIncluded('local');
+          const matchesApple = pl.has_apple && isSourceIncluded('apple_music');
+          const matchesSc = pl.has_soundcloud && isSourceIncluded('soundcloud');
+          const matchesIa = pl.has_archive && isSourceIncluded('internet_archive');
+          if (!matchesLocal && !matchesApple && !matchesSc && !matchesIa) {
             return false;
           }
         }
         return true;
       }),
-    [playlists, browserSourceFilter, searchLower]
+    [playlists, mediaTypeFilter, isSourceIncluded, searchLower]
   );
 
   const cleanCollectionTitle = (raw: string): string =>
@@ -2882,6 +3033,22 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     const isVideo = item.mediatype === 'movies';
     const isSelected = browserTarget?.kind === 'ia_item' && browserTarget.id === item.identifier;
     const isPinned = playlists.some((p) => p.id === `archive:item:${item.identifier}`);
+    const count =
+      item.item_count ??
+      iaResolvedCounts[item.identifier] ??
+      iaItemCountCache.get(item.identifier);
+    const badgeLabel =
+      count !== undefined && count > 0
+        ? isVideo
+          ? count === 1
+            ? '🎬 1 Film'
+            : `🎬 ${count} Ep`
+          : count === 1
+          ? '🎵 1 Audio'
+          : `🎵 ${count} Trk`
+        : isVideo
+        ? '🎬 VIDEO'
+        : '🎵 AUDIO';
     return (
       <button
         key={item.identifier}
@@ -2933,7 +3100,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 fontWeight: 800,
               }}
             >
-              {isVideo ? 'VIDEO' : 'AUDIO'}
+              {badgeLabel}
             </span>
             <span
               role="button"
@@ -3320,13 +3487,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           )}
         </div>
 
-        {/* Row 2: Top-Level Source Filter Bar (`[ 🌐 All | 💾 Local | 🍎 Apple | ☁️ SC | 🏛️ Archive ]`)
-            Only show Apple / SoundCloud / Archive pills when authenticated (or reauth_required for Apple). */}
+        {/* Row 2: Top-Level Multi-Select Source Filter Bar (`[ 🌐 All | 💾 Local | 🍎 Apple | ☁️ SC | 🏛️ Archive ]`)
+            🌐 All resets to all sources; clicking individual pills toggles them into a custom multi-source mix. */}
         {(() => {
           const sourceTabs = [
             { id: 'all' as const, label: '🌐 All', accent: 'teal' as const },
             { id: 'local' as const, label: '💾 Local', accent: 'teal' as const },
-            ...(snap?.apple_authenticated || appleAuthState === 'reauth_required'
+            ...(sourceVisibility.apple_music &&
+            (snap?.apple_authenticated || appleAuthState === 'reauth_required')
               ? [
                   {
                     id: 'apple_music' as const,
@@ -3335,7 +3503,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   },
                 ]
               : []),
-            ...(snap?.soundcloud_authenticated
+            ...(sourceVisibility.soundcloud && snap?.soundcloud_authenticated
               ? [
                   {
                     id: 'soundcloud' as const,
@@ -3344,7 +3512,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   },
                 ]
               : []),
-            ...(snap?.internet_archive_authenticated
+            ...(sourceVisibility.internet_archive && snap?.internet_archive_authenticated
               ? [
                   {
                     id: 'internet_archive' as const,
@@ -3363,38 +3531,79 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               }}
             >
               {sourceTabs.map((tab) => {
-                const active = browserSourceFilter === tab.id;
+                const active =
+                  tab.id === 'all'
+                    ? selectedSources.length === 0 && browserSourceFilter === 'all'
+                    : selectedSources.length > 0
+                    ? selectedSources.includes(tab.id)
+                    : browserSourceFilter === tab.id;
                 return (
                   <button
                     key={tab.id}
                     onClick={() => {
-                      if (browserSourceFilter !== tab.id) {
-                        pushCurrentNavState();
-                      }
-                      setBrowserSourceFilter(tab.id);
-                      if (tab.id === 'local') {
+                      pushCurrentNavState();
+                      if (tab.id === 'all') {
+                        setSelectedSources([]);
+                        setBrowserSourceFilterRaw('all');
                         setAppleSubTab('pinned');
                         setSoundCloudSubTab('pinned');
                         setIaSubTab('pinned');
                         setRightPaneMode('browse');
-                      } else if (tab.id === 'soundcloud') {
-                        setActiveMountRoot(null);
-                        if (soundCloudSubTab === 'pinned') {
-                          setSoundCloudSubTab('trending');
-                        }
+                        return;
+                      }
+                      const currentSet =
+                        selectedSources.length > 0
+                          ? selectedSources
+                          : browserSourceFilter !== 'all'
+                          ? [browserSourceFilter]
+                          : [];
+                      const exists = currentSet.includes(tab.id);
+                      const nextSet = exists
+                        ? currentSet.filter((s) => s !== tab.id)
+                        : [...currentSet, tab.id];
+
+                      setSelectedSources(nextSet);
+                      if (nextSet.length === 0) {
+                        setBrowserSourceFilterRaw('all');
+                        setAppleSubTab('pinned');
+                        setSoundCloudSubTab('pinned');
+                        setIaSubTab('pinned');
                         setRightPaneMode('browse');
-                      } else if (tab.id === 'apple_music') {
-                        setActiveMountRoot(null);
-                        if (appleSubTab === 'pinned') {
-                          setAppleSubTab('cloud_playlists');
+                      } else if (nextSet.length === 1) {
+                        const single = nextSet[0];
+                        setBrowserSourceFilterRaw(single);
+                        if (single === 'local') {
+                          setAppleSubTab('pinned');
+                          setSoundCloudSubTab('pinned');
+                          setIaSubTab('pinned');
+                          setRightPaneMode('browse');
+                        } else if (single === 'soundcloud') {
+                          setActiveMountRoot(null);
+                          if (soundCloudSubTab === 'pinned') {
+                            setSoundCloudSubTab('trending');
+                          }
+                          setRightPaneMode('browse');
+                        } else if (single === 'apple_music') {
+                          setActiveMountRoot(null);
+                          if (appleSubTab === 'pinned') {
+                            setAppleSubTab('cloud_playlists');
+                          }
+                          setRightPaneMode('browse');
+                        } else if (single === 'internet_archive') {
+                          setActiveMountRoot(null);
+                          if (iaSubTab === 'pinned') {
+                            setIaSubTab('trending');
+                            setIaSubFilter('all');
+                          }
+                          setRightPaneMode('browse');
                         }
-                        setRightPaneMode('browse');
-                      } else if (tab.id === 'internet_archive') {
+                      } else {
+                        // Multi-source mix (e.g. Local + Internet Archive): show unified SIMP Library / Search filtered to those sources
+                        setBrowserSourceFilterRaw('all');
                         setActiveMountRoot(null);
-                        if (iaSubTab === 'pinned') {
-                          setIaSubTab('trending');
-                          setIaSubFilter('all');
-                        }
+                        setAppleSubTab('pinned');
+                        setSoundCloudSubTab('pinned');
+                        setIaSubTab('pinned');
                         setRightPaneMode('browse');
                       }
                     }}
@@ -3441,6 +3650,44 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             </div>
           );
         })()}
+
+        {/* Row 2b: Media Type Filter Strip (`[ All Media | 🎬 Video | 🎵 Audio ]`) */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+            gap: 5,
+          }}
+        >
+          {(
+            [
+              { id: 'all' as const, label: 'All Media' },
+              { id: 'video' as const, label: '🎬 Video' },
+              { id: 'audio' as const, label: '🎵 Audio' },
+            ] as const
+          ).map((m) => {
+            const active = mediaTypeFilter === m.id;
+            return (
+              <button
+                key={m.id}
+                onClick={() => setMediaTypeFilter(m.id)}
+                style={{
+                  minHeight: 28,
+                  padding: '0 6px',
+                  borderRadius: 7,
+                  background: active ? '#11222c' : '#09090d',
+                  border: active ? '1px solid #2aa3c4' : '1px solid #1a1a24',
+                  color: active ? '#bfeaf5' : '#8e8e99',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                {m.label}
+              </button>
+            );
+          })}
+        </div>
 
         {/* =================================================================
             COLLAPSIBLE BUCKET 0: ▾ PLACES (Unified PS3 XMB Vertical Stack)
@@ -3763,8 +4010,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               })
             )}
 
-            {/* Unified Service Drill-Right Places in `🌐 All` mode (only when authenticated) */}
-            {browserSourceFilter === 'all' && snap?.apple_authenticated && (
+            {/* Unified Service Drill-Right Places in `🌐 All` / multi-source mode (only when authenticated & visible) */}
+            {browserSourceFilter === 'all' &&
+              isSourceIncluded('apple_music') &&
+              snap?.apple_authenticated && (
               <button
                 data-xmb-drill-right="true"
                 onClick={() => {
@@ -3796,7 +4045,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               </button>
             )}
 
-            {browserSourceFilter === 'all' && snap?.soundcloud_authenticated && (
+            {browserSourceFilter === 'all' &&
+              isSourceIncluded('soundcloud') &&
+              snap?.soundcloud_authenticated && (
               <button
                 data-xmb-drill-right="true"
                 onClick={() => {
@@ -3828,7 +4079,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               </button>
             )}
 
-            {browserSourceFilter === 'all' && snap?.internet_archive_authenticated && (
+            {browserSourceFilter === 'all' &&
+              isSourceIncluded('internet_archive') &&
+              snap?.internet_archive_authenticated && (
               <button
                 data-xmb-drill-right="true"
                 onClick={() => {
@@ -3861,8 +4114,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               </button>
             )}
 
-            {/* Local Places (shown in `🌐 All` and `💾 Local` modes) */}
-            {(browserSourceFilter === 'all' || browserSourceFilter === 'local') &&
+            {/* Local Places (shown when Local is included) */}
+            {isSourceIncluded('local') &&
               snap?.mounts.map((m) => {
                 const isMountActive =
                   activeMountRoot === m.mount_root && rightPaneMode === 'browse';
@@ -3929,8 +4182,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 );
               })}
 
-            {/* Loaded Audio CD or DVD-Video (`cdda://` or `dvd://`) — only shown in `🌐 All` and `💾 Local` */}
-            {(browserSourceFilter === 'all' || browserSourceFilter === 'local') && (
+            {/* Loaded Audio CD or DVD-Video (`cdda://` or `dvd://`) — only shown when Optical Drive is enabled and Local is included */}
+            {sourceVisibility.optical_drive && isSourceIncluded('local') && (
               <div
                 style={{
                   padding: '6px 10px',
@@ -4484,7 +4737,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 )}
 
                 {/* 1B. Matching Unpinned Apple Library Playlists */}
-                {(browserSourceFilter === 'all' || browserSourceFilter === 'apple_music') &&
+                {isSourceIncluded('apple_music') &&
+                  mediaTypeFilter !== 'video' &&
                   filteredCloudPlaylists.length > 0 && (
                     <>
                       <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
@@ -4497,29 +4751,29 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   )}
 
                 {/* 1C. Matching Local & Pinned Albums */}
-                {albums.length > 0 && (
+                {filteredAlbums.length > 0 && (
                   <>
                     <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                      💿 MATCHING SIMP LIBRARY ALBUMS ({albums.length})
+                      💿 MATCHING SIMP LIBRARY ALBUMS ({filteredAlbums.length})
                     </div>
                     <div style={tileGridStyle}>
-                      {albums.slice(0, 24).map(renderSimpAlbumCard)}
+                      {filteredAlbums.slice(0, 24).map(renderSimpAlbumCard)}
                     </div>
                   </>
                 )}
 
                 {/* 1C-2. Matching Local Tracks & Local Videos */}
-                {(browserSourceFilter === 'all' || browserSourceFilter === 'local') &&
-                  localSearchTracks.length > 0 && (
+                {isSourceIncluded('local') &&
+                  filteredLocalSearchTracks.length > 0 && (
                     <>
                       <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                        LOCAL TRACKS & VIDEOS ({localSearchTracks.length})
+                        LOCAL TRACKS & VIDEOS ({filteredLocalSearchTracks.length})
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        {localSearchTracks.map((s) =>
+                        {filteredLocalSearchTracks.map((s) =>
                           renderSingleSongRow(
                             s,
-                            localSearchTracks.filter(
+                            filteredLocalSearchTracks.filter(
                               (tr) =>
                                 tr.source !== 'local_video' && !tr.uri.startsWith('video://local/')
                             ),
@@ -4531,7 +4785,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   )}
 
                 {/* 1D. Personal Apple Cloud Library ("Your Library") & Public Catalog Search Results */}
-                {(browserSourceFilter === 'all' || browserSourceFilter === 'apple_music') &&
+                {isSourceIncluded('apple_music') &&
+                  mediaTypeFilter !== 'video' &&
                   snap?.apple_authenticated && (
                   <>
                     {catalogSearchResults.albums.some((a) => a.kind === 'library') && (
@@ -4600,7 +4855,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 )}
 
                 {/* 1E. SoundCloud Catalog Search Results (Sets & Tracks) */}
-                {(browserSourceFilter === 'all' || browserSourceFilter === 'soundcloud') &&
+                {isSourceIncluded('soundcloud') &&
+                  mediaTypeFilter !== 'video' &&
                   (scCatalogSearchResults.playlists.length > 0 ||
                     scCatalogSearchResults.songs.length > 0) && (
                     <>
@@ -4644,8 +4900,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   )}
 
                 {/* 1F. Internet Archive Search Results (Films, TV, Concerts & Audio) */}
-                {(browserSourceFilter === 'all' || browserSourceFilter === 'internet_archive') &&
-                  iaSearchResults.length > 0 && (
+                {isSourceIncluded('internet_archive') &&
+                  filteredIaSearchResults.length > 0 && (
                     <>
                       <div
                         style={{
@@ -4657,25 +4913,25 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           marginTop: 8,
                         }}
                       >
-                        🏛️ Internet Archive ({iaSearchResults.length})
+                        🏛️ Internet Archive ({filteredIaSearchResults.length})
                       </div>
                       <div style={tileGridStyle}>
-                        {iaSearchResults.map(renderArchiveItemCard)}
+                        {filteredIaSearchResults.map(renderArchiveItemCard)}
                       </div>
                     </>
                   )}
 
                 {filteredPlaylists.length === 0 &&
                   filteredCloudPlaylists.length === 0 &&
-                  albums.length === 0 &&
-                  localSearchTracks.length === 0 &&
+                  filteredAlbums.length === 0 &&
+                  filteredLocalSearchTracks.length === 0 &&
                   catalogSearchResults.albums.length === 0 &&
                   catalogSearchResults.playlists.length === 0 &&
                   catalogSearchResults.stations.length === 0 &&
                   catalogSearchResults.songs.length === 0 &&
                   scCatalogSearchResults.playlists.length === 0 &&
                   scCatalogSearchResults.songs.length === 0 &&
-                  iaSearchResults.length === 0 &&
+                  filteredIaSearchResults.length === 0 &&
                   !cloudLoading &&
                   !iaLoading && (
                     <div style={{ fontSize: 12, color: '#8e8e99', padding: '12px 4px' }}>
@@ -4862,6 +5118,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         {(
                           [
                             { id: 'all', label: 'All' },
+                            ...(filteredRecentlyPlayed.length > 0
+                              ? [
+                                  {
+                                    id: 'recent' as const,
+                                    label: `🕒 Recent (${filteredRecentlyPlayed.length})`,
+                                  },
+                                ]
+                              : []),
                             {
                               id: 'hybrid',
                               label: `★ SIMP Playlists (${hybridPlaylistsList.length})`,
@@ -4874,12 +5138,21 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                                   },
                                 ]
                               : []),
-                            { id: 'albums', label: `💿 Albums (${albums.length})` },
-                            ...(localVideos.length > 0
+                            ...(mediaTypeFilter !== 'video'
+                              ? [
+                                  {
+                                    id: 'albums' as const,
+                                    label: `💿 Albums (${filteredAlbums.length})`,
+                                  },
+                                ]
+                              : []),
+                            ...(isSourceIncluded('local') &&
+                            mediaTypeFilter !== 'audio' &&
+                            localVideos.length > 0
                               ? [
                                   {
                                     id: 'videos' as const,
-                                    label: `Videos (${localVideos.length})`,
+                                    label: `🎬 Videos (${localVideos.length})`,
                                   },
                                 ]
                               : []),
@@ -4965,6 +5238,28 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       </div>
                     )}
 
+                    {/* Recently Played Section */}
+                    {(simpHubFilter === 'all' || simpHubFilter === 'recent') &&
+                      filteredRecentlyPlayed.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                            🕒 RECENTLY PLAYED ({filteredRecentlyPlayed.length})
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {(simpHubFilter === 'recent'
+                              ? filteredRecentlyPlayed
+                              : filteredRecentlyPlayed.slice(0, 6)
+                            ).map((rTrack) =>
+                              renderSingleSongRow(
+                                rTrack,
+                                filteredRecentlyPlayed.filter((tr) => !isUiVideoTrack(tr)),
+                                'recent_played'
+                              )
+                            )}
+                          </div>
+                        </>
+                      )}
+
                     {/* SIMP Hybrid Playlists Section */}
                     {(simpHubFilter === 'all' || simpHubFilter === 'hybrid') &&
                       hybridPlaylistsList.length > 0 && (
@@ -4993,19 +5288,21 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
                     {/* Local & Pinned Full Albums Section */}
                     {(simpHubFilter === 'all' || simpHubFilter === 'albums') &&
-                      albums.length > 0 && (
+                      filteredAlbums.length > 0 && (
                         <>
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                            💿 ALBUMS & SOUNDTRACKS ({albums.length})
+                            💿 ALBUMS & SOUNDTRACKS ({filteredAlbums.length})
                           </div>
                           <div style={tileGridStyle}>
-                            {albums.map(renderSimpAlbumCard)}
+                            {filteredAlbums.map(renderSimpAlbumCard)}
                           </div>
                         </>
                       )}
 
                     {/* Indexed Local Unencrypted Video Files Section */}
                     {(simpHubFilter === 'all' || simpHubFilter === 'videos') &&
+                      isSourceIncluded('local') &&
+                      mediaTypeFilter !== 'audio' &&
                       localVideos.length > 0 && (
                         <>
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
@@ -5984,9 +6281,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           ? [
                               { id: 'all', label: 'All TV' },
                               { id: 'cartoons', label: 'Animation' },
-                              { id: 'chronicles', label: 'Computer Chronicles' },
                               { id: 'classic_tv', label: 'Classic TV' },
-                              { id: 'scifi_tv', label: 'Sci-Fi & Anthology' },
+                              { id: 'scifi_tv', label: 'Sci-Fi & Mystery' },
                             ]
                           : [
                               { id: 'all', label: 'All Audio' },
@@ -6019,7 +6315,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         })}
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        {iaItems.length > 0 &&
+                        {filteredIaItems.length > 0 &&
                           (() => {
                             const collKey = `${iaSubTab}:${iaSubFilter}`;
                             const collId = `archive:collection:${collKey}`;
@@ -6034,7 +6330,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                                   if (isCollPinned) {
                                     handleDeletePlaylist(collId, collTitle);
                                   } else {
-                                    handlePinArchiveCollection(collKey, collTitle, iaItems);
+                                    handlePinArchiveCollection(collKey, collTitle, filteredIaItems);
                                   }
                                 }}
                                 style={{
@@ -6071,8 +6367,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       </div>
                     </div>
 
-                    {iaItems.length > 0 ? (
-                      <div style={tileGridStyle}>{iaItems.map(renderArchiveItemCard)}</div>
+                    {filteredIaItems.length > 0 ? (
+                      <div style={tileGridStyle}>{filteredIaItems.map(renderArchiveItemCard)}</div>
                     ) : (
                       !iaLoading && (
                         <div style={{ fontSize: 12, color: '#8e8e99', padding: '12px 4px' }}>

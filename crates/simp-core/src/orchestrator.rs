@@ -761,6 +761,7 @@ impl AudioOrchestrator {
                 username,
                 access_key,
                 secret_key,
+                safe_search,
             } => {
                 {
                     let mut cfg = self.settings.lock().unwrap();
@@ -772,6 +773,9 @@ impl AudioOrchestrator {
                     }
                     if !secret_key.trim().is_empty() {
                         cfg.services.internet_archive_secret_key = secret_key.trim().to_string();
+                    }
+                    if let Some(ss) = safe_search {
+                        cfg.services.internet_archive_safe_search = ss;
                     }
                 }
                 self.internet_archive_sink.is_authenticated = enabled;
@@ -1799,6 +1803,7 @@ pub fn build_state_snapshot(
         repeat_mode: st.repeat_mode,
         current_track: st.current_track.clone(),
         up_next,
+        queue: st.queue.clone(),
         queue_length: st.queue.len(),
         queue_index: st.queue_index,
         mounts,

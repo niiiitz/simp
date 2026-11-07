@@ -55,6 +55,7 @@ export class SimpDaemonClient {
     repeat_mode: 'off',
     current_track: null,
     up_next: [],
+    queue: [],
     queue_length: 0,
     queue_index: 0,
     mounts: [],
@@ -101,6 +102,7 @@ export class SimpDaemonClient {
         repeat_mode: msg.repeat_mode,
         current_track: msg.current_track,
         up_next: msg.up_next ?? [],
+        queue: msg.queue ?? [],
         queue_length: msg.queue_length ?? 0,
         queue_index: msg.queue_index ?? 0,
         mounts: msg.mounts ?? [],
@@ -168,6 +170,7 @@ export class SimpDaemonClient {
           }
           this.state = {
             ...this.state,
+            queue: q,
             queue_index: idx,
             queue_length: q.length,
             up_next: upNext,
@@ -313,12 +316,14 @@ export class SimpDaemonClient {
     username?: string;
     access_key?: string;
     secret_key?: string;
+    safe_search?: boolean;
   }) =>
     this.sendCommand('configure_internet_archive', {
       enabled: params.enabled,
       username: params.username ?? '',
       access_key: params.access_key ?? '',
       secret_key: params.secret_key ?? '',
+      ...(typeof params.safe_search === 'boolean' ? { safe_search: params.safe_search } : {}),
     });
 
   public disconnectInternetArchive = () => this.sendCommand('disconnect_internet_archive');

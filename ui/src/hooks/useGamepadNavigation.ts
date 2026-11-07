@@ -265,6 +265,64 @@ export function useGamepadNavigation({
       const cy = cur.top + cur.height / 2;
       const curCol = getCol(active);
 
+      // Two-Column Player Actions (`SELECT`) Modal Navigation:
+      // - Up/Down stays strictly within `data-player-actions-col="left"` (settings) or `"right"` (queue tracks).
+      // - Right from `"left"` jumps directly to `data-queue-current="true"` in `"right"`.
+      // - Left from `"right"` returns directly to `"left"`.
+      const curPlayerCol =
+        active.closest<HTMLElement>('[data-player-actions-col]')?.dataset.playerActionsCol || null;
+      if (curPlayerCol && !oskTarget) {
+        if (dir === 'up' || dir === 'down') {
+          let bestInPlayerCol: HTMLElement | null = null;
+          let bestScore = Infinity;
+          for (const candidate of nodes) {
+            if (candidate === active) continue;
+            const candCol =
+              candidate.closest<HTMLElement>('[data-player-actions-col]')?.dataset
+                .playerActionsCol || null;
+            if (candCol !== curPlayerCol) continue;
+            const r = candidate.getBoundingClientRect();
+            const dy = r.top + r.height / 2 - cy;
+            if (dir === 'down' && dy <= 4) continue;
+            if (dir === 'up' && dy >= -4) continue;
+            if (Math.abs(dy) < bestScore) {
+              bestScore = Math.abs(dy);
+              bestInPlayerCol = candidate;
+            }
+          }
+          if (bestInPlayerCol) {
+            applyFocusMarker(bestInPlayerCol);
+          }
+          return;
+        }
+        if (curPlayerCol === 'left' && dir === 'right') {
+          const currentQueueTarget =
+            document.querySelector<HTMLElement>(
+              '[data-player-actions-modal="true"] [data-player-actions-col="right"] [data-queue-current="true"]:not([disabled])'
+            ) ||
+            document.querySelector<HTMLElement>(
+              '[data-player-actions-modal="true"] [data-player-actions-col="right"] button:not([disabled])'
+            );
+          if (currentQueueTarget) {
+            applyFocusMarker(currentQueueTarget);
+          }
+          return;
+        }
+        if (curPlayerCol === 'right' && dir === 'left') {
+          const leftSettingTarget =
+            document.querySelector<HTMLElement>(
+              '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-default-focus="true"]:not([disabled])'
+            ) ||
+            document.querySelector<HTMLElement>(
+              '[data-player-actions-modal="true"] [data-player-actions-col="left"] button:not([disabled])'
+            );
+          if (leftSettingTarget) {
+            applyFocusMarker(leftSettingTarget);
+          }
+          return;
+        }
+      }
+
       if (!oskTarget && !isModalOpen && (dir === 'up' || dir === 'down') && curCol) {
         // 1. Try moving Up/Down among primary row items inside the SAME column (`left` or `right`)
         let bestInCol: HTMLElement | null = null;
@@ -682,11 +740,42 @@ export function useGamepadNavigation({
             }, 30);
             break;
           }
+          // In the Two-Column `SELECT` Player Actions modal, pressing `B` while in the Right Column
+          // returns focus to the Left Column settings first; pressing `B` in the Left Column closes the modal.
+          const activeModalEl =
+            (document.querySelector<HTMLElement>(
+              '[data-simp-active-focus="true"]'
+            ) as HTMLElement | null) || (document.activeElement as HTMLElement | null);
+          if (
+            activeModalEl?.closest<HTMLElement>('[data-player-actions-col]')?.dataset
+              .playerActionsCol === 'right'
+          ) {
+            const leftSettingBtn =
+              document.querySelector<HTMLElement>(
+                '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-default-focus="true"]:not([disabled])'
+              ) ||
+              document.querySelector<HTMLElement>(
+                '[data-player-actions-modal="true"] [data-player-actions-col="left"] button:not([disabled])'
+              );
+            if (leftSettingBtn) {
+              applyFocusMarker(leftSettingBtn);
+              break;
+            }
+          }
           const playerActionsClose = document.querySelector<HTMLElement>(
             '[data-player-actions-close="true"]'
           );
           if (playerActionsClose) {
             playerActionsClose.click();
+            break;
+          }
+          // Hierarchical walk-back inside the Top-Left Settings Drawer (`SettingsModal`):
+          // If a nested section is expanded (`[data-settings-walk-back="true"]`), collapse it first!
+          const settingsWalkBack = document.querySelector<HTMLElement>(
+            '[data-settings-walk-back="true"]:not([disabled])'
+          );
+          if (settingsWalkBack) {
+            settingsWalkBack.click();
             break;
           }
           const hybridPickerClose = document.querySelector<HTMLElement>(
@@ -801,8 +890,8 @@ export function useGamepadNavigation({
           break;
         case 'power':
           setOskTarget(null);
-          setSourceModalOpen(false);
-          setPowerModalOpen((v) => !v);
+          setPowerModalOpen(false);
+          setSourceModalOpen((v) => !v);
           break;
         case 'vol_up':
           applyVolume(currentVolume + 0.05);

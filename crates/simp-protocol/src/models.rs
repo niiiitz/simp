@@ -169,6 +169,8 @@ pub struct ArchiveItemSummary {
     pub views_30d: u64,
     #[serde(default)]
     pub runtime_label: Option<String>,
+    #[serde(default)]
+    pub item_count: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -335,6 +337,8 @@ pub struct ServiceSettings {
     pub internet_archive_access_key: String,
     #[serde(default)]
     pub internet_archive_secret_key: String,
+    #[serde(default)]
+    pub internet_archive_safe_search: bool,
 }
 
 impl Default for SimpSettings {
@@ -385,6 +389,7 @@ impl Default for SimpSettings {
                 internet_archive_username: String::new(),
                 internet_archive_access_key: String::new(),
                 internet_archive_secret_key: String::new(),
+                internet_archive_safe_search: false,
             },
             provisioning: ProvisioningSettings::default(),
         }
