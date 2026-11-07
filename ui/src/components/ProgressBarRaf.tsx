@@ -44,6 +44,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
   const lastDragSeekSentRef = useRef(0);
   const lastTickCallbackPerfRef = useRef(0);
   const prevTrackUriRef = useRef<string | undefined>(trackUri);
+  const awaitingFirstStreamTickRef = useRef(false);
 
   useEffect(() => {
     let rafId = 0;
@@ -53,15 +54,26 @@ export const ProgressBarRaf: React.FC<Props> = ({
     // Reset monotonic playhead state when switching tracks or mounting back onto PlayerView
     const snap = defaultSimpClient.getState();
     const initialPos = Math.max(0, snap?.position_ms ?? 0);
+    const isProgressiveCloudStream = Boolean(
+      trackUri &&
+        (trackUri.startsWith('applemusic:') ||
+          trackUri.startsWith('soundcloud:') ||
+          trackUri.startsWith('ia:audio:') ||
+          trackUri.startsWith('ia://audio/'))
+    );
     if (prevTrackUriRef.current !== trackUri) {
       prevTrackUriRef.current = trackUri;
       anchorPosRef.current = initialPos;
       lastRenderedMsRef.current = initialPos;
       anchorPerfRef.current = performance.now();
+      awaitingFirstStreamTickRef.current = isProgressiveCloudStream && initialPos === 0;
     } else {
       anchorPosRef.current = initialPos;
       lastRenderedMsRef.current = initialPos;
       anchorPerfRef.current = performance.now();
+      if (initialPos > 0 || !isProgressiveCloudStream) {
+        awaitingFirstStreamTickRef.current = false;
+      }
     }
     isPlayingRef.current = !!snap?.is_playing;
 
@@ -70,7 +82,12 @@ export const ProgressBarRaf: React.FC<Props> = ({
       if (isDraggingRef.current) {
         currentMs = dragPreviewMsRef.current;
         lastRenderedMsRef.current = currentMs;
-      } else if (isPlayingRef.current && anchorPosRef.current >= 0 && durationMs > 0) {
+      } else if (
+        isPlayingRef.current &&
+        !awaitingFirstStreamTickRef.current &&
+        anchorPosRef.current >= 0 &&
+        durationMs > 0
+      ) {
         const elapsedSinceTick = Math.min(performance.now() - anchorPerfRef.current, 1500);
         const rawMs = anchorPosRef.current + elapsedSinceTick;
         // Monotonic forward guard during active playback
@@ -108,9 +125,20 @@ export const ProgressBarRaf: React.FC<Props> = ({
       }
     };
 
-    const unsub = defaultSimpClient.subscribeProgress((posMs, perfNow, playing) => {
+    const unsub = defaultSimpClient.subscribeProgress((posMs, perfNow, playing, isTick) => {
       const wasPlaying = isPlayingRef.current;
       isPlayingRef.current = playing;
+
+      if (awaitingFirstStreamTickRef.current) {
+        if (isTick || posMs > 0) {
+          awaitingFirstStreamTickRef.current = false;
+          anchorPosRef.current = posMs;
+          anchorPerfRef.current = perfNow;
+          lastRenderedMsRef.current = posMs;
+          updateDom();
+        }
+        return;
+      }
 
       if (!playing || !wasPlaying) {
         anchorPosRef.current = posMs;

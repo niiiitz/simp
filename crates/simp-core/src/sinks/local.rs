@@ -153,6 +153,19 @@ impl LocalAudioEngine {
             || uri.starts_with("soundcloud:")
             || uri.starts_with("ia:audio:")
             || uri.starts_with("ia://audio/");
+
+        // Reset `self.tracker` BEFORE spawning any progressive stream worker thread (`simp-sc-stream`,
+        // `simp-apple-stream`, `simp-ia-audio`). Otherwise, if the worker hits a `< 0.1ms` RAM prefetch
+        // cache while `rodio::Sink::append` is sleeping inside `sleep_until_end()`, a post-append
+        // `tracker.reset()` would clobber the worker's `tracker.play()` and freeze progress at `00:01`!
+        {
+            let mut tracker = self.tracker.lock().unwrap();
+            tracker.reset();
+            if start_pos_ms > 0 {
+                tracker.seek(start_pos_ms);
+            }
+        }
+
         if uri.starts_with("cdda://") {
             let source = crate::sinks::cdda::CddaTrackSource::open_uri(uri)
                 .with_context(|| format!("Failed to open Audio CD track: {uri}"))?;
@@ -216,19 +229,14 @@ impl LocalAudioEngine {
         }
         sink.set_volume(self.volume);
 
-        {
+        if !is_progressive_stream {
             let mut tracker = self.tracker.lock().unwrap();
-            tracker.reset();
             if start_pos_ms > 0 {
-                if !is_progressive_stream {
-                    let target = Duration::from_millis(start_pos_ms as u64);
-                    let _ = sink.try_seek(target);
-                }
+                let target = Duration::from_millis(start_pos_ms as u64);
+                let _ = sink.try_seek(target);
                 tracker.seek(start_pos_ms);
             }
-            if !is_progressive_stream {
-                tracker.play();
-            }
+            tracker.play();
         }
 
         sink.play();
@@ -309,8 +317,27 @@ impl LocalAudioEngine {
             self.abort_monitor();
             self.ensure_stream()?;
             let sink = self.sink.as_ref().unwrap();
-            let was_playing = self.tracker.lock().unwrap().is_playing();
+            let was_playing = !self.user_paused.load(Ordering::SeqCst);
+            let seek_epoch = self
+                .active_epoch
+                .fetch_add(1, Ordering::SeqCst)
+                .wrapping_add(1)
+                .max(epoch);
+            self.active_epoch.store(seek_epoch, Ordering::SeqCst);
             sink.stop();
+
+            let is_progressive_stream = uri.starts_with("applemusic:")
+                || uri.starts_with("soundcloud:")
+                || uri.starts_with("ia:audio:")
+                || uri.starts_with("ia://audio/");
+            {
+                let mut tracker = self.tracker.lock().unwrap();
+                tracker.reset();
+                tracker.seek(position_ms);
+                if !is_progressive_stream && was_playing {
+                    tracker.play();
+                }
+            }
 
             if uri.starts_with("cdda://") {
                 let mut source = crate::sinks::cdda::CddaTrackSource::open_uri(&uri)?;
@@ -324,7 +351,7 @@ impl LocalAudioEngine {
                         uri.to_string(),
                         None,
                         position_ms,
-                        epoch,
+                        seek_epoch,
                         self.active_epoch.clone(),
                         self.tracker.clone(),
                         self.user_paused.clone(),
@@ -338,7 +365,20 @@ impl LocalAudioEngine {
                         uri.to_string(),
                         None,
                         position_ms,
-                        epoch,
+                        seek_epoch,
+                        self.active_epoch.clone(),
+                        self.tracker.clone(),
+                        self.user_paused.clone(),
+                    )?;
+                sink.append(source);
+            } else if uri.starts_with("ia:audio:") || uri.starts_with("ia://audio/") {
+                let settings = load_local_settings_vdf();
+                let source =
+                    crate::sinks::internet_archive::spawn_progressive_internet_archive_rodio_source(
+                        settings,
+                        uri.to_string(),
+                        position_ms,
+                        seek_epoch,
                         self.active_epoch.clone(),
                         self.tracker.clone(),
                         self.user_paused.clone(),
@@ -357,12 +397,11 @@ impl LocalAudioEngine {
             } else {
                 sink.pause();
             }
-            self.tracker.lock().unwrap().seek(position_ms);
 
             self.monitor_handle = Some(spawn_rodio_monitor(
                 sink.clone(),
                 self.tracker.clone(),
-                epoch,
+                seek_epoch,
                 event_tx,
             ));
         }
@@ -474,9 +513,12 @@ fn spawn_rodio_monitor(
     tx: mpsc::UnboundedSender<PlaybackEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_millis(500));
+        let mut started = false;
         loop {
-            ticker.tick().await;
+            // Poll at 50ms until the first audio chunk starts playing so the initial `ProgressTick`
+            // fires within <= 50ms of audio start, then tick at 250ms (4 Hz) during active playback.
+            let sleep_ms = if started { 250 } else { 50 };
+            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
 
             if sink.empty() {
                 let _ = tx.send(PlaybackEvent::EndOfTrack { epoch });
@@ -489,6 +531,7 @@ fn spawn_rodio_monitor(
             };
 
             if is_playing {
+                started = true;
                 let _ = tx.send(PlaybackEvent::ProgressTick { position_ms });
             }
         }

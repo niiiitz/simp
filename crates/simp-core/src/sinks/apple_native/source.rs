@@ -140,6 +140,9 @@ pub struct DecryptedFmp4RodioSource {
     state: Arc<Mutex<StreamingPcmState>>,
     epoch: u64,
     active_epoch: Option<Arc<AtomicU64>>,
+    tracker: Option<Arc<Mutex<LocalTimeTracker>>>,
+    user_paused: Option<Arc< std::sync::atomic::AtomicBool>>,
+    started_tracker: bool,
     local_chunk: Vec<f32>,
     local_chunk_start: usize,
     cursor: usize,
@@ -164,12 +167,27 @@ impl DecryptedFmp4RodioSource {
             state,
             epoch,
             active_epoch: Some(active_epoch),
+            tracker: None,
+            user_paused: None,
+            started_tracker: false,
             local_chunk: Vec::with_capacity(16_384),
             local_chunk_start: 0,
             cursor: initial_cursor,
             channels,
             sample_rate,
         }
+    }
+
+    /// Attaches the engine's `LocalTimeTracker` and `user_paused` flag so the audio iterator itself
+    /// guarantees the playhead clock is running as soon as the first real PCM chunk is pulled.
+    pub fn with_tracker(
+        mut self,
+        tracker: Arc<Mutex<LocalTimeTracker>>,
+        user_paused: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.tracker = Some(tracker);
+        self.user_paused = Some(user_paused);
+        self
     }
 
     /// Concatenates the rewritten clear init segment (`enca` -> `mp4a`) with decrypted media segments
@@ -190,6 +208,9 @@ impl DecryptedFmp4RodioSource {
             })),
             epoch: 0,
             active_epoch: None,
+            tracker: None,
+            user_paused: None,
+            started_tracker: true,
             local_chunk: Vec::with_capacity(16_384),
             local_chunk_start: 0,
             cursor: 0,
@@ -225,6 +246,9 @@ impl DecryptedFmp4RodioSource {
             })),
             epoch: 0,
             active_epoch: None,
+            tracker: None,
+            user_paused: None,
+            started_tracker: true,
             local_chunk: Vec::with_capacity(16_384),
             local_chunk_start: 0,
             cursor: 0,
@@ -355,6 +379,23 @@ impl Iterator for DecryptedFmp4RodioSource {
                 return None;
             }
             if self.cursor < guard.samples.len() {
+                if !self.started_tracker {
+                    self.started_tracker = true;
+                    let is_paused = self
+                        .user_paused
+                        .as_ref()
+                        .map(|p| p.load(Ordering::Relaxed))
+                        .unwrap_or(false);
+                    if !is_paused {
+                        if let Some(ref tr_arc) = self.tracker {
+                            if let Ok(mut tr) = tr_arc.lock() {
+                                if !tr.is_playing() {
+                                    tr.play();
+                                }
+                            }
+                        }
+                    }
+                }
                 let end = (self.cursor + 16_384).min(guard.samples.len());
                 self.local_chunk.clear();
                 self.local_chunk.extend_from_slice(&guard.samples[self.cursor..end]);
@@ -405,6 +446,11 @@ impl Source for DecryptedFmp4RodioSource {
         let target_frame = (pos.as_secs_f64() * (self.sample_rate.max(1) as f64)).round() as usize;
         let mut target_sample_idx = target_frame * ch;
         if let Ok(guard) = self.state.lock() {
+            if !guard.is_complete && target_sample_idx > guard.samples.len() {
+                return Err(RodioSeekError::NotSupported {
+                    underlying_source: std::any::type_name::<Self>(),
+                });
+            }
             if guard.is_complete && !guard.samples.is_empty() {
                 target_sample_idx = target_sample_idx.min(guard.samples.len());
             }
@@ -781,7 +827,8 @@ pub fn spawn_progressive_apple_music_rodio_source(
         start_pos_ms,
         epoch,
         active_epoch.clone(),
-    );
+    )
+    .with_tracker(tracker.clone(), user_paused_flag.clone());
 
     let mark_aborted = |st: &Arc<Mutex<StreamingPcmState>>| {
         if let Ok(mut g) = st.lock() {

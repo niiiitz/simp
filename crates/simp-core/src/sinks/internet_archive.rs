@@ -185,7 +185,8 @@ pub fn spawn_progressive_internet_archive_rodio_source(
         start_pos_ms,
         epoch,
         active_epoch.clone(),
-    );
+    )
+    .with_tracker(tracker.clone(), user_paused_flag.clone());
 
     std::thread::Builder::new()
         .name("simp-ia-audio".to_string())

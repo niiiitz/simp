@@ -587,7 +587,8 @@ pub fn spawn_progressive_soundcloud_rodio_source(
         start_pos_ms,
         epoch,
         active_epoch.clone(),
-    );
+    )
+    .with_tracker(tracker.clone(), user_paused_flag.clone());
 
     let mark_aborted = |st: &Arc<Mutex<StreamingPcmState>>| {
         if let Ok(mut g) = st.lock() {

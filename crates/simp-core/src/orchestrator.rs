@@ -1156,8 +1156,13 @@ impl AudioOrchestrator {
                 {
                     let mut st = self.state.lock().unwrap();
                     st.position_ms = position_ms;
-                    if position_ms >= 8_000 {
-                        for offset in [1usize, 2usize] {
+                    if position_ms >= 2_000 {
+                        let offsets: &[usize] = if position_ms >= 15_000 {
+                            &[1usize, 2usize]
+                        } else {
+                            &[1usize]
+                        };
+                        for &offset in offsets {
                             let target_idx = st.queue_index + offset;
                             if target_idx < st.queue.len() {
                                 let candidate = &st.queue[target_idx].uri;

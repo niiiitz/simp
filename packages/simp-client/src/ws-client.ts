@@ -12,7 +12,12 @@ import type {
 } from './types';
 
 type StateListener = (state: SimpStateSnapshot) => void;
-type ProgressListener = (positionMs: number, syncPerfTime: number, isPlaying: boolean) => void;
+type ProgressListener = (
+  positionMs: number,
+  syncPerfTime: number,
+  isPlaying: boolean,
+  isTick?: boolean
+) => void;
 type AppleSinkListener = (cmd: AppleSinkCommandPayload) => void;
 
 /**
@@ -135,7 +140,7 @@ export class SimpDaemonClient {
         case 'progress_tick':
           // High-frequency tick: ONLY notify rAF progress listeners (never re-render React tree!)
           this.state.position_ms = msg.data.position_ms;
-          this.notifyProgress(msg.data.position_ms);
+          this.notifyProgress(msg.data.position_ms, true);
           break;
         case 'track_changed':
           this.state = {
@@ -364,7 +369,7 @@ export class SimpDaemonClient {
 
   public subscribeProgress(fn: ProgressListener): () => void {
     this.progressListeners.add(fn);
-    fn(this.state.position_ms, performance.now(), this.state.is_playing);
+    fn(this.state.position_ms, performance.now(), this.state.is_playing, false);
     return () => this.progressListeners.delete(fn);
   }
 
@@ -374,10 +379,10 @@ export class SimpDaemonClient {
     }
   }
 
-  private notifyProgress(posMs: number): void {
+  private notifyProgress(posMs: number, isTick = false): void {
     const now = performance.now();
     for (const fn of this.progressListeners) {
-      fn(posMs, now, this.state.is_playing);
+      fn(posMs, now, this.state.is_playing, isTick);
     }
   }
 }
