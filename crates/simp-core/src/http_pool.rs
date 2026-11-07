@@ -16,6 +16,7 @@ mod libcurl_ffi {
     pub const CURLOPT_POSTFIELDS: c_int = 10015;
     pub const CURLOPT_USERAGENT: c_int = 10018;
     pub const CURLOPT_HTTPHEADER: c_int = 10023;
+    pub const CURLOPT_CUSTOMREQUEST: c_int = 10036;
     pub const CURLOPT_WRITEFUNCTION: c_int = 20011;
     pub const CURLOPT_TIMEOUT: c_int = 13;
     pub const CURLOPT_POST: c_int = 47;
@@ -169,6 +170,7 @@ mod libcurl_ffi {
         url: &str,
         headers: &[(&str, &str)],
         post_body: Option<&[u8]>,
+        custom_method: Option<&str>,
         byte_range: Option<(u64, u64)>,
         timeout_secs: u64,
     ) -> Option<Result<Vec<u8>>> {
@@ -227,8 +229,15 @@ mod libcurl_ffi {
                 (api.easy_setopt)(raw, CURLOPT_RANGE, c_range.as_ptr());
             }
 
+            let c_method_opt = custom_method.and_then(|m| CString::new(m.trim()).ok());
+            if let Some(ref c_method) = c_method_opt {
+                (api.easy_setopt)(raw, CURLOPT_CUSTOMREQUEST, c_method.as_ptr());
+            }
+
             if let Some(body) = post_body {
-                (api.easy_setopt)(raw, CURLOPT_POST, 1 as c_long);
+                if c_method_opt.is_none() {
+                    (api.easy_setopt)(raw, CURLOPT_POST, 1 as c_long);
+                }
                 (api.easy_setopt)(raw, CURLOPT_POSTFIELDSIZE, body.len() as c_long);
                 (api.easy_setopt)(raw, CURLOPT_POSTFIELDS, body.as_ptr() as *const c_char);
             }
@@ -463,6 +472,7 @@ mod winhttp_ffi {
         url: &str,
         headers: &[(&str, &str)],
         post_body: Option<&[u8]>,
+        custom_method: Option<&str>,
         byte_range: Option<(u64, u64)>,
         timeout_secs: u64,
     ) -> Option<Result<Vec<u8>>> {
@@ -477,7 +487,8 @@ mod winhttp_ffi {
             }
             let _conn_guard = HandleGuard(h_conn);
 
-            let verb_w = to_wide(if post_body.is_some() { "POST" } else { "GET" });
+            let verb = custom_method.unwrap_or_else(|| if post_body.is_some() { "POST" } else { "GET" });
+            let verb_w = to_wide(verb);
             let path_w = to_wide(&path);
             let flags = if https { WINHTTP_FLAG_SECURE } else { 0 };
             let h_req = WinHttpOpenRequest(
@@ -637,7 +648,7 @@ pub fn http_get_bytes(
     #[cfg(unix)]
     {
         if let Some(res) =
-            libcurl_ffi::execute_pooled_request(url, headers, None, byte_range, timeout_secs)
+            libcurl_ffi::execute_pooled_request(url, headers, None, None, byte_range, timeout_secs)
         {
             return res;
         }
@@ -645,12 +656,12 @@ pub fn http_get_bytes(
     #[cfg(target_os = "windows")]
     {
         if let Some(res) =
-            winhttp_ffi::execute_winhttp_request(url, headers, None, byte_range, timeout_secs)
+            winhttp_ffi::execute_winhttp_request(url, headers, None, None, byte_range, timeout_secs)
         {
             return res;
         }
     }
-    fallback_curl_subprocess(url, headers, None, byte_range, timeout_secs)
+    fallback_curl_subprocess(url, headers, None, None, byte_range, timeout_secs)
 }
 
 /// Performs an HTTP/2 connection-pooled `POST` request in-process via `libcurl.so.4` (Unix)
@@ -663,32 +674,82 @@ pub fn http_post_bytes(
 ) -> Result<Vec<u8>> {
     #[cfg(unix)]
     {
-        if let Some(res) =
-            libcurl_ffi::execute_pooled_request(url, headers, Some(body), None, timeout_secs)
-        {
+        if let Some(res) = libcurl_ffi::execute_pooled_request(
+            url,
+            headers,
+            Some(body),
+            None,
+            None,
+            timeout_secs,
+        ) {
             return res;
         }
     }
     #[cfg(target_os = "windows")]
     {
-        if let Some(res) =
-            winhttp_ffi::execute_winhttp_request(url, headers, Some(body), None, timeout_secs)
-        {
+        if let Some(res) = winhttp_ffi::execute_winhttp_request(
+            url,
+            headers,
+            Some(body),
+            None,
+            None,
+            timeout_secs,
+        ) {
             return res;
         }
     }
-    fallback_curl_subprocess(url, headers, Some(body), None, timeout_secs)
+    fallback_curl_subprocess(url, headers, Some(body), None, None, timeout_secs)
+}
+
+/// Performs an HTTP/2 connection-pooled custom-method request (`PUT`, `DELETE`, etc.).
+pub fn http_custom_bytes(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    timeout_secs: u64,
+) -> Result<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        if let Some(res) = libcurl_ffi::execute_pooled_request(
+            url,
+            headers,
+            body,
+            Some(method),
+            None,
+            timeout_secs,
+        ) {
+            return res;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(res) = winhttp_ffi::execute_winhttp_request(
+            url,
+            headers,
+            body,
+            Some(method),
+            None,
+            timeout_secs,
+        ) {
+            return res;
+        }
+    }
+    fallback_curl_subprocess(url, headers, body, Some(method), None, timeout_secs)
 }
 
 fn fallback_curl_subprocess(
     url: &str,
     headers: &[(&str, &str)],
     post_body: Option<&[u8]>,
+    custom_method: Option<&str>,
     byte_range: Option<(u64, u64)>,
     timeout_secs: u64,
 ) -> Result<Vec<u8>> {
     let mut cfg = format!("url = \"{}\"\n", url.replace('"', "\\\""));
-    if post_body.is_some() {
+    if let Some(method) = custom_method {
+        cfg.push_str(&format!("request = \"{}\"\n", method.trim().replace('"', "")));
+    } else if post_body.is_some() {
         cfg.push_str("request = \"POST\"\n");
     }
     for (k, v) in headers {

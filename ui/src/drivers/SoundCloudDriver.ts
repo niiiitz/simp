@@ -34,7 +34,29 @@ export interface SoundCloudPlaylistsResponse {
 
 export interface SoundCloudStreamResponse {
   stream_tracks: TrackMetadata[];
+  stream_playlists?: SoundCloudPlaylistSummary[];
   stations: SoundCloudStationSummary[];
+}
+
+export interface SoundCloudMixChapter {
+  label: string;
+  timestamp_ms: number;
+}
+
+export interface SoundCloudUserSummary {
+  id: string;
+  urn: string;
+  username: string;
+  avatar_url: string | null;
+  track_count: number;
+  followers_count: number;
+  description: string;
+}
+
+export interface SoundCloudUserProfileResponse {
+  user: SoundCloudUserSummary | null;
+  tracks: TrackMetadata[];
+  playlists: SoundCloudPlaylistSummary[];
 }
 
 export interface SoundCloudDiscoverResponse {
@@ -59,6 +81,11 @@ export interface SoundCloudWaveform {
   track_id: string;
   bars: number[];
   waveform_url?: string | null;
+  bpm?: number | null;
+  favoritings_count?: number | null;
+  playback_count?: number | null;
+  user_id?: string | null;
+  chapters?: SoundCloudMixChapter[];
 }
 
 export const SOUNDCLOUD_GENRE_PILLS: Array<{ id: string; label: string; icon: string }> = [
@@ -265,9 +292,91 @@ export async function fetchSoundCloudStreamAndRadio(): Promise<{
   const res = await fetchSoundCloudStreamAndStations();
   return {
     streamTracks: res.stream_tracks || [],
-    streamPlaylists: [],
+    streamPlaylists: res.stream_playlists || [],
     stations: res.stations || [],
   };
+}
+
+export async function fetchSoundCloudFollowings(): Promise<SoundCloudUserSummary[]> {
+  try {
+    return await fetchSoundCloudDaemonJson<SoundCloudUserSummary[]>('/api/soundcloud/followings');
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchSoundCloudUserTracks(
+  userId: string
+): Promise<SoundCloudUserProfileResponse> {
+  const clean = cleanSoundCloudTrackId(userId).replace(/^users:/, '');
+  return fetchSoundCloudDaemonJson<SoundCloudUserProfileResponse>(
+    `/api/soundcloud/user-tracks?id=${encodeURIComponent(clean)}`
+  );
+}
+
+export async function toggleFollowSoundCloudUser(
+  userId: string,
+  follow = true,
+  username?: string,
+  onToast?: (msg: string) => void
+): Promise<boolean> {
+  const clean = cleanSoundCloudTrackId(userId).replace(/^users:/, '');
+  if (!clean) return false;
+  const base = resolveDaemonHttpBase();
+  const r = await fetch(
+    `${base}/api/soundcloud/follow?id=${encodeURIComponent(clean)}&follow=${follow ? '1' : '0'}`,
+    { method: 'POST' }
+  );
+  const j = await r.json().catch(() => ({ ok: false }));
+  if (!r.ok || !j.ok) {
+    throw new Error(j.error || 'Sign in with your personal SoundCloud account to follow creators');
+  }
+  onToast?.(
+    follow
+      ? `👥 Following ${username ? `@${username}` : 'creator'} on SoundCloud!`
+      : `Unfollowed ${username ? `@${username}` : 'creator'} on SoundCloud`
+  );
+  return true;
+}
+
+export async function setSoundCloudPlaylistLiked(
+  playlistId: string,
+  liked: boolean
+): Promise<boolean> {
+  const clean = cleanSoundCloudTrackId(playlistId);
+  if (!clean || clean === 'likes') return false;
+  try {
+    const base = resolveDaemonHttpBase();
+    const r = await fetch(
+      `${base}/api/soundcloud/like-playlist?id=${encodeURIComponent(clean)}&liked=${
+        liked ? '1' : '0'
+      }`,
+      { method: 'POST' }
+    );
+    const j = await r.json().catch(() => ({ ok: false }));
+    return Boolean(r.ok && j.ok);
+  } catch {
+    return false;
+  }
+}
+
+export async function unlikeSoundCloudTrack(
+  trackUriOrId: string,
+  onToast?: (msg: string) => void
+): Promise<boolean> {
+  const clean = cleanSoundCloudTrackId(trackUriOrId);
+  if (!clean) return false;
+  const base = resolveDaemonHttpBase();
+  const r = await fetch(
+    `${base}/api/soundcloud/like?id=${encodeURIComponent(clean)}&unlike=1`,
+    { method: 'POST' }
+  );
+  const j = await r.json().catch(() => ({ ok: false }));
+  if (!r.ok || !j.ok) {
+    throw new Error(j.error || 'Could not remove track from SoundCloud Likes');
+  }
+  onToast?.('Removed from your SoundCloud Likes');
+  return true;
 }
 
 export async function fetchSoundCloudDiscover(
@@ -384,6 +493,9 @@ export async function pinSoundCloudPlaylistToSimp(
     playlist: record,
     tracks,
   });
+
+  // Also sync as a Liked Set on SoundCloud (`POST /likes/playlists/{id}`) if signed in
+  setSoundCloudPlaylistLiked(playlist.id, true).catch(() => {});
 
   onToast?.(`📌 Pinned "${playlist.name}" (${tracks.length} tracks) to SIMP Library`);
   return tracks.length;

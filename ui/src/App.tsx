@@ -32,6 +32,7 @@ import {
   fetchSoundCloudStreamAndRadio,
   pinSoundCloudPlaylistToSimp,
   searchSoundCloudCatalog,
+  setSoundCloudPlaylistLiked,
   SoundCloudCatalogSearchResults,
   SoundCloudPlaylistSummary,
   startSoundCloudTrackRadio,
@@ -80,6 +81,9 @@ const ConsoleMainApp: React.FC = () => {
     });
   }, []);
   const [browserSearch, setBrowserSearch] = useState('');
+  const [searchPreferredSource, setSearchPreferredSource] = useState<
+    'local' | 'apple_music' | 'soundcloud' | 'internet_archive' | null
+  >(null);
   const [browserTarget, setBrowserTarget] = useState<BrowserTarget | null>(null);
   const [browserTracks, setBrowserTracks] = useState<TrackMetadata[]>([]);
 
@@ -582,8 +586,45 @@ const ConsoleMainApp: React.FC = () => {
         .catch(() => {});
     } else if (browserTarget.kind === 'cdda') {
       setBrowserTracks(opticalDisc?.tracks || []);
+    } else if (
+      browserTarget.kind === 'cloud_playlist' &&
+      browserTarget.id !== 'active_queue' &&
+      activeCloudPlaylist?.id !== browserTarget.id
+    ) {
+      fetchApplePlaylistTracks(browserTarget.id)
+        .then((tracks) => {
+          if (tracks.length > 0) setBrowserTracks(tracks);
+        })
+        .catch(() => {});
+    } else if (
+      browserTarget.kind === 'soundcloud_playlist' &&
+      browserTarget.id !== 'active_queue' &&
+      activeScPlaylist?.id !== browserTarget.id
+    ) {
+      fetchSoundCloudPlaylistTracks(browserTarget.id)
+        .then((tracks) => {
+          if (tracks.length > 0) setBrowserTracks(tracks);
+        })
+        .catch(() => {});
+    } else if (
+      browserTarget.kind === 'cloud_album' &&
+      activeCloudAlbum?.id !== browserTarget.id
+    ) {
+      fetchFullAppleAlbum({ albumId: browserTarget.id })
+        .then(({ album, tracks }) => {
+          setActiveCloudAlbum(album);
+          if (tracks.length > 0) setBrowserTracks(tracks);
+        })
+        .catch(() => {});
     }
-  }, [browserTarget, browserSearch, opticalDisc]);
+  }, [
+    browserTarget,
+    browserSearch,
+    opticalDisc,
+    activeCloudPlaylist?.id,
+    activeScPlaylist?.id,
+    activeCloudAlbum?.id,
+  ]);
 
   // 3a. Optical CD-ROM (`cdda://`) & DVD-Video Scanner & Eject Handler
   const handleScanOpticalDisc = useCallback(
@@ -985,13 +1026,31 @@ const ConsoleMainApp: React.FC = () => {
         });
         setBrowserTracks(tracks);
         setView('browser');
+        window.setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('simp-open-collection-in-library'));
+        }, 0);
       } catch (err: any) {
-        showToast(err?.message || 'Could not resolve full catalog album');
+        if (snap?.queue && snap.queue.length > 0) {
+          setBrowserTracks(snap.queue);
+          setBrowserTarget({
+            kind: 'cloud_playlist',
+            id: 'active_queue',
+            title: `🍎 ${params.fallbackTitle || 'Active Playback Queue'}`,
+            subtitle: `${snap.queue.length} tracks in queue`,
+            art_url: snap.current_track?.art_url || null,
+          });
+          setView('browser');
+          window.setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('simp-open-collection-in-library'));
+          }, 0);
+        } else {
+          showToast(err?.message || 'Could not resolve full catalog album');
+        }
       } finally {
         setCloudLoading(false);
       }
     },
-    [showToast]
+    [showToast, snap?.queue, snap?.current_track?.art_url]
   );
 
   const handleStartAppleStation = useCallback(
@@ -1278,9 +1337,18 @@ const ConsoleMainApp: React.FC = () => {
     }
   };
 
-  const handleMoreByArtist = (artistName: string) => {
+  const handleMoreByArtist = (artistName: string, preferredSource?: string) => {
     const cleaned = artistName.trim();
     if (!cleaned) return;
+    const raw = (preferredSource || snap?.current_track?.source || '').toLowerCase();
+    let mapped: 'local' | 'apple_music' | 'soundcloud' | 'internet_archive' | null = null;
+    if (raw === 'apple_music') mapped = 'apple_music';
+    else if (raw === 'soundcloud') mapped = 'soundcloud';
+    else if (raw === 'internet_archive' || raw === 'ia_video') mapped = 'internet_archive';
+    else if (raw) mapped = 'local';
+    setSearchPreferredSource(mapped);
+    setSelectedSources([]);
+    setBrowserSourceFilterState('all');
     setBrowserSearch(cleaned);
     setView('browser');
   };
@@ -1329,6 +1397,9 @@ const ConsoleMainApp: React.FC = () => {
   const handleDeletePlaylist = async (playlistId: string, playlistName: string) => {
     try {
       await defaultSimpClient.query('delete_playlist', { playlist_id: playlistId });
+      if (playlistId.startsWith('soundcloud:playlist:')) {
+        setSoundCloudPlaylistLiked(playlistId, false).catch(() => {});
+      }
       setBrowserTarget((prev) =>
         prev?.kind === 'playlist' && prev.id === playlistId
           ? albums.length > 0
@@ -1587,55 +1658,68 @@ const ConsoleMainApp: React.FC = () => {
         }}
       >
         <button
+          data-tile-aux="true"
           onClick={() => {
             setVolumePopoverOpen(false);
             setBrightnessPopoverOpen(false);
             setPowerModalOpen(false);
-            setSourceModalOpen((v) => !v);
+            setSourceModalOpen(false);
+            window.dispatchEvent(new CustomEvent('simp-player-actions-toggle'));
           }}
-          title="Settings, Folders & Accounts, Power & System Menu (START)"
+          title="Current Track & Source (Click to open Track Actions & Queue)"
           style={{
             minHeight: 44,
-            padding: '0 14px 0 10px',
+            maxWidth: 'clamp(170px, 28vw, 340px)',
+            padding: '0 12px 0 8px',
             borderRadius: 12,
-            background: sourceModalOpen ? '#0f222a' : '#0a0a0e',
-            border: sourceModalOpen ? '1px solid #2aa3c4' : '1px solid #22222c',
-            color: sourceModalOpen ? '#bfeaf5' : '#d4d4dc',
+            background: '#0a0a0e',
+            border: '1px solid #22222c',
+            color: '#d4d4dc',
             display: 'flex',
             alignItems: 'center',
-            gap: 10,
-            fontSize: 13,
-            fontWeight: 800,
+            gap: 8,
+            fontSize: 12.5,
+            fontWeight: 700,
             cursor: 'pointer',
+            minWidth: 0,
           }}
         >
-          <span style={{ fontSize: 16, lineHeight: 1 }}>☰</span>
           <img
             src="/favicon.png"
             alt="SIMP"
             style={{
-              width: 24,
-              height: 24,
-              borderRadius: 6,
+              width: 26,
+              height: 26,
+              borderRadius: 7,
               objectFit: 'cover',
               border: '1px solid #2e2e3c',
+              flexShrink: 0,
             }}
           />
-          <span>Settings</span>
+          <span style={{ fontSize: 14, lineHeight: 1, flexShrink: 0 }}>
+            {track?.source === 'apple_music'
+              ? '🍎'
+              : track?.source === 'soundcloud'
+              ? '☁️'
+              : track?.source === 'internet_archive' || track?.source === 'ia_video'
+              ? '🏛️'
+              : track?.source === 'cdda' || track?.source === 'dvd'
+              ? '💿'
+              : '💾'}
+          </span>
           <span
-            className="simp-gp-badge"
             style={{
-              padding: '2px 6px',
-              borderRadius: 6,
-              background: '#14141e',
-              border: '1px solid #2a2a38',
-              color: '#9ca3af',
-              fontSize: 10,
-              fontFamily: 'monospace',
-              fontWeight: 700,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              minWidth: 0,
+              flex: 1,
+              textAlign: 'left',
             }}
           >
-            START
+            {track
+              ? `${track.title}${track.artists?.length ? ` — ${track.artists[0]}` : ''}`
+              : 'Local / Ready'}
           </span>
         </button>
 
@@ -1946,36 +2030,73 @@ const ConsoleMainApp: React.FC = () => {
               </div>
             )}
           </div>
+
+          {/* Right-End Hamburger (☰) Settings Button + Dynamic Gamepad START Badge */}
+          <button
+            onClick={() => {
+              setVolumePopoverOpen(false);
+              setBrightnessPopoverOpen(false);
+              setPowerModalOpen(false);
+              setSourceModalOpen((v) => !v);
+            }}
+            title="Settings Menu (START)"
+            style={{
+              height: 44,
+              padding: '0 12px',
+              borderRadius: 12,
+              background: sourceModalOpen || powerModalOpen ? '#0f222a' : '#0a0a0e',
+              border:
+                sourceModalOpen || powerModalOpen
+                  ? '1px solid #2aa3c4'
+                  : '1px solid #22222c',
+              color: sourceModalOpen || powerModalOpen ? '#bfeaf5' : '#c8c8d2',
+              fontSize: 16,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            <span
+              className="simp-gp-badge"
+              style={{
+                padding: '2px 6px',
+                borderRadius: 6,
+                background: '#14141e',
+                border: '1px solid #2a2a38',
+                color: '#9ca3af',
+                fontSize: 10,
+                fontFamily: 'monospace',
+                fontWeight: 700,
+              }}
+            >
+              START
+            </span>
+            <span style={{ lineHeight: 1 }}>☰</span>
+          </button>
         </div>
       </header>
 
       {/* Main Viewport: Lock Screen (PlayerView stays mounted across L1/R1 so video audio continues in background) + Persistent Split Browser */}
-      <div
-        style={{
-          display: view === 'lock' ? 'flex' : 'none',
-          flex: 1,
-          width: '100%',
-          overflow: 'hidden',
-        }}
-      >
-        <PlayerView
-          snap={snap}
-          track={track}
-          isPlaying={isPlaying}
-          opticalDisc={opticalDisc}
-          browserTarget={browserTarget}
-          playingContextId={playingContextId}
-          setBrowserTarget={setBrowserTarget}
-          setView={setView}
-          handleOpenFullAppleAlbum={handleOpenFullAppleAlbum}
-          handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
-          handleAddTracksToPlaylist={handleAddTracksToPlaylist}
-          handleFavoriteTrack={handleFavoriteTrack}
-          handleMoreByArtist={handleMoreByArtist}
-          applyFocusMarker={applyFocusMarker}
-          showToast={showToast}
-        />
-      </div>
+      <PlayerView
+        hidden={view !== 'lock'}
+        snap={snap}
+        track={track}
+        isPlaying={isPlaying}
+        opticalDisc={opticalDisc}
+        browserTarget={browserTarget}
+        playingContextId={playingContextId}
+        setBrowserTarget={setBrowserTarget}
+        setBrowserTracks={setBrowserTracks}
+        setView={setView}
+        handleOpenFullAppleAlbum={handleOpenFullAppleAlbum}
+        handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
+        handleAddTracksToPlaylist={handleAddTracksToPlaylist}
+        handleFavoriteTrack={handleFavoriteTrack}
+        handleMoreByArtist={handleMoreByArtist}
+        applyFocusMarker={applyFocusMarker}
+        showToast={showToast}
+      />
       <LibraryBrowserView
         hidden={view !== 'browser'}
         snap={snap}
@@ -1989,6 +2110,7 @@ const ConsoleMainApp: React.FC = () => {
           setBrowserSourceFilterRaw={setBrowserSourceFilterState}
           browserSearch={browserSearch}
           setBrowserSearch={setBrowserSearch}
+          searchPreferredSource={searchPreferredSource}
           browserTarget={browserTarget}
           setBrowserTarget={setBrowserTarget}
           browserTracks={browserTracks}
@@ -2109,6 +2231,7 @@ const ConsoleMainApp: React.FC = () => {
           setAppleSubTab={setAppleSubTab}
           setSoundCloudSubTab={setSoundCloudSubTab}
           refreshLibraryData={refreshLibraryData}
+          applyFocusMarker={applyFocusMarker}
           showToast={showToast}
         />
       )}

@@ -15,6 +15,8 @@ import {
   fetchSoundCloudTrackComments,
   fetchSoundCloudTrackWaveform,
   likeSoundCloudTrack,
+  SoundCloudMixChapter,
+  toggleFollowSoundCloudUser,
 } from '../drivers/SoundCloudDriver';
 
 export interface BrowserTarget {
@@ -25,6 +27,7 @@ export interface BrowserTarget {
     | 'cloud_playlist'
     | 'cloud_album'
     | 'soundcloud_playlist'
+    | 'soundcloud_user'
     | 'ia_discover'
     | 'ia_item'
     | 'cdda';
@@ -35,6 +38,7 @@ export interface BrowserTarget {
 }
 
 export interface PlayerViewProps {
+  hidden?: boolean;
   snap: SimpStateSnapshot | null;
   track: TrackMetadata | null | undefined;
   isPlaying: boolean;
@@ -42,6 +46,7 @@ export interface PlayerViewProps {
   browserTarget: BrowserTarget | null;
   playingContextId: string;
   setBrowserTarget: React.Dispatch<React.SetStateAction<BrowserTarget | null>>;
+  setBrowserTracks?: React.Dispatch<React.SetStateAction<TrackMetadata[]>>;
   setView: React.Dispatch<React.SetStateAction<'lock' | 'browser'>>;
   handleOpenFullAppleAlbum: (params: {
     albumId?: string | null;
@@ -55,7 +60,7 @@ export interface PlayerViewProps {
     trackMetadata?: TrackMetadata[]
   ) => Promise<void>;
   handleFavoriteTrack?: (track: TrackMetadata) => Promise<void>;
-  handleMoreByArtist?: (artistName: string) => void;
+  handleMoreByArtist?: (artistName: string, preferredSource?: string) => void;
   applyFocusMarker?: (el: HTMLElement | null) => void;
   showToast?: (msg: string) => void;
 }
@@ -63,6 +68,7 @@ export interface PlayerViewProps {
 interface ActiveCommentBubble {
   comment: SoundCloudComment;
   slot: 0 | 1;
+  placement: 'above' | 'below';
   expiresAt: number;
 }
 
@@ -102,12 +108,15 @@ function computePlayerViewportScale(isVideo = false): number {
 }
 
 export const PlayerView: React.FC<PlayerViewProps> = ({
+  hidden = false,
   snap,
   track,
   isPlaying,
   opticalDisc,
+  browserTarget,
   playingContextId,
   setBrowserTarget,
+  setBrowserTracks,
   setView,
   handleOpenFullAppleAlbum,
   handleStartSoundCloudTrackRadio,
@@ -129,6 +138,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   });
   const [scComments, setScComments] = useState<SoundCloudComment[]>([]);
   const [scWaveformBars, setScWaveformBars] = useState<number[] | null>(null);
+  const [scMixChapters, setScMixChapters] = useState<SoundCloudMixChapter[]>([]);
+  const [scTrackUserId, setScTrackUserId] = useState<string | null>(null);
+  const [scCreatorFollowed, setScCreatorFollowed] = useState<boolean>(false);
+  const [rightColMode, setRightColMode] = useState<'queue' | 'chapters'>('queue');
   const [activeBubbles, setActiveBubbles] = useState<ActiveCommentBubble[]>([]);
   const [playerActionsOpen, setPlayerActionsOpen] = useState<boolean>(false);
   const [playerScale, setPlayerScale] = useState<number>(() =>
@@ -136,6 +149,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   );
   const shownCommentIdsRef = useRef<Set<string>>(new Set());
   const lastPlayheadMsRef = useRef<number>(0);
+  const nextCommentPlacementRef = useRef<'above' | 'below'>('above');
 
   // Unified Video Modality State (`ia_video`, `local_video`, `dvd`)
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -533,6 +547,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     if (!isSoundCloudTrack || !track?.uri) {
       setScComments([]);
       setScWaveformBars(null);
+      setScMixChapters([]);
+      setScTrackUserId(null);
+      setScCreatorFollowed(false);
+      setRightColMode('queue');
       return;
     }
 
@@ -549,6 +567,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       .then((wf) => {
         if (!cancelled) {
           setScWaveformBars(wf?.bars || null);
+          const chapters = wf?.chapters || [];
+          setScMixChapters(chapters);
+          setScTrackUserId(wf?.user_id || null);
+          setScCreatorFollowed(false);
+          setRightColMode(chapters.length > 0 ? 'chapters' : 'queue');
         }
       })
       .catch(() => {});
@@ -608,7 +631,14 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         if (alive.length >= 2) return alive;
         const usedSlot0 = alive.some((b) => b.slot === 0);
         const slot: 0 | 1 = usedSlot0 ? 1 : 0;
-        return [...alive, { comment: match, slot, expiresAt: now + 5000 }];
+        let placement: 'above' | 'below';
+        if (alive.length === 1) {
+          placement = alive[0].placement === 'above' ? 'below' : 'above';
+        } else {
+          placement = nextCommentPlacementRef.current;
+        }
+        nextCommentPlacementRef.current = placement === 'above' ? 'below' : 'above';
+        return [...alive, { comment: match, slot, placement, expiresAt: now + 5000 }];
       });
     },
     [isSoundCloudTrack, scCommentsEnabled, scComments, track?.duration_ms]
@@ -617,6 +647,12 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const handleOpenCurrentCollection = useCallback(() => {
     setPlayerActionsOpen(false);
     setVideoTheatreExpanded(false);
+    const notifyOpenCollection = () => {
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('simp-open-collection-in-library'));
+      }, 0);
+    };
+
     if (playingContextId) {
       const sep = playingContextId.indexOf(':');
       if (sep > 0) {
@@ -632,8 +668,29 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           ctxKind === 'soundcloud_playlist' ||
           ctxKind === 'ia_item'
         ) {
-          setBrowserTarget({ kind: ctxKind, id: ctxId });
+          if (
+            (ctxKind === 'cloud_playlist' ||
+              ctxKind === 'cloud_album' ||
+              ctxKind === 'soundcloud_playlist') &&
+            snap?.queue &&
+            snap.queue.length > 0 &&
+            setBrowserTracks
+          ) {
+            setBrowserTracks(snap.queue);
+          }
+          setBrowserTarget((prev) =>
+            prev && prev.kind === ctxKind && prev.id === ctxId
+              ? { ...prev }
+              : {
+                  kind: ctxKind,
+                  id: ctxId,
+                  title: track?.album || track?.title,
+                  subtitle: track?.artists?.join(', '),
+                  art_url: track?.art_url,
+                }
+          );
           setView('browser');
+          notifyOpenCollection();
           return;
         }
       }
@@ -654,45 +711,98 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           art_url: track.art_url,
         });
         setView('browser');
+        notifyOpenCollection();
         return;
       }
     }
     if (track?.source === 'apple_music') {
       handleOpenFullAppleAlbum({
+        albumId: track.album_id?.replace(/^applemusic:album:/, '') || undefined,
         songUri: track.uri,
         fallbackTitle: track.album || track.title,
       });
       return;
     }
-    if (track?.source === 'cdda') {
+    if (track?.source === 'cdda' || track?.source === 'dvd') {
       setBrowserTarget({
         kind: 'cdda',
         id: opticalDisc?.disc_id || opticalDisc?.device_path || '/dev/sr0',
-        title: `💿 ${opticalDisc?.album_title || track.album || 'Audio CD'}`,
-        subtitle: opticalDisc?.artist_name || track.artists?.join(', ') || 'Audio CD',
+        title: `💿 ${opticalDisc?.album_title || track.album || 'Optical Disc'}`,
+        subtitle: opticalDisc?.artist_name || track.artists?.join(', ') || 'Optical Disc',
         art_url: opticalDisc?.art_url || track.art_url,
       });
       setView('browser');
+      notifyOpenCollection();
       return;
     }
     if (track?.album_id) {
-      setBrowserTarget({ kind: 'album', id: track.album_id });
+      setBrowserTarget({
+        kind: 'album',
+        id: track.album_id,
+        title: track.album || track.title,
+        subtitle: track.artists?.join(', '),
+        art_url: track.art_url,
+      });
       setView('browser');
+      notifyOpenCollection();
+      return;
+    }
+    if (snap?.queue && snap.queue.length > 0 && setBrowserTracks) {
+      setBrowserTracks(snap.queue);
+      setBrowserTarget({
+        kind: 'soundcloud_playlist',
+        id: 'active_queue',
+        title:
+          track?.album ||
+          (track?.source === 'soundcloud'
+            ? '☁️ Active SoundCloud Queue'
+            : '🎵 Active Playback Queue'),
+        subtitle: track?.artists?.join(', ') || `${snap.queue.length} tracks in queue`,
+        art_url: track?.art_url || null,
+      });
+      setView('browser');
+      notifyOpenCollection();
       return;
     }
     setView('browser');
+    notifyOpenCollection();
   }, [
     playingContextId,
     track,
+    snap?.queue,
     opticalDisc,
     setBrowserTarget,
+    setBrowserTracks,
     setView,
     handleOpenFullAppleAlbum,
   ]);
 
   const primaryArtist = track?.artists?.[0]?.trim() || '';
 
-  // Build unified Queue / Episodes / DVD Titles list for the right column of the SELECT modal
+  // Build unified Queue / Episodes / DVD Titles / SoundCloud DJ Mix Chapters list for the right column of the SELECT modal
+  const chapterModalItems = useMemo(() => {
+    if (!isSoundCloudTrack || scMixChapters.length === 0) return [];
+    const posMs = snap?.position_ms ?? 0;
+    return scMixChapters.map((ch, idx) => {
+      const nextTs = scMixChapters[idx + 1]?.timestamp_ms ?? Infinity;
+      const isCurrent = posMs >= ch.timestamp_ms && posMs < nextTs;
+      return {
+        key: `chapter:${idx}:${ch.timestamp_ms}`,
+        index: idx,
+        title: ch.label,
+        subtitle: `Jump to ${formatCommentTs(ch.timestamp_ms)}`,
+        durationMs: ch.timestamp_ms,
+        badgeLabel: formatCommentTs(ch.timestamp_ms),
+        isCurrent,
+        onSelect: () => {
+          setPlayerActionsOpen(false);
+          defaultSimpClient.seek(ch.timestamp_ms);
+          showToast?.(`⏭ Seeking to ${formatCommentTs(ch.timestamp_ms)} — ${ch.label}`);
+        },
+      };
+    });
+  }, [isSoundCloudTrack, scMixChapters, snap?.position_ms, showToast]);
+
   const queueModalItems = useMemo(() => {
     if (snap?.queue && snap.queue.length > 1) {
       return snap.queue.map((qt, idx) => ({
@@ -701,6 +811,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         title: qt.title || `Track ${idx + 1}`,
         subtitle: qt.artists?.join(', ') || qt.album || '',
         durationMs: qt.duration_ms || 0,
+        badgeLabel: `#${idx + 1}`,
         isCurrent: idx === (snap.queue_index ?? 0),
         onSelect: () => {
           setPlayerActionsOpen(false);
@@ -721,6 +832,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           title: ep.label,
           subtitle: iaDetail.summary.title,
           durationMs: ep.duration_ms || 0,
+          badgeLabel: `#${idx + 1}`,
           isCurrent: track?.uri === epUri,
           onSelect: () => {
             setPlayerActionsOpen(false);
@@ -755,6 +867,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           title: `Title ${t.title_number}: ${t.label || 'DVD Video'}`,
           subtitle: `${Math.round(t.duration_ms / 60000)}m • ${t.aspect_ratio}`,
           durationMs: t.duration_ms || 0,
+          badgeLabel: `#${idx + 1}`,
           isCurrent: track?.uri === dvdUri,
           onSelect: () => {
             setPlayerActionsOpen(false);
@@ -778,25 +891,36 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return [];
   }, [snap?.queue, snap?.queue_index, isVideoTrack, iaDetail, dvdTitles, opticalDisc, track?.uri]);
 
+  const activeRightColItems = useMemo(() => {
+    if (rightColMode === 'chapters' && chapterModalItems.length > 0) {
+      return chapterModalItems;
+    }
+    if (queueModalItems.length > 0) {
+      return queueModalItems;
+    }
+    return chapterModalItems;
+  }, [rightColMode, chapterModalItems, queueModalItems]);
+
   const currentQueueIdx = useMemo(() => {
-    const found = queueModalItems.findIndex((item) => item.isCurrent);
+    const found = activeRightColItems.findIndex((item) => item.isCurrent);
     return found >= 0 ? found : 0;
-  }, [queueModalItems]);
+  }, [activeRightColItems]);
 
   return (
-    <main
-      style={{
-        flex: 1,
-        boxSizing: 'border-box',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '0 48px',
-        width: '100%',
-        overflow: 'hidden',
-        position: 'relative',
-      }}
-    >
+    <>
+      <main
+        style={{
+          flex: 1,
+          boxSizing: 'border-box',
+          display: hidden ? 'none' : 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '0 48px',
+          width: '100%',
+          overflow: 'hidden',
+          position: 'relative',
+        }}
+      >
       <div
         style={{
           display: 'grid',
@@ -1319,38 +1443,42 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           </div>
 
           <div style={{ position: 'relative', width: '100%' }}>
-            {/* Ephemeral SoundCloud Timed Comment Speech Bubbles (+25% larger, out-of-flow overlay above scrub rail) */}
-            {isSoundCloudTrack && scCommentsEnabled && activeBubbles.length > 0 && (
-              <div
-                style={{
-                  position: 'absolute',
-                  bottom: 'calc(100% - 8px)',
-                  left: 14,
-                  right: 14,
-                  display: 'flex',
-                  justifyContent: 'flex-start',
-                  gap: 12,
-                  pointerEvents: 'none',
-                  zIndex: 25,
-                }}
-              >
-                {activeBubbles.map((b) => {
-                  const dur = track?.duration_ms || 0;
-                  const pct =
-                    dur > 0 && Number.isFinite(b.comment.timestamp_ms)
-                      ? Math.max(0, Math.min(46, (b.comment.timestamp_ms / dur) * 100))
-                      : 0;
-                  return (
+            {/* Ephemeral SoundCloud Timed Comment Speech Bubbles — Alternating Over & Under Scrub Bar */}
+            {isSoundCloudTrack &&
+              scCommentsEnabled &&
+              activeBubbles.map((b) => {
+                const dur = track?.duration_ms || 0;
+                const pct =
+                  dur > 0 && Number.isFinite(b.comment.timestamp_ms)
+                    ? Math.max(0, Math.min(46, (b.comment.timestamp_ms / dur) * 100))
+                    : 0;
+                const isBelow = b.placement === 'below';
+                return (
+                  <div
+                    key={b.comment.id}
+                    style={{
+                      position: 'absolute',
+                      ...(isBelow
+                        ? { top: 'calc(100% + 6px)' }
+                        : { bottom: 'calc(100% - 8px)' }),
+                      left: 14,
+                      right: 14,
+                      display: 'flex',
+                      justifyContent: 'flex-start',
+                      pointerEvents: 'none',
+                      zIndex: 25,
+                    }}
+                  >
                     <div
-                      key={b.comment.id}
                       style={{
-                        marginLeft: b.slot === 0 && activeBubbles.length === 1 ? `${pct}%` : 0,
-                        maxWidth: activeBubbles.length > 1 ? '54%' : '82%',
+                        marginLeft: `${pct}%`,
+                        maxWidth: '78%',
                         minWidth: 240,
                         padding: '8px 14px',
                         borderRadius: 15,
-                        borderBottomLeftRadius: b.slot === 0 ? 4 : 15,
-                        borderBottomRightRadius: b.slot === 1 ? 4 : 15,
+                        ...(isBelow
+                          ? { borderTopLeftRadius: 4 }
+                          : { borderBottomLeftRadius: 4 }),
                         background: 'rgba(14, 12, 20, 0.96)',
                         border: '1px solid rgba(251, 146, 60, 0.6)',
                         boxShadow: '0 10px 26px rgba(0, 0, 0, 0.88)',
@@ -1439,10 +1567,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         </div>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            )}
+                  </div>
+                );
+              })}
 
             <ProgressBarRaf
               durationMs={track?.duration_ms ?? 0}
@@ -1561,6 +1688,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           ) : null}
         </div>
       </div>
+      </main>
 
       {/* Unified Two-Column Controller-First `SELECT` Track & Queue Actions Overlay Menu */}
       {playerActionsOpen && (
@@ -1584,7 +1712,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             onClick={(e) => e.stopPropagation()}
             style={{
               width: '100%',
-              maxWidth: queueModalItems.length > 0 ? 840 : 460,
+              maxWidth: activeRightColItems.length > 0 ? 840 : 460,
               maxHeight: '88vh',
               overflow: 'hidden',
               background: '#0a0a10',
@@ -1649,7 +1777,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: queueModalItems.length > 0 ? '1fr 1fr' : '1fr',
+                gridTemplateColumns: activeRightColItems.length > 0 ? '1fr 1fr' : '1fr',
                 gap: 16,
                 minHeight: 0,
                 flex: 1,
@@ -1664,7 +1792,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                   flexDirection: 'column',
                   gap: 9,
                   overflowY: 'auto',
-                  paddingRight: 2,
+                  padding: '6px 8px',
+                  boxSizing: 'border-box',
                 }}
               >
                 {isVideoTrack && (
@@ -1816,7 +1945,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                       if (track.source === 'soundcloud' && handleStartSoundCloudTrackRadio) {
                         handleStartSoundCloudTrackRadio(track);
                       } else if (primaryArtist && handleMoreByArtist) {
-                        handleMoreByArtist(primaryArtist);
+                        handleMoreByArtist(primaryArtist, track.source);
                       }
                     }}
                     style={actionRowBtnStyle}
@@ -1842,7 +1971,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     onClick={() => {
                       setPlayerActionsOpen(false);
                       setVideoTheatreExpanded(false);
-                      handleMoreByArtist(primaryArtist);
+                      handleMoreByArtist(primaryArtist, track?.source);
                     }}
                     style={actionRowBtnStyle}
                   >
@@ -1851,10 +1980,88 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         👤 More by {primaryArtist}
                       </span>
                       <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        Search active source for {primaryArtist}
+                        Search across sources for {primaryArtist} (current source prioritized first)
                       </span>
                     </div>
                     <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#9ca3af' }}>🔍</span>
+                  </button>
+                )}
+
+                {/* 5b. Follow / Unfollow Creator on SoundCloud */}
+                {isSoundCloudTrack && scTrackUserId && primaryArtist && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextFollow = !scCreatorFollowed;
+                      toggleFollowSoundCloudUser(
+                        scTrackUserId,
+                        nextFollow,
+                        primaryArtist,
+                        showToast
+                      )
+                        .then((ok) => {
+                          if (ok) setScCreatorFollowed(nextFollow);
+                        })
+                        .catch((err: any) => {
+                          showToast?.(
+                            err?.message || 'Sign in with SoundCloud to follow creators'
+                          );
+                        });
+                    }}
+                    style={{
+                      ...actionRowBtnStyle,
+                      background: scCreatorFollowed ? '#1f120b' : '#101018',
+                      border: scCreatorFollowed ? '1px solid #ea580c' : '1px solid #222230',
+                    }}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
+                        {scCreatorFollowed
+                          ? `✓ Following @${primaryArtist}`
+                          : `➕ Follow @${primaryArtist} on SoundCloud`}
+                      </span>
+                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                        {scCreatorFollowed
+                          ? 'In your 👥 Following list & ⚡ Following Stream'
+                          : 'Add creator to your 👥 Following list & ⚡ Following Stream'}
+                      </span>
+                    </div>
+                    <span
+                      style={{
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        color: scCreatorFollowed ? '#fdba74' : '#9ca3af',
+                      }}
+                    >
+                      {scCreatorFollowed ? 'FOLLOWING' : '+ FOLLOW'}
+                    </span>
+                  </button>
+                )}
+
+                {/* 5c. Switch Right Column between Mix Chapters & Active Queue when both exist */}
+                {chapterModalItems.length > 0 && queueModalItems.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setRightColMode((prev) => (prev === 'chapters' ? 'queue' : 'chapters'))
+                    }
+                    style={actionRowBtnStyle}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
+                        📑 Right Column:{' '}
+                        {rightColMode === 'chapters'
+                          ? `Mix Chapters (${chapterModalItems.length})`
+                          : `Active Queue (${queueModalItems.length})`}
+                      </span>
+                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                        Toggle right column between timestamped DJ Mix Chapters and Active Queue
+                      </span>
+                    </div>
+                    <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#67e8f9' }}>
+                      {rightColMode === 'chapters' ? 'CHAPTERS' : 'QUEUE'}
+                    </span>
                   </button>
                 )}
 
@@ -1893,8 +2100,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 )}
               </div>
 
-              {/* Right Column: Queue / Episodes / DVD Titles Browser (D-Pad Right jumps straight to current item) */}
-              {queueModalItems.length > 0 && (
+              {/* Right Column: Queue / Mix Chapters / Episodes / DVD Titles Browser (D-Pad Right jumps straight to current item) */}
+              {activeRightColItems.length > 0 && (
                 <div
                   data-player-actions-col="right"
                   style={{
@@ -1920,14 +2127,22 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     }}
                   >
                     <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
-                      📑 {isVideoTrack ? 'EPISODES / QUEUE' : 'ACTIVE QUEUE'} (
-                      {currentQueueIdx + 1} / {queueModalItems.length})
+                      📑{' '}
+                      {rightColMode === 'chapters' && chapterModalItems.length > 0
+                        ? 'MIX CHAPTERS'
+                        : isVideoTrack
+                          ? 'EPISODES / QUEUE'
+                          : 'ACTIVE QUEUE'}{' '}
+                      ({currentQueueIdx + 1} / {activeRightColItems.length})
                     </span>
                     <span
                       className="simp-gp-badge"
                       style={{ fontSize: 10.5, fontFamily: 'monospace', color: '#7dd3fc' }}
                     >
-                      ◄ Settings | ► Queue
+                      ◄ Settings | ►{' '}
+                      {rightColMode === 'chapters' && chapterModalItems.length > 0
+                        ? 'Chapters'
+                        : 'Queue'}
                     </span>
                   </div>
 
@@ -1938,10 +2153,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                       gap: 6,
                       overflowY: 'auto',
                       flex: 1,
-                      paddingRight: 4,
+                      padding: '6px 8px',
+                      boxSizing: 'border-box',
                     }}
                   >
-                    {queueModalItems.map((item) => (
+                    {activeRightColItems.map((item) => (
                       <button
                         key={item.key}
                         type="button"
@@ -1999,7 +2215,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                             flexShrink: 0,
                           }}
                         >
-                          #{item.index + 1}
+                          {item.badgeLabel || `#${item.index + 1}`}
                         </span>
                       </button>
                     ))}
@@ -2010,7 +2226,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           </div>
         </div>
       )}
-    </main>
+    </>
   );
 };
 

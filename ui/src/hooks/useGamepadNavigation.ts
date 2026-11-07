@@ -323,6 +323,86 @@ export function useGamepadNavigation({
         }
       }
 
+      // Two-Column Settings Drawer (`data-settings-col="main"` and slide-out `"sub"`):
+      // Keep Up/Down navigation within the active Settings column; if on the `Folders & Accounts` trigger
+      // and pressing Left, slide out / jump into the Folders & Accounts column!
+      const curSettingsCol =
+        active.closest<HTMLElement>('[data-settings-col]')?.dataset.settingsCol || null;
+      if (curSettingsCol && !oskTarget) {
+        if (
+          curSettingsCol === 'main' &&
+          dir === 'left' &&
+          active.dataset.settingsFoldersTrigger === 'true'
+        ) {
+          const existingSub = document.querySelector<HTMLElement>(
+            '[data-settings-col="sub"] button[data-sub-default="true"]:not([disabled]), [data-settings-col="sub"] button:not([disabled])'
+          );
+          if (existingSub) {
+            applyFocusMarker(existingSub);
+          } else {
+            active.click();
+          }
+          return;
+        }
+
+        let bestInSettingsCol: HTMLElement | null = null;
+        let bestSettingsScore = Infinity;
+        for (const candidate of nodes) {
+          if (candidate === active) continue;
+          const candSettingsCol =
+            candidate.closest<HTMLElement>('[data-settings-col]')?.dataset.settingsCol || null;
+          if (candSettingsCol !== curSettingsCol) continue;
+          const r = candidate.getBoundingClientRect();
+          const tx = r.left + r.width / 2;
+          const ty = r.top + r.height / 2;
+          const dx = tx - cx;
+          const dy = ty - cy;
+
+          if (dir === 'right' && dx <= 6) continue;
+          if (dir === 'left' && dx >= -6) continue;
+          if (dir === 'down' && dy <= 6) continue;
+          if (dir === 'up' && dy >= -6) continue;
+
+          if (dir === 'left' || dir === 'right') {
+            const overlapsY = r.bottom > cur.top + 4 && r.top < cur.bottom - 4;
+            if (!overlapsY && Math.abs(dy) > 28) continue;
+          }
+
+          const primary = dir === 'left' || dir === 'right' ? Math.abs(dx) : Math.abs(dy);
+          const boxCross =
+            dir === 'left' || dir === 'right'
+              ? cy >= r.top && cy <= r.bottom
+                ? 0
+                : Math.min(Math.abs(cy - r.top), Math.abs(cy - r.bottom))
+              : cx >= r.left && cx <= r.right
+              ? 0
+              : Math.min(Math.abs(cx - r.left), Math.abs(cx - r.right));
+          const centerTieBreak =
+            (dir === 'left' || dir === 'right' ? Math.abs(ty - cy) : Math.abs(tx - cx)) * 0.08;
+          const score = primary + (boxCross + centerTieBreak) * 2.2;
+          if (score < bestSettingsScore) {
+            bestSettingsScore = score;
+            bestInSettingsCol = candidate;
+          }
+        }
+
+        if (bestInSettingsCol) {
+          applyFocusMarker(bestInSettingsCol);
+          return;
+        }
+
+        // If in `sub` column and no same-row element to the right, pressing Right returns to `Folders & Accounts` trigger in `main`
+        if (curSettingsCol === 'sub' && dir === 'right') {
+          const mainTrigger = document.querySelector<HTMLElement>(
+            '[data-settings-col="main"] [data-settings-folders-trigger="true"]:not([disabled])'
+          );
+          if (mainTrigger) {
+            applyFocusMarker(mainTrigger);
+          }
+        }
+        return;
+      }
+
       if (!oskTarget && !isModalOpen && (dir === 'up' || dir === 'down') && curCol) {
         // 1. Try moving Up/Down among primary row items inside the SAME column (`left` or `right`)
         let bestInCol: HTMLElement | null = null;
@@ -876,7 +956,9 @@ export function useGamepadNavigation({
           defaultSimpClient.seekRelative(10_000);
           break;
         case 'sources':
-          if (view === 'browser' && !sourceModalOpen && !powerModalOpen && !oskTarget) {
+          if (document.querySelector('[data-player-actions-modal="true"]')) {
+            window.dispatchEvent(new CustomEvent('simp-player-actions-toggle'));
+          } else if (view === 'browser' && !sourceModalOpen && !powerModalOpen && !oskTarget) {
             window.dispatchEvent(
               new CustomEvent('simp-browser-gamepad-op', { detail: { op: 'select' } })
             );

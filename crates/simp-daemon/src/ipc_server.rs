@@ -144,6 +144,10 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/soundcloud/comments", get(soundcloud_comments_handler))
         .route("/api/soundcloud/waveform", get(soundcloud_waveform_handler))
         .route("/api/soundcloud/like", post(soundcloud_like_handler))
+        .route("/api/soundcloud/like-playlist", post(soundcloud_like_playlist_handler))
+        .route("/api/soundcloud/followings", get(soundcloud_followings_handler))
+        .route("/api/soundcloud/user-tracks", get(soundcloud_user_tracks_handler))
+        .route("/api/soundcloud/follow", post(soundcloud_follow_handler))
         .route("/api/ia/discover", get(ia_discover_handler))
         .route("/api/ia/item", get(ia_item_handler))
         .route("/api/ia/search", get(ia_search_handler))
@@ -834,8 +838,89 @@ async fn soundcloud_like_handler(
 ) -> impl IntoResponse {
     let cfg = state.settings.lock().unwrap().clone();
     let id = params.get("id").cloned().unwrap_or_default();
+    let unlike = params
+        .get("unlike")
+        .or_else(|| params.get("action"))
+        .map(|v| v == "1" || v == "true" || v == "unlike")
+        .unwrap_or(false);
     let res = tokio::task::spawn_blocking(move || {
-        simp_core::sinks::soundcloud_api::like_soundcloud_track(&cfg, &id)
+        if unlike {
+            simp_core::sinks::soundcloud_api::unlike_soundcloud_track(&cfg, &id)
+        } else {
+            simp_core::sinks::soundcloud_api::like_soundcloud_track(&cfg, &id)
+        }
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_like_playlist_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let liked = params
+        .get("liked")
+        .map(|v| v != "0" && v != "false")
+        .unwrap_or(true);
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::set_soundcloud_playlist_liked(&cfg, &id, liked)
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_followings_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::fetch_user_followings(&cfg)
+    })
+    .await;
+    match res {
+        Ok(Ok(users)) => Json(serde_json::json!({ "ok": true, "data": users })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_user_tracks_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::fetch_user_profile_tracks(&cfg, &id)
+    })
+    .await;
+    match res {
+        Ok(Ok(profile)) => Json(serde_json::json!({ "ok": true, "data": profile })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_follow_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let follow = params
+        .get("follow")
+        .map(|v| v != "0" && v != "false")
+        .unwrap_or(true);
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::set_soundcloud_user_followed(&cfg, &id, follow)
     })
     .await;
     match res {

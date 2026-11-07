@@ -26,12 +26,16 @@ import {
 } from '../drivers/AppleMusicDriver';
 import {
   fetchSoundCloudDiscover,
+  fetchSoundCloudFollowings,
   fetchSoundCloudLikesAndPlaylists,
   fetchSoundCloudPlaylistTracks,
   fetchSoundCloudStreamAndRadio,
+  fetchSoundCloudUserTracks,
   likeSoundCloudTrack,
   SoundCloudCatalogSearchResults,
   SoundCloudPlaylistSummary,
+  SoundCloudUserSummary,
+  unlikeSoundCloudTrack,
 } from '../drivers/SoundCloudDriver';
 import { OskTargetKind } from '../hooks/useGamepadNavigation';
 import { BrowserTarget, isUiVideoTrack } from './PlayerView';
@@ -59,6 +63,7 @@ export interface LibraryBrowserViewProps {
   >;
   browserSearch: string;
   setBrowserSearch: React.Dispatch<React.SetStateAction<string>>;
+  searchPreferredSource?: 'local' | 'apple_music' | 'soundcloud' | 'internet_archive' | null;
   browserTarget: BrowserTarget | null;
   setBrowserTarget: React.Dispatch<React.SetStateAction<BrowserTarget | null>>;
   browserTracks: TrackMetadata[];
@@ -309,6 +314,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   setBrowserSourceFilterRaw,
   browserSearch,
   setBrowserSearch,
+  searchPreferredSource = null,
   browserTarget,
   setBrowserTarget,
   browserTracks,
@@ -498,8 +504,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     'all' | 'stations' | 'mixes' | 'albums' | 'recent_library'
   >('all');
   const [newFilter, setNewFilter] = useState<'all' | 'albums' | 'playlists' | 'songs'>('all');
-  const [scLikesFilter, setScLikesFilter] = useState<'all' | 'likes' | 'sets'>('all');
-  const [scStreamFilter, setScStreamFilter] = useState<'all' | 'stream' | 'sets'>('all');
+  const [scLikesFilter, setScLikesFilter] = useState<'all' | 'likes' | 'sets' | 'following'>('all');
+  const [scFollowings, setScFollowings] = useState<SoundCloudUserSummary[]>([]);
+  const [scFollowingsLoaded, setScFollowingsLoaded] = useState<boolean>(false);
+  const [scStreamFilter, setScStreamFilter] = useState<'all' | 'history' | 'stream' | 'sets'>('all');
   const [scTrendingFilter, setScTrendingFilter] = useState<'all' | 'mixes' | 'sets' | 'tracks'>('all');
   const [recentlyAddedCloudAlbums, setRecentlyAddedCloudAlbums] = useState<AppleCloudAlbumSummary[]>(
     []
@@ -518,6 +526,25 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     },
     [sourceVisibility, selectedSources, browserSourceFilter]
   );
+
+  useEffect(() => {
+    if (
+      browserSourceFilter !== 'soundcloud' ||
+      soundCloudSubTab !== 'likes_sets' ||
+      !snap?.soundcloud_authenticated
+    ) {
+      return;
+    }
+    if (scFollowingsLoaded) return;
+    setScFollowingsLoaded(true);
+    fetchSoundCloudFollowings()
+      .then((users) => {
+        if (Array.isArray(users)) setScFollowings(users);
+      })
+      .catch(() => {
+        setScFollowingsLoaded(false);
+      });
+  }, [browserSourceFilter, soundCloudSubTab, snap?.soundcloud_authenticated, scFollowingsLoaded]);
 
   useEffect(() => {
     if (
@@ -691,6 +718,40 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       .catch(() => {})
       .finally(() => setIaLoading(false));
   }, [browserTarget, activeIaDetail?.summary.identifier, setBrowserTracks, resolveDaemonUrl]);
+
+  // Listen for 'Open Collection in Library' ('simp-open-collection-in-library') from Player / SELECT menu:
+  // Switch the Right Pane to 'tracks' mode, clear any active search query, and scroll/focus the playing track!
+  useEffect(() => {
+    const onOpenCollectionInLibrary = () => {
+      setBrowserSearch('');
+      setActiveMountRoot(null);
+      setRightPaneMode('tracks');
+      pendingRightFocusRef.current = 'track';
+      window.setTimeout(() => {
+        const playingRow =
+          document.querySelector<HTMLElement>(
+            '[data-nav-col="right"] [data-right-track="true"][data-track-playing="true"]'
+          ) ||
+          document.querySelector<HTMLElement>(
+            '[data-nav-col="right"] [data-right-track="true"]'
+          ) ||
+          document.querySelector<HTMLElement>(
+            '[data-nav-col="right"] [data-right-play-all="true"]:not([disabled])'
+          );
+        if (playingRow) {
+          playingRow.scrollIntoView({ block: 'center', inline: 'nearest' });
+          applyFocusMarker(playingRow);
+          if (playingRow.dataset.rightTrack === 'true') {
+            pendingRightFocusRef.current = null;
+          }
+        }
+      }, 65);
+    };
+    window.addEventListener('simp-open-collection-in-library', onOpenCollectionInLibrary);
+    return () => {
+      window.removeEventListener('simp-open-collection-in-library', onOpenCollectionInLibrary);
+    };
+  }, [applyFocusMarker, setBrowserSearch]);
 
   // Load albums and tracks belonging to the selected Storage Mount Place (`activeMountRoot`)
   useEffect(() => {
@@ -1285,6 +1346,28 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     setRightPaneMode('tracks');
     focusRightPaneFirstTrack();
     await handleOpenSoundCloudPlaylist(pl);
+  };
+
+  const selectSoundCloudUser = async (user: SoundCloudUserSummary) => {
+    pushCurrentNavState();
+    setBrowserTarget({
+      kind: 'soundcloud_user',
+      id: user.id,
+      title: `👥 @${user.username}`,
+      subtitle: user.description || `${user.track_count} tracks`,
+      art_url: user.avatar_url,
+    });
+    setRightPaneMode('tracks');
+    focusRightPaneFirstTrack();
+    setCloudLoading(true);
+    try {
+      const profile = await fetchSoundCloudUserTracks(user.id);
+      setBrowserTracks(profile.tracks || []);
+    } catch {
+      showToast(`Could not load tracks for @${user.username}`);
+    } finally {
+      setCloudLoading(false);
+    }
   };
 
   const selectCloudAlbum = async (params: {
@@ -1893,6 +1976,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         browserTarget.kind === 'mount' ||
         browserTarget.kind === 'cloud_album' ||
         browserTarget.kind === 'cloud_playlist' ||
+        browserTarget.kind === 'soundcloud_playlist' ||
+        browserTarget.kind === 'soundcloud_user' ||
         browserTarget.kind === 'ia_item' ||
         (browserTarget.kind === 'playlist' && selectedPlaylistObj?.origin !== 'simp_local')) &&
       browserTracks.length > 0;
@@ -2223,10 +2308,19 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 : undefined
             }
           />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-end',
+              gap: 4,
+              flexShrink: 0,
+              minWidth: 0,
+            }}
+          >
             <span
               style={{
-                padding: '3px 6px',
+                padding: '2px 6px',
                 borderRadius: 6,
                 background: isLocal ? '#0f222a' : '#251018',
                 border: isLocal ? '1px solid #2aa3c4' : '1px solid #4c1d2e',
@@ -2234,79 +2328,82 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 fontSize: 10,
                 fontFamily: 'monospace',
                 fontWeight: 800,
+                whiteSpace: 'nowrap',
               }}
             >
               {isActiveTarget ? `★ ${sourceBadge}` : sourceBadge}
             </span>
-            {!isLocal ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {!isLocal ? (
+                <span
+                  role="button"
+                  data-tile-aux="true"
+                  data-tile-select="true"
+                  title="Add all tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleAddSimpPlaylistToHybrid(pl);
+                  }}
+                  style={{
+                    padding: '2px 6px',
+                    borderRadius: 6,
+                    background: '#0f222a',
+                    border: '1px solid #2aa3c4',
+                    color: '#67e8f9',
+                    fontSize: 10,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  +
+                </span>
+              ) : (
+                <span
+                  role="button"
+                  data-tile-aux="true"
+                  data-tile-select="true"
+                  title="Set as active ★ target playlist (SELECT)"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setActivePlaylistId(pl.id);
+                  }}
+                  style={{
+                    padding: '2px 6px',
+                    borderRadius: 6,
+                    background: isActiveTarget ? '#13303d' : '#12141c',
+                    border: isActiveTarget ? '1px solid #2aa3c4' : '1px solid #262a38',
+                    color: isActiveTarget ? '#67e8f9' : '#71717a',
+                    fontSize: 10,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ★
+                </span>
+              )}
               <span
                 role="button"
                 data-tile-aux="true"
-                data-tile-select="true"
-                title="Add all tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+                data-tile-y="true"
+                title={isLocal ? 'Delete SIMP Playlist (Y)' : 'Unpin Playlist from SIMP (Y)'}
                 onClick={(e) => {
                   e.stopPropagation();
-                  handleAddSimpPlaylistToHybrid(pl);
+                  handleDeletePlaylist(pl.id, cleanTitle);
                 }}
                 style={{
                   padding: '2px 6px',
                   borderRadius: 6,
-                  background: '#0f222a',
-                  border: '1px solid #2aa3c4',
-                  color: '#67e8f9',
+                  background: '#1c1115',
+                  border: '1px solid #4c2228',
+                  color: '#fca5a5',
                   fontSize: 10,
                   fontWeight: 800,
                   cursor: 'pointer',
                 }}
               >
-                +
+                {isLocal ? '🗑' : '✕'}
               </span>
-            ) : (
-              <span
-                role="button"
-                data-tile-aux="true"
-                data-tile-select="true"
-                title="Set as active ★ target playlist (SELECT)"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setActivePlaylistId(pl.id);
-                }}
-                style={{
-                  padding: '2px 6px',
-                  borderRadius: 6,
-                  background: isActiveTarget ? '#13303d' : '#12141c',
-                  border: isActiveTarget ? '1px solid #2aa3c4' : '1px solid #262a38',
-                  color: isActiveTarget ? '#67e8f9' : '#71717a',
-                  fontSize: 10,
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                }}
-              >
-                ★
-              </span>
-            )}
-            <span
-              role="button"
-              data-tile-aux="true"
-              data-tile-y="true"
-              title={isLocal ? 'Delete SIMP Playlist (Y)' : 'Unpin Playlist from SIMP (Y)'}
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDeletePlaylist(pl.id, cleanTitle);
-              }}
-              style={{
-                padding: '2px 6px',
-                borderRadius: 6,
-                background: '#1c1115',
-                border: '1px solid #4c2228',
-                color: '#fca5a5',
-                fontSize: 10,
-                fontWeight: 800,
-                cursor: 'pointer',
-              }}
-            >
-              {isLocal ? '🗑' : '✕'}
-            </span>
+            </div>
           </div>
         </div>
         <div style={{ minWidth: 0, width: '100%' }}>
@@ -2391,10 +2488,19 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             bg="#121820"
             border="1px solid #222e3c"
           />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-end',
+              gap: 4,
+              flexShrink: 0,
+              minWidth: 0,
+            }}
+          >
             <span
               style={{
-                padding: '3px 6px',
+                padding: '2px 6px',
                 borderRadius: 6,
                 background: isAppleAlbum ? '#251018' : '#0f222a',
                 border: isAppleAlbum ? '1px solid #4c1d2e' : '1px solid #2aa3c4',
@@ -2402,56 +2508,59 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 fontSize: 10,
                 fontFamily: 'monospace',
                 fontWeight: 800,
+                whiteSpace: 'nowrap',
               }}
             >
               {isAppleAlbum ? '🍎' : '💾'}
             </span>
-            <span
-              role="button"
-              data-tile-aux="true"
-              data-tile-select="true"
-              title="Add album tracks to active ★ SIMP Hybrid Playlist (SELECT)"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleAddSimpAlbumToHybrid(alb);
-              }}
-              style={{
-                padding: '2px 6px',
-                borderRadius: 6,
-                background: '#0f222a',
-                border: '1px solid #2aa3c4',
-                color: '#67e8f9',
-                fontSize: 10,
-                fontWeight: 800,
-                cursor: 'pointer',
-              }}
-            >
-              +
-            </span>
-            {isAppleAlbum && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <span
                 role="button"
                 data-tile-aux="true"
-                data-tile-y="true"
-                title="Unpin Album from SIMP (Y)"
+                data-tile-select="true"
+                title="Add album tracks to active ★ SIMP Hybrid Playlist (SELECT)"
                 onClick={(e) => {
                   e.stopPropagation();
-                  handleDeleteAlbum(alb.id, cleanTitle);
+                  handleAddSimpAlbumToHybrid(alb);
                 }}
                 style={{
                   padding: '2px 6px',
                   borderRadius: 6,
-                  background: '#1c1115',
-                  border: '1px solid #4c2228',
-                  color: '#fca5a5',
+                  background: '#0f222a',
+                  border: '1px solid #2aa3c4',
+                  color: '#67e8f9',
                   fontSize: 10,
                   fontWeight: 800,
                   cursor: 'pointer',
                 }}
               >
-                ✕
+                +
               </span>
-            )}
+              {isAppleAlbum && (
+                <span
+                  role="button"
+                  data-tile-aux="true"
+                  data-tile-y="true"
+                  title="Unpin Album from SIMP (Y)"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteAlbum(alb.id, cleanTitle);
+                  }}
+                  style={{
+                    padding: '2px 6px',
+                    borderRadius: 6,
+                    background: '#1c1115',
+                    border: '1px solid #4c2228',
+                    color: '#fca5a5',
+                    fontSize: 10,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ✕
+                </span>
+              )}
+            </div>
           </div>
         </div>
         <div style={{ minWidth: 0, width: '100%' }}>
@@ -2541,56 +2650,82 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               );
             }}
           />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-end',
+              gap: 4,
+              flexShrink: 0,
+              minWidth: 0,
+            }}
+          >
             <span
-              role="button"
-              data-tile-aux="true"
-              data-tile-select="true"
-              title="Add playlist tracks to active ★ SIMP Hybrid Playlist (SELECT)"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleAddCloudPlaylistToHybrid(pl);
-              }}
               style={{
                 padding: '2px 6px',
                 borderRadius: 6,
-                background: '#0f222a',
-                border: '1px solid #2aa3c4',
-                color: '#67e8f9',
-                fontSize: 10,
-                fontWeight: 800,
-                cursor: 'pointer',
-              }}
-            >
-              +
-            </span>
-            <span
-              role="button"
-              data-tile-aux="true"
-              data-tile-y="true"
-              title={isPinned ? 'Unpin Playlist from SIMP (Y)' : 'Pin Playlist to SIMP (Y)'}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (isPinned) {
-                  handleDeletePlaylist(`applemusic:playlist:${pl.id}`, pl.name);
-                } else {
-                  handlePinCloudPlaylist(pl);
-                }
-              }}
-              style={{
-                padding: '2px 6px',
-                borderRadius: 6,
-                background: isPinned ? '#0f222a' : '#251018',
-                border: isPinned ? '1px solid #2aa3c4' : '1px solid #4c1d2e',
-                color: isPinned ? '#67e8f9' : '#fda4af',
+                background: '#251018',
+                border: '1px solid #4c1d2e',
+                color: '#fda4af',
                 fontSize: 10,
                 fontFamily: 'monospace',
                 fontWeight: 800,
-                cursor: 'pointer',
+                whiteSpace: 'nowrap',
               }}
             >
-              {isPinned ? '✓ 📌' : '📌'}
+              🍎
             </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span
+                role="button"
+                data-tile-aux="true"
+                data-tile-select="true"
+                title="Add playlist tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleAddCloudPlaylistToHybrid(pl);
+                }}
+                style={{
+                  padding: '2px 6px',
+                  borderRadius: 6,
+                  background: '#0f222a',
+                  border: '1px solid #2aa3c4',
+                  color: '#67e8f9',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                +
+              </span>
+              <span
+                role="button"
+                data-tile-aux="true"
+                data-tile-y="true"
+                title={isPinned ? 'Unpin Playlist from SIMP (Y)' : 'Pin Playlist to SIMP (Y)'}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (isPinned) {
+                    handleDeletePlaylist(`applemusic:playlist:${pl.id}`, pl.name);
+                  } else {
+                    handlePinCloudPlaylist(pl);
+                  }
+                }}
+                style={{
+                  padding: '2px 6px',
+                  borderRadius: 6,
+                  background: isPinned ? '#0f222a' : '#251018',
+                  border: isPinned ? '1px solid #2aa3c4' : '1px solid #4c1d2e',
+                  color: isPinned ? '#67e8f9' : '#fda4af',
+                  fontSize: 10,
+                  fontFamily: 'monospace',
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                {isPinned ? '✓ 📌' : '📌'}
+              </span>
+            </div>
           </div>
         </div>
         <div style={{ minWidth: 0, width: '100%' }}>
@@ -2678,60 +2813,86 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             bg="#181118"
             border="1px solid #321a24"
           />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-end',
+              gap: 4,
+              flexShrink: 0,
+              minWidth: 0,
+            }}
+          >
             <span
-              role="button"
-              data-tile-aux="true"
-              data-tile-select="true"
-              title="Add album tracks to active ★ SIMP Hybrid Playlist (SELECT)"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleAddCloudAlbumToHybrid(alb);
-              }}
               style={{
                 padding: '2px 6px',
                 borderRadius: 6,
-                background: '#0f222a',
-                border: '1px solid #2aa3c4',
-                color: '#67e8f9',
-                fontSize: 10,
-                fontWeight: 800,
-                cursor: 'pointer',
-              }}
-            >
-              +
-            </span>
-            <span
-              role="button"
-              data-tile-aux="true"
-              data-tile-y="true"
-              title={isPinned ? 'Unpin Album from SIMP (Y)' : 'Pin Album to SIMP (Y)'}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (isPinned) {
-                  handleDeleteAlbum(`applemusic:album:${alb.id}`, alb.title);
-                } else {
-                  setCloudLoading(true);
-                  fetchFullAppleAlbum({ albumId: alb.id })
-                    .then(({ album, tracks }) => handlePinCloudAlbum(album, tracks))
-                    .catch(() => {})
-                    .finally(() => setCloudLoading(false));
-                }
-              }}
-              style={{
-                padding: '2px 6px',
-                borderRadius: 6,
-                background: isPinned ? '#0f222a' : '#251018',
-                border: isPinned ? '1px solid #2aa3c4' : '1px solid #4c1d2e',
-                color: isPinned ? '#67e8f9' : '#fda4af',
+                background: '#251018',
+                border: '1px solid #4c1d2e',
+                color: '#fda4af',
                 fontSize: 10,
                 fontFamily: 'monospace',
                 fontWeight: 800,
-                cursor: 'pointer',
+                whiteSpace: 'nowrap',
               }}
             >
-              {isPinned ? '✓ 📌' : '📌'}
+              🍎
             </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span
+                role="button"
+                data-tile-aux="true"
+                data-tile-select="true"
+                title="Add album tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleAddCloudAlbumToHybrid(alb);
+                }}
+                style={{
+                  padding: '2px 6px',
+                  borderRadius: 6,
+                  background: '#0f222a',
+                  border: '1px solid #2aa3c4',
+                  color: '#67e8f9',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                +
+              </span>
+              <span
+                role="button"
+                data-tile-aux="true"
+                data-tile-y="true"
+                title={isPinned ? 'Unpin Album from SIMP (Y)' : 'Pin Album to SIMP (Y)'}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (isPinned) {
+                    handleDeleteAlbum(`applemusic:album:${alb.id}`, alb.title);
+                  } else {
+                    setCloudLoading(true);
+                    fetchFullAppleAlbum({ albumId: alb.id })
+                      .then(({ album, tracks }) => handlePinCloudAlbum(album, tracks))
+                      .catch(() => {})
+                      .finally(() => setCloudLoading(false));
+                  }
+                }}
+                style={{
+                  padding: '2px 6px',
+                  borderRadius: 6,
+                  background: isPinned ? '#0f222a' : '#251018',
+                  border: isPinned ? '1px solid #2aa3c4' : '1px solid #4c1d2e',
+                  color: isPinned ? '#67e8f9' : '#fda4af',
+                  fontSize: 10,
+                  fontFamily: 'monospace',
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                {isPinned ? '✓ 📌' : '📌'}
+              </span>
+            </div>
           </div>
         </div>
         <div style={{ minWidth: 0, width: '100%' }}>
@@ -2937,56 +3098,82 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             bg="#23120b"
             border="1px solid #7c2d12"
           />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-end',
+              gap: 4,
+              flexShrink: 0,
+              minWidth: 0,
+            }}
+          >
             <span
-              role="button"
-              data-tile-aux="true"
-              data-tile-select="true"
-              title="Add set tracks to active ★ SIMP Hybrid Playlist (SELECT)"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleAddSoundCloudPlaylistToHybrid(pl);
-              }}
               style={{
                 padding: '2px 6px',
                 borderRadius: 6,
-                background: '#0f222a',
-                border: '1px solid #2aa3c4',
-                color: '#67e8f9',
-                fontSize: 10,
-                fontWeight: 800,
-                cursor: 'pointer',
-              }}
-            >
-              +
-            </span>
-            <span
-              role="button"
-              data-tile-aux="true"
-              data-tile-y="true"
-              title={isPinned ? 'Unpin Set from SIMP (Y)' : 'Pin Set to SIMP (Y)'}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (isPinned) {
-                  handleDeletePlaylist(`soundcloud:playlist:${pl.id}`, pl.name);
-                } else {
-                  handlePinSoundCloudPlaylist(pl);
-                }
-              }}
-              style={{
-                padding: '2px 6px',
-                borderRadius: 6,
-                background: isPinned ? '#0f222a' : '#2c140a',
-                border: isPinned ? '1px solid #2aa3c4' : '1px solid #7c2d12',
-                color: isPinned ? '#67e8f9' : '#fdba74',
+                background: '#2c140a',
+                border: '1px solid #7c2d12',
+                color: '#fdba74',
                 fontSize: 10,
                 fontFamily: 'monospace',
                 fontWeight: 800,
-                cursor: 'pointer',
+                whiteSpace: 'nowrap',
               }}
             >
-              {isPinned ? '✓ 📌' : '📌'}
+              ☁️
             </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span
+                role="button"
+                data-tile-aux="true"
+                data-tile-select="true"
+                title="Add set tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleAddSoundCloudPlaylistToHybrid(pl);
+                }}
+                style={{
+                  padding: '2px 6px',
+                  borderRadius: 6,
+                  background: '#0f222a',
+                  border: '1px solid #2aa3c4',
+                  color: '#67e8f9',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                +
+              </span>
+              <span
+                role="button"
+                data-tile-aux="true"
+                data-tile-y="true"
+                title={isPinned ? 'Unpin Set from SIMP (Y)' : 'Pin Set to SIMP (Y)'}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (isPinned) {
+                    handleDeletePlaylist(`soundcloud:playlist:${pl.id}`, pl.name);
+                  } else {
+                    handlePinSoundCloudPlaylist(pl);
+                  }
+                }}
+                style={{
+                  padding: '2px 6px',
+                  borderRadius: 6,
+                  background: isPinned ? '#0f222a' : '#2c140a',
+                  border: isPinned ? '1px solid #2aa3c4' : '1px solid #7c2d12',
+                  color: isPinned ? '#67e8f9' : '#fdba74',
+                  fontSize: 10,
+                  fontFamily: 'monospace',
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                {isPinned ? '✓ 📌' : '📌'}
+              </span>
+            </div>
           </div>
         </div>
         <div style={{ minWidth: 0, width: '100%' }}>
@@ -3022,6 +3209,101 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           >
             {pl.track_count ? `${pl.track_count} tracks • ` : ''}
             {pl.description || 'SoundCloud Set'}
+          </div>
+        </div>
+      </button>
+    );
+  };
+
+  // Reusable Visual Tile for Followed SoundCloud Creators / DJs (`GET /me/followings`)
+  const renderSoundCloudUserCard = (user: SoundCloudUserSummary) => {
+    const isSelected = browserTarget?.kind === 'soundcloud_user' && browserTarget.id === user.id;
+    return (
+      <button
+        key={user.id}
+        data-right-tile="true"
+        onClick={() => selectSoundCloudUser(user)}
+        style={{
+          minWidth: 0,
+          minHeight: 124,
+          padding: 10,
+          borderRadius: 12,
+          background: isSelected ? '#2c140a' : '#0a0a0e',
+          border: isSelected ? '1px solid #ea580c' : '1px solid #181822',
+          color: '#d4d4dc',
+          textAlign: 'left',
+          cursor: 'pointer',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          gap: 8,
+          boxSizing: 'border-box',
+        }}
+      >
+        <div
+          style={{
+            width: '100%',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-start',
+            gap: 6,
+          }}
+        >
+          <ResilientTileArtwork
+            src={user.avatar_url}
+            fallbackIcon="👤"
+            bg="#23120b"
+            border="1px solid #7c2d12"
+          />
+          <span
+            style={{
+              padding: '2px 6px',
+              borderRadius: 6,
+              background: '#2c140a',
+              border: '1px solid #7c2d12',
+              color: '#fdba74',
+              fontSize: 10,
+              fontFamily: 'monospace',
+              fontWeight: 800,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            👥 {user.track_count} Trk
+          </span>
+        </div>
+        <div style={{ minWidth: 0, width: '100%' }}>
+          <div
+            style={{
+              fontSize: 13,
+              fontWeight: 800,
+              lineHeight: 1.3,
+              color: '#e4e4ec',
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              whiteSpace: 'normal',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            @{user.username}
+          </div>
+          <div
+            style={{
+              fontSize: 11,
+              lineHeight: 1.35,
+              color: '#8e8e99',
+              marginTop: 4,
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              whiteSpace: 'normal',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            {user.description || `${user.track_count} tracks`}
           </div>
         </div>
       </button>
@@ -3087,10 +3369,19 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             bg="#1f160b"
             border="1px solid #78350f"
           />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-end',
+              gap: 4,
+              flexShrink: 0,
+              minWidth: 0,
+            }}
+          >
             <span
               style={{
-                padding: '3px 6px',
+                padding: '2px 6px',
                 borderRadius: 6,
                 background: '#261a0b',
                 border: '1px solid #78350f',
@@ -3098,59 +3389,62 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 fontSize: 10,
                 fontFamily: 'monospace',
                 fontWeight: 800,
+                whiteSpace: 'nowrap',
               }}
             >
               {badgeLabel}
             </span>
-            <span
-              role="button"
-              data-tile-aux="true"
-              data-tile-select="true"
-              title="Add to active ★ SIMP Hybrid Playlist (SELECT)"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleAddArchiveItemToHybrid(item);
-              }}
-              style={{
-                padding: '2px 6px',
-                borderRadius: 6,
-                background: '#0f222a',
-                border: '1px solid #2aa3c4',
-                color: '#67e8f9',
-                fontSize: 10,
-                fontWeight: 800,
-                cursor: 'pointer',
-              }}
-            >
-              +
-            </span>
-            <span
-              role="button"
-              data-tile-aux="true"
-              data-tile-y="true"
-              title={isPinned ? 'Unpin from SIMP (Y)' : 'Pin to SIMP (Y)'}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (isPinned) {
-                  handleDeletePlaylist(`archive:item:${item.identifier}`, item.title);
-                } else {
-                  handlePinArchiveItem(item);
-                }
-              }}
-              style={{
-                padding: '2px 6px',
-                borderRadius: 6,
-                background: isPinned ? '#0f222a' : '#261a0b',
-                border: isPinned ? '1px solid #2aa3c4' : '1px solid #78350f',
-                color: isPinned ? '#67e8f9' : '#fde68a',
-                fontSize: 10,
-                fontFamily: 'monospace',
-                fontWeight: 800,
-                cursor: 'pointer',
-              }}
-            >
-              {isPinned ? '✓ 📌' : '📌'}
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span
+                role="button"
+                data-tile-aux="true"
+                data-tile-select="true"
+                title="Add to active ★ SIMP Hybrid Playlist (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleAddArchiveItemToHybrid(item);
+                }}
+                style={{
+                  padding: '2px 6px',
+                  borderRadius: 6,
+                  background: '#0f222a',
+                  border: '1px solid #2aa3c4',
+                  color: '#67e8f9',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                +
+              </span>
+              <span
+                role="button"
+                data-tile-aux="true"
+                data-tile-y="true"
+                title={isPinned ? 'Unpin from SIMP (Y)' : 'Pin to SIMP (Y)'}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (isPinned) {
+                    handleDeletePlaylist(`archive:item:${item.identifier}`, item.title);
+                  } else {
+                    handlePinArchiveItem(item);
+                  }
+                }}
+                style={{
+                  padding: '2px 6px',
+                  borderRadius: 6,
+                  background: isPinned ? '#0f222a' : '#261a0b',
+                  border: isPinned ? '1px solid #2aa3c4' : '1px solid #78350f',
+                  color: isPinned ? '#67e8f9' : '#fde68a',
+                  fontSize: 10,
+                  fontFamily: 'monospace',
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                {isPinned ? '✓ 📌' : '📌'}
+              </span>
+            </div>
           </div>
         </div>
         <div style={{ minWidth: 0, width: '100%' }}>
@@ -3355,19 +3649,55 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               </button>
               <button
                 data-row-aux="true"
-                onClick={() => likeSoundCloudTrack(s.uri, showToast)}
-                title="Like this track on SoundCloud"
+                onClick={() => {
+                  const isAlreadyLiked =
+                    ctxPrefix === 'sc_likes' || scLikedTracks.some((lt) => lt.uri === s.uri);
+                  if (isAlreadyLiked) {
+                    unlikeSoundCloudTrack(s.uri, showToast)
+                      .then((ok) => {
+                        if (ok) {
+                          setScLikedTracks((prev) => prev.filter((lt) => lt.uri !== s.uri));
+                        }
+                      })
+                      .catch((err: any) => {
+                        showToast(err?.message || 'Could not unlike track');
+                      });
+                  } else {
+                    likeSoundCloudTrack(s.uri, showToast)
+                      .then((ok) => {
+                        if (ok && !scLikedTracks.some((lt) => lt.uri === s.uri)) {
+                          setScLikedTracks((prev) => [s, ...prev]);
+                        }
+                      })
+                      .catch((err: any) => {
+                        showToast(err?.message || 'Sign in with SoundCloud to like tracks');
+                      });
+                  }
+                }}
+                title={
+                  ctxPrefix === 'sc_likes' || scLikedTracks.some((lt) => lt.uri === s.uri)
+                    ? 'Remove from SoundCloud Likes'
+                    : 'Like this track on SoundCloud'
+                }
                 style={{
                   padding: '5px 8px',
                   borderRadius: 8,
-                  background: '#18141c',
-                  border: '1px solid #2e2e3e',
+                  background:
+                    ctxPrefix === 'sc_likes' || scLikedTracks.some((lt) => lt.uri === s.uri)
+                      ? '#2c140a'
+                      : '#18141c',
+                  border:
+                    ctxPrefix === 'sc_likes' || scLikedTracks.some((lt) => lt.uri === s.uri)
+                      ? '1px solid #ea580c'
+                      : '1px solid #2e2e3e',
                   color: '#fb923c',
                   fontSize: 11,
                   cursor: 'pointer',
                 }}
               >
-                ❤️
+                {ctxPrefix === 'sc_likes' || scLikedTracks.some((lt) => lt.uri === s.uri)
+                  ? '💔'
+                  : '❤️'}
               </button>
             </>
           ) : (
@@ -4736,190 +5066,242 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   </>
                 )}
 
-                {/* 1B. Matching Unpinned Apple Library Playlists */}
-                {isSourceIncluded('apple_music') &&
-                  mediaTypeFilter !== 'video' &&
-                  filteredCloudPlaylists.length > 0 && (
-                    <>
-                      <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                        ☁️ MATCHING APPLE LIBRARY PLAYLISTS ({filteredCloudPlaylists.length})
-                      </div>
-                      <div style={tileGridStyle}>
-                        {filteredCloudPlaylists.slice(0, 50).map(renderCloudPlaylistCard)}
-                      </div>
-                    </>
-                  )}
-
-                {/* 1C. Matching Local & Pinned Albums */}
-                {filteredAlbums.length > 0 && (
-                  <>
-                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                      💿 MATCHING SIMP LIBRARY ALBUMS ({filteredAlbums.length})
-                    </div>
-                    <div style={tileGridStyle}>
-                      {filteredAlbums.slice(0, 24).map(renderSimpAlbumCard)}
-                    </div>
-                  </>
-                )}
-
-                {/* 1C-2. Matching Local Tracks & Local Videos */}
-                {isSourceIncluded('local') &&
-                  filteredLocalSearchTracks.length > 0 && (
-                    <>
-                      <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                        LOCAL TRACKS & VIDEOS ({filteredLocalSearchTracks.length})
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        {filteredLocalSearchTracks.map((s) =>
-                          renderSingleSongRow(
-                            s,
-                            filteredLocalSearchTracks.filter(
-                              (tr) =>
-                                tr.source !== 'local_video' && !tr.uri.startsWith('video://local/')
-                            ),
-                            'local_search'
-                          )
-                        )}
-                      </div>
-                    </>
-                  )}
-
-                {/* 1D. Personal Apple Cloud Library ("Your Library") & Public Catalog Search Results */}
-                {isSourceIncluded('apple_music') &&
-                  mediaTypeFilter !== 'video' &&
-                  snap?.apple_authenticated && (
-                  <>
-                    {catalogSearchResults.albums.some((a) => a.kind === 'library') && (
-                      <>
-                        <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                          ☁️ IN YOUR APPLE CLOUD LIBRARY — ALBUMS (
-                          {catalogSearchResults.albums.filter((a) => a.kind === 'library').length})
-                        </div>
-                        <div style={tileGridStyle}>
-                          {catalogSearchResults.albums
-                            .filter((a) => a.kind === 'library')
-                            .map(renderCloudAlbumCard)}
-                        </div>
-                      </>
-                    )}
-
-                    {catalogSearchResults.albums.some((a) => a.kind !== 'library') && (
-                      <>
-                        <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                          🍎 APPLE CATALOG ALBUMS (
-                          {catalogSearchResults.albums.filter((a) => a.kind !== 'library').length})
-                        </div>
-                        <div style={tileGridStyle}>
-                          {catalogSearchResults.albums
-                            .filter((a) => a.kind !== 'library')
-                            .map(renderCloudAlbumCard)}
-                        </div>
-                      </>
-                    )}
-
-                    {catalogSearchResults.playlists.length > 0 && (
-                      <>
-                        <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                          🎶 APPLE CATALOG PLAYLISTS ({catalogSearchResults.playlists.length})
-                        </div>
-                        <div style={tileGridStyle}>
-                          {catalogSearchResults.playlists.map(renderCloudPlaylistCard)}
-                        </div>
-                      </>
-                    )}
-
-                    {catalogSearchResults.stations.length > 0 && (
-                      <>
-                        <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                          📻 RADIO STATIONS ({catalogSearchResults.stations.length})
-                        </div>
-                        <div style={tileGridStyle}>
-                          {catalogSearchResults.stations.map(renderStationCard)}
-                        </div>
-                      </>
-                    )}
-
-                    {catalogSearchResults.songs.length > 0 && (
-                      <>
-                        <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                          🎵 SONGS / SINGLES ({catalogSearchResults.songs.length})
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                          {catalogSearchResults.songs.map((s) =>
-                            renderSingleSongRow(s, catalogSearchResults.songs, 'search')
+                {/* 1B–1F. Source-Grouped Search Results (Originating / Preferred Source Prioritized First) */}
+                {(
+                  [
+                    'local',
+                    'apple_music',
+                    'soundcloud',
+                    'internet_archive',
+                  ] as const
+                )
+                  .slice()
+                  .sort((a, b) => {
+                    if (searchPreferredSource) {
+                      if (a === searchPreferredSource && b !== searchPreferredSource) return -1;
+                      if (b === searchPreferredSource && a !== searchPreferredSource) return 1;
+                    }
+                    return 0;
+                  })
+                  .map((sourceGroup) => {
+                    if (sourceGroup === 'local') {
+                      return (
+                        <React.Fragment key="search-group-local">
+                          {/* 1C. Matching Local & Pinned Albums */}
+                          {filteredAlbums.length > 0 && (
+                            <>
+                              <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                                💿 MATCHING SIMP LIBRARY ALBUMS ({filteredAlbums.length})
+                              </div>
+                              <div style={tileGridStyle}>
+                                {filteredAlbums.slice(0, 24).map(renderSimpAlbumCard)}
+                              </div>
+                            </>
                           )}
-                        </div>
-                      </>
-                    )}
-                  </>
-                )}
 
-                {/* 1E. SoundCloud Catalog Search Results (Sets & Tracks) */}
-                {isSourceIncluded('soundcloud') &&
-                  mediaTypeFilter !== 'video' &&
-                  (scCatalogSearchResults.playlists.length > 0 ||
-                    scCatalogSearchResults.songs.length > 0) && (
-                    <>
-                      <div
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 800,
-                          color: '#fdba74',
-                          borderBottom: '1px solid #3c1c0f',
-                          paddingBottom: 6,
-                          marginTop: 8,
-                        }}
-                      >
-                        ☁️ SoundCloud Sets & Tracks
-                      </div>
-
-                      {scCatalogSearchResults.playlists.length > 0 && (
-                        <>
-                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
-                            🎶 SOUNDCLOUD SETS & PLAYLISTS ({scCatalogSearchResults.playlists.length})
-                          </div>
-                          <div style={tileGridStyle}>
-                            {scCatalogSearchResults.playlists.map(renderSoundCloudPlaylistCard)}
-                          </div>
-                        </>
-                      )}
-
-                      {scCatalogSearchResults.songs.length > 0 && (
-                        <>
-                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
-                            ☁️ SOUNDCLOUD TRACKS & MIXES ({scCatalogSearchResults.songs.length})
-                          </div>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            {scCatalogSearchResults.songs.map((s) =>
-                              renderSingleSongRow(s, scCatalogSearchResults.songs, 'sc_search')
+                          {/* 1C-2. Matching Local Tracks & Local Videos */}
+                          {isSourceIncluded('local') &&
+                            filteredLocalSearchTracks.length > 0 && (
+                              <>
+                                <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                                  LOCAL TRACKS & VIDEOS ({filteredLocalSearchTracks.length})
+                                </div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                  {filteredLocalSearchTracks.map((s) =>
+                                    renderSingleSongRow(
+                                      s,
+                                      filteredLocalSearchTracks.filter(
+                                        (tr) =>
+                                          tr.source !== 'local_video' &&
+                                          !tr.uri.startsWith('video://local/')
+                                      ),
+                                      'local_search'
+                                    )
+                                  )}
+                                </div>
+                              </>
                             )}
-                          </div>
-                        </>
-                      )}
-                    </>
-                  )}
+                        </React.Fragment>
+                      );
+                    }
 
-                {/* 1F. Internet Archive Search Results (Films, TV, Concerts & Audio) */}
-                {isSourceIncluded('internet_archive') &&
-                  filteredIaSearchResults.length > 0 && (
-                    <>
-                      <div
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 800,
-                          color: '#fde68a',
-                          borderBottom: '1px solid #3c260a',
-                          paddingBottom: 6,
-                          marginTop: 8,
-                        }}
-                      >
-                        🏛️ Internet Archive ({filteredIaSearchResults.length})
-                      </div>
-                      <div style={tileGridStyle}>
-                        {filteredIaSearchResults.map(renderArchiveItemCard)}
-                      </div>
-                    </>
-                  )}
+                    if (sourceGroup === 'apple_music') {
+                      return (
+                        <React.Fragment key="search-group-apple">
+                          {/* 1B. Matching Unpinned Apple Library Playlists */}
+                          {isSourceIncluded('apple_music') &&
+                            mediaTypeFilter !== 'video' &&
+                            filteredCloudPlaylists.length > 0 && (
+                              <>
+                                <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
+                                  ☁️ MATCHING APPLE LIBRARY PLAYLISTS ({filteredCloudPlaylists.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {filteredCloudPlaylists.slice(0, 50).map(renderCloudPlaylistCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {/* 1D. Personal Apple Cloud Library ("Your Library") & Public Catalog Search Results */}
+                          {isSourceIncluded('apple_music') &&
+                            mediaTypeFilter !== 'video' &&
+                            snap?.apple_authenticated && (
+                              <>
+                                {catalogSearchResults.albums.some((a) => a.kind === 'library') && (
+                                  <>
+                                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
+                                      ☁️ IN YOUR APPLE CLOUD LIBRARY — ALBUMS (
+                                      {
+                                        catalogSearchResults.albums.filter((a) => a.kind === 'library')
+                                          .length
+                                      }
+                                      )
+                                    </div>
+                                    <div style={tileGridStyle}>
+                                      {catalogSearchResults.albums
+                                        .filter((a) => a.kind === 'library')
+                                        .map(renderCloudAlbumCard)}
+                                    </div>
+                                  </>
+                                )}
+
+                                {catalogSearchResults.albums.some((a) => a.kind !== 'library') && (
+                                  <>
+                                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
+                                      🍎 APPLE CATALOG ALBUMS (
+                                      {
+                                        catalogSearchResults.albums.filter((a) => a.kind !== 'library')
+                                          .length
+                                      }
+                                      )
+                                    </div>
+                                    <div style={tileGridStyle}>
+                                      {catalogSearchResults.albums
+                                        .filter((a) => a.kind !== 'library')
+                                        .map(renderCloudAlbumCard)}
+                                    </div>
+                                  </>
+                                )}
+
+                                {catalogSearchResults.playlists.length > 0 && (
+                                  <>
+                                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
+                                      🎶 APPLE CATALOG PLAYLISTS ({catalogSearchResults.playlists.length})
+                                    </div>
+                                    <div style={tileGridStyle}>
+                                      {catalogSearchResults.playlists.map(renderCloudPlaylistCard)}
+                                    </div>
+                                  </>
+                                )}
+
+                                {catalogSearchResults.stations.length > 0 && (
+                                  <>
+                                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
+                                      📻 RADIO STATIONS ({catalogSearchResults.stations.length})
+                                    </div>
+                                    <div style={tileGridStyle}>
+                                      {catalogSearchResults.stations.map(renderStationCard)}
+                                    </div>
+                                  </>
+                                )}
+
+                                {catalogSearchResults.songs.length > 0 && (
+                                  <>
+                                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
+                                      🎵 SONGS / SINGLES ({catalogSearchResults.songs.length})
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                      {catalogSearchResults.songs.map((s) =>
+                                        renderSingleSongRow(s, catalogSearchResults.songs, 'search')
+                                      )}
+                                    </div>
+                                  </>
+                                )}
+                              </>
+                            )}
+                        </React.Fragment>
+                      );
+                    }
+
+                    if (sourceGroup === 'soundcloud') {
+                      return (
+                        <React.Fragment key="search-group-sc">
+                          {/* 1E. SoundCloud Catalog Search Results (Sets & Tracks) */}
+                          {isSourceIncluded('soundcloud') &&
+                            mediaTypeFilter !== 'video' &&
+                            (scCatalogSearchResults.playlists.length > 0 ||
+                              scCatalogSearchResults.songs.length > 0) && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 13,
+                                    fontWeight: 800,
+                                    color: '#fdba74',
+                                    borderBottom: '1px solid #3c1c0f',
+                                    paddingBottom: 6,
+                                    marginTop: 8,
+                                  }}
+                                >
+                                  ☁️ SoundCloud Sets & Tracks
+                                </div>
+
+                                {scCatalogSearchResults.playlists.length > 0 && (
+                                  <>
+                                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                                      🎶 SOUNDCLOUD SETS & PLAYLISTS (
+                                      {scCatalogSearchResults.playlists.length})
+                                    </div>
+                                    <div style={tileGridStyle}>
+                                      {scCatalogSearchResults.playlists.map(renderSoundCloudPlaylistCard)}
+                                    </div>
+                                  </>
+                                )}
+
+                                {scCatalogSearchResults.songs.length > 0 && (
+                                  <>
+                                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                                      ☁️ SOUNDCLOUD TRACKS & MIXES (
+                                      {scCatalogSearchResults.songs.length})
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                      {scCatalogSearchResults.songs.map((s) =>
+                                        renderSingleSongRow(s, scCatalogSearchResults.songs, 'sc_search')
+                                      )}
+                                    </div>
+                                  </>
+                                )}
+                              </>
+                            )}
+                        </React.Fragment>
+                      );
+                    }
+
+                    return (
+                      <React.Fragment key="search-group-ia">
+                        {/* 1F. Internet Archive Search Results (Films, TV, Concerts & Audio) */}
+                        {isSourceIncluded('internet_archive') &&
+                          filteredIaSearchResults.length > 0 && (
+                            <>
+                              <div
+                                style={{
+                                  fontSize: 13,
+                                  fontWeight: 800,
+                                  color: '#fde68a',
+                                  borderBottom: '1px solid #3c260a',
+                                  paddingBottom: 6,
+                                  marginTop: 8,
+                                }}
+                              >
+                                🏛️ Internet Archive ({filteredIaSearchResults.length})
+                              </div>
+                              <div style={tileGridStyle}>
+                                {filteredIaSearchResults.map(renderArchiveItemCard)}
+                              </div>
+                            </>
+                          )}
+                      </React.Fragment>
+                    );
+                  })}
 
                 {filteredPlaylists.length === 0 &&
                   filteredCloudPlaylists.length === 0 &&
@@ -5792,6 +6174,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                             { id: 'all', label: 'All' },
                             { id: 'likes', label: `❤️ Liked Tracks (${scLikedTracks.length})` },
                             { id: 'sets', label: `🎶 Sets & Playlists (${scPlaylists.length})` },
+                            { id: 'following', label: `👥 Following (${scFollowings.length})` },
                           ] as const
                         ).map((f) => {
                           const active = scLikesFilter === f.id;
@@ -5847,11 +6230,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           data-right-filter-pill="true"
                           onClick={() => {
                             setCloudLoading(true);
-                            fetchSoundCloudLikesAndPlaylists()
-                              .then((res) => {
+                            Promise.all([
+                              fetchSoundCloudLikesAndPlaylists().then((res) => {
                                 setScLikedTracks(res.likedTracks);
                                 setScPlaylists(res.playlists);
-                              })
+                              }),
+                              fetchSoundCloudFollowings().then((users) => {
+                                if (Array.isArray(users)) setScFollowings(users);
+                              }),
+                            ])
                               .catch(() => {})
                               .finally(() => setCloudLoading(false));
                           }}
@@ -5883,6 +6270,18 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         </>
                       )}
 
+                    {(scLikesFilter === 'all' || scLikesFilter === 'following') &&
+                      scFollowings.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            👥 FOLLOWED CREATORS & DJS ({scFollowings.length})
+                          </div>
+                          <div style={tileGridStyle}>
+                            {scFollowings.map(renderSoundCloudUserCard)}
+                          </div>
+                        </>
+                      )}
+
                     {(scLikesFilter === 'all' || scLikesFilter === 'likes') &&
                       scLikedTracks.length > 0 && (
                         <>
@@ -5897,7 +6296,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         </>
                       )}
 
-                    {scPlaylists.length === 0 && scLikedTracks.length === 0 && !cloudLoading && (
+                    {scPlaylists.length === 0 &&
+                      scLikedTracks.length === 0 &&
+                      scFollowings.length === 0 &&
+                      !cloudLoading && (
                       <div style={{ fontSize: 12, color: '#8e8e99', padding: '12px 4px' }}>
                         {snap?.soundcloud_authenticated
                           ? 'No SoundCloud likes or sets found yet.'
@@ -5908,7 +6310,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 )}
 
                 {/* ---------------------------------------------------------
-                    7. ⚡ SOUNDCLOUD STREAM & RADIO HUB (Chronological Feed + Track Radio)
+                    7. ⚡ SOUNDCLOUD STREAM & RADIO HUB (Following Stream + Listening History + Track Radio)
                    --------------------------------------------------------- */}
                 {browserSourceFilter === 'soundcloud' && soundCloudSubTab === 'stream_radio' && (
                   <>
@@ -5937,7 +6339,13 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         {(
                           [
                             { id: 'all', label: 'All' },
-                            { id: 'stream', label: `⚡ Activity Stream (${scStreamTracks.length})` },
+                            {
+                              id: 'history',
+                              label: `🕒 Listening History (${
+                                recentlyPlayed.filter((t) => t.source === 'soundcloud').length
+                              })`,
+                            },
+                            { id: 'stream', label: `⚡ Following Stream (${scStreamTracks.length})` },
                             { id: 'sets', label: `🎶 Reposted Sets (${scStreamPlaylists.length})` },
                           ] as const
                         ).map((f) => {
@@ -6013,6 +6421,27 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       </div>
                     </div>
 
+                    {(scStreamFilter === 'all' || scStreamFilter === 'history') &&
+                      recentlyPlayed.some((t) => t.source === 'soundcloud') && (
+                        <>
+                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
+                            🕒 LISTENING HISTORY IN SIMP (
+                            {recentlyPlayed.filter((t) => t.source === 'soundcloud').length})
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {recentlyPlayed
+                              .filter((t) => t.source === 'soundcloud')
+                              .map((s) =>
+                                renderSingleSongRow(
+                                  s,
+                                  recentlyPlayed.filter((t) => t.source === 'soundcloud'),
+                                  'sc_history'
+                                )
+                              )}
+                          </div>
+                        </>
+                      )}
+
                     {(scStreamFilter === 'all' || scStreamFilter === 'sets') &&
                       scStreamPlaylists.length > 0 && (
                         <>
@@ -6029,7 +6458,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       scStreamTracks.length > 0 && (
                         <>
                           <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>
-                            ⚡ CHRONOLOGICAL ACTIVITY STREAM ({scStreamTracks.length})
+                            ⚡ FOLLOWING STREAM — UPLOADS & REPOSTS FROM ARTISTS YOU FOLLOW (
+                            {scStreamTracks.length})
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                             {scStreamTracks.map((s) =>
@@ -6455,23 +6885,13 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
                 {(selectedAlbumObj?.art_url ||
                   selectedPlaylistObj?.cover_art_url ||
-                  (browserTarget &&
-                    (browserTarget.kind === 'cloud_album' ||
-                      browserTarget.kind === 'cloud_playlist' ||
-                      browserTarget.kind === 'ia_item' ||
-                      browserTarget.kind === 'cdda') &&
-                    browserTarget.art_url)) && (
+                  browserTarget?.art_url) && (
                   <img
                     src={
                       selectedAlbumObj?.art_url ||
                       selectedPlaylistObj?.cover_art_url ||
-                      (browserTarget &&
-                      (browserTarget.kind === 'cloud_album' ||
-                        browserTarget.kind === 'cloud_playlist' ||
-                        browserTarget.kind === 'ia_item' ||
-                        browserTarget.kind === 'cdda')
-                        ? browserTarget.art_url || ''
-                        : '')
+                      browserTarget?.art_url ||
+                      ''
                     }
                     alt=""
                     style={{
@@ -6500,13 +6920,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       ? selectedPlaylistObj.name
                       : selectedMountObj
                       ? `💾 ${selectedMountObj.label}`
-                      : browserTarget &&
-                        (browserTarget.kind === 'cloud_album' ||
-                          browserTarget.kind === 'cloud_playlist' ||
-                          browserTarget.kind === 'ia_item' ||
-                          browserTarget.kind === 'cdda')
-                      ? browserTarget.title
-                      : 'Tracks'}
+                      : browserTarget?.title || 'Tracks'}
                   </div>
                   <div style={{ fontSize: 12, color: '#8e8e99' }}>
                     {browserTarget?.kind === 'ia_item' &&
@@ -6520,12 +6934,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       : `${browserTracks.length} tracks`}
                     {selectedAlbumObj ? ` • ${selectedAlbumObj.album_artist}` : ''}
                     {selectedMountObj ? ` in ${selectedMountObj.mount_root}` : ''}
-                    {browserTarget &&
-                    (browserTarget.kind === 'cloud_album' ||
-                      browserTarget.kind === 'cloud_playlist' ||
-                      browserTarget.kind === 'ia_item' ||
-                      browserTarget.kind === 'cdda') &&
-                    browserTarget.subtitle
+                    {!selectedAlbumObj &&
+                    !selectedMountObj &&
+                    browserTarget?.subtitle
                       ? ` • ${browserTarget.subtitle}`
                       : ''}
                   </div>
@@ -6933,6 +7344,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   tabIndex={0}
                   data-focusable="true"
                   data-right-track="true"
+                  data-track-playing={track?.uri === t.uri ? 'true' : undefined}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
