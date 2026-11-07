@@ -34,7 +34,7 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
 * **Philip Deljanov & [`Symphonia`](https://github.com/pdeljanov/Symphonia) Contributors**:
   * Pure-Rust multimedia container demuxing (`ISOMP4`, `MKV`, `OGG`, `WAV`) and audio decoding (`FLAC`, `MP3`, `AAC-LC`, `Vorbis`, `PCM`) powering SIMP's local, optical, SoundCloud, Apple Music, and Internet Archive audio pipelines.
 * **[`Rodio`](https://github.com/RustAudio/rodio) & [`cpal`](https://github.com/RustAudio/cpal) Contributors**:
-  * Cross-platform audio output stream management across PipeWire, ALSA, PulseAudio, and Windows WASAPI.
+  * Cross-platform audio output stream management across Linux PipeWire/ALSA/PulseAudio, macOS CoreAudio, and Windows WASAPI.
 * **[`Lofty`](https://github.com/Serial-ATA/lofty-rs) Contributors**:
   * Pure-Rust audio metadata tag (`ID3v2`, `Vorbis Comments`, `MP4/iTunes` atoms) and embedded cover artwork extraction.
 * **PipeWire & PulseAudio Communities**:
@@ -66,7 +66,7 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
 
 ---
 
-## 6. SteamOS, Gamescope, OpenVR & Desktop Ecosystem
+## 6. SteamOS, Gamescope, OpenVR, macOS & Desktop Ecosystem
 
 * **Valve Corporation ([`SteamOS`](https://store.steampowered.com/steamos), [`Gamescope`](https://github.com/ValveSoftware/gamescope), and [`OpenVR`](https://github.com/ValveSoftware/openvr))**:
   * Reference for Valve Data Format (`libraryfolders.vdf`, `appmanifest_*.acf`, and binary `shortcuts.vdf`) parsing and SIMP's zero-dependency `libopenvr_api.so` `IVROverlay` C ABI bridge (`crates/simp-core/src/vr_overlay.rs`) for SteamVR / Steam Frame dashboard overlays.
@@ -74,3 +74,5 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
   * Reference and plugin host ecosystem for SIMP's optional Quick Access Menu (`decky-plugin`) companion drawer.
 * **freedesktop.org (`org.mpris.MediaPlayer2`) & KDE (`org.kde.StatusNotifierItem`)**:
   * D-Bus specifications powering SIMP's native media key arbitration and Linux desktop system tray integration.
+* **[`Souvlaki`](https://github.com/Sinono3/souvlaki), [`rust-objc`](https://github.com/SSheldon/rust-objc), [`core-foundation-rs`](https://github.com/servo/core-foundation-rs) & Apple macOS Frameworks (`AppKit`, `WebKit`, `MediaPlayer`, `IOKit`)**:
+  * Powers SIMP's native macOS application bundle (`src-tauri/src/macos_app.rs`), `NSStatusItem` Menu Bar tray, `WKWebView` presentation layer, `MPNowPlayingInfoCenter` / `MPRemoteCommandCenter` Control Center & media key integration (`crates/simp-core/src/mpris.rs`), and `IOHIDManager` USB/Bluetooth gamepad input reader (`crates/simp-core/src/gamepad.rs`).

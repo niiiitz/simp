@@ -49,6 +49,7 @@ pub fn resolve_ui_dir() -> Option<PathBuf> {
         if let Some(exe_dir) = exe.parent() {
             candidates.push(exe_dir.join("ui"));
             candidates.push(exe_dir.join("../ui"));
+            candidates.push(exe_dir.join("../Resources/ui"));
             candidates.push(exe_dir.join("../../ui/dist"));
         }
     }
@@ -75,7 +76,7 @@ pub fn detect_lan_ips() -> Vec<String> {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     if let Ok(out) = std::process::Command::new("hostname").arg("-I").output() {
         let text = String::from_utf8_lossy(&out.stdout);
         for token in text.split_whitespace() {
@@ -85,6 +86,23 @@ pub fn detect_lan_ips() -> Vec<String> {
                 && !ips.contains(&token.to_string())
             {
                 ips.push(token.to_string());
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for iface in ["en0", "en1"] {
+        if let Ok(out) = std::process::Command::new("ipconfig")
+            .args(["getifaddr", iface])
+            .output()
+        {
+            let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if ip.contains('.')
+                && !ip.starts_with("127.")
+                && !ip.starts_with("169.254.")
+                && !ips.contains(&ip)
+            {
+                ips.push(ip);
             }
         }
     }
@@ -121,7 +139,9 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/v1/system/perf", get(system_perf_handler))
         .route("/api/system/perf", get(system_perf_handler))
         .route("/api/update/check", get(update_check_handler))
+        .route("/api/update/channel", post(update_channel_handler))
         .route("/api/update/apply", post(update_apply_handler))
+        .route("/api/v1/transport", post(transport_handler))
         .route("/api/apple/playlists", get(apple_playlists_handler))
         .route("/api/apple/library-recent", get(apple_library_recent_handler))
         .route("/api/apple/playlist-tracks", get(apple_playlist_tracks_handler))
@@ -244,7 +264,14 @@ async fn system_perf_handler() -> impl IntoResponse {
     Json(snap)
 }
 
-async fn update_check_handler() -> impl IntoResponse {
+async fn update_check_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let channel = state
+        .settings
+        .lock()
+        .unwrap()
+        .provisioning
+        .update_channel
+        .clone();
     let res = tokio::task::spawn_blocking(simp_core::updater::check_for_updates).await;
     match res {
         Ok(Ok(status)) => Json(serde_json::json!({
@@ -256,19 +283,94 @@ async fn update_check_handler() -> impl IntoResponse {
             "release_url": status.release_url,
             "published_at": status.published_at,
             "target_arch": status.target_arch,
+            "channel": status.channel,
         })),
         Ok(Err(e)) => Json(serde_json::json!({
             "ok": false,
             "current_version": env!("CARGO_PKG_VERSION"),
             "target_arch": std::env::consts::ARCH,
+            "channel": channel,
             "error": e.to_string(),
         })),
         Err(e) => Json(serde_json::json!({
             "ok": false,
             "current_version": env!("CARGO_PKG_VERSION"),
             "target_arch": std::env::consts::ARCH,
+            "channel": channel,
             "error": e.to_string(),
         })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateChannelPayload {
+    channel: String,
+}
+
+async fn update_channel_handler(
+    State(state): State<DaemonIpcState>,
+    Json(payload): Json<UpdateChannelPayload>,
+) -> impl IntoResponse {
+    let channel = if payload.channel.trim().eq_ignore_ascii_case("stable") {
+        "stable".to_string()
+    } else {
+        "alpha".to_string()
+    };
+    {
+        let mut cfg = state.settings.lock().unwrap();
+        cfg.provisioning.update_channel = channel.clone();
+        let _ = crate::config::save_settings(&cfg);
+    }
+    let res = tokio::task::spawn_blocking(simp_core::updater::check_for_updates).await;
+    match res {
+        Ok(Ok(status)) => Json(serde_json::json!({
+            "ok": true,
+            "channel": status.channel,
+            "current_version": status.current_version,
+            "latest_version": status.latest_version,
+            "latest_tag": status.latest_tag,
+            "update_available": status.update_available,
+            "release_url": status.release_url,
+            "published_at": status.published_at,
+            "target_arch": status.target_arch,
+        })),
+        Ok(Err(e)) => Json(serde_json::json!({
+            "ok": true,
+            "channel": channel,
+            "current_version": env!("CARGO_PKG_VERSION"),
+            "target_arch": std::env::consts::ARCH,
+            "error": e.to_string(),
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "channel": channel,
+            "error": e.to_string(),
+        })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TransportCommandPayload {
+    command: String,
+}
+
+async fn transport_handler(
+    State(state): State<DaemonIpcState>,
+    Json(payload): Json<TransportCommandPayload>,
+) -> impl IntoResponse {
+    let cmd = match payload.command.as_str() {
+        "toggle_play_pause" => Some(AudioCommand::TogglePlayPause),
+        "play" => Some(AudioCommand::Play),
+        "pause" => Some(AudioCommand::Pause),
+        "next" => Some(AudioCommand::Next),
+        "previous" => Some(AudioCommand::Previous),
+        _ => None,
+    };
+    if let Some(c) = cmd {
+        let _ = state.cmd_tx.send(c);
+        Json(serde_json::json!({ "ok": true }))
+    } else {
+        Json(serde_json::json!({ "ok": false, "error": "Unknown transport command" }))
     }
 }
 

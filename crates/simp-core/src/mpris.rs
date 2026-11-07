@@ -65,10 +65,52 @@ pub fn apply_desktop_display_env(cmd: &mut Command) {
     }
 }
 
+static NATIVE_WINDOW_RAISER: std::sync::OnceLock<Box<dyn Fn() + Send + Sync + 'static>> =
+    std::sync::OnceLock::new();
+static INPROCESS_CMD_TX: std::sync::OnceLock<mpsc::UnboundedSender<AudioCommand>> =
+    std::sync::OnceLock::new();
+static INPROCESS_STATE: std::sync::OnceLock<Arc<Mutex<OrchestratorSnapshot>>> =
+    std::sync::OnceLock::new();
+
+/// Registers an in-process callback to raise/show the native desktop window (used by `SIMP.app` on macOS).
+pub fn set_native_window_raiser<F: Fn() + Send + Sync + 'static>(f: F) {
+    let _ = NATIVE_WINDOW_RAISER.set(Box::new(f));
+}
+
+/// Sends an `AudioCommand` directly to the in-process `AudioOrchestrator` if running in the same process.
+pub fn send_inprocess_audio_command(cmd: AudioCommand) -> bool {
+    if let Some(tx) = INPROCESS_CMD_TX.get() {
+        return tx.send(cmd).is_ok();
+    }
+    false
+}
+
+/// Returns a formatted `"🎵 Title — Artist"` summary and `is_playing` flag from the in-process `OrchestratorSnapshot`.
+pub fn current_now_playing_summary() -> Option<(String, bool)> {
+    let state = INPROCESS_STATE.get()?;
+    let st = state.lock().ok()?;
+    if let Some(ref t) = st.current_track {
+        let artist = t
+            .artists
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown Artist");
+        let icon = if st.is_playing { "🎵" } else { "⏸" };
+        Some((format!("{icon} {} — {artist}", t.title), st.is_playing))
+    } else {
+        Some(("🎵 SIMP — Idle".to_string(), st.is_playing))
+    }
+}
+
 /// Raises an existing `org.simp.player` window or launches the SIMP Desktop Application via
-/// `org.simp.player.desktop` (Linux) or `simp.exe` (Windows).
+/// `org.simp.player.desktop` (Linux) or `simp` / `simp.exe` (macOS / Windows).
 pub fn launch_simp_desktop_window() {
-    #[cfg(target_os = "windows")]
+    if let Some(raiser) = NATIVE_WINDOW_RAISER.get() {
+        raiser();
+        return;
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         if let Ok(exe) = std::env::current_exe() {
             let mut cmd = Command::new(exe);
@@ -81,7 +123,7 @@ pub fn launch_simp_desktop_window() {
         return;
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         // 1. If an `org.simp.player` window is already open on X11/XWayland, raise/activate it immediately
         let mut wmctrl = Command::new("wmctrl");
@@ -120,13 +162,14 @@ pub fn launch_simp_desktop_window() {
     }
 }
 
-/// Initializes the full Linux D-Bus `MPRIS2` (`org.mpris.MediaPlayer2.simp`) server.
-/// Exposes `DesktopEntry = "org.simp.player"`, `Raise` (click in KDE Media Player to open SIMP),
-/// `Quit`, `Shuffle`, `LoopStatus` (Repeat), `Volume`, `Seek`/`SetPosition`, and live artwork metadata.
+/// Initializes the OS media controls bridge (`MPRIS2` D-Bus on Linux, `MPNowPlayingInfoCenter` via `souvlaki` on macOS).
 pub fn initialize_mpris(
     state: Arc<Mutex<OrchestratorSnapshot>>,
     cmd_tx: mpsc::UnboundedSender<AudioCommand>,
 ) -> Option<MprisHandle> {
+    let _ = INPROCESS_STATE.set(state.clone());
+    let _ = INPROCESS_CMD_TX.set(cmd_tx.clone());
+
     #[cfg(target_os = "linux")]
     {
         let _ = std::thread::Builder::new()
@@ -136,10 +179,186 @@ pub fn initialize_mpris(
             });
         Some(MprisHandle)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::thread::Builder::new()
+            .name("simp-macos-nowplaying".to_string())
+            .spawn(move || {
+                macos_mpris::run_macos_now_playing_loop(state, cmd_tx);
+            });
+        Some(MprisHandle)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (state, cmd_tx);
         None
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_mpris {
+    use super::*;
+    use souvlaki::{
+        MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition,
+        PlatformConfig, SeekDirection,
+    };
+    use std::time::Duration;
+
+    fn normalize_cover_url(raw: Option<&str>) -> Option<String> {
+        let s = raw?.trim();
+        if s.is_empty() {
+            return None;
+        }
+        if s.starts_with('/') {
+            Some(format!("http://127.0.0.1:18888{s}"))
+        } else {
+            Some(s.to_string())
+        }
+    }
+
+    pub fn run_macos_now_playing_loop(
+        state: Arc<Mutex<OrchestratorSnapshot>>,
+        cmd_tx: mpsc::UnboundedSender<AudioCommand>,
+    ) {
+        // Attach MPRemoteCommandCenter on the main dispatch queue so macOS registers media keys cleanly
+        let tx_attach = cmd_tx.clone();
+        dispatch::Queue::main().exec_async(move || {
+            if let Ok(mut controls) = MediaControls::new(PlatformConfig {
+                dbus_name: "org.simp.player",
+                display_name: "SIMP",
+                hwnd: None,
+            }) {
+                let _ = controls.attach(move |event: MediaControlEvent| match event {
+                    MediaControlEvent::Play => {
+                        let _ = tx_attach.send(AudioCommand::Play);
+                    }
+                    MediaControlEvent::Pause | MediaControlEvent::Stop => {
+                        let _ = tx_attach.send(AudioCommand::Pause);
+                    }
+                    MediaControlEvent::Toggle => {
+                        let _ = tx_attach.send(AudioCommand::TogglePlayPause);
+                    }
+                    MediaControlEvent::Next => {
+                        let _ = tx_attach.send(AudioCommand::Next);
+                    }
+                    MediaControlEvent::Previous => {
+                        let _ = tx_attach.send(AudioCommand::Previous);
+                    }
+                    MediaControlEvent::SetPosition(MediaPosition(pos)) => {
+                        let _ = tx_attach.send(AudioCommand::Seek {
+                            position_ms: pos.as_millis() as u32,
+                        });
+                    }
+                    MediaControlEvent::Seek(dir) => {
+                        if let Some(st) = INPROCESS_STATE.get().and_then(|s| s.lock().ok()) {
+                            let cur = st.position_ms as i64;
+                            let next_pos = match dir {
+                                SeekDirection::Forward => (cur + 10_000).max(0) as u32,
+                                SeekDirection::Backward => (cur - 10_000).max(0) as u32,
+                            };
+                            let _ = tx_attach.send(AudioCommand::Seek {
+                                position_ms: next_pos,
+                            });
+                        }
+                    }
+                    MediaControlEvent::Raise => {
+                        launch_simp_desktop_window();
+                    }
+                    _ => {}
+                });
+                // Keep `controls` alive for the lifetime of the process
+                std::mem::forget(controls);
+            }
+        });
+
+        let mut last_meta_sig = String::new();
+        let mut last_play_sig = String::new();
+
+        loop {
+            std::thread::sleep(Duration::from_millis(450));
+
+            let (current_track, is_playing, position_ms) = {
+                let Ok(st) = state.lock() else {
+                    continue;
+                };
+                (st.current_track.clone(), st.is_playing, st.position_ms)
+            };
+
+            let meta_sig = if let Some(ref t) = current_track {
+                format!(
+                    "{}|{}|{}|{}|{}",
+                    t.uri,
+                    t.title,
+                    t.artists.join(","),
+                    t.album,
+                    t.art_url.as_deref().unwrap_or("")
+                )
+            } else {
+                String::new()
+            };
+
+            let play_bucket = position_ms / 2000;
+            let play_sig = format!("{}|{}|{}", meta_sig, is_playing, play_bucket);
+
+            if meta_sig != last_meta_sig {
+                last_meta_sig = meta_sig.clone();
+                if let Some(track) = current_track.clone() {
+                    let cover = normalize_cover_url(track.art_url.as_deref());
+                    dispatch::Queue::main().exec_async(move || {
+                        if let Ok(mut controls) = MediaControls::new(PlatformConfig {
+                            dbus_name: "org.simp.player",
+                            display_name: "SIMP",
+                            hwnd: None,
+                        }) {
+                            let artist = if track.artists.is_empty() {
+                                None
+                            } else {
+                                Some(track.artists.join(", "))
+                            };
+                            let album = if track.album.is_empty() {
+                                None
+                            } else {
+                                Some(track.album.as_str())
+                            };
+                            let duration = if track.duration_ms > 0 {
+                                Some(Duration::from_millis(track.duration_ms as u64))
+                            } else {
+                                None
+                            };
+                            let _ = controls.set_metadata(MediaMetadata {
+                                title: Some(track.title.as_str()),
+                                artist: artist.as_deref(),
+                                album,
+                                duration,
+                                cover_url: cover.as_deref(),
+                            });
+                        }
+                    });
+                }
+            }
+
+            if play_sig != last_play_sig {
+                last_play_sig = play_sig;
+                let has_track = current_track.is_some();
+                dispatch::Queue::main().exec_async(move || {
+                    if let Ok(mut controls) = MediaControls::new(PlatformConfig {
+                        dbus_name: "org.simp.player",
+                        display_name: "SIMP",
+                        hwnd: None,
+                    }) {
+                        let progress = Some(MediaPosition(Duration::from_millis(position_ms as u64)));
+                        let pb = if !has_track {
+                            MediaPlayback::Stopped
+                        } else if is_playing {
+                            MediaPlayback::Playing { progress }
+                        } else {
+                            MediaPlayback::Paused { progress }
+                        };
+                        let _ = controls.set_playback(pb);
+                    }
+                });
+            }
+        }
     }
 }
 

@@ -1444,8 +1444,8 @@ impl AudioOrchestrator {
                 }
             }
             Err(e) => {
-                tracing::warn!("AudioSink failed to load track {}: {e}", track.uri);
-                self.handle_track_load_failure(&e.to_string());
+                tracing::warn!("AudioSink failed to load track {}: {e:#}", track.uri);
+                self.handle_track_load_failure(&format!("{e:#}"));
                 return;
             }
         }

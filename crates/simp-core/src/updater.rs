@@ -1,4 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+#[cfg(not(target_os = "macos"))]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -13,6 +15,7 @@ pub struct UpdateStatus {
     pub published_at: Option<String>,
     pub target_arch: String,
     pub asset_url: Option<String>,
+    pub channel: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,7 +28,7 @@ pub struct UpdateApplyResult {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct GithubReleaseAsset {
+pub(crate) struct GithubReleaseAsset {
     name: String,
     browser_download_url: String,
     #[serde(default)]
@@ -33,11 +36,13 @@ struct GithubReleaseAsset {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct GithubReleaseItem {
+pub(crate) struct GithubReleaseItem {
     tag_name: String,
     html_url: String,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    prerelease: bool,
     published_at: Option<String>,
     #[serde(default)]
     assets: Vec<GithubReleaseAsset>,
@@ -82,24 +87,55 @@ fn load_provisioning_settings() -> simp_protocol::ProvisioningSettings {
     simp_protocol::ProvisioningSettings::default()
 }
 
-/// Finds the matching architecture tarball URL inside a GitHub release's `assets` list.
-fn find_arch_asset_url(release: &GithubReleaseItem, arch: &str) -> Option<String> {
-    let primary_name = format!("simp-steamos-userland-{arch}.tar.gz");
-    if let Some(asset) = release.assets.iter().find(|a| {
-        a.name == primary_name && (a.state.is_empty() || a.state == "uploaded")
-    }) {
-        return Some(asset.browser_download_url.clone());
-    }
-    // On x86_64, also accept the generic `simp-steamos-userland.tar.gz` archive
-    if arch == "x86_64" {
+/// Finds the matching architecture asset URL inside a GitHub release's `assets` list for `(os, arch)`.
+pub(crate) fn find_platform_arch_asset_url(
+    release: &GithubReleaseItem,
+    os: &str,
+    arch: &str,
+) -> Option<String> {
+    let candidates: Vec<String> = match os {
+        "macos" => {
+            if arch == "aarch64" {
+                vec![
+                    "SIMP-macos-arm64.zip".to_string(),
+                    "SIMP-macos-aarch64.zip".to_string(),
+                    "SIMP-macos-universal.zip".to_string(),
+                ]
+            } else {
+                vec![
+                    format!("SIMP-macos-{arch}.zip"),
+                    "SIMP-macos-universal.zip".to_string(),
+                ]
+            }
+        }
+        "windows" => vec![
+            format!("simp-windows-portable-{arch}.zip"),
+            "simp-windows-portable.zip".to_string(),
+        ],
+        _ => {
+            if arch == "x86_64" {
+                vec![
+                    format!("simp-steamos-userland-{arch}.tar.gz"),
+                    "simp-steamos-userland.tar.gz".to_string(),
+                ]
+            } else {
+                vec![format!("simp-steamos-userland-{arch}.tar.gz")]
+            }
+        }
+    };
+
+    for candidate in candidates {
         if let Some(asset) = release.assets.iter().find(|a| {
-            a.name == "simp-steamos-userland.tar.gz"
-                && (a.state.is_empty() || a.state == "uploaded")
+            a.name == candidate && (a.state.is_empty() || a.state == "uploaded")
         }) {
             return Some(asset.browser_download_url.clone());
         }
     }
     None
+}
+
+fn find_arch_asset_url(release: &GithubReleaseItem, arch: &str) -> Option<String> {
+    find_platform_arch_asset_url(release, std::env::consts::OS, arch)
 }
 
 fn fetch_github_releases_bytes(api_url: &str) -> Result<Vec<u8>> {
@@ -150,12 +186,23 @@ fn fetch_github_releases_bytes(api_url: &str) -> Result<Vec<u8>> {
     Err(anyhow!("GitHub Releases API request failed for {api_url}"))
 }
 
+pub(crate) fn is_stable_release_item(r: &GithubReleaseItem) -> bool {
+    let tag = r.tag_name.trim();
+    !r.prerelease && !tag.contains("-alpha") && !tag.contains("-beta") && !tag.contains("-rc")
+}
+
 /// Queries GitHub Releases (`niiiitz/simp` or configured `github_releases_api_url` in `settings.vdf`)
-/// for the newest release that provides a build for the current CPU architecture (`aarch64` or `x86_64`).
+/// for the newest release on the configured channel (`"alpha"` vs `"stable"`) that provides a build
+/// for the current OS & CPU architecture (`aarch64` or `x86_64`).
 pub fn check_for_updates() -> Result<UpdateStatus> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let target_arch = std::env::consts::ARCH.to_string();
     let prov = load_provisioning_settings();
+    let channel = if prov.update_channel.trim().eq_ignore_ascii_case("stable") {
+        "stable".to_string()
+    } else {
+        "alpha".to_string()
+    };
     let api_url = if prov.github_releases_api_url.trim().is_empty() {
         "https://api.github.com/repos/niiiitz/simp/releases?per_page=10"
     } else {
@@ -170,9 +217,30 @@ pub fn check_for_updates() -> Result<UpdateStatus> {
     let valid_releases: Vec<GithubReleaseItem> = releases
         .into_iter()
         .filter(|r| !r.draft && !r.tag_name.trim().is_empty())
+        .filter(|r| {
+            if channel == "stable" {
+                is_stable_release_item(r)
+            } else {
+                true
+            }
+        })
         .collect();
 
-    // Prefer the newest release that actually has the current architecture's tarball uploaded
+    if valid_releases.is_empty() && channel == "stable" {
+        return Ok(UpdateStatus {
+            current_version: current_version.clone(),
+            latest_version: current_version,
+            latest_tag: "No stable release yet".to_string(),
+            update_available: false,
+            release_url: "https://github.com/niiiitz/simp/releases".to_string(),
+            published_at: None,
+            target_arch,
+            asset_url: None,
+            channel,
+        });
+    }
+
+    // Prefer the newest release that actually has the current OS/architecture's asset uploaded
     let newest = valid_releases
         .iter()
         .filter(|r| find_arch_asset_url(r, &target_arch).is_some())
@@ -197,9 +265,11 @@ pub fn check_for_updates() -> Result<UpdateStatus> {
         published_at: newest.published_at.clone(),
         target_arch,
         asset_url,
+        channel,
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -233,7 +303,26 @@ pub fn spawn_delayed_daemon_restart() {
         return;
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        let pid = std::process::id();
+        let exe_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "/Applications/SIMP.app/Contents/MacOS/simp".to_string());
+        let script = format!(
+            "sleep 0.50; kill -TERM {pid} 2>/dev/null || true; sleep 0.25; nohup \"{exe_path}\" >/dev/null 2>&1 &"
+        );
+        let _ = Command::new("sh")
+            .args(["-c", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        return;
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let script = "sleep 0.45; \
             export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; \
@@ -293,6 +382,13 @@ pub fn apply_self_update(
         // Still allow reinstalling if explicitly requested
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        return apply_macos_self_update(&status, &tag, &target_ver, restart_daemon_after);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine HOME directory"))?;
     let install_root = home.join(".local/share/simp");
     let bin_dest_dir = install_root.join("bin");
@@ -393,6 +489,35 @@ pub fn apply_self_update(
     let dest_bin = bin_dest_dir.join("simp");
     let dest_bin_new = bin_dest_dir.join("simp.new");
     let _ = std::fs::remove_file(&dest_bin_new);
+    if std::fs::copy(&src_bin, &dest_bin_new).is_err() {
+        #[cfg(unix)]
+        {
+            let uid = unsafe { libc::getuid() };
+            let gid = unsafe { libc::getgid() };
+            let install_str = install_root.to_string_lossy().to_string();
+            let systemd_str = home.join(".config/systemd").to_string_lossy().to_string();
+            let fix_userland_cmd = format!(
+                "chown -R {uid}:{gid} \"{install_str}\" \"{systemd_str}\" 2>/dev/null || true"
+            );
+            let _ = Command::new("sudo")
+                .args(["-n", "sh", "-c", &fix_userland_cmd])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if std::fs::copy(&src_bin, &dest_bin_new).is_err()
+                && (std::env::var_os("DISPLAY").is_some()
+                    || std::env::var_os("WAYLAND_DISPLAY").is_some())
+            {
+                let _ = Command::new("pkexec")
+                    .args(["sh", "-c", &fix_userland_cmd])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+    }
     std::fs::copy(&src_bin, &dest_bin_new).with_context(|| {
         format!(
             "Failed to write {} (if previously installed with sudo, run: sudo chown -R $USER:$USER ~/.local/share/simp)",
@@ -406,19 +531,55 @@ pub fn apply_self_update(
     }
     std::fs::rename(&dest_bin_new, &dest_bin)?;
 
-    // Also update `uninstall-steamos.sh` in `~/.local/share/simp/bin/` if present in the bundle
-    let src_uninstall = extracted_root.join("uninstall-steamos.sh");
-    if src_uninstall.is_file() {
-        let dest_uninstall = bin_dest_dir.join("uninstall-steamos.sh");
-        let _ = std::fs::remove_file(&dest_uninstall);
-        if std::fs::copy(&src_uninstall, &dest_uninstall).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &dest_uninstall,
-                    std::fs::Permissions::from_mode(0o755),
+    // Also update `install-steamos.sh` & `uninstall-steamos.sh` in `~/.local/share/simp/bin/` if present in the bundle
+    for script_name in ["install-steamos.sh", "uninstall-steamos.sh"] {
+        let src_script = extracted_root.join(script_name);
+        if src_script.is_file() {
+            let dest_script = bin_dest_dir.join(script_name);
+            let _ = std::fs::remove_file(&dest_script);
+            if std::fs::copy(&src_script, &dest_script).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &dest_script,
+                        std::fs::Permissions::from_mode(0o755),
+                    );
+                }
+            }
+        }
+    }
+
+    // Also update `~/.config/systemd/user/simp.service` and `~/.local/share/applications/org.simp.player.desktop`
+    let src_service = extracted_root.join("systemd/simp.service");
+    if src_service.is_file() {
+        let systemd_user_dir = home.join(".config/systemd/user");
+        let _ = std::fs::create_dir_all(&systemd_user_dir);
+        let dest_service = systemd_user_dir.join("simp.service");
+        let _ = std::fs::copy(&src_service, &dest_service);
+    }
+
+    let src_desktop = extracted_root.join("desktop/org.simp.player.desktop");
+    if src_desktop.is_file() {
+        if let Ok(raw_desktop) = std::fs::read_to_string(&src_desktop) {
+            let apps_dir = home.join(".local/share/applications");
+            let _ = std::fs::create_dir_all(&apps_dir);
+            let rendered = raw_desktop
+                .replace("__SIMP_BIN__", &dest_bin.to_string_lossy())
+                .replace(
+                    "__SIMP_ICON__",
+                    &ui_dest_dir.join("simp-icon-dark.png").to_string_lossy(),
                 );
+            let dest_desktop = apps_dir.join("org.simp.player.desktop");
+            if std::fs::write(&dest_desktop, rendered).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &dest_desktop,
+                        std::fs::Permissions::from_mode(0o755),
+                    );
+                }
             }
         }
     }
@@ -526,6 +687,28 @@ pub fn apply_self_update(
                     if copy_dir_contents(&src_decky, &decky_target).is_ok() {
                         decky_updated = true;
                     }
+                } else if std::env::var_os("DISPLAY").is_some()
+                    || std::env::var_os("WAYLAND_DISPLAY").is_some()
+                {
+                    // 3c. Running from GUI on KDE/Desktop Linux where Decky directory is owned by root — try pkexec
+                    let _ = Command::new("pkexec")
+                        .args([
+                            "sh",
+                            "-c",
+                            fix_perms_cmd,
+                            "--",
+                            &target_str,
+                            &uid_str,
+                            &gid_str,
+                            &plugins_str,
+                        ])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                    if copy_dir_contents(&src_decky, &decky_target).is_ok() {
+                        decky_updated = true;
+                    }
                 }
             }
         }
@@ -570,6 +753,141 @@ pub fn apply_self_update(
         decky_updated,
         message: msg,
     })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_app_bundle_dest() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors() {
+            if ancestor
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("app"))
+                .unwrap_or(false)
+            {
+                return ancestor.to_path_buf();
+            }
+        }
+    }
+    let sys_app = PathBuf::from("/Applications/SIMP.app");
+    if sys_app.exists() || Path::new("/Applications").exists() {
+        return sys_app;
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("Applications/SIMP.app")
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_self_update(
+    status: &UpdateStatus,
+    tag: &str,
+    target_ver: &str,
+    restart_after: bool,
+) -> Result<UpdateApplyResult> {
+    let tmp_dir = PathBuf::from(format!("/tmp/simp-macos-update-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir)?;
+
+    let arch_slug = if std::env::consts::ARCH == "aarch64" {
+        "arm64"
+    } else {
+        std::env::consts::ARCH
+    };
+    let zip_path = tmp_dir.join(format!("SIMP-macos-{arch_slug}.zip"));
+    let download_url = status.asset_url.clone().unwrap_or_else(|| {
+        format!("https://github.com/niiiitz/simp/releases/download/{tag}/SIMP-macos-{arch_slug}.zip")
+    });
+
+    let dl_ok = Command::new("curl")
+        .args([
+            "-4",
+            "--http1.1",
+            "--retry",
+            "2",
+            "-fsSL",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "180",
+            "-o",
+        ])
+        .arg(&zip_path)
+        .arg(&download_url)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !dl_ok {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(anyhow!(
+            "Failed to download macOS release bundle from {download_url}"
+        ));
+    }
+
+    let extract_dir = tmp_dir.join("extracted");
+    std::fs::create_dir_all(&extract_dir)?;
+    let ditto_ok = Command::new("ditto")
+        .args(["-x", "-k"])
+        .arg(&zip_path)
+        .arg(&extract_dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !ditto_ok {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(anyhow!("Failed to extract {download_url} with ditto"));
+    }
+
+    let staged_app = extract_dir.join("SIMP.app");
+    if !staged_app.join("Contents/MacOS/simp").is_file() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(anyhow!(
+            "Downloaded macOS archive did not contain SIMP.app/Contents/MacOS/simp"
+        ));
+    }
+
+    let dest_app = resolve_macos_app_bundle_dest();
+    if let Some(parent) = dest_app.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::remove_dir_all(&dest_app);
+    let copy_ok = Command::new("ditto")
+        .arg(&staged_app)
+        .arg(&dest_app)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    if !copy_ok {
+        return Err(anyhow!(
+            "Failed to install updated SIMP.app into {}",
+            dest_app.display()
+        ));
+    }
+
+    let _ = Command::new("xattr")
+        .args(["-cr"])
+        .arg(&dest_app)
+        .status();
+
+    if restart_after {
+        spawn_delayed_daemon_restart();
+    }
+
+    Ok(UpdateApplyResult {
+        ok: true,
+        previous_version: status.current_version.clone(),
+        updated_version: target_ver.to_string(),
+        decky_updated: false,
+        message: format!(
+            "Updated SIMP.app ({}) to v{target_ver}",
+            dest_app.display()
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -587,11 +905,12 @@ mod tests {
     }
 
     #[test]
-    fn test_find_arch_asset_url_matches_architecture() {
+    fn test_find_platform_arch_asset_url_matches_os_and_architecture() {
         let rel = GithubReleaseItem {
             tag_name: "v0.1.0-alpha.40".to_string(),
             html_url: "https://github.com/niiiitz/simp/releases/tag/v0.1.0-alpha.40".to_string(),
             draft: false,
+            prerelease: true,
             published_at: None,
             assets: vec![
                 GithubReleaseAsset {
@@ -604,15 +923,25 @@ mod tests {
                     browser_download_url: "https://example.com/x86_64.tar.gz".to_string(),
                     state: "uploaded".to_string(),
                 },
+                GithubReleaseAsset {
+                    name: "SIMP-macos-arm64.zip".to_string(),
+                    browser_download_url: "https://example.com/SIMP-macos-arm64.zip".to_string(),
+                    state: "uploaded".to_string(),
+                },
             ],
         };
         assert_eq!(
-            find_arch_asset_url(&rel, "aarch64").as_deref(),
+            find_platform_arch_asset_url(&rel, "linux", "aarch64").as_deref(),
             Some("https://example.com/aarch64.tar.gz")
         );
         assert_eq!(
-            find_arch_asset_url(&rel, "x86_64").as_deref(),
+            find_platform_arch_asset_url(&rel, "linux", "x86_64").as_deref(),
             Some("https://example.com/x86_64.tar.gz")
         );
+        assert_eq!(
+            find_platform_arch_asset_url(&rel, "macos", "aarch64").as_deref(),
+            Some("https://example.com/SIMP-macos-arm64.zip")
+        );
+        assert!(!is_stable_release_item(&rel));
     }
 }

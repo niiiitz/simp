@@ -466,10 +466,14 @@ export async function pinSoundCloudPlaylistToSimp(
   onToast?: (msg: string) => void
 ): Promise<number> {
   onToast?.(`Pinning "${playlist.name}" to SIMP...`);
-  const tracks =
+  let tracks =
     preloadedTracks && preloadedTracks.length > 0
       ? preloadedTracks
-      : await fetchSoundCloudPlaylistTracks(playlist.id);
+      : await fetchSoundCloudPlaylistTracks(playlist.id).catch(() => []);
+
+  if (tracks.length === 0 && playlist.tracks && playlist.tracks.length > 0) {
+    tracks = playlist.tracks;
+  }
 
   if (tracks.length === 0) {
     throw new Error(`No playable tracks found in "${playlist.name}"`);

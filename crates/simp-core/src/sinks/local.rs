@@ -215,14 +215,13 @@ impl LocalAudioEngine {
                 .with_context(|| format!("Failed to load native Internet Archive stream: {uri}"))?;
             sink.append(source);
         } else {
-            let file_path_str = uri.strip_prefix("file://").unwrap_or(uri);
-            let path = Path::new(file_path_str);
-            let file = File::open(path)
+            let path = resolve_local_file_path(uri);
+            let file = File::open(&path)
                 .with_context(|| format!("Failed to open audio file: {}", path.display()))?;
 
             // Build seekable Symphonia decoder directly over `std::fs::File` (so `byte_len()` returns
             // `Some(file_len)` for `.m4a` ISOMP4 files with trailing `moov` atoms and never panics)
-            let source = SymphoniaFileSource::from_file(file, path)
+            let source = SymphoniaFileSource::from_file(file, &path)
                 .with_context(|| format!("Failed to decode audio file: {}", path.display()))?;
 
             sink.append(source);
@@ -385,10 +384,9 @@ impl LocalAudioEngine {
                     )?;
                 sink.append(source);
             } else {
-                let file_path_str = uri.strip_prefix("file://").unwrap_or(&uri);
-                let path = Path::new(file_path_str);
-                let file = File::open(path)?;
-                let source = SymphoniaFileSource::from_file(file, path)?;
+                let path = resolve_local_file_path(&uri);
+                let file = File::open(&path)?;
+                let source = SymphoniaFileSource::from_file(file, &path)?;
                 let skipped = source.skip_duration(target);
                 sink.append(skipped);
             }
@@ -457,9 +455,12 @@ impl crate::sinks::AudioSink for LocalAudioEngine {
         internal_event_tx: &mpsc::UnboundedSender<PlaybackEvent>,
         _broadcast_tx: &tokio::sync::broadcast::Sender<PlaybackEvent>,
     ) -> Result<()> {
-        if !uri.starts_with("cdda://") {
-            let file_path = uri.strip_prefix("file://").unwrap_or(uri);
-            if !Path::new(file_path).exists() {
+        if !uri.starts_with("cdda://")
+            && !uri.starts_with("ia:audio:")
+            && !uri.starts_with("ia://audio/")
+        {
+            let file_path = resolve_local_file_path(uri);
+            if !file_path.exists() {
                 return Err(anyhow!("Offline/unplugged storage mount"));
             }
         }
@@ -649,13 +650,34 @@ pub struct SymphoniaFileSource {
 
 impl SymphoniaFileSource {
     pub fn from_file(file: File, path: &Path) -> Result<Self> {
+        let ext = path.extension().and_then(|e| e.to_str());
+        match Self::from_media_source(Box::new(file), ext) {
+            Ok(src) => Ok(src),
+            Err(primary_err) => {
+                // Fallback for codecs not natively handled by Symphonia 0.5 (e.g., `.opus`, xHE-AAC, WMA):
+                // transcode to 16-bit PCM WAV in memory via `ffmpeg` or macOS CoreAudio `/usr/bin/afconvert`.
+                match transcode_file_to_wav_cursor(path) {
+                    Ok(wav_cursor) => Self::from_media_source(Box::new(wav_cursor), Some("wav"))
+                        .with_context(|| {
+                            format!(
+                                "Primary decode error ({primary_err:#}); fallback WAV decode also failed"
+                            )
+                        }),
+                    Err(_) => Err(primary_err),
+                }
+            }
+        }
+    }
+
+    pub fn from_media_source(media_source: Box<dyn MediaSource>, ext_hint: Option<&str>) -> Result<Self> {
         let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if let Some(ext) = ext_hint {
             hint.with_extension(ext);
         }
 
-        // `std::fs::File` implements `MediaSource` with `is_seekable() == true` and `byte_len() == Some(len)`!
-        let mss = MediaSourceStream::new(Box::new(file) as Box<dyn MediaSource>, Default::default());
+        // `std::fs::File` and `std::io::Cursor<Vec<u8>>` implement `MediaSource` with
+        // `is_seekable() == true` and `byte_len() == Some(len)`!
+        let mss = MediaSourceStream::new(media_source, Default::default());
         let format_opts = FormatOptions {
             enable_gapless: true,
             ..Default::default()
@@ -688,7 +710,7 @@ impl SymphoniaFileSource {
 
         let mut decoder = get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
-            .map_err(|e| anyhow!("Unsupported audio codec: {e}"))?;
+            .map_err(|e| anyhow!("Unsupported audio codec ({:?}): {e}", track.codec_params.codec))?;
 
         let mut decode_errors = 0usize;
         let decoded = loop {
@@ -733,6 +755,118 @@ impl SymphoniaFileSource {
         buffer.copy_interleaved_ref(decoded);
         buffer
     }
+}
+
+fn resolve_local_file_path(uri: &str) -> std::path::PathBuf {
+    let raw = uri.strip_prefix("file://").unwrap_or(uri);
+    let direct = Path::new(raw);
+    if direct.exists() || !raw.contains('%') {
+        return direct.to_path_buf();
+    }
+    let decoded = percent_decode_path(raw);
+    let decoded_path = std::path::PathBuf::from(&decoded);
+    if decoded_path.exists() {
+        decoded_path
+    } else {
+        direct.to_path_buf()
+    }
+}
+
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push(((hi << 4) | lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn transcode_file_to_wav_cursor(path: &Path) -> Result<std::io::Cursor<Vec<u8>>> {
+    // 1. Try `ffmpeg` (Linux / Windows / macOS Homebrew)
+    for ffmpeg_bin in ["ffmpeg", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+        if let Ok(output) = std::process::Command::new(ffmpeg_bin)
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args([
+                "-vn",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "44100",
+                "-ac",
+                "2",
+                "-f",
+                "wav",
+                "-",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            if output.status.success() && output.stdout.len() > 64 {
+                tracing::info!(
+                    "Decoded audio file via {} fallback: {}",
+                    ffmpeg_bin,
+                    path.display()
+                );
+                return Ok(std::io::Cursor::new(output.stdout));
+            }
+        }
+    }
+
+    // 2. macOS built-in CoreAudio `/usr/bin/afconvert` fallback
+    #[cfg(target_os = "macos")]
+    {
+        let afconvert = Path::new("/usr/bin/afconvert");
+        if afconvert.is_file() {
+            let tmp_wav = std::env::temp_dir().join(format!(
+                "simp-afconvert-{}-{}.wav",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            let status = std::process::Command::new(afconvert)
+                .args(["-f", "WAVE", "-d", "LEI16@44100"])
+                .arg(path)
+                .arg(&tmp_wav)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if let Ok(st) = status {
+                if st.success() {
+                    if let Ok(bytes) = std::fs::read(&tmp_wav) {
+                        let _ = std::fs::remove_file(&tmp_wav);
+                        if bytes.len() > 64 {
+                            tracing::info!(
+                                "Decoded audio file via macOS CoreAudio afconvert fallback: {}",
+                                path.display()
+                            );
+                            return Ok(std::io::Cursor::new(bytes));
+                        }
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&tmp_wav);
+        }
+    }
+
+    Err(anyhow!("No external audio transcoder succeeded"))
 }
 
 impl Iterator for SymphoniaFileSource {

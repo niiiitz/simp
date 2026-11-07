@@ -193,6 +193,11 @@ pub fn sample_daemon_perf() -> DaemonPerfSnapshot {
             format!("windows-{}", std::env::consts::ARCH),
             "WASAPI (Rodio)".to_string(),
         )
+    } else if cfg!(target_os = "macos") {
+        (
+            format!("macos-{}", std::env::consts::ARCH),
+            "CoreAudio (Rodio)".to_string(),
+        )
     } else {
         (
             format!("linux-{}", std::env::consts::ARCH),
@@ -306,7 +311,41 @@ fn read_process_ticks_and_rss() -> (u64, f64, f64) {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
+fn read_process_ticks_and_rss() -> (u64, f64, f64) {
+    unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        let mut total_us = 0u64;
+        if libc::getrusage(libc::RUSAGE_SELF, &mut usage) == 0 {
+            let u_us = (usage.ru_utime.tv_sec as u64)
+                .saturating_mul(1_000_000)
+                .saturating_add(usage.ru_utime.tv_usec as u64);
+            let s_us = (usage.ru_stime.tv_sec as u64)
+                .saturating_mul(1_000_000)
+                .saturating_add(usage.ru_stime.tv_usec as u64);
+            total_us = u_us.saturating_add(s_us);
+        }
+
+        let mut task_info: libc::proc_taskinfo = std::mem::zeroed();
+        let info_size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let ret = libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut task_info as *mut _ as *mut libc::c_void,
+            info_size,
+        );
+        let rss_mb = if ret == info_size {
+            (task_info.pti_resident_size as f64) / (1024.0 * 1024.0)
+        } else {
+            (usage.ru_maxrss as f64) / (1024.0 * 1024.0)
+        };
+
+        (total_us, 1_000_000.0, rss_mb)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn read_process_ticks_and_rss() -> (u64, f64, f64) {
     (0, 100.0, 0.0)
 }

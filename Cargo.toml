@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.61"
+version = "0.1.0-alpha.62"
 edition = "2021"
 license = "LicenseRef-Proprietary"
 authors = ["niiiitz"]
@@ -29,7 +29,7 @@ walkdir = "2.5"
 lofty = "0.21"
 blake3 = "1.5"
 rodio = { version = "0.19", default-features = false, features = ["symphonia-all"] }
-symphonia = { version = "0.5.4", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "vorbis", "wav"] }
+symphonia = { version = "0.5.4", default-features = false, features = ["all"] }
 souvlaki = "0.7"
 moka = { version = "0.12", features = ["future"] }
 axum = { version = "0.7", features = ["ws"] }
@@ -41,6 +41,12 @@ libc = "0.2"
 sha1 = "0.10"
 dbus = "0.9"
 dbus-crossroads = "0.5"
+objc = "0.2.7"
+cocoa = "0.24.1"
+core-foundation = "0.9.4"
+core-graphics = "0.22.3"
+block = "0.1.6"
+dispatch = "0.2.0"
 
 # Micro-Footprint Release Profile for SteamOS / gamescope
 [profile.release]

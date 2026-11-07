@@ -1,6 +1,11 @@
+#![allow(unexpected_cfgs)]
+
 use std::net::{SocketAddr, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+#[cfg(target_os = "macos")]
+pub mod macos_app;
 
 /// Ensures `simp --daemon` is listening on `127.0.0.1:18888`.
 /// If not running, spawns `simp --daemon` as a detached background process.
@@ -49,30 +54,43 @@ pub fn ensure_daemon_running() {
 }
 
 pub fn run_ui() {
-    ensure_daemon_running();
     let ui_url = "http://127.0.0.1:18888";
-    println!("SIMP daemon verified online at {ui_url} (IPC: ws://127.0.0.1:18888/ws)");
 
-    if std::env::var("SIMP_NO_WINDOW").ok().as_deref() == Some("1") {
-        return;
-    }
-
-    let profile_dir_path = simp_core::simp_data_dir().join("window-profile");
-    let _ = std::fs::create_dir_all(&profile_dir_path);
-    // Create the Chromium "First Run" sentinel file and clear any stale Crash/Singleton locks
-    let _ = std::fs::File::create(profile_dir_path.join("First Run"));
-    for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"] {
-        let _ = std::fs::remove_file(profile_dir_path.join(lock_name));
-    }
-    let user_data_arg = format!("--user-data-dir={}", profile_dir_path.to_string_lossy());
-
-    #[cfg(target_os = "windows")]
+    #[cfg(target_os = "macos")]
     {
-        run_windows_ui(ui_url, &profile_dir_path, &user_data_arg);
-        return;
+        if std::env::var("SIMP_NO_WINDOW").ok().as_deref() == Some("1") {
+            ensure_daemon_running();
+            return;
+        }
+        macos_app::run_macos_native_app(ui_url);
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(target_os = "macos"))]
+    {
+        ensure_daemon_running();
+        println!("SIMP daemon verified online at {ui_url} (IPC: ws://127.0.0.1:18888/ws)");
+
+        if std::env::var("SIMP_NO_WINDOW").ok().as_deref() == Some("1") {
+            return;
+        }
+
+        let profile_dir_path = simp_core::simp_data_dir().join("window-profile");
+        let _ = std::fs::create_dir_all(&profile_dir_path);
+        // Create the Chromium "First Run" sentinel file and clear any stale Crash/Singleton locks
+        let _ = std::fs::File::create(profile_dir_path.join("First Run"));
+        for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"] {
+            let _ = std::fs::remove_file(profile_dir_path.join(lock_name));
+        }
+        let user_data_arg = format!("--user-data-dir={}", profile_dir_path.to_string_lossy());
+
+        #[cfg(target_os = "windows")]
+        {
+            run_windows_ui(ui_url, &profile_dir_path, &user_data_arg);
+            return;
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         // Ensure DISPLAY / WAYLAND_DISPLAY are populated even if invoked from a background D-Bus/systemd context
         let mut wmctrl = Command::new("wmctrl");
@@ -226,4 +244,5 @@ fn run_windows_ui(ui_url: &str, profile_dir: &std::path::Path, user_data_arg: &s
     simp_core::configure_background_command(&mut fallback);
     let _ = fallback.spawn();
 }
+
 

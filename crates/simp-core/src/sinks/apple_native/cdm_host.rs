@@ -40,6 +40,53 @@ const fn platform_cdm_filename() -> &'static str {
     }
 }
 
+static NATIVE_CDM_VMP_REJECTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_native_cdm_vmp_rejected() -> bool {
+    NATIVE_CDM_VMP_REJECTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn mark_native_cdm_vmp_rejected(reason: &str) {
+    if !NATIVE_CDM_VMP_REJECTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        tracing::info!(
+            "Native Widevine CDM unavailable ({reason}); delegating Apple Music playback to in-app WebKit/MusicKit worker"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn verify_macos_cdm_usable_once(lib_path: &Path) -> bool {
+    static MACOS_CDM_VERIFIED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MACOS_CDM_VERIFIED.get_or_init(|| {
+        // Minimal 52-byte Widevine v0 PSSH box with a 16-byte test KID
+        const TEST_PSSH: [u8; 52] = [
+            0x00, 0x00, 0x00, 0x34, b'p', b's', b's', b'h', 0x00, 0x00, 0x00, 0x00, 0xed, 0xef,
+            0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
+            0x00, 0x00, 0x00, 0x14, 0x08, 0x01, 0x12, 0x10, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+            0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+        ];
+        match with_persistent_cdm_session(lib_path, |session| {
+            session.generate_license_challenge(&TEST_PSSH)
+        }) {
+            Ok(challenge) if !challenge.is_empty() => true,
+            Ok(_) => {
+                mark_native_cdm_vmp_rejected("macOS libwidevinecdm.dylib returned empty challenge (VMP check)");
+                false
+            }
+            Err(e) => {
+                mark_native_cdm_vmp_rejected(&format!("macOS libwidevinecdm.dylib VMP check failed: {e}"));
+                false
+            }
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn verify_macos_cdm_usable_once(_lib_path: &Path) -> bool {
+    true
+}
+
 /// Discovers an installed Widevine CDM library (`libwidevinecdm.so`, `libwidevinecdm.dylib`, or `widevinecdm.dll`)
 /// on the system without spawning any browser process.
 /// Searches:
@@ -48,7 +95,7 @@ const fn platform_cdm_filename() -> &'static str {
 /// 3. Firefox & Chromium/Chrome/Brave/Edge WidevineCdm directories across Linux, macOS, and Windows
 /// 4. Declarative auto-provisioning from `settings.vdf` `[provisioning]` URLs for the current `(OS, ARCH)`
 pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
-    if !crate::sinks::apple::is_native_apple_cdm_preferred() {
+    if is_native_cdm_vmp_rejected() || !crate::sinks::apple::is_native_apple_cdm_preferred() {
         return None;
     }
     if let Ok(env_path) = std::env::var("SIMP_WIDEVINE_CDM_PATH") {
@@ -81,6 +128,9 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
     let simp_lib = crate::simp_data_dir().join("lib").join(cdm_file);
     if simp_lib.is_file() {
         if is_compatible_cdm_binary(&simp_lib) {
+            if !verify_macos_cdm_usable_once(&simp_lib) {
+                return None;
+            }
             return Some(DiscoveredWidevineCdm {
                 library_path: simp_lib,
                 source_label: "simp-userland".to_string(),
@@ -95,6 +145,9 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
         let legacy_simp_lib = home.join(".local/share/simp").join(sub).join(cdm_file);
         if legacy_simp_lib.is_file() {
             if is_compatible_cdm_binary(&legacy_simp_lib) {
+                if !verify_macos_cdm_usable_once(&legacy_simp_lib) {
+                    return None;
+                }
                 return Some(DiscoveredWidevineCdm {
                     library_path: legacy_simp_lib,
                     source_label: "simp-userland".to_string(),
@@ -130,6 +183,9 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
             if is_compatible_cdm_binary(&found) {
                 stage_cdm_into_userland(&found, &simp_lib);
                 let active_path = if simp_lib.is_file() { simp_lib } else { found };
+                if !verify_macos_cdm_usable_once(&active_path) {
+                    return None;
+                }
                 return Some(DiscoveredWidevineCdm {
                     library_path: active_path,
                     source_label: label.to_string(),
@@ -205,6 +261,9 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
             if is_compatible_cdm_binary(&found) {
                 stage_cdm_into_userland(&found, &simp_lib);
                 let active_path = if simp_lib.is_file() { simp_lib } else { found };
+                if !verify_macos_cdm_usable_once(&active_path) {
+                    return None;
+                }
                 return Some(DiscoveredWidevineCdm {
                     library_path: active_path,
                     source_label: label.to_string(),
@@ -240,6 +299,9 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
         && simp_lib.is_file()
         && is_compatible_cdm_binary(&simp_lib)
     {
+        if !verify_macos_cdm_usable_once(&simp_lib) {
+            return None;
+        }
         return Some(DiscoveredWidevineCdm {
             library_path: simp_lib,
             source_label: "simp-auto-provisioned".to_string(),
@@ -250,18 +312,13 @@ pub fn discover_widevine_cdm_library() -> Option<DiscoveredWidevineCdm> {
     None
 }
 
-/// Verifies that an ELF/Mach-O/PE shared library matches the current CPU architecture (`x86_64` vs `aarch64`)
-/// before attempting `dlopen`, preventing an `x86_64` `.so` from breaking a Steam Frame `aarch64` build.
-fn is_compatible_cdm_binary(path: &Path) -> bool {
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
-    use std::io::Read;
-    let mut hdr = [0u8; 20];
-    if f.read_exact(&mut hdr).is_err() {
+/// Verifies that an ELF (`\x7fELF`) or Mach-O (`0xFEEDFACF` / Universal `0xCAFEBABE`) header
+/// matches the current CPU architecture (`x86_64` vs `aarch64`).
+pub fn check_cdm_header_bytes(hdr: &[u8]) -> bool {
+    if hdr.len() < 20 {
         return false;
     }
-    // Check ELF header (`\x7FELF`) e_machine field (little-endian u16 at offset 18)
+    // 1. ELF header (`\x7FELF`) e_machine field (little-endian u16 at offset 18)
     if &hdr[0..4] == b"\x7fELF" {
         let e_machine = u16::from_le_bytes([hdr[18], hdr[19]]);
         if cfg!(target_arch = "x86_64") {
@@ -270,7 +327,49 @@ fn is_compatible_cdm_binary(path: &Path) -> bool {
             return e_machine == 0xB7; // EM_AARCH64 (183)
         }
     }
+    // 2. 64-bit Mach-O little-endian (`MH_MAGIC_64 = 0xFEEDFACF` -> bytes `[0xCF, 0xFA, 0xED, 0xFE]`)
+    if hdr[0..4] == [0xCF, 0xFA, 0xED, 0xFE] {
+        let cputype = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+        if cfg!(target_arch = "aarch64") {
+            return cputype == 0x0100_000C; // CPU_TYPE_ARM64
+        } else if cfg!(target_arch = "x86_64") {
+            return cputype == 0x0100_0007; // CPU_TYPE_X86_64
+        }
+    }
+    // 3. Universal Fat Mach-O big-endian (`FAT_MAGIC = 0xCAFEBABE` -> bytes `[0xCA, 0xFE, 0xBA, 0xBE]`)
+    if hdr[0..4] == [0xCA, 0xFE, 0xBA, 0xBE] {
+        let nfat_arch = u32::from_be_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
+        let target_cputype: u32 = if cfg!(target_arch = "aarch64") {
+            0x0100_000C
+        } else {
+            0x0100_0007
+        };
+        for i in 0..nfat_arch.min(4) {
+            let off = 8 + i * 20;
+            if off + 4 <= hdr.len() {
+                let cputype = u32::from_be_bytes([hdr[off], hdr[off + 1], hdr[off + 2], hdr[off + 3]]);
+                if cputype == target_cputype {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
     true
+}
+
+/// Verifies that an ELF/Mach-O/PE shared library matches the current CPU architecture (`x86_64` vs `aarch64`)
+/// before attempting `dlopen`, preventing an `x86_64` `.so`/`.dylib` from breaking an `aarch64` build.
+fn is_compatible_cdm_binary(path: &Path) -> bool {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    let mut hdr = [0u8; 68];
+    let Ok(n) = f.read(&mut hdr) else {
+        return false;
+    };
+    check_cdm_header_bytes(&hdr[..n])
 }
 
 static LAST_PROVISION_ATTEMPT_SECS: std::sync::atomic::AtomicU64 =
@@ -320,12 +419,28 @@ fn auto_provision_widevine_cdm(dest: &Path, prov: &simp_protocol::ProvisioningSe
     LAST_PROVISION_ATTEMPT_SECS.store(now_secs, std::sync::atomic::Ordering::SeqCst);
 
     let default_aarch64_url = simp_protocol::default_widevine_url_aarch64_linux();
+    let default_macos_arm64_url = simp_protocol::default_widevine_url_aarch64_macos();
+    let default_macos_x64_url = simp_protocol::default_widevine_url_x86_64_macos();
     let url = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         prov.widevine_cdm_url_x86_64_linux.trim()
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         let configured = prov.widevine_cdm_url_aarch64_linux.trim();
         if configured.is_empty() || configured.contains("4.10.2710.0-linux-arm64.zip") {
             default_aarch64_url.as_str()
+        } else {
+            configured
+        }
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        let configured = prov.widevine_cdm_url_aarch64_macos.trim();
+        if configured.is_empty() {
+            default_macos_arm64_url.as_str()
+        } else {
+            configured
+        }
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        let configured = prov.widevine_cdm_url_x86_64_macos.trim();
+        if configured.is_empty() {
+            default_macos_x64_url.as_str()
         } else {
             configured
         }
@@ -444,9 +559,14 @@ fn stage_cdm_into_userland(src: &Path, dest: &Path) {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755));
         }
-        // Also copy companion `.sig` or `manifest.json` files if present alongside `libwidevinecdm.so` / `widevinecdm.dll`
+        // Also copy companion `.sig` or `manifest.json` files if present alongside `libwidevinecdm.so` / `libwidevinecdm.dylib` / `widevinecdm.dll`
         if let (Some(src_dir), Some(dest_dir)) = (resolved_src.parent(), dest.parent()) {
-            for companion in ["libwidevinecdm.so.sig", "widevinecdm.dll.sig", "manifest.json"] {
+            for companion in [
+                "libwidevinecdm.so.sig",
+                "libwidevinecdm.dylib.sig",
+                "widevinecdm.dll.sig",
+                "manifest.json",
+            ] {
                 let s = src_dir.join(companion);
                 if s.is_file() {
                     let _ = std::fs::copy(&s, dest_dir.join(companion));
@@ -482,7 +602,7 @@ fn scan_for_file_named(root: &Path, target_name: &str, max_depth: usize) -> Opti
 /// On `aarch64` Linux, `libwidevinecdm.so` has `DT_NEEDED: [libnspr4.so]` even though it imports zero
 /// symbols from `libnspr4.so`; loading SIMP's bundled fallback `~/.local/share/simp/lib/libnspr4.so`
 /// with `RTLD_GLOBAL` satisfies `glibc` `dlopen` on minimal OS images that lack system `nspr`.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 unsafe fn ensure_nspr4_loaded_for_cdm() {
     let sys_h = libc::dlopen(c"libnspr4.so".as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL);
     if !sys_h.is_null() {
@@ -506,6 +626,9 @@ unsafe fn ensure_nspr4_loaded_for_cdm() {
         }
     }
 }
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn ensure_nspr4_loaded_for_cdm() {}
 
 #[cfg(unix)]
 unsafe fn dl_open_library(lib_path: &Path) -> Result<*mut c_void> {
@@ -2176,5 +2299,33 @@ mod tests {
         let (name, payload) = extract_deb_data_tar(&deb).expect("extract data.tar.xz");
         assert_eq!(name, "data.tar.xz");
         assert_eq!(payload, b"HELLO");
+    }
+
+    #[test]
+    fn test_macho_and_universal_header_compatibility() {
+        // 64-bit Mach-O little-endian header (`MH_MAGIC_64 = 0xFEEDFACF` -> `[0xCF, 0xFA, 0xED, 0xFE]`)
+        let mut arm64_macho = [0u8; 32];
+        arm64_macho[0..4].copy_from_slice(&[0xCF, 0xFA, 0xED, 0xFE]);
+        arm64_macho[4..8].copy_from_slice(&0x0100_000Cu32.to_le_bytes()); // CPU_TYPE_ARM64
+
+        let mut x64_macho = [0u8; 32];
+        x64_macho[0..4].copy_from_slice(&[0xCF, 0xFA, 0xED, 0xFE]);
+        x64_macho[4..8].copy_from_slice(&0x0100_0007u32.to_le_bytes()); // CPU_TYPE_X86_64
+
+        if cfg!(target_arch = "aarch64") {
+            assert!(check_cdm_header_bytes(&arm64_macho));
+            assert!(!check_cdm_header_bytes(&x64_macho));
+        } else if cfg!(target_arch = "x86_64") {
+            assert!(check_cdm_header_bytes(&x64_macho));
+            assert!(!check_cdm_header_bytes(&arm64_macho));
+        }
+
+        // Universal Fat Mach-O (`0xCAFEBABE`) containing both x86_64 and arm64 slices
+        let mut fat_macho = [0u8; 48];
+        fat_macho[0..4].copy_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
+        fat_macho[4..8].copy_from_slice(&2u32.to_be_bytes()); // nfat_arch = 2
+        fat_macho[8..12].copy_from_slice(&0x0100_0007u32.to_be_bytes()); // slice 0: x86_64
+        fat_macho[28..32].copy_from_slice(&0x0100_000Cu32.to_be_bytes()); // slice 1: arm64
+        assert!(check_cdm_header_bytes(&fat_macho));
     }
 }

@@ -166,10 +166,13 @@ def _sync_staged_decky_plugin(plugin_dir: str, home: str, uid: int, gid: int) ->
     current_dist_index = os.path.join(plugin_dir, "dist", "index.js")
     staged_pkg = os.path.join(staged_dir, "package.json")
     current_pkg = os.path.join(plugin_dir, "package.json")
+    staged_main = os.path.join(staged_dir, "main.py")
+    current_main = os.path.join(plugin_dir, "main.py")
 
     needs_sync = (
         _sha256_file(staged_dist_index) != _sha256_file(current_dist_index)
         or _sha256_file(staged_pkg) != _sha256_file(current_pkg)
+        or (os.path.isfile(staged_main) and _sha256_file(staged_main) != _sha256_file(current_main))
     )
     if not needs_sync:
         _chown_tree(plugin_dir, uid, gid)
@@ -358,9 +361,34 @@ class Plugin:
     and supervises `simp.service` across Gaming Mode boots and plugin reloads.
     """
 
+    _watch_task = None
+
+    async def _watch_staged_updates_loop(self):
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(5.0)
+            try:
+                def _check_sync():
+                    plugin_dir = os.environ.get("DECKY_PLUGIN_DIR") or os.path.dirname(
+                        os.path.realpath(__file__)
+                    )
+                    _user, home, uid, gid = _resolve_target_user()
+                    install_root = os.path.join(home, ".local", "share", "simp")
+                    if os.path.isdir(install_root):
+                        _chown_tree(install_root, uid, gid)
+                    _sync_staged_decky_plugin(plugin_dir, home, uid, gid)
+
+                await loop.run_in_executor(None, _check_sync)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
     async def _main(self):
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _provision_and_start_userland)
+        if self._watch_task is None or self._watch_task.done():
+            self._watch_task = asyncio.create_task(self._watch_staged_updates_loop())
 
     async def restart_daemon(self) -> bool:
         loop = asyncio.get_running_loop()
@@ -380,5 +408,7 @@ class Plugin:
         return await loop.run_in_executor(None, _do_sync)
 
     async def _unload(self):
+        if self._watch_task and not self._watch_task.done():
+            self._watch_task.cancel()
         # Audio daemon intentionally stays alive in userland across QAM reloads
         pass

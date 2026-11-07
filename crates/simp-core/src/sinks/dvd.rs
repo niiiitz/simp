@@ -137,13 +137,19 @@ pub fn candidate_libdvdcss_paths() -> Vec<PathBuf> {
     #[cfg(not(target_os = "windows"))]
     {
         paths.push(data_lib.join("libdvdcss.so.2"));
+        paths.push(data_lib.join("libdvdcss.2.dylib"));
         if let Some(data_dir) = dirs::data_local_dir() {
             paths.push(data_dir.join("simp").join("lib").join("libdvdcss.so.2"));
+            paths.push(data_dir.join("simp").join("lib").join("libdvdcss.2.dylib"));
         }
         if let Some(home) = std::env::var_os("HOME") {
             paths.push(
-                PathBuf::from(home)
+                PathBuf::from(&home)
                     .join(".local/share/simp/lib/libdvdcss.so.2"),
+            );
+            paths.push(
+                PathBuf::from(home)
+                    .join(".local/share/simp/lib/libdvdcss.2.dylib"),
             );
         }
         for sys in [
@@ -152,6 +158,9 @@ pub fn candidate_libdvdcss_paths() -> Vec<PathBuf> {
             "/usr/local/lib/libdvdcss.so.2",
             "/usr/lib/x86_64-linux-gnu/libdvdcss.so.2",
             "/usr/lib/aarch64-linux-gnu/libdvdcss.so.2",
+            "/opt/homebrew/lib/libdvdcss.2.dylib",
+            "/usr/local/lib/libdvdcss.2.dylib",
+            "/Applications/VLC.app/Contents/MacOS/lib/libdvdcss.2.dylib",
         ] {
             paths.push(PathBuf::from(sys));
         }
@@ -490,7 +499,12 @@ pub fn find_ffmpeg_binary() -> Option<PathBuf> {
         }
     }
     #[cfg(not(target_os = "windows"))]
-    for sys in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"] {
+    for sys in [
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+        "/bin/ffmpeg",
+    ] {
         let p = PathBuf::from(sys);
         if p.is_file() {
             return Some(p);

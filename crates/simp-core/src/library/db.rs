@@ -833,6 +833,18 @@ impl LibraryDatabase {
                     None,
                     t.art_url.as_deref(),
                 )?;
+            } else if t.source == "local" || t.source == "steam_ost" || t.source == "removable" {
+                // Local indexed tracks keep their existing album_id intact when pinned into a collection
+                if let Some(ref alb_id) = t.album_id {
+                    self.upsert_album(
+                        alb_id,
+                        &album_title,
+                        &artist_primary,
+                        None,
+                        None,
+                        t.art_url.as_deref(),
+                    )?;
+                }
             } else {
                 // Individual Apple Music tracks or playlist tracks do not auto-create albums
                 // unless an explicit `AlbumRecord` is being pinned.

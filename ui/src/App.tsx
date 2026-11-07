@@ -342,6 +342,7 @@ const ConsoleMainApp: React.FC = () => {
             latest_tag: data.latest_tag,
             update_available: Boolean(data.update_available),
             target_arch: data.target_arch,
+            channel: data.channel || 'alpha',
             checking: false,
           });
           return;
@@ -350,6 +351,7 @@ const ConsoleMainApp: React.FC = () => {
             ...prev,
             current_version: data.current_version || prev.current_version,
             target_arch: data.target_arch || prev.target_arch,
+            channel: data.channel || prev.channel || 'alpha',
             checking: false,
             error: data.error,
           }));
@@ -593,7 +595,7 @@ const ConsoleMainApp: React.FC = () => {
     ) {
       fetchApplePlaylistTracks(browserTarget.id)
         .then((tracks) => {
-          if (tracks.length > 0) setBrowserTracks(tracks);
+          setBrowserTracks(tracks);
         })
         .catch(() => {});
     } else if (
@@ -603,7 +605,7 @@ const ConsoleMainApp: React.FC = () => {
     ) {
       fetchSoundCloudPlaylistTracks(browserTarget.id)
         .then((tracks) => {
-          if (tracks.length > 0) setBrowserTracks(tracks);
+          setBrowserTracks(tracks);
         })
         .catch(() => {});
     } else if (
@@ -613,7 +615,7 @@ const ConsoleMainApp: React.FC = () => {
       fetchFullAppleAlbum({ albumId: browserTarget.id })
         .then(({ album, tracks }) => {
           setActiveCloudAlbum(album);
-          if (tracks.length > 0) setBrowserTracks(tracks);
+          setBrowserTracks(tracks);
         })
         .catch(() => {});
     }
@@ -925,9 +927,11 @@ const ConsoleMainApp: React.FC = () => {
 
   const handleOpenSoundCloudPlaylist = useCallback(
     async (pl: SoundCloudPlaylistSummary) => {
+      const initialTracks = pl.tracks && pl.tracks.length > 0 ? pl.tracks : [];
       setActiveScPlaylist(pl);
       setActiveCloudPlaylist(null);
       setActiveCloudAlbum(null);
+      setBrowserTracks(initialTracks);
       setBrowserTarget({
         kind: 'soundcloud_playlist',
         id: pl.id,
@@ -935,17 +939,18 @@ const ConsoleMainApp: React.FC = () => {
         subtitle: pl.description,
         art_url: pl.art_url,
       });
-      if (pl.tracks && pl.tracks.length > 0) {
-        setBrowserTracks(pl.tracks);
-      }
       setCloudLoading(true);
       try {
         const tracks = await fetchSoundCloudPlaylistTracks(pl.id);
         if (tracks.length > 0) {
           setBrowserTracks(tracks);
+        } else if (initialTracks.length === 0) {
+          setBrowserTracks([]);
+          showToast(`No streamable tracks available in "${pl.name}"`);
         }
       } catch (err: any) {
-        if (!pl.tracks || pl.tracks.length === 0) {
+        if (initialTracks.length === 0) {
+          setBrowserTracks([]);
           showToast(err?.message || 'Could not load SoundCloud set tracks');
         }
       } finally {
@@ -967,7 +972,9 @@ const ConsoleMainApp: React.FC = () => {
   const handleOpenCloudPlaylist = useCallback(
     async (pl: AppleCloudPlaylistSummary) => {
       setActiveCloudPlaylist(pl);
+      setActiveScPlaylist(null);
       setActiveCloudAlbum(null);
+      setBrowserTracks([]);
       setBrowserTarget({
         kind: 'cloud_playlist',
         id: pl.id,

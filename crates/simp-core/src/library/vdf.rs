@@ -2,13 +2,12 @@ use anyhow::Result;
 use keyvalues_parser::Value;
 use simp_protocol::{SessionState, SimpSettings};
 use std::fs;
-#[cfg(not(target_os = "windows"))]
-use std::path::Path;
 use std::path::PathBuf;
 
 /// Discovers all active Steam soundtrack directories across:
 /// - SteamOS / Linux (`~/.local/share/Steam`, `~/.steam/steam`, Flatpak Steam)
-/// - WSL2 Windows Host (`/mnt/c/Program Files (x86)/Steam/steamapps/libraryfolders.vdf`)
+/// - macOS (`~/Library/Application Support/Steam`)
+/// - WSL2 / Windows Host (`/mnt/c/Program Files (x86)/Steam/steamapps/libraryfolders.vdf` or `C:\...`)
 ///
 /// Checks both `<library>/steamapps/music` and `<library>/steamapps/common/*Soundtrack*`.
 pub fn discover_steam_music_directories() -> Vec<PathBuf> {
@@ -20,6 +19,9 @@ pub fn discover_steam_music_directories() -> Vec<PathBuf> {
         candidate_vdfs.push(home.join(".steam/steam/steamapps/libraryfolders.vdf"));
         candidate_vdfs.push(
             home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/libraryfolders.vdf"),
+        );
+        candidate_vdfs.push(
+            home.join("Library/Application Support/Steam/steamapps/libraryfolders.vdf"),
         );
     }
 
@@ -152,10 +154,7 @@ pub fn normalize_platform_path(raw_path: &str) -> PathBuf {
             let drive_letter = (bytes[0] as char).to_ascii_lowercase();
             let rest = unescaped[3..].replace('\\', "/");
             let rest_clean = rest.trim_end_matches('/');
-            let wsl_path = PathBuf::from(format!("/mnt/{drive_letter}/{rest_clean}"));
-            if Path::new("/mnt").is_dir() {
-                return wsl_path;
-            }
+            return PathBuf::from(format!("/mnt/{drive_letter}/{rest_clean}"));
         }
     }
 
