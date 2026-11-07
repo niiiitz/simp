@@ -560,6 +560,14 @@ impl crate::sinks::AudioSink for AppleMusicSink {
     }
 }
 
+fn resolve_openssl_bin() -> &'static str {
+    if Path::new("/usr/bin/openssl").is_file() {
+        "/usr/bin/openssl"
+    } else {
+        "openssl"
+    }
+}
+
 /// Signs an Apple MusicKit Developer JWT (`alg: ES256`, P-256 ECDSA + SHA-256)
 /// using `/usr/bin/openssl` and converts the ASN.1 DER ECDSA signature into
 /// the 64-byte IEEE P1363 (`R || S`) format mandated by RFC 7518 Section 3.4.
@@ -608,7 +616,7 @@ pub fn sign_es256_developer_jwt(
     }
 
     let sign_result = (|| -> Result<Vec<u8>> {
-        let mut child = Command::new("openssl")
+        let mut child = Command::new(resolve_openssl_bin())
             .args(["dgst", "-sha256", "-sign"])
             .arg(&tmp_key_path)
             .stdin(Stdio::piped())
@@ -947,18 +955,12 @@ mod tests {
 
     #[test]
     fn test_es256_developer_jwt_generation() {
-        // Generate an ephemeral prime256v1 PKCS#8 private key (.p8 format) using openssl
-        let key_out = Command::new("openssl")
-            .args([
-                "genpkey",
-                "-algorithm",
-                "EC",
-                "-pkeyopt",
-                "ec_paramgen_curve:P-256",
-            ])
+        // Generate an ephemeral prime256v1 EC private key using openssl / LibreSSL
+        let key_out = Command::new(resolve_openssl_bin())
+            .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout"])
             .output()
-            .expect("openssl genpkey");
-        assert!(key_out.status.success(), "openssl genpkey failed");
+            .expect("openssl ecparam genkey");
+        assert!(key_out.status.success(), "openssl ecparam genkey failed");
         let pem = String::from_utf8(key_out.stdout).expect("valid utf8 pem");
 
         let jwt = sign_es256_developer_jwt("TEAM123456", "KEY7890ABC", &pem, 3600)

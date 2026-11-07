@@ -66,9 +66,9 @@ pub fn apply_desktop_display_env(cmd: &mut Command) {
 }
 
 /// Raises an existing `org.simp.player` window or launches the SIMP Desktop Application via
-/// `org.simp.player.desktop` (Linux) or `simp.exe` (Windows).
+/// `org.simp.player.desktop` (Linux) or `simp` / `simp.exe` (macOS / Windows).
 pub fn launch_simp_desktop_window() {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         if let Ok(exe) = std::env::current_exe() {
             let mut cmd = Command::new(exe);
@@ -81,7 +81,7 @@ pub fn launch_simp_desktop_window() {
         return;
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         // 1. If an `org.simp.player` window is already open on X11/XWayland, raise/activate it immediately
         let mut wmctrl = Command::new("wmctrl");

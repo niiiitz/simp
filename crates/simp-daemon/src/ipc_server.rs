@@ -75,7 +75,7 @@ pub fn detect_lan_ips() -> Vec<String> {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     if let Ok(out) = std::process::Command::new("hostname").arg("-I").output() {
         let text = String::from_utf8_lossy(&out.stdout);
         for token in text.split_whitespace() {
@@ -85,6 +85,23 @@ pub fn detect_lan_ips() -> Vec<String> {
                 && !ips.contains(&token.to_string())
             {
                 ips.push(token.to_string());
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for iface in ["en0", "en1"] {
+        if let Ok(out) = std::process::Command::new("ipconfig")
+            .args(["getifaddr", iface])
+            .output()
+        {
+            let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if ip.contains('.')
+                && !ip.starts_with("127.")
+                && !ip.starts_with("169.254.")
+                && !ips.contains(&ip)
+            {
+                ips.push(ip);
             }
         }
     }

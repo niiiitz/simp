@@ -28,7 +28,7 @@ const fn eviocgabs(axis: u8) -> libc::Ioctl {
     (0x80184540u32 + (axis as u32)) as libc::Ioctl
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 struct InputAbsInfo {
@@ -124,9 +124,10 @@ fn is_evdev_gamepad_candidate(idx: usize) -> bool {
     false
 }
 
-/// Spawns a lightweight Linux `/dev/input/js*` + `/dev/input/event*` (`evdev`) gamepad reader thread
-/// so standalone windows, Firefox, and SteamVR Desktop views on Steam Deck and Steam Frame (`aarch64`)
-/// receive controller navigation and transport actions over the local WebSocket (`PlaybackEvent::GamepadInput`).
+/// Spawns a lightweight Linux `/dev/input/js*` + `/dev/input/event*` (`evdev`) + Steam Deck `/dev/hidraw*`
+/// gamepad reader thread so standalone windows, Firefox, KDE Plasma Desktop Mode, and SteamVR Desktop views
+/// on Steam Deck and Steam Frame (`aarch64`) receive controller navigation and transport actions over the
+/// local WebSocket (`PlaybackEvent::GamepadInput`).
 pub fn spawn_linux_gamepad_reader(broadcast_tx: broadcast::Sender<PlaybackEvent>) {
     #[cfg(not(target_os = "linux"))]
     let _ = broadcast_tx;
@@ -134,6 +135,7 @@ pub fn spawn_linux_gamepad_reader(broadcast_tx: broadcast::Sender<PlaybackEvent>
     {
         let active_js: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
         let active_ev: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
+        let active_hidraw: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
         let _ = std::thread::Builder::new()
             .name("simp-linux-gamepad-discovery".to_string())
             .spawn(move || loop {
@@ -204,12 +206,44 @@ pub fn spawn_linux_gamepad_reader(broadcast_tx: broadcast::Sender<PlaybackEvent>
                         });
                 }
 
+                // 3. Scan `/dev/hidraw0`..`hidraw15` for Valve Steam Deck / Steam Controller (`28DE:1205`)
+                // when Steam's desktop client holds `client_hdev` open in KDE Plasma Desktop Mode
+                // (where `hid-steam.c` unregisters `evdev` and Steam Input's Desktop Action Set swallows `BTN_START`).
+                for idx in 0..16usize {
+                    let dev_path = format!("/dev/hidraw{idx}");
+                    if !Path::new(&dev_path).exists() || !is_steam_deck_hidraw_candidate(idx) {
+                        continue;
+                    }
+
+                    {
+                        let mut guard = match active_hidraw.lock() {
+                            Ok(g) => g,
+                            Err(_) => continue,
+                        };
+                        if guard.contains(&idx) {
+                            continue;
+                        }
+                        guard.insert(idx);
+                    }
+
+                    let bcast = broadcast_tx.clone();
+                    let active_clone = active_hidraw.clone();
+                    let _ = std::thread::Builder::new()
+                        .name(format!("simp-hidraw{idx}"))
+                        .spawn(move || {
+                            read_steam_deck_hidraw_loop(idx, &dev_path, bcast);
+                            if let Ok(mut g) = active_clone.lock() {
+                                g.remove(&idx);
+                            }
+                        });
+                }
+
                 std::thread::sleep(Duration::from_secs(3));
             });
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub fn map_linux_keycode_to_action(code: u16) -> Option<&'static str> {
     match code {
         0x130 | 0x120 => Some("activate"), // BTN_SOUTH (A / Cross) or BTN_TRIGGER
@@ -419,7 +453,7 @@ fn read_joystick_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sende
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn normalize_evdev_axis(raw: i32, info: Option<InputAbsInfo>) -> i32 {
     if let Some(ai) = info {
         let span = (ai.maximum as i64) - (ai.minimum as i64);
@@ -597,6 +631,116 @@ fn read_evdev_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sender<P
     }
 }
 
+/// Checks whether `/dev/hidraw{idx}` is a Valve Steam Deck (`28DE:1205`) or Steam Controller
+/// (`28DE:1102` / `28DE:1142`) `client_hdev` node that is ALREADY opened by another process (such as
+/// the Steam client in KDE Plasma Desktop Mode).
+///
+/// Safety invariant: We only attach to `/dev/hidraw{idx}` when another process already holds it open
+/// (`steam->client_opened > 0`), so SIMP never causes `hid-steam.c` to unregister the kernel `evdev`
+/// gamepad when Steam is closed.
+#[cfg(target_os = "linux")]
+fn is_steam_deck_hidraw_candidate(idx: usize) -> bool {
+    let uevent_path = format!("/sys/class/hidraw/hidraw{idx}/device/uevent");
+    let uevent = match std::fs::read_to_string(&uevent_path) {
+        Ok(s) => s.to_uppercase(),
+        Err(_) => return false,
+    };
+    let is_valve_deck_or_sc = uevent.contains("28DE:00001205")
+        || uevent.contains("28DE:00001102")
+        || uevent.contains("28DE:00001142");
+    if !is_valve_deck_or_sc {
+        return false;
+    }
+    is_hidraw_opened_by_other_process(idx)
+}
+
+#[cfg(target_os = "linux")]
+fn is_hidraw_opened_by_other_process(idx: usize) -> bool {
+    let target = format!("/dev/hidraw{idx}");
+    let self_pid = std::process::id().to_string();
+    let proc_entries = match std::fs::read_dir("/proc") {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in proc_entries.flatten() {
+        let fname = entry.file_name();
+        let pid_str = fname.to_string_lossy();
+        if pid_str == self_pid || !pid_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let fd_dir = format!("/proc/{pid_str}/fd");
+        if let Ok(fds) = std::fs::read_dir(&fd_dir) {
+            for fd in fds.flatten() {
+                if let Ok(link) = std::fs::read_link(fd.path()) {
+                    if link.to_string_lossy() == target {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Extracts the physical `BTN_START` (`Menu ☰`, byte 9 bit 6 = `0x40`) state from a 64-byte
+/// Valve Steam Deck (`ID_CONTROLLER_DECK_STATE = 0x09`) or Steam Controller (`ID_CONTROLLER_STATE = 0x01`)
+/// raw HID input report (`drivers/hid/hid-steam.c` `steam_do_deck_input_event`).
+#[cfg(any(target_os = "linux", test))]
+pub fn extract_steam_deck_hidraw_start_pressed(report: &[u8]) -> Option<bool> {
+    if report.len() < 16 || report[0] != 0x01 || report[1] != 0x00 {
+        return None;
+    }
+    // `0x09` = `ID_CONTROLLER_DECK_STATE`, `0x01` = `ID_CONTROLLER_STATE`
+    if report[2] != 0x09 && report[2] != 0x01 {
+        return None;
+    }
+    let b9 = report[9];
+    Some((b9 & 0x40) != 0)
+}
+
+#[cfg(target_os = "linux")]
+fn read_steam_deck_hidraw_loop(
+    idx: usize,
+    dev_path: &str,
+    broadcast_tx: broadcast::Sender<PlaybackEvent>,
+) {
+    let mut file = match File::open(dev_path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    tracing::info!(
+        "Linux Steam Deck hidraw reader attached to {dev_path} (hidraw{idx}) for KDE Desktop Mode BTN_START"
+    );
+
+    let mut buf = [0u8; 64];
+    let mut prev_start = false;
+    let mut last_client_check = Instant::now();
+
+    while let Ok(n) = file.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        if last_client_check.elapsed() >= Duration::from_secs(3) {
+            last_client_check = Instant::now();
+            if !is_hidraw_opened_by_other_process(idx) {
+                tracing::info!(
+                    "Steam client closed {dev_path}; releasing SIMP hidraw handle so kernel evdev can resume"
+                );
+                break;
+            }
+        }
+        if let Some(start_pressed) = extract_steam_deck_hidraw_start_pressed(&buf[..n]) {
+            if start_pressed && !prev_start {
+                let _ = broadcast_tx.send(PlaybackEvent::GamepadInput {
+                    action: "power".to_string(),
+                });
+            }
+            prev_start = start_pressed;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,5 +763,13 @@ mod tests {
         assert!(normalize_evdev_axis(0, Some(info)) <= -32760);
         assert!(normalize_evdev_axis(255, Some(info)) >= 32760);
         assert!(normalize_evdev_axis(128, Some(info)).abs() < 300);
+
+        let mut report = [0u8; 64];
+        report[0] = 0x01;
+        report[1] = 0x00;
+        report[2] = 0x09; // ID_CONTROLLER_DECK_STATE
+        assert_eq!(extract_steam_deck_hidraw_start_pressed(&report), Some(false));
+        report[9] = 0x40; // BIT(6) = BTN_START
+        assert_eq!(extract_steam_deck_hidraw_start_pressed(&report), Some(true));
     }
 }

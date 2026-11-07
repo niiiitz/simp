@@ -1,10 +1,18 @@
 use simp_protocol::PowerState;
+#[cfg(target_os = "linux")]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Discovers mounted removable USB / MicroSD drives under `/run/media/$USER/`,
-/// `/run/media/mmcblk0p1` (SteamOS / Bazzite / Linux), `/Volumes` (macOS), and `D:\`..`Z:\` (Windows).
+/// `/run/media/mmcblk0p1` (SteamOS / Bazzite / Linux), and `D:\`..`Z:\` (`DRIVE_REMOVABLE` on Windows).
+/// On macOS, `/Volumes` is intentionally not auto-scanned during onboarding because `/Volumes`
+/// includes Time Machine local snapshots (`.timemachine` / `com.apple.TimeMachine.localsnapshots`),
+/// backup drives, and mounted `.dmg` installer images; macOS users start with `~/Music` by default
+/// and can add any additional folders explicitly.
 pub fn discover_removable_mounts() -> Vec<(PathBuf, String)> {
+    #[allow(unused_mut)]
     let mut mounts = Vec::new();
 
     #[cfg(target_os = "linux")]
@@ -23,25 +31,6 @@ pub fn discover_removable_mounts() -> Vec<(PathBuf, String)> {
         let sd_direct = PathBuf::from("/run/media/mmcblk0p1");
         if sd_direct.is_dir() && !mounts.iter().any(|(p, _)| p == &sd_direct) {
             mounts.push((sd_direct, "MicroSD Card".to_string()));
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let volumes = Path::new("/Volumes");
-        if let Ok(entries) = fs::read_dir(volumes) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let label = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if label != "Macintosh HD" && label != "Preboot" && label != "Recovery" && !label.is_empty() {
-                        mounts.push((path, label));
-                    }
-                }
-            }
         }
     }
 
@@ -131,7 +120,7 @@ pub fn is_windows_non_removable_drive_root(mount_root: &str) -> bool {
     false
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn collect_subdirs(base: &Path, out: &mut Vec<(PathBuf, String)>) {
     let Ok(entries) = fs::read_dir(base) else {
         return;
@@ -143,30 +132,54 @@ fn collect_subdirs(base: &Path, out: &mut Vec<(PathBuf, String)>) {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Removable Drive".to_string());
+            if label.starts_with('.') {
+                continue;
+            }
             out.push((path, label));
         }
     }
 }
 
-/// Reads Linux `/sys/class/power_supply` to determine if the Steam Deck / Frame is running on battery.
+/// Reads Linux `/sys/class/power_supply` (or `pmset -g batt` on macOS) to determine battery state.
 pub fn read_power_state() -> PowerState {
     let mut on_battery = false;
     let mut battery_pct = None;
 
-    let power_dir = Path::new("/sys/class/power_supply");
-    if let Ok(entries) = fs::read_dir(power_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let status_path = path.join("status");
-            if let Ok(status) = fs::read_to_string(&status_path) {
-                if status.trim().eq_ignore_ascii_case("Discharging") {
-                    on_battery = true;
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("pmset").args(["-g", "batt"]).output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if text.contains("Battery Power") || text.contains("discharging") {
+                on_battery = true;
+            }
+            for token in text.split(|c: char| c.is_whitespace() || c == ';') {
+                if let Some(num_str) = token.strip_suffix('%') {
+                    if let Ok(pct) = num_str.trim().parse::<u8>() {
+                        battery_pct = Some(pct.min(100));
+                        break;
+                    }
                 }
             }
-            let cap_path = path.join("capacity");
-            if let Ok(cap_str) = fs::read_to_string(&cap_path) {
-                if let Ok(pct) = cap_str.trim().parse::<u8>() {
-                    battery_pct = Some(pct);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let power_dir = Path::new("/sys/class/power_supply");
+        if let Ok(entries) = fs::read_dir(power_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let status_path = path.join("status");
+                if let Ok(status) = fs::read_to_string(&status_path) {
+                    if status.trim().eq_ignore_ascii_case("Discharging") {
+                        on_battery = true;
+                    }
+                }
+                let cap_path = path.join("capacity");
+                if let Ok(cap_str) = fs::read_to_string(&cap_path) {
+                    if let Ok(pct) = cap_str.trim().parse::<u8>() {
+                        battery_pct = Some(pct);
+                    }
                 }
             }
         }

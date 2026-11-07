@@ -3,7 +3,10 @@ use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rodio::{source::SeekError as RodioSeekError, Source};
 use sha1::{Digest, Sha1};
-use simp_protocol::{OpticalDiscStatus, TrackMetadata};
+use simp_protocol::OpticalDiscStatus;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use simp_protocol::TrackMetadata;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::fs::OpenOptions;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
@@ -47,11 +50,15 @@ const CDS_DRIVE_NOT_READY: libc::c_int = 3;
 #[cfg(target_os = "linux")]
 const CDS_DISC_OK: libc::c_int = 4;
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const CDS_AUDIO: libc::c_int = 100;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const CDS_MIXED: libc::c_int = 105;
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const CD_FRAMESIZE_RAW: usize = 2352; // 588 stereo 16-bit samples per sector (1/75th sec)
 const CD_SECTORS_PER_SECOND: u32 = 75;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const READ_CHUNK_SECTORS: i32 = 25; // ~333ms per ioctl read chunk
 
 #[cfg(target_os = "linux")]
@@ -910,9 +917,20 @@ pub fn scan_optical_disc(
     }
 }
 
-/// Ejects the optical disc tray via `CDROMEJECT` (Linux) or `IOCTL_STORAGE_EJECT_MEDIA` (Windows).
+/// Ejects the optical disc tray via `CDROMEJECT` (Linux), `IOCTL_STORAGE_EJECT_MEDIA` (Windows), or `drutil` (macOS).
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn eject_optical_disc(_preferred_device: Option<&str>) -> Result<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if std::process::Command::new("drutil")
+            .args(["tray", "eject"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Ok("drutil".to_string());
+        }
+    }
     Err(anyhow!("No optical drive found"))
 }
 
@@ -970,6 +988,7 @@ pub fn eject_optical_disc(preferred_device: Option<&str>) -> Result<String> {
     Ok(device_path)
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 struct MusicBrainzResolvedDisc {
     album_title: String,
     artist_name: String,
@@ -978,6 +997,7 @@ struct MusicBrainzResolvedDisc {
     tracks: Vec<(String, Vec<String>)>,
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn fetch_musicbrainz_metadata(disc_id: &str, toc_param: &str) -> Option<MusicBrainzResolvedDisc> {
     let url = format!(
         "https://musicbrainz.org/ws/2/discid/{disc_id}?toc={toc_param}&fmt=json&inc=artists+recordings"
@@ -1073,6 +1093,7 @@ fn fetch_musicbrainz_metadata(disc_id: &str, toc_param: &str) -> Option<MusicBra
     })
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn extract_artist_credit(credit_val: Option<&serde_json::Value>) -> Option<String> {
     let arr = credit_val?.as_array()?;
     let mut out = String::new();
@@ -1097,6 +1118,7 @@ fn extract_artist_credit(credit_val: Option<&serde_json::Value>) -> Option<Strin
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn fetch_and_cache_cover_art(disc_id: &str, release_mbid: &str) -> Option<String> {
     let art_cache_dir = crate::simp_art_cache_dir();
     let _ = std::fs::create_dir_all(&art_cache_dir);

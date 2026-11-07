@@ -616,10 +616,15 @@ export function useGamepadNavigation({
   // Keyboard shortcuts + Native Decky Fullscreen Route `postMessage` Gamepad Bridge
   useEffect(() => {
     const lastActionTs: Record<string, number> = {};
+    let lastPowerActionTs = 0;
     const handleGamepadAction = (action: string) => {
       const now = performance.now();
-      if (lastActionTs[action] && now - lastActionTs[action] < 70) return;
+      const debounceMs = action === 'power' || action === 'sources' ? 200 : 70;
+      if (lastActionTs[action] && now - lastActionTs[action] < debounceMs) return;
       lastActionTs[action] = now;
+      if (action === 'power') {
+        lastPowerActionTs = now;
+      }
       lastGamepadInputTsRef.current = now;
       if (document.documentElement.dataset.simpInput !== 'gamepad') {
         document.documentElement.dataset.simpInput = 'gamepad';
@@ -1034,6 +1039,12 @@ export function useGamepadNavigation({
       } else if (e.key === 'Escape' || e.key === 'Backspace') {
         e.preventDefault();
         e.stopPropagation();
+        // In Steam KDE Desktop Mode, if `Start` (`Menu ☰`) opened the hamburger menu via `hidraw`
+        // (`action === 'power'`) and Steam Input also emits a synthetic `Escape` on button release,
+        // ignore that synthetic `Escape` so it does not immediately close the menu!
+        if (e.key === 'Escape' && performance.now() - lastPowerActionTs < 600) {
+          return;
+        }
         handleGamepadAction('back');
       } else if (e.key === ' ' || e.key === 'y' || e.key === 'Y') {
         // In Steam KDE Desktop Mode, the physical `Y` button sends `Space` (`' '`).
@@ -1066,7 +1077,14 @@ export function useGamepadNavigation({
         e.preventDefault();
         e.stopPropagation();
         handleGamepadAction('r2');
-      } else if (e.key === 'ContextMenu' || e.key === 'F2' || e.key === 'p' || e.key === 'P') {
+      } else if (
+        e.key === 'ContextMenu' ||
+        e.key === 'F1' ||
+        e.key === 'F2' ||
+        e.key === 'F10' ||
+        e.key === 'p' ||
+        e.key === 'P'
+      ) {
         e.preventDefault();
         e.stopPropagation();
         handleGamepadAction('power');
@@ -1126,7 +1144,8 @@ export function useGamepadNavigation({
       }
     };
 
-    // Native Linux `/dev/input/js*` & `/dev/input/event*` daemon gamepad fallback for standalone KDE / SteamVR windows
+    // Native Linux `/dev/input/js*`, `/dev/input/event*` & Steam Deck `/dev/hidraw*` daemon gamepad fallback
+    // for standalone KDE / SteamVR windows
     const onDaemonGamepad = (e: any) => {
       const action = e?.detail?.action;
       if (!action) return;
@@ -1135,7 +1154,10 @@ export function useGamepadNavigation({
       // visible windows (`visibilityState === 'visible'`) often have `document.hasFocus() === false` when using Gamepad mode!
       if (document.visibilityState === 'hidden') return;
       const now = performance.now();
-      if (now - lastBridgeMsgTsRef.current < 220 || now - lastWebGamepadTsRef.current < 220) {
+      if (now - lastBridgeMsgTsRef.current < 220) {
+        return;
+      }
+      if (action !== 'power' && now - lastWebGamepadTsRef.current < 220) {
         return;
       }
       handleGamepadAction(action);

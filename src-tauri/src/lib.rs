@@ -72,7 +72,13 @@ pub fn run_ui() {
         return;
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        run_macos_ui(ui_url, &user_data_arg);
+        return;
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         // Ensure DISPLAY / WAYLAND_DISPLAY are populated even if invoked from a background D-Bus/systemd context
         let mut wmctrl = Command::new("wmctrl");
@@ -225,5 +231,57 @@ fn run_windows_ui(ui_url: &str, profile_dir: &std::path::Path, user_data_arg: &s
         .stderr(Stdio::null());
     simp_core::configure_background_command(&mut fallback);
     let _ = fallback.spawn();
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_ui(ui_url: &str, user_data_arg: &str) {
+    use std::path::PathBuf;
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut app_roots = vec![PathBuf::from("/Applications")];
+    if let Ok(home) = std::env::var("HOME") {
+        app_roots.push(PathBuf::from(home).join("Applications"));
+    }
+
+    let rel_paths = [
+        "Google Chrome.app/Contents/MacOS/Google Chrome",
+        "Brave Browser.app/Contents/MacOS/Brave Browser",
+        "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "Chromium.app/Contents/MacOS/Chromium",
+    ];
+
+    for rel in rel_paths {
+        for root in &app_roots {
+            let p = root.join(rel);
+            if p.is_file() && !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }
+    }
+
+    for bin in candidates {
+        let mut cmd = Command::new(&bin);
+        cmd.arg(format!("--app={ui_url}"))
+            .arg("--window-size=1280,800")
+            .arg("--no-first-run")
+            .arg("--no-default-browser-check")
+            .arg("--autoplay-policy=no-user-gesture-required")
+            .arg("--disable-features=HardwareMediaKeyHandling,MediaSessionService")
+            .arg(user_data_arg)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if cmd.spawn().is_ok() {
+            return;
+        }
+    }
+
+    // Fallback: open in default macOS browser via `open`
+    let _ = Command::new("open")
+        .arg(ui_url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 

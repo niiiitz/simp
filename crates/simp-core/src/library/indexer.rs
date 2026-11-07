@@ -51,19 +51,28 @@ pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize
 
     // Prune any stale `user_custom` mounts in SQLite that are no longer in `custom_paths`,
     // or any mounts explicitly added to `ignored_paths`, or any fixed/optical Windows drive roots
-    // that were previously misclassified as `removable_media` (e.g., `D:\`).
+    // or macOS `/Volumes` Time Machine shadow mounts that were previously misclassified as `removable_media`.
     if let Ok(existing_mounts) = db.get_mounts() {
         for m in existing_mounts {
             let is_ignored = ignored_roots.contains(&m.mount_root);
             #[cfg(target_os = "windows")]
             let is_misclassified_fixed = m.mount_kind == "removable_media"
                 && crate::library::mounts::is_windows_non_removable_drive_root(&m.mount_root);
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "macos")]
+            let is_misclassified_fixed = m.mount_kind == "removable_media";
+            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
             let is_misclassified_fixed = false;
+
+            let is_shadow_timemachine = m.mount_root.contains(".timemachine")
+                || m.mount_root.contains("TimeMachine")
+                || m.mount_root.contains("Backups.backupdb");
 
             if (m.mount_kind == "user_custom" && !active_custom_roots.contains(&m.mount_root))
                 || (m.mount_kind != "user_custom" && is_ignored)
+                || (m.mount_kind == "removable_media" && !settings.library.auto_mount_removable)
+                || (m.mount_kind == "steam_vdf" && !settings.library.scan_steam_osts)
                 || is_misclassified_fixed
+                || is_shadow_timemachine
             {
                 let _ = db.remove_mount(&m.mount_root);
             }
@@ -175,6 +184,23 @@ fn resolve_missing_local_album_artwork_via_musicbrainz(db: &LibraryDatabase) {
     }
 }
 
+fn is_ignored_walk_entry(entry: &walkdir::DirEntry) -> bool {
+    if entry.depth() == 0 {
+        return false;
+    }
+    let name = entry.file_name().to_string_lossy();
+    // Skip hidden dot-files/folders (`.timemachine`, `.Spotlight-V100`, `.Trashes`, `.git`, AppleDouble `._*`)
+    // and Time Machine backup bundles
+    if name.starts_with('.')
+        || name.eq_ignore_ascii_case("Backups.backupdb")
+        || name.ends_with(".backupbundle")
+        || name.ends_with(".sparsebundle")
+    {
+        return true;
+    }
+    false
+}
+
 fn scan_mount_directory(db: &LibraryDatabase, dir: &Path, mount_root: &str, source: &str) {
     let fingerprints = db.get_mount_file_fingerprints(mount_root).unwrap_or_default();
 
@@ -183,6 +209,7 @@ fn scan_mount_directory(db: &LibraryDatabase, dir: &Path, mount_root: &str, sour
         .follow_links(false)
         .max_depth(10)
         .into_iter()
+        .filter_entry(|e| !is_ignored_walk_entry(e))
         .filter_map(Result::ok)
         .map(|e| e.into_path())
         .filter(|p| {
@@ -267,6 +294,7 @@ fn scan_mount_directory(db: &LibraryDatabase, dir: &Path, mount_root: &str, sour
             .follow_links(false)
             .max_depth(10)
             .into_iter()
+            .filter_entry(|e| !is_ignored_walk_entry(e))
             .filter_map(Result::ok)
             .map(|e| e.into_path())
             .filter(|p| {

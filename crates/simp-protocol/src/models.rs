@@ -344,7 +344,7 @@ pub struct ServiceSettings {
 impl Default for SimpSettings {
     fn default() -> Self {
         let mut custom_paths = BTreeMap::new();
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             let music_dir = std::path::PathBuf::from(home).join("Music");
             custom_paths.insert("0".to_string(), music_dir.to_string_lossy().to_string());
         }
@@ -365,8 +365,8 @@ impl Default for SimpSettings {
                 brightness_pct: 100,
             },
             library: LibrarySettings {
-                scan_steam_osts: true,
-                auto_mount_removable: true,
+                scan_steam_osts: false,
+                auto_mount_removable: false,
                 custom_paths,
                 ignored_paths: BTreeMap::new(),
             },

@@ -1737,7 +1737,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     async (pl: SoundCloudPlaylistSummary) => {
       setCloudLoading(true);
       try {
-        const items = await fetchSoundCloudPlaylistTracks(pl.id);
+        let items = await fetchSoundCloudPlaylistTracks(pl.id).catch(() => []);
+        if (items.length === 0 && pl.tracks && pl.tracks.length > 0) {
+          items = pl.tracks;
+        }
         if (items.length > 0) {
           await handleAddTracksToPlaylist(
             items.map((t) => t.uri),
@@ -1862,7 +1865,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
     const isScPlaylistPinned =
       rightPaneMode === 'tracks' &&
-      browserTarget?.kind === 'cloud_playlist' &&
+      browserTarget?.kind === 'soundcloud_playlist' &&
       activeScPlaylist &&
       playlists.some((p) => p.id === `soundcloud:playlist:${activeScPlaylist.id}`);
 
@@ -2074,7 +2077,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 </button>
               )}
 
-              {browserTarget.kind === 'cloud_playlist' && activeScPlaylist && (
+              {browserTarget.kind === 'soundcloud_playlist' && activeScPlaylist && (
                 <button
                   data-tile-aux="true"
                   data-collection-y="true"
@@ -3058,7 +3061,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
   // Reusable Visual Tile for SoundCloud Sets / Playlists
   const renderSoundCloudPlaylistCard = (pl: SoundCloudPlaylistSummary) => {
-    const isSelected = browserTarget?.kind === 'cloud_playlist' && browserTarget.id === `sc:${pl.id}`;
+    const isSelected = browserTarget?.kind === 'soundcloud_playlist' && browserTarget.id === pl.id;
     const isPinned = playlists.some((p) => p.id === `soundcloud:playlist:${pl.id}`);
     return (
       <button
@@ -7560,6 +7563,24 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 </div>
               );
             })}
+
+            {browserTracks.length === 0 && !(browserTarget?.kind === 'cdda' && opticalDisc?.is_dvd_video) && (
+              <div
+                style={{
+                  padding: '20px 14px',
+                  borderRadius: 12,
+                  background: '#0a0a0e',
+                  border: '1px solid #16161e',
+                  fontSize: 13,
+                  color: '#8e8e99',
+                  textAlign: 'center',
+                }}
+              >
+                {cloudLoading || iaLoading
+                  ? '⏳ Loading tracks...'
+                  : 'No streamable tracks available in this collection.'}
+              </div>
+            )}
           </div>
         )}
       </div>
