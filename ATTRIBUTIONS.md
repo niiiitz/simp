@@ -22,10 +22,22 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
 
 ---
 
-## 2. Console UX & Industrial Design Inspiration
+## 2. Console UX, Demoscene Visualizer & Generative Art Inspiration
 
 * **Sony Interactive Entertainment — PlayStation 3 XrossMediaBar (XMB)**:
   * SIMP's two-column spatial controller navigation (`ui/src/hooks/useGamepadNavigation.ts` and `ui/src/views/LibraryBrowserView.tsx`) is an homage to the award-winning PlayStation 3 XMB interface: moving the cursor up and down the left category column automatically previews content in the right pane after a short debounce, pressing D-Pad Right steps directly onto the first playable item (bypassing auxiliary header filters), and pressing `B` walks back up the hierarchy.
+* **Cheng Lou ([@chenglou](https://github.com/chenglou)) — [Pretext Variable Typographic ASCII](https://chenglou.me/pretext/variable-typographic-ascii/)**:
+  * Directly inspired SIMP's `VIZ: GLYPH` mode (`ui/src/components/PlayerBackgroundVisualizer.tsx`): treating typographic character density, weight, and punctuation geometry as a real-time luminance and motion medium, backed by an offscreen pre-baked glyph atlas (`drawImage` blits with zero per-frame font layout or `measureText` overhead).
+* **Andrei Fomin — [*Effulgence RPG*](https://andreifomin.itch.io/effulgencerpg)**:
+  * Inspired the volumetric glowing CRT phosphor aesthetic, 3D relief shading sculpted from album artwork luminance, and deep shadow-to-highlight color grading in `VIZ: GLYPH`.
+* **Tetsuya Mizuguchi, United Game Artists & Enhance — *Rez* (2001) & *Tetris Effect* (2018)**:
+  * Inspired SIMP's synesthetic audio-visual coupling — where sub-bass onsets, mid-range harmonics, and high-frequency transients drive geometric pulses, scanline datamosh bursts, wireframe horizon motion, and bespoke track-transition lock-on sequences.
+* **Nullsoft (Justin Frankel, Christophe Thibault & Contributors) — Winamp Spectrum Analyzer & Advanced Visualization Studio (`AVS`)**:
+  * Directly inspired `VIZ: AVS`: parametric `SuperScope` waveform ribbons, 3D starfield warp interleaved with live timed SoundCloud comment pills, and a 16-band logarithmic spectrum analyzer with gravity peak-hold caps.
+* **The 8-Bit & 16-Bit Demoscene Community & Artiom "Megus" Fedosov ([*"Creativity Through Limitation: 8-bit Demoscene"*](https://medium.com/@megus/creativity-through-limitation-8-bit-demoscene-68266b918e4a))**:
+  * Inspired `VIZ: 64K` and SIMP's broader engineering ethos of achieving rich visual expression within tight CPU/battery budgets: Amiga-style `Copperbars` (horizontal raster scanline gradient bars oscillating in sine/cosine phase), 3D perspective synth horizons, and classic `DYCP` (*Different Y Character Position*) sine-wave scrollers carrying track metadata and live SoundCloud community "greetz".
+* **[`Nannou`](https://github.com/nannou-org/nannou) ([*Why Nannou? Goals*](https://guide.nannou.cc/why_nannou.html#goals)) & [`Processing` / `p5.js`](https://github.com/processing/p5.js) (The Processing Foundation)**:
+  * Studied when designing SIMP's hybrid Rust-DSP + Canvas2D visualizer architecture (`crates/simp-core/src/viz.rs` and `ui/src/components/PlayerBackgroundVisualizer.tsx`), including lock-free audio sample ring-buffer tapping (`AudioTapSource<S>`), 30 Hz `AudioSpectrumTick` feature extraction, and immediate-mode 2D generative math primitives.
 
 ---
 
