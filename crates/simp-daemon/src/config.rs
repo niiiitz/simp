@@ -41,15 +41,7 @@ pub fn load_or_create_settings() -> SimpSettings {
 }
 
 pub fn save_settings(settings: &SimpSettings) -> Result<()> {
-    let path = settings_vdf_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let vdf_str = keyvalues_serde::to_string_with_key(settings, "SimpSettings")?;
-    let tmp_path = path.with_extension("vdf.tmp");
-    fs::write(&tmp_path, vdf_str)?;
-    fs::rename(&tmp_path, &path)?;
-    Ok(())
+    simp_core::library::vdf::save_settings(settings)
 }
 
 #[cfg(test)]

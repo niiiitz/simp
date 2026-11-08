@@ -130,7 +130,34 @@ async fn no_cache_headers_middleware(
     res
 }
 
+fn sync_soundcloud_tokens_into_daemon_state(state: &DaemonIpcState) {
+    if let Ok(mut cfg) = state.settings.lock() {
+        simp_core::sinks::soundcloud_api::sync_latest_soundcloud_tokens_into_settings(&mut cfg);
+    }
+}
+
 pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
+    let sc_bg_state = ipc_state.clone();
+    tokio::spawn(async move {
+        // Wait 5s after startup, then check every 10 minutes to proactively rotate SoundCloud OAuth tokens
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        loop {
+            let cfg_snapshot = sc_bg_state.settings.lock().unwrap().clone();
+            let creds = simp_core::sinks::soundcloud_api::resolve_soundcloud_credentials(&cfg_snapshot);
+            if !creds.refresh_token.is_empty()
+                && !creds.client_id.is_empty()
+                && !creds.client_secret.is_empty()
+            {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = simp_core::sinks::soundcloud_api::ensure_valid_access_token(&cfg_snapshot);
+                })
+                .await;
+                sync_soundcloud_tokens_into_daemon_state(&sc_bg_state);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        }
+    });
+
     let art_cache_dir = simp_core::simp_art_cache_dir();
     let _ = std::fs::create_dir_all(&art_cache_dir);
 
@@ -780,6 +807,25 @@ async fn soundcloud_callback_handler(
 
 async fn soundcloud_client_auth_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
     let cfg = state.settings.lock().unwrap().clone();
+    let existing_creds = simp_core::sinks::soundcloud_api::resolve_soundcloud_credentials(&cfg);
+    if !existing_creds.refresh_token.is_empty() {
+        let cfg_for_refresh = cfg.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = simp_core::sinks::soundcloud_api::ensure_valid_access_token(&cfg_for_refresh);
+        })
+        .await;
+        sync_soundcloud_tokens_into_daemon_state(&state);
+        let refreshed = simp_core::sinks::soundcloud_api::resolve_soundcloud_credentials(
+            &state.settings.lock().unwrap(),
+        );
+        return Json(serde_json::json!({
+            "ok": true,
+            "auth_mode": refreshed.auth_mode,
+            "username": refreshed.username,
+            "expires_at": refreshed.expires_at,
+        }));
+    }
+
     let res = tokio::task::spawn_blocking(move || {
         simp_core::sinks::soundcloud_api::obtain_client_credentials_token(&cfg)
     })
@@ -817,6 +863,7 @@ async fn soundcloud_playlists_handler(State(state): State<DaemonIpcState>) -> im
         simp_core::sinks::soundcloud_api::fetch_user_playlists_and_likes(&cfg)
     })
     .await;
+    sync_soundcloud_tokens_into_daemon_state(&state);
     match res {
         Ok(Ok(data)) => Json(serde_json::json!({ "ok": true, "data": data })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
@@ -834,6 +881,7 @@ async fn soundcloud_playlist_tracks_handler(
         simp_core::sinks::soundcloud_api::fetch_playlist_tracks(&cfg, &id)
     })
     .await;
+    sync_soundcloud_tokens_into_daemon_state(&state);
     match res {
         Ok(Ok(tracks)) => Json(serde_json::json!({ "ok": true, "data": tracks })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
@@ -847,6 +895,7 @@ async fn soundcloud_stream_handler(State(state): State<DaemonIpcState>) -> impl 
         simp_core::sinks::soundcloud_api::fetch_stream_and_stations(&cfg)
     })
     .await;
+    sync_soundcloud_tokens_into_daemon_state(&state);
     match res {
         Ok(Ok(feed)) => Json(serde_json::json!({ "ok": true, "data": feed })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),

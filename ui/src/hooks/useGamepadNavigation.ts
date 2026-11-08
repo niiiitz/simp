@@ -70,11 +70,17 @@ export function useGamepadNavigation({
   applyVolume,
 }: UseGamepadNavigationParams): UseGamepadNavigationResult {
   const lastBridgeMsgTsRef = useRef<number>(0);
-  const gamepadActionRef = useRef<(action: string) => void>(() => {});
+  const gamepadActionRef = useRef<
+    (action: string, source?: 'daemon' | 'keyboard' | 'web' | 'bridge') => void
+  >(() => {});
   const lastWebGamepadTsRef = useRef<number>(0);
   const lastGamepadInputTsRef = useRef<number>(0);
   const lastBrowserFocusRef = useRef<HTMLElement | null>(null);
   const preMuteVolumeRef = useRef<number>(0.85);
+  const lastActionTsRef = useRef<Record<string, number>>({});
+  const lastActionSourceRef = useRef<Record<string, string>>({});
+  const lastDaemonActionTsRef = useRef<Record<string, number>>({});
+  const lastPowerActionTsRef = useRef<number>(0);
 
   // Adaptive Input Modality (`data-simp-input="pointer" | "gamepad"`):
   // Default to `gamepad` inside SteamUI's `/simp-console` iframe and `pointer` in standalone desktop windows,
@@ -616,15 +622,30 @@ export function useGamepadNavigation({
 
   // Keyboard shortcuts + Native Decky Fullscreen Route `postMessage` Gamepad Bridge
   useEffect(() => {
-    const lastActionTs: Record<string, number> = {};
-    let lastPowerActionTs = 0;
-    const handleGamepadAction = (action: string) => {
+    const handleGamepadAction = (
+      action: string,
+      source: 'daemon' | 'keyboard' | 'web' | 'bridge' = 'keyboard'
+    ) => {
       const now = performance.now();
-      const debounceMs = action === 'power' || action === 'sources' ? 200 : 70;
-      if (lastActionTs[action] && now - lastActionTs[action] < debounceMs) return;
-      lastActionTs[action] = now;
+      const prevTs = lastActionTsRef.current[action] || 0;
+      const prevSource = lastActionSourceRef.current[action];
+      // When the same logical action arrives from two different input paths (e.g., Linux `/dev/hidraw*`
+      // daemon event + Steam Input KDE Desktop keyboard emulation `Enter`/`Escape`/`Arrow*`/`Tab`/`Space`),
+      // deduplicate within 240ms so a single physical button press never fires twice.
+      const crossSource = Boolean(prevSource && prevSource !== source);
+      const debounceMs = crossSource
+        ? 240
+        : action === 'power' || action === 'sources'
+        ? 220
+        : 70;
+      if (prevTs && now - prevTs < debounceMs) return;
+      lastActionTsRef.current[action] = now;
+      lastActionSourceRef.current[action] = source;
+      if (source === 'daemon') {
+        lastDaemonActionTsRef.current[action] = now;
+      }
       if (action === 'power') {
-        lastPowerActionTs = now;
+        lastPowerActionTsRef.current = now;
       }
       lastGamepadInputTsRef.current = now;
       if (document.documentElement.dataset.simpInput !== 'gamepad') {
@@ -1092,13 +1113,19 @@ export function useGamepadNavigation({
         // In Steam KDE Desktop Mode, if `Start` (`Menu ☰`) opened the hamburger menu via `hidraw`
         // (`action === 'power'`) and Steam Input also emits a synthetic `Escape` on button release,
         // ignore that synthetic `Escape` so it does not immediately close the menu!
-        if (e.key === 'Escape' && performance.now() - lastPowerActionTs < 600) {
+        if (e.key === 'Escape' && performance.now() - lastPowerActionTsRef.current < 600) {
           return;
         }
         handleGamepadAction('back');
       } else if (e.key === ' ') {
         e.preventDefault();
         e.stopPropagation();
+        // In Steam KDE Desktop Mode, the physical `Y` button emits `repeat` via `hidraw` AND Steam Input
+        // sends a synthetic `Space` keydown; ignore that synthetic `Space` so pressing `Y` in the Player
+        // view cycles Repeat without accidentally toggling Play/Pause.
+        if (performance.now() - (lastDaemonActionTsRef.current['repeat'] || 0) < 450) {
+          return;
+        }
         const isModalOpen =
           sourceModalOpen ||
           powerModalOpen ||
@@ -1216,7 +1243,7 @@ export function useGamepadNavigation({
       const data = e.data;
       if (!data || data.type !== 'SIMP_GAMEPAD_ACTION') return;
       lastBridgeMsgTsRef.current = performance.now();
-      handleGamepadAction(data.action);
+      handleGamepadAction(data.action, 'bridge');
     };
 
     // Also listen for SteamUI's native `vgp_onbuttondown` / `vgp_ondirection` events directly
@@ -1242,7 +1269,7 @@ export function useGamepadNavigation({
       const action = map[btn];
       if (action) {
         lastBridgeMsgTsRef.current = performance.now();
-        handleGamepadAction(action);
+        handleGamepadAction(action, 'bridge');
       }
     };
 
@@ -1259,10 +1286,7 @@ export function useGamepadNavigation({
       if (now - lastBridgeMsgTsRef.current < 220) {
         return;
       }
-      if (action !== 'power' && now - lastWebGamepadTsRef.current < 220) {
-        return;
-      }
-      handleGamepadAction(action);
+      handleGamepadAction(action, 'daemon');
     };
 
     window.addEventListener('keydown', onKeyDown, true);
@@ -1376,7 +1400,7 @@ export function useGamepadNavigation({
 
         const fireWebPad = (action: string) => {
           lastWebGamepadTsRef.current = performance.now();
-          gamepadActionRef.current(action);
+          gamepadActionRef.current(action, 'web');
         };
 
         if (!bridgeActive) {

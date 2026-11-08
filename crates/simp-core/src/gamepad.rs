@@ -637,10 +637,10 @@ fn read_evdev_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sender<P
 }
 
 /// Checks whether `/dev/hidraw{idx}` is a Valve Steam Deck (`28DE:1205`) or Steam Controller
-/// (`28DE:1102` / `28DE:1142`) `client_hdev` node that is ALREADY opened by another process (such as
-/// the Steam client in KDE Plasma Desktop Mode).
+/// (`28DE:1102` wired, `28DE:1142` wireless dongle, `28DE:1106` BLE, `28DE:1301`/`1302` SC2)
+/// `client_hdev` node that is ALREADY held open by the Steam client in KDE Plasma Desktop Mode.
 ///
-/// Safety invariant: We only attach to `/dev/hidraw{idx}` when another process already holds it open
+/// Safety invariant: We only attach to `/dev/hidraw{idx}` when the Steam client holds it open
 /// (`steam->client_opened > 0`), so SIMP never causes `hid-steam.c` to unregister the kernel `evdev`
 /// gamepad when Steam is closed.
 #[cfg(target_os = "linux")]
@@ -652,11 +652,53 @@ fn is_steam_deck_hidraw_candidate(idx: usize) -> bool {
     };
     let is_valve_deck_or_sc = uevent.contains("28DE:00001205")
         || uevent.contains("28DE:00001102")
-        || uevent.contains("28DE:00001142");
+        || uevent.contains("28DE:00001142")
+        || uevent.contains("28DE:00001106")
+        || uevent.contains("28DE:00001301")
+        || uevent.contains("28DE:00001302");
     if !is_valve_deck_or_sc {
         return false;
     }
-    is_hidraw_opened_by_other_process(idx)
+    is_steam_client_holding_hidraw(idx)
+}
+
+/// Detects whether the Steam client is running and holding the `hid-steam` `client_hdev` interface.
+///
+/// Note: The `steam` binary calls `prctl(PR_SET_DUMPABLE, 0)`, which sets `/proc/<steam_pid>/fd`
+/// permissions to `0500 root:root` so non-root processes cannot read `/proc/<steam_pid>/fd`.
+/// Therefore, in addition to checking readable `/proc/<pid>/fd` links, we check:
+/// 1. Whether `/sys/class/hidraw/hidraw{idx}/device/input` is absent (because `hid-steam.c`
+///    unregisters the kernel `input_dev` as soon as Steam opens `client_hdev`), or
+/// 2. Whether a process with `/proc/<pid>/comm == "steam"` is currently running (`comm` is always
+///    world-readable `0444` even when `PR_SET_DUMPABLE=0`).
+#[cfg(target_os = "linux")]
+fn is_steam_client_holding_hidraw(idx: usize) -> bool {
+    if is_hidraw_opened_by_other_process(idx) {
+        return true;
+    }
+    let input_dir = format!("/sys/class/hidraw/hidraw{idx}/device/input");
+    if !Path::new(&input_dir).exists() {
+        return true;
+    }
+    let proc_entries = match std::fs::read_dir("/proc") {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in proc_entries.flatten() {
+        let fname = entry.file_name();
+        let pid_str = fname.to_string_lossy();
+        if !pid_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let comm_path = format!("/proc/{pid_str}/comm");
+        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+            let name = comm.trim();
+            if name.eq_ignore_ascii_case("steam") || name.eq_ignore_ascii_case("steamwebhelper") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(target_os = "linux")]
@@ -687,15 +729,105 @@ fn is_hidraw_opened_by_other_process(idx: usize) -> bool {
     false
 }
 
+/// Decoded button and directional state from a Valve Steam Controller (`0x01`, BLE `0x03`) or
+/// Steam Deck (`0x09`) raw HID input report (`drivers/hid/hid-steam.c`).
+///
+/// Intentional omissions for KDE Plasma Desktop Mode mouse coexistence:
+/// - `R2` (Left Mouse Click), `L2` (Right Mouse Click), and Right Trackpad (Mouse Cursor) are left
+///   exclusively to Steam's Desktop Mode mouse emulation.
+/// - `X` (`b8 & 0x40`) is left unbound so SteamOS's native `Steam + X` / Desktop `X` On-Screen
+///   Keyboard shortcut does not conflict with SIMP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SteamHidrawState {
+    pub l1: bool,
+    pub r1: bool,
+    pub start: bool,
+    pub select: bool,
+    pub y: bool,
+    pub a: bool,
+    pub b: bool,
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub fn extract_steam_hidraw_state(report: &[u8]) -> Option<SteamHidrawState> {
+    if report.len() >= 20
+        && report[0] == 0x01
+        && report[1] == 0x00
+        && (report[2] == 0x01 || report[2] == 0x09)
+    {
+        let b8 = report[8];
+        let b9 = report[9];
+        let b10 = report[10];
+
+        // On Steam Controller (`0x01`), bytes 16..20 carry the physical Left Stick when bit 3 of
+        // `b10` (`LPAD_TOUCH`) is 0. On Steam Deck (`0x09`), bytes 48..52 carry the physical Left Stick.
+        let (lx, ly) = if report[2] == 0x09 && report.len() >= 52 {
+            (
+                i16::from_le_bytes([report[48], report[49]]),
+                i16::from_le_bytes([report[50], report[51]]),
+            )
+        } else if report[2] == 0x01 && (b10 & 0x08) == 0 {
+            (
+                i16::from_le_bytes([report[16], report[17]]),
+                i16::from_le_bytes([report[18], report[19]]),
+            )
+        } else {
+            (0, 0)
+        };
+
+        // Note: In `hid-steam.c`, raw `ly` is positive when pushing the stick UP (`input_report_abs(input, ABS_Y, -ly)`).
+        return Some(SteamHidrawState {
+            a: (b8 & 0x80) != 0,
+            b: (b8 & 0x20) != 0,
+            y: (b8 & 0x10) != 0,
+            l1: (b8 & 0x08) != 0,
+            r1: (b8 & 0x04) != 0,
+            start: (b9 & 0x40) != 0,
+            select: (b9 & 0x10) != 0,
+            left: (b9 & 0x08) != 0 || lx < -18000,
+            right: (b9 & 0x04) != 0 || lx > 18000,
+            down: (b9 & 0x02) != 0 || ly < -18000,
+            up: (b9 & 0x01) != 0 || ly > 18000,
+        });
+    }
+
+    // Bluetooth LE Steam Controller (`28DE:1106`) input report (`0x03`, `(report[1] & 0x0f) == 0x04`)
+    if report.len() >= 12 && report[0] == 0x03 && (report[1] & 0x0f) == 0x04 {
+        let b8 = report[2];
+        let b9 = report[3];
+        return Some(SteamHidrawState {
+            a: (b8 & 0x80) != 0,
+            b: (b8 & 0x20) != 0,
+            y: (b8 & 0x10) != 0,
+            l1: (b8 & 0x08) != 0,
+            r1: (b8 & 0x04) != 0,
+            start: (b9 & 0x40) != 0,
+            select: (b9 & 0x10) != 0,
+            left: (b9 & 0x08) != 0,
+            right: (b9 & 0x04) != 0,
+            down: (b9 & 0x02) != 0,
+            up: (b9 & 0x01) != 0,
+        });
+    }
+
+    None
+}
+
 /// Extracts the physical `BTN_START` (`Menu ☰`, byte 9 bit 6 = `0x40`) state from a 64-byte
 /// Valve Steam Deck (`ID_CONTROLLER_DECK_STATE = 0x09`) or Steam Controller (`ID_CONTROLLER_STATE = 0x01`)
 /// raw HID input report (`drivers/hid/hid-steam.c` `steam_do_deck_input_event`).
 #[cfg(any(target_os = "linux", test))]
 pub fn extract_steam_deck_hidraw_start_pressed(report: &[u8]) -> Option<bool> {
+    if let Some(state) = extract_steam_hidraw_state(report) {
+        return Some(state.start);
+    }
     if report.len() < 16 || report[0] != 0x01 || report[1] != 0x00 {
         return None;
     }
-    // `0x09` = `ID_CONTROLLER_DECK_STATE`, `0x01` = `ID_CONTROLLER_STATE`
     if report[2] != 0x09 && report[2] != 0x01 {
         return None;
     }
@@ -715,11 +847,11 @@ fn read_steam_deck_hidraw_loop(
     };
 
     tracing::info!(
-        "Linux Steam Deck hidraw reader attached to {dev_path} (hidraw{idx}) for KDE Desktop Mode BTN_START"
+        "Linux Valve Steam Controller / Deck hidraw reader attached to {dev_path} (hidraw{idx}) for KDE Desktop Mode"
     );
 
     let mut buf = [0u8; 64];
-    let mut prev_start = false;
+    let mut prev = SteamHidrawState::default();
     let mut last_client_check = Instant::now();
 
     while let Ok(n) = file.read(&mut buf) {
@@ -728,20 +860,35 @@ fn read_steam_deck_hidraw_loop(
         }
         if last_client_check.elapsed() >= Duration::from_secs(3) {
             last_client_check = Instant::now();
-            if !is_hidraw_opened_by_other_process(idx) {
+            if !is_steam_client_holding_hidraw(idx) {
                 tracing::info!(
                     "Steam client closed {dev_path}; releasing SIMP hidraw handle so kernel evdev can resume"
                 );
                 break;
             }
         }
-        if let Some(start_pressed) = extract_steam_deck_hidraw_start_pressed(&buf[..n]) {
-            if start_pressed && !prev_start {
-                let _ = broadcast_tx.send(PlaybackEvent::GamepadInput {
-                    action: "power".to_string(),
-                });
+        if let Some(cur) = extract_steam_hidraw_state(&buf[..n]) {
+            let edges: &[(bool, bool, &str)] = &[
+                (cur.l1, prev.l1, "l1"),
+                (cur.r1, prev.r1, "r1"),
+                (cur.start, prev.start, "power"),
+                (cur.select, prev.select, "sources"),
+                (cur.y, prev.y, "repeat"),
+                (cur.a, prev.a, "activate"),
+                (cur.b, prev.b, "back"),
+                (cur.up, prev.up, "up"),
+                (cur.down, prev.down, "down"),
+                (cur.left, prev.left, "left"),
+                (cur.right, prev.right, "right"),
+            ];
+            for &(now_pressed, was_pressed, action) in edges {
+                if now_pressed && !was_pressed {
+                    let _ = broadcast_tx.send(PlaybackEvent::GamepadInput {
+                        action: action.to_string(),
+                    });
+                }
             }
-            prev_start = start_pressed;
+            prev = cur;
         }
     }
 }
@@ -1076,6 +1223,29 @@ mod tests {
         assert_eq!(extract_steam_deck_hidraw_start_pressed(&report), Some(false));
         report[9] = 0x40; // BIT(6) = BTN_START
         assert_eq!(extract_steam_deck_hidraw_start_pressed(&report), Some(true));
+
+        // Verify full Steam Controller (`0x01`) and Steam Deck (`0x09`) hidraw button/stick decoding
+        let mut sc_report = [0u8; 64];
+        sc_report[0] = 0x01;
+        sc_report[1] = 0x00;
+        sc_report[2] = 0x01; // ID_CONTROLLER_STATE (Steam Controller USB/Wireless)
+        sc_report[8] = 0x80 | 0x20 | 0x10 | 0x08 | 0x04; // A, B, Y, L1, R1
+        sc_report[9] = 0x40 | 0x10 | 0x01; // START, SELECT, D-Pad Up
+        sc_report[16..18].copy_from_slice(&(-22000i16).to_le_bytes()); // Left Stick Left
+        let parsed_sc = extract_steam_hidraw_state(&sc_report).expect("valid SC report");
+        assert!(parsed_sc.a && parsed_sc.b && parsed_sc.y && parsed_sc.l1 && parsed_sc.r1);
+        assert!(parsed_sc.start && parsed_sc.select && parsed_sc.up && parsed_sc.left);
+        assert!(!parsed_sc.down && !parsed_sc.right);
+
+        // Verify Bluetooth LE Steam Controller (`0x03`, `0x04`) decoding
+        let mut ble_report = [0u8; 20];
+        ble_report[0] = 0x03;
+        ble_report[1] = 0x04;
+        ble_report[2] = 0x08 | 0x04; // L1 + R1
+        ble_report[3] = 0x40 | 0x10 | 0x04; // START + SELECT + D-Pad Right
+        let parsed_ble = extract_steam_hidraw_state(&ble_report).expect("valid BLE SC report");
+        assert!(parsed_ble.l1 && parsed_ble.r1 && parsed_ble.start && parsed_ble.select && parsed_ble.right);
+        assert!(!parsed_ble.a && !parsed_ble.b && !parsed_ble.left);
 
         // Verify macOS IOKit HID button & hat-switch normalization
         assert_eq!(map_hid_button_usage_to_action(0x09, 1), Some("activate"));

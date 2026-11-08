@@ -245,12 +245,51 @@ pub fn clear_cached_soundcloud_state() {
 
 pub fn update_cached_soundcloud_tokens(bundle: SoundCloudTokenBundle) {
     if let Ok(mut g) = token_cache().lock() {
+        // Never overwrite an active personal user session (`refresh_token` present) with a `client_credentials` token
+        if bundle.auth_mode == "client_credentials" {
+            if let Some(ref existing) = *g {
+                if !existing.refresh_token.trim().is_empty() {
+                    return;
+                }
+            }
+        }
         *g = Some(bundle);
     }
 }
 
 pub fn get_cached_soundcloud_tokens() -> Option<SoundCloudTokenBundle> {
     token_cache().lock().ok().and_then(|g| g.clone())
+}
+
+/// Synchronizes the most recent SoundCloud OAuth token bundle (from `TOKEN_CACHE` or disk `settings.vdf`)
+/// into `settings` before saving to disk or updating daemon state, preventing stale `SimpSettings`
+/// clones (e.g. during volume/brightness updates) from overwriting a rotated single-use `refresh_token`.
+pub fn sync_latest_soundcloud_tokens_into_settings(settings: &mut SimpSettings) {
+    if !settings.services.soundcloud_enabled {
+        return;
+    }
+
+    if let Some(cached) = get_cached_soundcloud_tokens() {
+        let cached_is_newer_or_user = !cached.access_token.trim().is_empty()
+            && (cached.expires_at >= settings.services.soundcloud_token_expires_at
+                || (cached.auth_mode == "user"
+                    && settings.services.soundcloud_auth_mode.trim() != "user")
+                || (!cached.refresh_token.trim().is_empty()
+                    && settings.services.soundcloud_refresh_token.trim().is_empty()));
+        if cached_is_newer_or_user {
+            settings.services.soundcloud_access_token = cached.access_token;
+            if !cached.refresh_token.trim().is_empty() {
+                settings.services.soundcloud_refresh_token = cached.refresh_token;
+            }
+            settings.services.soundcloud_token_expires_at = cached.expires_at;
+            if !cached.auth_mode.trim().is_empty() {
+                settings.services.soundcloud_auth_mode = cached.auth_mode;
+            }
+            if !cached.username.trim().is_empty() {
+                settings.services.soundcloud_username = cached.username;
+            }
+        }
+    }
 }
 
 pub fn clean_soundcloud_id(raw: &str) -> String {
@@ -762,6 +801,7 @@ pub fn resolve_soundcloud_credentials(settings: &SimpSettings) -> ResolvedSoundC
         // Prefer the in-memory token if settings hasn't been reloaded yet or if cached is newer
         let use_cached = access_token.is_empty()
             || (cached.auth_mode == "user" && auth_mode != "user")
+            || (!cached.refresh_token.is_empty() && refresh_token.is_empty())
             || (cached.expires_at >= expires_at && cached.auth_mode == auth_mode);
         if use_cached {
             access_token = cached.access_token;
@@ -774,6 +814,15 @@ pub fn resolve_soundcloud_credentials(settings: &SimpSettings) -> ResolvedSoundC
                 username = cached.username;
             }
         }
+    } else if !access_token.is_empty() {
+        // Seed TOKEN_CACHE from disk/settings on startup so `save_settings` always knows the latest token
+        update_cached_soundcloud_tokens(SoundCloudTokenBundle {
+            access_token: access_token.clone(),
+            refresh_token: refresh_token.clone(),
+            expires_at,
+            auth_mode: auth_mode.clone(),
+            username: username.clone(),
+        });
     }
 
     ResolvedSoundCloudCredentials {
@@ -1226,18 +1275,26 @@ fn persist_soundcloud_tokens_to_settings_vdf(bundle: &SoundCloudTokenBundle) {
     let _ = crate::library::vdf::save_settings(&settings);
 }
 
-fn clear_consumed_user_refresh_token() {
+fn clear_consumed_user_refresh_token(failed_refresh_token: &str) {
+    let failed_trimmed = failed_refresh_token.trim();
     let mut settings = crate::library::vdf::load_or_create_settings();
-    if !settings.services.soundcloud_refresh_token.trim().is_empty() {
+    // Only clear if the token on disk is still the exact refresh_token that failed with `invalid_grant`
+    // (never wipe a newly rotated refresh_token written by another thread).
+    if !settings.services.soundcloud_refresh_token.trim().is_empty()
+        && (failed_trimmed.is_empty()
+            || settings.services.soundcloud_refresh_token.trim() == failed_trimmed)
+    {
         settings.services.soundcloud_refresh_token.clear();
         if settings.services.soundcloud_auth_mode != "client_credentials" {
             settings.services.soundcloud_auth_mode = "client_credentials".to_string();
         }
-        let _ = crate::library::vdf::save_settings(&settings);
+        let _ = crate::library::vdf::save_settings_raw(&settings);
     }
     if let Ok(mut guard) = token_cache().lock() {
         if let Some(ref mut cached) = *guard {
-            cached.refresh_token.clear();
+            if failed_trimmed.is_empty() || cached.refresh_token.trim() == failed_trimmed {
+                cached.refresh_token.clear();
+            }
         }
     }
 }
@@ -1247,15 +1304,16 @@ fn is_clobbered_user_token(creds: &ResolvedSoundCloudCredentials) -> bool {
         && (creds.username == "Public Discovery (Client Credentials)" || creds.auth_mode != "user")
 }
 
-/// Resolves a valid SoundCloud OAuth access token, transparently refreshing expired user tokens
-/// or minting a `client_credentials` token when `SOUNDCLOUD_CLIENT_ID` & `SOUNDCLOUD_CLIENT_SECRET` are available.
+/// Resolves a valid SoundCloud OAuth access token, transparently refreshing user tokens
+/// up to 10 minutes (`600s`) before expiry or minting a `client_credentials` token when
+/// `SOUNDCLOUD_CLIENT_ID` & `SOUNDCLOUD_CLIENT_SECRET` are available.
 pub fn ensure_valid_access_token(settings: &SimpSettings) -> Result<String> {
     let creds = resolve_soundcloud_credentials(settings);
     let now = now_unix_secs();
 
     if !creds.access_token.is_empty()
         && !is_clobbered_user_token(&creds)
-        && (creds.expires_at == 0 || now + 60 < creds.expires_at)
+        && (creds.expires_at == 0 || now + 600 < creds.expires_at)
     {
         return Ok(creds.access_token);
     }
@@ -1269,7 +1327,7 @@ pub fn ensure_valid_access_token(settings: &SimpSettings) -> Result<String> {
 
     if !creds.access_token.is_empty()
         && !is_clobbered_user_token(&creds)
-        && (creds.expires_at == 0 || now + 60 < creds.expires_at)
+        && (creds.expires_at == 0 || now + 600 < creds.expires_at)
     {
         return Ok(creds.access_token);
     }
@@ -1286,15 +1344,20 @@ pub fn ensure_valid_access_token(settings: &SimpSettings) -> Result<String> {
         ) {
             Ok(refreshed) => return Ok(refreshed.access_token),
             Err(refresh_err) => {
-                let msg = refresh_err.to_string();
-                if msg.contains("HTTP 400") || msg.contains("HTTP 401") {
-                    clear_consumed_user_refresh_token();
+                let msg = format!("{refresh_err:#}");
+                tracing::warn!("SoundCloud user OAuth refresh attempt failed: {msg}");
+                if msg.contains("invalid_grant") {
+                    clear_consumed_user_refresh_token(&creds.refresh_token);
+                } else if !creds.access_token.is_empty() && now + 30 < creds.expires_at {
+                    // Transient network failure during early (10m pre-expiry) refresh window:
+                    // keep using the still-valid access_token and preserve refresh_token for next retry!
+                    return Ok(creds.access_token);
                 }
             }
         }
     }
 
-    if !creds.access_token.is_empty() && (creds.expires_at == 0 || now + 60 < creds.expires_at) {
+    if !creds.access_token.is_empty() && (creds.expires_at == 0 || now + 30 < creds.expires_at) {
         return Ok(creds.access_token);
     }
 
@@ -1312,7 +1375,7 @@ pub fn ensure_valid_access_token(settings: &SimpSettings) -> Result<String> {
     ))
 }
 
-/// Revokes the active SoundCloud token and clears in-memory state.
+/// Revokes the active SoundCloud token and clears in-memory and on-disk state.
 pub fn disconnect_soundcloud_session(settings: &SimpSettings) {
     let creds = resolve_soundcloud_credentials(settings);
     if !creds.access_token.is_empty() {
@@ -1329,6 +1392,14 @@ pub fn disconnect_soundcloud_session(settings: &SimpSettings) {
         );
     }
     clear_cached_soundcloud_state();
+    let mut disk = crate::library::vdf::load_or_create_settings();
+    disk.services.soundcloud_access_token.clear();
+    disk.services.soundcloud_refresh_token.clear();
+    disk.services.soundcloud_token_expires_at = 0;
+    disk.services.soundcloud_auth_mode.clear();
+    disk.services.soundcloud_username.clear();
+    disk.services.soundcloud_enabled = false;
+    let _ = crate::library::vdf::save_settings_raw(&disk);
 }
 
 pub fn is_soundcloud_ready(settings: &SimpSettings) -> bool {
@@ -1378,8 +1449,12 @@ pub fn soundcloud_authed_get(settings: &SimpSettings, url: &str) -> Result<Value
                         return Ok(v);
                     }
                 }
-                clear_cached_soundcloud_state();
                 let creds = resolve_soundcloud_credentials(settings);
+                if let Ok(mut guard) = token_cache().lock() {
+                    if let Some(ref mut cached) = *guard {
+                        cached.access_token.clear();
+                    }
+                }
                 if !creds.refresh_token.is_empty()
                     && !creds.client_id.is_empty()
                     && !creds.client_secret.is_empty()
@@ -1392,9 +1467,10 @@ pub fn soundcloud_authed_get(settings: &SimpSettings, url: &str) -> Result<Value
                     ) {
                         Ok(b) => return soundcloud_get_json(url, &b.access_token),
                         Err(refresh_err) => {
-                            let msg = refresh_err.to_string();
-                            if msg.contains("HTTP 400") || msg.contains("HTTP 401") {
-                                clear_consumed_user_refresh_token();
+                            let msg = format!("{refresh_err:#}");
+                            tracing::warn!("SoundCloud 401 refresh attempt failed: {msg}");
+                            if msg.contains("invalid_grant") {
+                                clear_consumed_user_refresh_token(&creds.refresh_token);
                             }
                         }
                     }
@@ -2602,5 +2678,61 @@ mod tests {
             mapped.album,
             "SoundCloud Mix • Techno • 128 BPM • ♥ 3.4K"
         );
+    }
+
+    #[test]
+    fn test_soundcloud_token_rotation_cache_and_settings_sync() {
+        clear_cached_soundcloud_state();
+
+        // 1. Seed a user OAuth session with an initial refresh_token
+        update_cached_soundcloud_tokens(SoundCloudTokenBundle {
+            access_token: "access_v1".to_string(),
+            refresh_token: "refresh_v1".to_string(),
+            expires_at: 2_000_000_000,
+            auth_mode: "user".to_string(),
+            username: "dj_tester".to_string(),
+        });
+
+        // 2. Verify a client_credentials fallback never overwrites an active user refresh_token
+        update_cached_soundcloud_tokens(SoundCloudTokenBundle {
+            access_token: "cc_access".to_string(),
+            refresh_token: String::new(),
+            expires_at: 2_000_003_600,
+            auth_mode: "client_credentials".to_string(),
+            username: "Public Discovery (Client Credentials)".to_string(),
+        });
+
+        let mut stale_settings = SimpSettings::default();
+        stale_settings.services.soundcloud_enabled = true;
+        stale_settings.services.soundcloud_access_token = "old_access_v0".to_string();
+        stale_settings.services.soundcloud_refresh_token = "old_refresh_v0".to_string();
+        stale_settings.services.soundcloud_token_expires_at = 1_700_000_000;
+        stale_settings.services.soundcloud_auth_mode = "user".to_string();
+
+        // 3. Rotate the user token in TOKEN_CACHE (simulating hourly grant_type=refresh_token rotation)
+        update_cached_soundcloud_tokens(SoundCloudTokenBundle {
+            access_token: "access_v2".to_string(),
+            refresh_token: "refresh_v2_rotated".to_string(),
+            expires_at: 2_000_007_200,
+            auth_mode: "user".to_string(),
+            username: "dj_tester".to_string(),
+        });
+
+        // 4. Syncing into a stale SimpSettings (e.g. before save_settings on SetVolume) must preserve
+        //    the newly rotated `refresh_v2_rotated` instead of overwriting disk with `old_refresh_v0`!
+        sync_latest_soundcloud_tokens_into_settings(&mut stale_settings);
+        assert_eq!(stale_settings.services.soundcloud_access_token, "access_v2");
+        assert_eq!(
+            stale_settings.services.soundcloud_refresh_token,
+            "refresh_v2_rotated"
+        );
+        assert_eq!(
+            stale_settings.services.soundcloud_token_expires_at,
+            2_000_007_200
+        );
+        assert_eq!(stale_settings.services.soundcloud_auth_mode, "user");
+        assert_eq!(stale_settings.services.soundcloud_username, "dj_tester");
+
+        clear_cached_soundcloud_state();
     }
 }

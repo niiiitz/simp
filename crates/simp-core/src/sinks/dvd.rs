@@ -143,14 +143,46 @@ pub fn candidate_libdvdcss_paths() -> Vec<PathBuf> {
             paths.push(data_dir.join("simp").join("lib").join("libdvdcss.2.dylib"));
         }
         if let Some(home) = std::env::var_os("HOME") {
-            paths.push(
-                PathBuf::from(&home)
-                    .join(".local/share/simp/lib/libdvdcss.so.2"),
-            );
-            paths.push(
-                PathBuf::from(home)
-                    .join(".local/share/simp/lib/libdvdcss.2.dylib"),
-            );
+            let home_path = PathBuf::from(&home);
+            paths.push(home_path.join(".local/share/simp/lib/libdvdcss.so.2"));
+            paths.push(home_path.join(".local/share/simp/lib/libdvdcss.2.dylib"));
+            for app_id in [
+                "org.videolan.VLC",
+                "tv.kodi.Kodi",
+                "fr.handbrake.ghb",
+                "io.mpv.Mpv",
+            ] {
+                for arch_sub in [
+                    "current/active/files/lib/libdvdcss.so.2",
+                    "x86_64/stable/active/files/lib/libdvdcss.so.2",
+                    "aarch64/stable/active/files/lib/libdvdcss.so.2",
+                ] {
+                    paths.push(
+                        home_path
+                            .join(".local/share/flatpak/app")
+                            .join(app_id)
+                            .join(arch_sub),
+                    );
+                }
+            }
+        }
+        for app_id in [
+            "org.videolan.VLC",
+            "tv.kodi.Kodi",
+            "fr.handbrake.ghb",
+            "io.mpv.Mpv",
+        ] {
+            for arch_sub in [
+                "current/active/files/lib/libdvdcss.so.2",
+                "x86_64/stable/active/files/lib/libdvdcss.so.2",
+                "aarch64/stable/active/files/lib/libdvdcss.so.2",
+            ] {
+                paths.push(
+                    PathBuf::from("/var/lib/flatpak/app")
+                        .join(app_id)
+                        .join(arch_sub),
+                );
+            }
         }
         for sys in [
             "/usr/lib/libdvdcss.so.2",
@@ -1417,7 +1449,7 @@ pub fn scan_dvd_disc(device_path: &str, force_refresh: bool) -> Option<OpticalDi
     let css_lib_hint = if cfg!(target_os = "windows") {
         "install VLC or place libdvdcss-2.dll in data\\lib\\"
     } else {
-        "place libdvdcss.so.2 in ~/.local/share/simp/lib/"
+        "install VLC (Flatpak/system) or place libdvdcss.so.2 in ~/.local/share/simp/lib/"
     };
     let css_label = if css_dll_available {
         "CSS"

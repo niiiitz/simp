@@ -177,8 +177,16 @@ pub fn load_or_create_settings() -> SimpSettings {
     SimpSettings::default()
 }
 
-/// Saves `SimpSettings` to `settings.vdf`.
+/// Saves `SimpSettings` to `settings.vdf`, first merging any newer rotated SoundCloud tokens
+/// from `TOKEN_CACHE` so saving volume/brightness/etc. never overwrites a rotated `refresh_token`.
 pub fn save_settings(settings: &SimpSettings) -> Result<()> {
+    let mut merged = settings.clone();
+    crate::sinks::soundcloud_api::sync_latest_soundcloud_tokens_into_settings(&mut merged);
+    save_settings_raw(&merged)
+}
+
+/// Writes `SimpSettings` directly to `settings.vdf` without merging cached tokens (used on disconnect/reset).
+pub fn save_settings_raw(settings: &SimpSettings) -> Result<()> {
     let path = settings_vdf_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
