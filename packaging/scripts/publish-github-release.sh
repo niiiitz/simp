@@ -12,6 +12,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
+export PATH="/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 
 TAG="${1:-}"
 NOTES_FILE="${2:-}"
@@ -25,17 +26,13 @@ TAG="v${TAG#v}"
 VERSION="${TAG#v}"
 
 if [[ "${SIMP_SKIP_BUILD:-0}" != "1" ]]; then
-  if [[ "$(uname -s)" == "Darwin" && ! -f "dist/SIMP-macos-arm64.zip" ]]; then
-    ./packaging/scripts/package-macos.sh
-  fi
-  if [[ ! -f "dist/simp-steamos-userland-x86_64.tar.gz" || ! -f "dist/simp-decky.zip" ]]; then
-    SIMP_TARGET_ARCH=x86_64 ./packaging/scripts/package-release.sh "${VERSION}"
-  fi
-  if [[ ! -f "dist/simp-steamos-userland-aarch64.tar.gz" ]]; then
-    SIMP_TARGET_ARCH=aarch64 SIMP_SKIP_UI_BUILD=1 SIMP_SKIP_DECKY_BUILD=1 ./packaging/scripts/package-release.sh "${VERSION}"
-  fi
-  if [[ ! -f "dist/simp-windows-portable-x86_64.zip" ]]; then
-    SIMP_SKIP_UI_BUILD=1 ./packaging/scripts/package-windows.sh
+  SIMP_TARGET_ARCH=x86_64 ./packaging/scripts/package-release.sh "${VERSION}"
+  SIMP_TARGET_ARCH=aarch64 SIMP_SKIP_UI_BUILD=1 SIMP_SKIP_DECKY_BUILD=1 ./packaging/scripts/package-release.sh "${VERSION}"
+  # Keep the generic `simp-steamos-userland.tar.gz` pointed at the x86_64 archive
+  cp -f "dist/simp-steamos-userland-x86_64.tar.gz" "dist/simp-steamos-userland.tar.gz"
+  SIMP_SKIP_UI_BUILD=1 ./packaging/scripts/package-windows.sh "${VERSION}"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    ./packaging/scripts/package-macos.sh "${VERSION}"
   fi
 fi
 
