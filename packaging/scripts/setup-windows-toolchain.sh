@@ -10,20 +10,40 @@ set -euo pipefail
 TOOLCHAIN_DIR="${HOME}/.cache/simp-toolchain"
 BIN_DIR="${TOOLCHAIN_DIR}/bin"
 ZIG_VER="0.13.0"
-ZIG_DIR="${TOOLCHAIN_DIR}/zig-linux-x86_64-${ZIG_VER}"
+HOST_OS="$(uname -s)"
+HOST_ARCH="$(uname -m)"
+if [[ "${HOST_OS}" == "Darwin" ]]; then
+  if [[ "${HOST_ARCH}" == "arm64" || "${HOST_ARCH}" == "aarch64" ]]; then
+    ZIG_SLUG="zig-macos-aarch64-${ZIG_VER}"
+  else
+    ZIG_SLUG="zig-macos-x86_64-${ZIG_VER}"
+  fi
+else
+  if [[ "${HOST_ARCH}" == "aarch64" || "${HOST_ARCH}" == "arm64" ]]; then
+    ZIG_SLUG="zig-linux-aarch64-${ZIG_VER}"
+  else
+    ZIG_SLUG="zig-linux-x86_64-${ZIG_VER}"
+  fi
+fi
+ZIG_DIR="${TOOLCHAIN_DIR}/${ZIG_SLUG}"
 ZIG_BIN="${ZIG_DIR}/zig"
 
 [[ -d "${BIN_DIR}" ]] || mkdir -p "${BIN_DIR}"
 
-if [[ -x "${BIN_DIR}/x86_64-w64-mingw32-gcc" && -x "${BIN_DIR}/x86_64-w64-mingw32-ar" ]]; then
+if [[ -x "/usr/local/bin/x86_64-w64-mingw32-gcc" && -x "/usr/local/bin/x86_64-w64-mingw32-ar" ]]; then
+  echo "/usr/local/bin"
+  exit 0
+fi
+
+if [[ -x "${BIN_DIR}/x86_64-w64-mingw32-gcc" && -x "${BIN_DIR}/x86_64-w64-mingw32-ar" ]] && grep -q "${ZIG_SLUG}" "${BIN_DIR}/x86_64-w64-mingw32-gcc" 2>/dev/null; then
   echo "${BIN_DIR}"
   exit 0
 fi
 
 if [[ ! -x "${ZIG_BIN}" ]]; then
-  echo "   • Downloading userland Zig ${ZIG_VER} cross-compiler into ${TOOLCHAIN_DIR}..." >&2
-  TARBALL="${TOOLCHAIN_DIR}/zig-${ZIG_VER}.tar.xz"
-  curl -fsSL "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" -o "${TARBALL}"
+  echo "   • Downloading userland Zig ${ZIG_VER} (${ZIG_SLUG}) cross-compiler into ${TOOLCHAIN_DIR}..." >&2
+  TARBALL="${TOOLCHAIN_DIR}/${ZIG_SLUG}.tar.xz"
+  curl -fsSL "https://ziglang.org/download/${ZIG_VER}/${ZIG_SLUG}.tar.xz" -o "${TARBALL}"
   tar -xJf "${TARBALL}" -C "${TOOLCHAIN_DIR}"
   rm -f "${TARBALL}"
 fi

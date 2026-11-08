@@ -88,78 +88,36 @@ pub fn run_ui() {
             run_windows_ui(ui_url, &profile_dir_path, &user_data_arg);
             return;
         }
-    }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        // Ensure DISPLAY / WAYLAND_DISPLAY are populated even if invoked from a background D-Bus/systemd context
-        let mut wmctrl = Command::new("wmctrl");
-        wmctrl
-            .args(["-xa", "org.simp.player"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        simp_core::mpris::apply_desktop_display_env(&mut wmctrl);
-        if wmctrl.status().map(|s| s.success()).unwrap_or(false) {
-            return;
-        }
-
-        // 1. Try native Chromium/Chrome/Edge/Brave in chromeless 1280x800 app mode
-        // Pass `--ozone-platform=x11` so `--class=org.simp.player` sets X11 `WM_CLASS="org.simp.player"`
-        // (preventing KWin Wayland's generic yellow "W" icon and allowing `wmctrl -xa org.simp.player` to raise it).
-        let native_browsers = [
-            "chromium",
-            "chromium-browser",
-            "google-chrome-stable",
-            "google-chrome",
-            "microsoft-edge-stable",
-            "microsoft-edge",
-            "brave-browser",
-        ];
-
-        for bin in native_browsers {
-            let mut cmd = Command::new(bin);
-            cmd.arg(format!("--app={ui_url}"))
-                .arg("--window-size=1280,800")
-                .arg("--class=org.simp.player")
-                .arg("--ozone-platform=x11")
-                .arg("--no-first-run")
-                .arg("--no-default-browser-check")
-                .arg("--disable-features=HardwareMediaKeyHandling,MediaSessionService")
-                .arg(&user_data_arg)
-                .stdin(Stdio::null())
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Ensure DISPLAY / WAYLAND_DISPLAY are populated even if invoked from a background D-Bus/systemd context
+            let mut wmctrl = Command::new("wmctrl");
+            wmctrl
+                .args(["-xa", "org.simp.player"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            simp_core::mpris::apply_desktop_display_env(&mut cmd);
-            if let Ok(mut child) = cmd.spawn() {
-                let _ = child.wait();
+            simp_core::mpris::apply_desktop_display_env(&mut wmctrl);
+            if wmctrl.status().map(|s| s.success()).unwrap_or(false) {
                 return;
             }
-        }
 
-        // 2. Try SteamOS Flatpak browsers in chromeless 1280x800 app mode
-        let flatpak_browsers = [
-            "org.chromium.Chromium",
-            "com.google.Chrome",
-            "com.microsoft.Edge",
-            "com.brave.Browser",
-        ];
+            // 1. Try native Chromium/Chrome/Edge/Brave in chromeless 1280x800 app mode
+            // Pass `--ozone-platform=x11` so `--class=org.simp.player` sets X11 `WM_CLASS="org.simp.player"`
+            // (preventing KWin Wayland's generic yellow "W" icon and allowing `wmctrl -xa org.simp.player` to raise it).
+            let native_browsers = [
+                "chromium",
+                "chromium-browser",
+                "google-chrome-stable",
+                "google-chrome",
+                "microsoft-edge-stable",
+                "microsoft-edge",
+                "brave-browser",
+            ];
 
-        for app_id in flatpak_browsers {
-            if Command::new("flatpak")
-                .arg("info")
-                .arg(app_id)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-            {
-                let mut cmd = Command::new("flatpak");
-                cmd.arg("run")
-                    .arg("--filesystem=xdg-data/simp:create")
-                    .arg("--device=all")
-                    .arg(app_id)
-                    .arg(format!("--app={ui_url}"))
+            for bin in native_browsers {
+                let mut cmd = Command::new(bin);
+                cmd.arg(format!("--app={ui_url}"))
                     .arg("--window-size=1280,800")
                     .arg("--class=org.simp.player")
                     .arg("--ozone-platform=x11")
@@ -176,15 +134,57 @@ pub fn run_ui() {
                     return;
                 }
             }
-        }
 
-        // 3. Fallback to xdg-open
-        let _ = Command::new("xdg-open")
-            .arg(ui_url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            // 2. Try SteamOS Flatpak browsers in chromeless 1280x800 app mode
+            let flatpak_browsers = [
+                "org.chromium.Chromium",
+                "com.google.Chrome",
+                "com.microsoft.Edge",
+                "com.brave.Browser",
+            ];
+
+            for app_id in flatpak_browsers {
+                if Command::new("flatpak")
+                    .arg("info")
+                    .arg(app_id)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+                {
+                    let mut cmd = Command::new("flatpak");
+                    cmd.arg("run")
+                        .arg("--filesystem=xdg-data/simp:create")
+                        .arg("--device=all")
+                        .arg(app_id)
+                        .arg(format!("--app={ui_url}"))
+                        .arg("--window-size=1280,800")
+                        .arg("--class=org.simp.player")
+                        .arg("--ozone-platform=x11")
+                        .arg("--no-first-run")
+                        .arg("--no-default-browser-check")
+                        .arg("--disable-features=HardwareMediaKeyHandling,MediaSessionService")
+                        .arg(&user_data_arg)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+                    simp_core::mpris::apply_desktop_display_env(&mut cmd);
+                    if let Ok(mut child) = cmd.spawn() {
+                        let _ = child.wait();
+                        return;
+                    }
+                }
+            }
+
+            // 3. Fallback to xdg-open
+            let _ = Command::new("xdg-open")
+                .arg(ui_url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 }
 
