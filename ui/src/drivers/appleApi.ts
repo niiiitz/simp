@@ -161,6 +161,7 @@ export async function ensureMusicKitConfigured(
   if (configuredToken !== developerToken) {
     await MK.configure({
       developerToken,
+      ...(musicUserToken ? { musicUserToken } : {}),
       app: {
         name: 'SIMP Media Player',
         build: '0.1.0-alpha',
@@ -172,12 +173,9 @@ export async function ensureMusicKitConfigured(
   const effectiveToken = musicUserToken || instance.musicUserToken;
   if (effectiveToken && instance.musicUserToken !== effectiveToken) {
     try {
-      if (instance.storekit && !instance.isAuthorized) {
-        instance.storekit._authorizationStatus = 0;
-      }
       instance.musicUserToken = effectiveToken;
-      if (instance.storekit?.userTokenIsValid && !instance.isAuthorized) {
-        await instance.authorize().catch(() => {});
+      if (instance.storekit) {
+        instance.storekit.userToken = effectiveToken;
       }
     } catch {
       // Ignore if read-only in a future MusicKit build

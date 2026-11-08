@@ -4,42 +4,166 @@ use simp_protocol::{SessionState, SimpSettings};
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(target_os = "windows")]
+fn query_windows_registry_steam_roots() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let queries = [
+        (r"HKCU\Software\Valve\Steam", "SteamPath"),
+        (r"HKLM\SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        (r"HKLM\SOFTWARE\Valve\Steam", "InstallPath"),
+    ];
+    for (key, val_name) in queries {
+        let mut cmd = std::process::Command::new("reg");
+        cmd.args(["query", key, "/v", val_name]);
+        crate::configure_background_command(&mut cmd);
+        if let Ok(output) = cmd.output() {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                for line in text.lines() {
+                    if let Some(pos) = line.find("REG_SZ") {
+                        let raw = line[pos + "REG_SZ".len()..].trim();
+                        if !raw.is_empty() {
+                            let norm = normalize_platform_path(raw);
+                            if norm.is_dir() && !out.contains(&norm) {
+                                out.push(norm);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn collect_ost_dirs_under_library_root(lib_root: & std::path::Path, music_dirs: &mut Vec<PathBuf>) {
+    // 1. Standard standalone Steam Soundtracks directory (`steamapps/music`)
+    let music_dir = lib_root.join("steamapps").join("music");
+    if music_dir.is_dir() && !music_dirs.contains(&music_dir) {
+        tracing::info!("Discovered Steam OST directory: {}", music_dir.display());
+        music_dirs.push(music_dir);
+    }
+
+    // 2. Legacy/DLC Soundtracks inside `steamapps/common/*Soundtrack*` / `*OST*` or `<Game>/Soundtrack`
+    let common_dir = lib_root.join("steamapps").join("common");
+    if let Ok(entries) = fs::read_dir(&common_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name_lower = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                let is_ost_folder = name_lower.contains("soundtrack")
+                    || name_lower.ends_with(" ost")
+                    || name_lower.contains(" ost ")
+                    || name_lower.ends_with("-ost")
+                    || name_lower.ends_with("_ost");
+                if is_ost_folder {
+                    if !music_dirs.contains(&path) {
+                        tracing::info!("Discovered Steam common OST directory: {}", path.display());
+                        music_dirs.push(path);
+                    }
+                } else {
+                    for sub in ["Soundtrack", "Soundtracks", "OST", "Original Soundtrack"] {
+                        let sub_dir = path.join(sub);
+                        if sub_dir.is_dir() && !music_dirs.contains(&sub_dir) {
+                            tracing::info!(
+                                "Discovered nested Steam game OST directory: {}",
+                                sub_dir.display()
+                            );
+                            music_dirs.push(sub_dir);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Discovers all active Steam soundtrack directories across:
 /// - SteamOS / Linux (`~/.local/share/Steam`, `~/.steam/steam`, Flatpak Steam)
 /// - macOS (`~/Library/Application Support/Steam`)
-/// - WSL2 / Windows Host (`/mnt/c/Program Files (x86)/Steam/steamapps/libraryfolders.vdf` or `C:\...`)
+/// - WSL2 / Windows Host (`/mnt/c/Program Files (x86)/Steam/steamapps/libraryfolders.vdf`, Registry `SteamPath`, or `<Drive>:\SteamLibrary`)
 ///
-/// Checks both `<library>/steamapps/music` and `<library>/steamapps/common/*Soundtrack*`.
+/// Checks `<library>/steamapps/music`, `<library>/steamapps/common/*Soundtrack*`, and `<library>/steamapps/common/<Game>/Soundtrack`.
 pub fn discover_steam_music_directories() -> Vec<PathBuf> {
     let mut music_dirs = Vec::new();
     let mut candidate_vdfs = Vec::new();
+    let mut candidate_roots = Vec::new();
 
     if let Some(home) = dirs::home_dir() {
-        candidate_vdfs.push(home.join(".local/share/Steam/steamapps/libraryfolders.vdf"));
-        candidate_vdfs.push(home.join(".steam/steam/steamapps/libraryfolders.vdf"));
-        candidate_vdfs.push(
-            home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/libraryfolders.vdf"),
-        );
-        candidate_vdfs.push(
-            home.join("Library/Application Support/Steam/steamapps/libraryfolders.vdf"),
-        );
+        for rel in [
+            ".local/share/Steam",
+            ".steam/steam",
+            ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+            "Library/Application Support/Steam",
+        ] {
+            let root = home.join(rel);
+            candidate_vdfs.push(root.join("steamapps/libraryfolders.vdf"));
+            candidate_vdfs.push(root.join("config/libraryfolders.vdf"));
+            if root.is_dir() {
+                candidate_roots.push(root);
+            }
+        }
     }
 
     // WSL2 / Windows Host Steam installation fallback
-    candidate_vdfs.push(PathBuf::from(
-        "/mnt/c/Program Files (x86)/Steam/steamapps/libraryfolders.vdf",
-    ));
-    candidate_vdfs.push(PathBuf::from(
-        "/mnt/c/Program Files/Steam/steamapps/libraryfolders.vdf",
-    ));
+    for wsl_root in [
+        "/mnt/c/Program Files (x86)/Steam",
+        "/mnt/c/Program Files/Steam",
+        "/mnt/c/SteamLibrary",
+        "/mnt/d/SteamLibrary",
+        "/mnt/d/Steam",
+        "/mnt/e/SteamLibrary",
+        "/mnt/e/Steam",
+    ] {
+        let root = PathBuf::from(wsl_root);
+        candidate_vdfs.push(root.join("steamapps/libraryfolders.vdf"));
+        candidate_vdfs.push(root.join("config/libraryfolders.vdf"));
+        if root.is_dir() && !candidate_roots.contains(&root) {
+            candidate_roots.push(root);
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
-        candidate_vdfs.push(PathBuf::from(
-            r"C:\Program Files (x86)\Steam\steamapps\libraryfolders.vdf",
-        ));
-        candidate_vdfs.push(PathBuf::from(
-            r"C:\Program Files\Steam\steamapps\libraryfolders.vdf",
-        ));
+        for reg_root in query_windows_registry_steam_roots() {
+            candidate_vdfs.push(reg_root.join(r"steamapps\libraryfolders.vdf"));
+            candidate_vdfs.push(reg_root.join(r"config\libraryfolders.vdf"));
+            if !candidate_roots.contains(&reg_root) {
+                candidate_roots.push(reg_root);
+            }
+        }
+        for env_key in ["ProgramFiles(x86)", "ProgramFiles"] {
+            if let Ok(pf) = std::env::var(env_key) {
+                let root = PathBuf::from(pf).join("Steam");
+                candidate_vdfs.push(root.join(r"steamapps\libraryfolders.vdf"));
+                candidate_vdfs.push(root.join(r"config\libraryfolders.vdf"));
+                if root.is_dir() && !candidate_roots.contains(&root) {
+                    candidate_roots.push(root);
+                }
+            }
+        }
+        for drive in b'C'..=b'Z' {
+            let d = drive as char;
+            for suffix in [
+                r"Program Files (x86)\Steam",
+                r"Program Files\Steam",
+                r"Steam",
+                r"SteamLibrary",
+                r"Games\Steam",
+                r"Games\SteamLibrary",
+            ] {
+                let root = PathBuf::from(format!(r"{d}:\{suffix}"));
+                if root.is_dir() {
+                    candidate_vdfs.push(root.join(r"steamapps\libraryfolders.vdf"));
+                    candidate_vdfs.push(root.join(r"config\libraryfolders.vdf"));
+                    if !candidate_roots.contains(&root) {
+                        candidate_roots.push(root);
+                    }
+                }
+            }
+        }
     }
 
     for vdf_path in candidate_vdfs {
@@ -47,47 +171,14 @@ pub fn discover_steam_music_directories() -> Vec<PathBuf> {
             continue;
         };
         for lib_root in parse_library_roots_from_vdf(&vdf_text) {
-            // 1. Standard standalone Steam Soundtracks directory (`steamapps/music`)
-            let music_dir = lib_root.join("steamapps").join("music");
-            if music_dir.is_dir() && !music_dirs.contains(&music_dir) {
-                tracing::info!("Discovered Steam OST directory: {}", music_dir.display());
-                music_dirs.push(music_dir);
-            }
-
-            // 2. Legacy/DLC Soundtracks inside `steamapps/common/*Soundtrack*` or `*OST*`
-            let common_dir = lib_root.join("steamapps").join("common");
-            if let Ok(entries) = fs::read_dir(&common_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        let name_lower = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_lowercase())
-                            .unwrap_or_default();
-                        if (name_lower.contains("soundtrack") || name_lower.ends_with(" ost"))
-                            && !music_dirs.contains(&path)
-                        {
-                            tracing::info!("Discovered Steam common OST directory: {}", path.display());
-                            music_dirs.push(path);
-                        }
-                    }
-                }
+            if !candidate_roots.contains(&lib_root) {
+                candidate_roots.push(lib_root);
             }
         }
     }
 
-    // Explicit direct fallback for standard WSL2 / SteamOS / Windows music paths
-    let direct_fallbacks = [
-        PathBuf::from("/mnt/c/Program Files (x86)/Steam/steamapps/music"),
-        PathBuf::from("/mnt/c/Program Files/Steam/steamapps/music"),
-        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\music"),
-        PathBuf::from(r"C:\Program Files\Steam\steamapps\music"),
-    ];
-    for fallback in direct_fallbacks {
-        if fallback.is_dir() && !music_dirs.contains(&fallback) {
-            tracing::info!("Discovered Steam OST fallback directory: {}", fallback.display());
-            music_dirs.push(fallback);
-        }
+    for lib_root in candidate_roots {
+        collect_ost_dirs_under_library_root(&lib_root, &mut music_dirs);
     }
 
     music_dirs
@@ -170,7 +261,8 @@ pub fn settings_vdf_path() -> PathBuf {
 pub fn load_or_create_settings() -> SimpSettings {
     let path = settings_vdf_path();
     if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(settings) = keyvalues_serde::from_str::<SimpSettings>(&content) {
+        if let Ok(mut settings) = keyvalues_serde::from_str::<SimpSettings>(&content) {
+            settings.library.scan_steam_osts = true;
             return settings;
         }
     }

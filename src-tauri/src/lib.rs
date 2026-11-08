@@ -74,6 +74,13 @@ pub fn run_ui() {
             return;
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            if simp_core::focus_existing_windows_ui_window() {
+                return;
+            }
+        }
+
         let profile_dir_path = simp_core::simp_data_dir().join("window-profile");
         let _ = std::fs::create_dir_all(&profile_dir_path);
         // Create the Chromium "First Run" sentinel file and clear any stale Crash/Singleton locks
@@ -190,33 +197,13 @@ pub fn run_ui() {
 
 #[cfg(target_os = "windows")]
 fn run_windows_ui(ui_url: &str, profile_dir: &std::path::Path, user_data_arg: &str) {
-    use std::path::PathBuf;
+    if simp_core::focus_existing_windows_ui_window() {
+        return;
+    }
 
     simp_core::seed_windows_browser_widevine_profile(profile_dir);
 
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    let env_roots = [
-        std::env::var("ProgramFiles").ok(),
-        std::env::var("ProgramFiles(x86)").ok(),
-        std::env::var("LOCALAPPDATA").ok(),
-    ];
-
-    let rel_paths = [
-        r"BraveSoftware\Brave-Browser\Application\brave.exe",
-        r"Google\Chrome\Application\chrome.exe",
-        r"Microsoft\Edge\Application\msedge.exe",
-    ];
-
-    for rel in rel_paths {
-        for root in env_roots.iter().flatten() {
-            let p = PathBuf::from(root).join(rel);
-            if p.is_file() && !candidates.contains(&p) {
-                candidates.push(p);
-            }
-        }
-    }
-
-    for bin in candidates {
+    for bin in simp_core::windows_browser_candidates() {
         let mut cmd = Command::new(&bin);
         cmd.arg(format!("--app={ui_url}"))
             .arg("--window-size=1280,800")

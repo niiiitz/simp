@@ -900,7 +900,7 @@ mod win32_tray {
         match msg {
             WM_TRAYICON => {
                 let mouse_msg = (l_param as u32) & 0xFFFF;
-                if mouse_msg == WM_LBUTTONUP || mouse_msg == WM_LBUTTONDBLCLK {
+                if mouse_msg == WM_LBUTTONUP {
                     crate::mpris::launch_simp_desktop_window();
                 } else if mouse_msg == WM_MBUTTONUP {
                     if let Some(g) = TRAY_GLOBAL.get() {
@@ -930,6 +930,8 @@ mod win32_tray {
                             crate::mpris::launch_simp_desktop_window();
                         }
                         ID_TRAY_QUIT => {
+                            let _ = g.cmd_tx.send(AudioCommand::ShutdownDaemon);
+                            crate::sinks::apple::AppleMusicSink::kill_headless_widevine_worker();
                             if let Ok(nid) = g.nid.lock() {
                                 Shell_NotifyIconW(NIM_DELETE, &*nid);
                             }
@@ -1069,6 +1071,7 @@ mod win32_tray {
             let mut msg: Msg = zeroed();
             while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
                 if msg.message == WM_TIMER {
+                    let _ = crate::hide_windows_headless_worker_windows();
                     let next_tip = format_tray_tooltip(&state);
                     if next_tip != last_tip {
                         last_tip = next_tip.clone();

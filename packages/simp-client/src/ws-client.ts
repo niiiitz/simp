@@ -47,6 +47,7 @@ export class SimpDaemonClient {
   private ws: WebSocket | null = null;
   private url: string;
   private reqCounter = 1;
+  private outboundQueue: string[] = [];
   private pendingQueries = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void }>();
   private stateListeners = new Set<StateListener>();
   private progressListeners = new Set<ProgressListener>();
@@ -81,6 +82,15 @@ export class SimpDaemonClient {
     }
 
     this.ws = new WebSocket(this.url);
+
+    this.ws.onopen = () => {
+      while (this.outboundQueue.length > 0 && this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const nextMsg = this.outboundQueue.shift();
+        if (nextMsg) {
+          this.ws.send(nextMsg);
+        }
+      }
+    };
 
     this.ws.onmessage = (evt) => {
       try {
@@ -214,20 +224,26 @@ export class SimpDaemonClient {
     }
   }
 
+  private sendOrQueue(rawJson: string): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(rawJson);
+      return;
+    }
+    this.outboundQueue.push(rawJson);
+    this.connect();
+  }
+
   public sendCommand(cmd: string, payload?: Record<string, unknown>): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify({ kind: 'command', cmd, ...(payload ? { payload } : {}) }));
+    this.sendOrQueue(JSON.stringify({ kind: 'command', cmd, ...(payload ? { payload } : {}) }));
   }
 
   public query<T = any>(queryName: string, params?: Record<string, unknown>): Promise<T> {
     return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        reject(new Error('Daemon WebSocket not connected'));
-        return;
-      }
       const req_id = this.reqCounter++;
       this.pendingQueries.set(req_id, { resolve, reject });
-      this.ws.send(JSON.stringify({ kind: 'query', req_id, query: queryName, ...(params ? { params } : {}) }));
+      this.sendOrQueue(
+        JSON.stringify({ kind: 'query', req_id, query: queryName, ...(params ? { params } : {}) })
+      );
     });
   }
 
@@ -342,8 +358,7 @@ export class SimpDaemonClient {
     track?: TrackMetadata | null,
     duration_ms?: number | null
   ): void => {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(
+    this.sendOrQueue(
       JSON.stringify({
         kind: 'apple_worker_event',
         state,

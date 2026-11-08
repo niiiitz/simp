@@ -390,7 +390,7 @@ impl Default for SimpSettings {
                 brightness_pct: 100,
             },
             library: LibrarySettings {
-                scan_steam_osts: false,
+                scan_steam_osts: true,
                 auto_mount_removable: false,
                 custom_paths,
                 ignored_paths: BTreeMap::new(),

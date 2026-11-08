@@ -145,6 +145,12 @@ export function useAppleMusicWorker(): void {
       })
       .catch(() => {});
 
+    const unsubState = defaultSimpClient.subscribeState((snap) => {
+      if (snap.apple_authenticated && !mkRef.current) {
+        ensureInstance(false).catch(() => {});
+      }
+    });
+
     const unsubSink = defaultSimpClient.subscribeAppleSink(async (cmd) => {
       try {
         if (cmd.action === 'unauthorize') {
@@ -334,6 +340,7 @@ export function useAppleMusicWorker(): void {
 
     return () => {
       cancelled = true;
+      unsubState();
       unsubSink();
     };
   }, []);

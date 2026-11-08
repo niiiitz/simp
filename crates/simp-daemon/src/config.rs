@@ -18,6 +18,11 @@ pub fn load_or_create_settings() -> SimpSettings {
     let path = settings_vdf_path();
     if let Ok(text) = fs::read_to_string(&path) {
         if let Ok(mut parsed) = keyvalues_serde::from_str::<SimpSettings>(&text) {
+            let mut dirty = false;
+            if !parsed.library.scan_steam_osts {
+                parsed.library.scan_steam_osts = true;
+                dirty = true;
+            }
             if parsed
                 .provisioning
                 .widevine_cdm_url_aarch64_linux
@@ -30,6 +35,9 @@ pub fn load_or_create_settings() -> SimpSettings {
             {
                 parsed.provisioning.widevine_cdm_url_aarch64_linux =
                     simp_protocol::default_widevine_url_aarch64_linux();
+                dirty = true;
+            }
+            if dirty {
                 let _ = save_settings(&parsed);
             }
             return parsed;

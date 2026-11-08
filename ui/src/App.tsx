@@ -47,7 +47,22 @@ const isCompanionPairRoute =
   (window.location.pathname.startsWith('/pair') ||
     new URLSearchParams(window.location.search).get('pair') === '1');
 
+const isDedicatedAppleWorkerRoute =
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('worker') === 'apple';
+
+const DedicatedAppleWorkerApp: React.FC = () => {
+  useEffect(() => {
+    document.title = 'SIMP Headless Audio Worker';
+    defaultSimpClient.connect();
+  }, []);
+  return <AppleMusicDriver />;
+};
+
 export const App: React.FC = () => {
+  if (isDedicatedAppleWorkerRoute) {
+    return <DedicatedAppleWorkerApp />;
+  }
   if (isCompanionPairRoute) {
     return <CompanionPairView />;
   }

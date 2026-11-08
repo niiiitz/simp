@@ -110,7 +110,35 @@ pub fn launch_simp_desktop_window() {
         return;
     }
 
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        if crate::focus_existing_windows_ui_window() {
+            return;
+        }
+        static LAST_LAUNCH: std::sync::OnceLock<std::sync::Mutex<std::time::Instant>> =
+            std::sync::OnceLock::new();
+        let now = std::time::Instant::now();
+        let mutex = LAST_LAUNCH.get_or_init(|| {
+            std::sync::Mutex::new(now - std::time::Duration::from_secs(10))
+        });
+        if let Ok(mut last) = mutex.lock() {
+            if now.duration_since(*last) < std::time::Duration::from_millis(2000) {
+                return;
+            }
+            *last = now;
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            let mut cmd = Command::new(exe);
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::configure_background_command(&mut cmd);
+            let _ = cmd.spawn();
+        }
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
     {
         if let Ok(exe) = std::env::current_exe() {
             let mut cmd = Command::new(exe);

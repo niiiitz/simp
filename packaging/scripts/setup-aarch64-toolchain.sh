@@ -273,7 +273,8 @@ EOF
 fi
 
 # 2. Create `${TARGET_ARCH}-linux-gnu-gcc` and `${TARGET_ARCH}-linux-gnu-ar` wrappers
-cat > "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-gcc" <<EOF
+if [[ ! -x "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-gcc" || ! -x "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-ar" ]]; then
+  cat > "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-gcc" <<EOF
 #!/usr/bin/env bash
 ARGS=()
 for arg in "\$@"; do
@@ -287,12 +288,13 @@ for arg in "\$@"; do
 done
 exec "${ZIG_BIN}" cc -target ${TARGET_ARCH}-linux-gnu.2.35 -L"${LIB_DIR}" "\${ARGS[@]}"
 EOF
-chmod +x "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-gcc"
+  chmod +x "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-gcc"
 
-cat > "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-ar" <<EOF
+  cat > "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-ar" <<EOF
 #!/usr/bin/env bash
 exec "${ZIG_BIN}" ar "\$@"
 EOF
-chmod +x "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-ar"
+  chmod +x "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-ar"
+fi
 
 echo "${BIN_DIR}"

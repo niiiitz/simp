@@ -142,6 +142,12 @@ impl AppleMusicSink {
     }
 
     pub fn is_headless_worker_active() -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            if crate::has_windows_headless_worker_window() {
+                return true;
+            }
+        }
         if let Ok(mut guard) = worker_slot().lock() {
             if let Some(ref mut child) = *guard {
                 if let Ok(None) = child.try_wait() {
@@ -160,6 +166,10 @@ impl AppleMusicSink {
                 let _ = child.wait();
             }
             *guard = None;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            crate::close_windows_headless_worker_windows();
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -208,7 +218,10 @@ impl AppleMusicSink {
         }
 
         // 2. Clean Chromium/Chrome worker & window profiles (preserving `WidevineCdm` and `First Run`)
+        let data_dir = crate::simp_data_dir();
         for chr_worker in [
+            data_dir.join("window-profile"),
+            data_dir.join("simp-widevine-worker"),
             home.join(".local/share/simp/window-profile"),
             home.join(".local/share/simp/simp-widevine-worker-chromium"),
             home.join(".var/app/com.google.Chrome/config/google-chrome/simp-widevine-worker"),
@@ -232,12 +245,28 @@ impl AppleMusicSink {
     }
 
     /// Ensures a headless Widevine CDM browser worker (`http://127.0.0.1:18888/?worker=apple`)
-    /// is running in the background on Linux / SteamOS (Gamescope + Desktop Mode) so full-length
-    /// DRM-protected Apple Music tracks stream via PipeWire even when `steamwebhelper` lacks Widevine.
+    /// is running in the background on Linux / SteamOS / Windows so full-length
+    /// DRM-protected Apple Music tracks stream continuously even when the main UI window is closed.
     pub fn ensure_headless_widevine_worker() -> bool {
         #[cfg(target_os = "windows")]
         {
-            return false;
+            if Self::is_headless_worker_active() {
+                let _ = crate::hide_windows_headless_worker_windows();
+                return true;
+            }
+            if let Ok(mut guard) = worker_slot().lock() {
+                if let Some(ref mut child) = *guard {
+                    if let Ok(None) = child.try_wait() {
+                        let _ = crate::hide_windows_headless_worker_windows();
+                        return true;
+                    }
+                }
+                if let Some(child) = spawn_windows_headless_widevine_browser() {
+                    *guard = Some(child);
+                    return true;
+                }
+            }
+            return crate::has_windows_headless_worker_window();
         }
         #[cfg(target_os = "macos")]
         {
@@ -950,6 +979,56 @@ fn spawn_headless_widevine_browser() -> Option<Child> {
             .stderr(Stdio::null());
         apply_pipewire_env(&mut cmd);
         if let Ok(child) = cmd.spawn() {
+            return Some(child);
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_headless_widevine_browser() -> Option<Child> {
+    if crate::has_windows_headless_worker_window() {
+        let _ = crate::hide_windows_headless_worker_windows();
+        return None;
+    }
+
+    let worker_url = "http://127.0.0.1:18888/?worker=apple";
+    let worker_profile = crate::simp_data_dir().join("simp-widevine-worker");
+    let _ = std::fs::create_dir_all(&worker_profile);
+    let _ = std::fs::write(worker_profile.join("First Run"), "");
+    clean_stale_profile_locks(&worker_profile);
+    crate::seed_windows_browser_widevine_profile(&worker_profile);
+
+    for bin_path in crate::windows_browser_candidates() {
+        let mut cmd = Command::new(&bin_path);
+        crate::configure_background_command(&mut cmd);
+        cmd.arg(format!("--user-data-dir={}", worker_profile.display()))
+            .arg(format!("--app={worker_url}"))
+            .args([
+                "--window-position=-32000,-32000",
+                "--window-size=320,240",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-extensions",
+                "--disable-sync",
+                "--autoplay-policy=no-user-gesture-required",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-features=Translate,DialMediaRouteProvider,OptimizationHints,MediaRouter,HardwareMediaKeyHandling,MediaSessionService,CalculateNativeWinOcclusion",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        if let Ok(child) = cmd.spawn() {
+            std::thread::spawn(|| {
+                for _ in 0..125 {
+                    let _ = crate::hide_windows_headless_worker_windows();
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                }
+            });
             return Some(child);
         }
     }

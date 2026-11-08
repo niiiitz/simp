@@ -82,6 +82,30 @@ pub fn configure_background_command(cmd: &mut std::process::Command) {
     }
 }
 
+/// Returns candidate Chromium-based browser executables installed on Windows (`Brave`, `Chrome`, `Edge`).
+pub fn windows_browser_candidates() -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let env_roots = [
+        std::env::var("ProgramFiles").ok(),
+        std::env::var("ProgramFiles(x86)").ok(),
+        std::env::var("LOCALAPPDATA").ok(),
+    ];
+    let rel_paths = [
+        r"BraveSoftware\Brave-Browser\Application\brave.exe",
+        r"Google\Chrome\Application\chrome.exe",
+        r"Microsoft\Edge\Application\msedge.exe",
+    ];
+    for rel in rel_paths {
+        for root in env_roots.iter().flatten() {
+            let p = PathBuf::from(root).join(rel);
+            if p.is_file() && !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }
+    }
+    candidates
+}
+
 /// Pre-seeds an isolated Chromium/Brave/Edge `--user-data-dir` profile on Windows with the user's
 /// installed `WidevineCdm` component and Brave's `widevine_opted_in: true` preferences so Widevine EME
 /// works immediately on launch without prompting or requiring a browser restart.
@@ -119,6 +143,25 @@ pub fn seed_windows_browser_widevine_profile(profile_dir: &std::path::Path) {
             }
         }
 
+        // If preparing the background `simp-widevine-worker` profile, seed `Local Storage` from `window-profile`
+        // so any MusicKit JS v3 origin storage is immediately available without an interactive prompt.
+        if profile_dir
+            .file_name()
+            .map(|n| n.to_string_lossy() == "simp-widevine-worker")
+            .unwrap_or(false)
+        {
+            if let Some(parent) = profile_dir.parent() {
+                let win_prof_ls = parent
+                    .join("window-profile")
+                    .join("Default")
+                    .join("Local Storage");
+                let worker_ls = profile_dir.join("Default").join("Local Storage");
+                if win_prof_ls.is_dir() && !worker_ls.is_dir() {
+                    copy_dir_recursive_win(&win_prof_ls, &worker_ls);
+                }
+            }
+        }
+
         for rel_json in ["Local State", r"Default\Preferences"] {
             let json_path = profile_dir.join(rel_json);
             if let Some(parent) = json_path.parent() {
@@ -151,6 +194,194 @@ pub fn seed_windows_browser_widevine_profile(profile_dir: &std::path::Path) {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = profile_dir;
+    }
+}
+
+/// Raises/focuses an existing `"SIMP — Simple Integrated Media Player"` window on Windows if one is already open,
+/// preventing duplicate console windows when clicking the System Tray icon or launching `simp.exe`.
+pub fn focus_existing_windows_ui_window() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return win32_window_mgr::focus_existing_ui_window();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// Hides any `"SIMP Headless Audio Worker"` (`?worker=apple`) window from the Windows screen, taskbar, and `Alt+Tab`
+/// (`WS_EX_TOOLWINDOW` + `SW_HIDE`) while keeping its Chromium Widevine EME + WASAPI audio pipeline running.
+pub fn hide_windows_headless_worker_windows() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return win32_window_mgr::hide_headless_worker_windows();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// Returns `true` if a `"SIMP Headless Audio Worker"` window currently exists on Windows.
+pub fn has_windows_headless_worker_window() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return win32_window_mgr::has_headless_worker_window();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// Closes any running `"SIMP Headless Audio Worker"` windows on Windows when shutting down or disconnecting.
+pub fn close_windows_headless_worker_windows() {
+    #[cfg(target_os = "windows")]
+    {
+        win32_window_mgr::close_headless_worker_windows();
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod win32_window_mgr {
+    use std::ffi::c_void;
+
+    type Hwnd = *mut c_void;
+    type Lparam = isize;
+    type Wparam = usize;
+
+    const SW_HIDE: i32 = 0;
+    const SW_SHOW: i32 = 5;
+    const SW_RESTORE: i32 = 9;
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_TOOLWINDOW: isize = 0x00000080;
+    const WS_EX_APPWINDOW: isize = 0x00040000;
+    const WM_CLOSE: u32 = 0x0010;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(
+            lp_enum_func: unsafe extern "system" fn(Hwnd, Lparam) -> i32,
+            l_param: Lparam,
+        ) -> i32;
+        fn GetWindowTextW(h_wnd: Hwnd, lp_string: *mut u16, n_max_count: i32) -> i32;
+        fn IsWindowVisible(h_wnd: Hwnd) -> i32;
+        fn IsIconic(h_wnd: Hwnd) -> i32;
+        fn ShowWindow(h_wnd: Hwnd, n_cmd_show: i32) -> i32;
+        fn BringWindowToTop(h_wnd: Hwnd) -> i32;
+        fn SetForegroundWindow(h_wnd: Hwnd) -> i32;
+        fn GetWindowLongPtrW(h_wnd: Hwnd, n_index: i32) -> isize;
+        fn SetWindowLongPtrW(h_wnd: Hwnd, n_index: i32, dw_new_long: isize) -> isize;
+        fn PostMessageW(h_wnd: Hwnd, msg: u32, w_param: Wparam, l_param: Lparam) -> i32;
+        fn keybd_event(b_vk: u8, b_scan: u8, dw_flags: u32, dw_extra_info: usize);
+    }
+
+    unsafe fn read_window_title(hwnd: Hwnd) -> String {
+        let mut buf = [0u16; 256];
+        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if len <= 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+
+    unsafe extern "system" fn enum_focus_ui_cb(hwnd: Hwnd, l_param: Lparam) -> i32 {
+        let title = read_window_title(hwnd);
+        if title.starts_with("SIMP — Simple Integrated Media Player")
+            || title.starts_with("SIMP - Simple Integrated Media Player")
+        {
+            let found_ptr = l_param as *mut bool;
+            if !found_ptr.is_null() {
+                *found_ptr = true;
+            }
+            if IsIconic(hwnd) != 0 || IsWindowVisible(hwnd) == 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            } else {
+                ShowWindow(hwnd, SW_SHOW);
+            }
+            // Send a zero virtual-key event so Windows allows our background tray thread to transfer foreground focus
+            keybd_event(0, 0, 0, 0);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            return 0; // Stop enumeration once we focused the main SIMP window
+        }
+        1
+    }
+
+    pub fn focus_existing_ui_window() -> bool {
+        let mut found = false;
+        unsafe {
+            EnumWindows(enum_focus_ui_cb, (&mut found as *mut bool) as Lparam);
+        }
+        found
+    }
+
+    unsafe extern "system" fn enum_hide_worker_cb(hwnd: Hwnd, l_param: Lparam) -> i32 {
+        let title = read_window_title(hwnd);
+        if title.starts_with("SIMP Headless Audio Worker")
+            || title.contains("127.0.0.1:18888/?worker=apple")
+        {
+            let found_ptr = l_param as *mut bool;
+            if !found_ptr.is_null() {
+                *found_ptr = true;
+            }
+            let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let next_style = (ex_style | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
+            if next_style != ex_style {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_style);
+            }
+            if IsWindowVisible(hwnd) != 0 {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+        1
+    }
+
+    pub fn hide_headless_worker_windows() -> bool {
+        let mut found = false;
+        unsafe {
+            EnumWindows(enum_hide_worker_cb, (&mut found as *mut bool) as Lparam);
+        }
+        found
+    }
+
+    unsafe extern "system" fn enum_check_worker_cb(hwnd: Hwnd, l_param: Lparam) -> i32 {
+        let title = read_window_title(hwnd);
+        if title.starts_with("SIMP Headless Audio Worker")
+            || title.contains("127.0.0.1:18888/?worker=apple")
+        {
+            let found_ptr = l_param as *mut bool;
+            if !found_ptr.is_null() {
+                *found_ptr = true;
+            }
+            return 0;
+        }
+        1
+    }
+
+    pub fn has_headless_worker_window() -> bool {
+        let mut found = false;
+        unsafe {
+            EnumWindows(enum_check_worker_cb, (&mut found as *mut bool) as Lparam);
+        }
+        found
+    }
+
+    unsafe extern "system" fn enum_close_worker_cb(hwnd: Hwnd, _l_param: Lparam) -> i32 {
+        let title = read_window_title(hwnd);
+        if title.starts_with("SIMP Headless Audio Worker")
+            || title.contains("127.0.0.1:18888/?worker=apple")
+        {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+        1
+    }
+
+    pub fn close_headless_worker_windows() {
+        unsafe {
+            EnumWindows(enum_close_worker_cb, 0);
+        }
     }
 }
 

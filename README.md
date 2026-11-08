@@ -5,7 +5,7 @@
 
   **A lightweight, controller-first & desktop-native audio and video player for SteamOS, Linux, macOS, Windows, and SteamVR.**
 
-  [![Status: v0.1.0-alpha.63](https://img.shields.io/badge/status-v0.1.0--alpha.63-ff6a00?style=flat-square)](https://github.com/niiiitz/simp/releases)
+  [![Status: v0.1.0-alpha.64](https://img.shields.io/badge/status-v0.1.0--alpha.64-ff6a00?style=flat-square)](https://github.com/niiiitz/simp/releases)
   [![Platforms: SteamOS | Linux | macOS | Windows | SteamVR](https://img.shields.io/badge/platforms-SteamOS%20%7C%20Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20SteamVR-000000?style=flat-square)](#installation)
   [![Backend: 100% Native Rust](https://img.shields.io/badge/backend-Native%20Rust-dea584?style=flat-square)](#development--building-from-source)
 </div>
