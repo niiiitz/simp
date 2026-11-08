@@ -3,7 +3,10 @@ use crate::sinks::apple_native::{
         extract_variant_from_master_m3u8, fetch_hls_bytes, parse_apple_media_m3u8,
         AppleHlsMediaPlaylist,
     },
-    source::{download_hls_segment_slice, DecryptedFmp4RodioSource, StreamingPcmState},
+    source::{
+        download_hls_segment_slice, DecryptedFmp4RodioSource, StreamCompletionGuard,
+        StreamingPcmState,
+    },
 };
 use crate::sinks::local::LocalAudioEngine;
 use crate::sinks::soundcloud_api::{
@@ -489,6 +492,7 @@ fn prepare_initial_soundcloud_stream(
                     // Pre-buffer 2 segments (~6-8s of audio) so startup comment/waveform fetches never starve Segment #1
                     let mut initial_count = 2usize.min(playlist.segments.len());
                     if start_pos_ms > 0 {
+                        initial_count = playlist.segments.len();
                         let target_sec = (start_pos_ms as f64 / 1000.0) + 6.0;
                         let mut accum = 0.0;
                         for (i, seg) in playlist.segments.iter().enumerate() {
@@ -576,12 +580,7 @@ pub fn spawn_progressive_soundcloud_rodio_source(
         return Err(anyhow!("Invalid SoundCloud track URI: {track_uri}"));
     }
 
-    let state = Arc::new(Mutex::new(StreamingPcmState {
-        samples: Vec::new(),
-        total_expected_samples: 0,
-        is_complete: false,
-        aborted: false,
-    }));
+    let state = Arc::new(Mutex::new(StreamingPcmState::default()));
     let source = DecryptedFmp4RodioSource::new_progressive(
         state.clone(),
         start_pos_ms,
@@ -600,6 +599,7 @@ pub fn spawn_progressive_soundcloud_rodio_source(
     std::thread::Builder::new()
         .name("simp-sc-stream".to_string())
         .spawn(move || {
+            let _completion_guard = StreamCompletionGuard(state.clone());
             if active_epoch.load(Ordering::SeqCst) != epoch {
                 mark_aborted(&state);
                 return;
@@ -769,7 +769,21 @@ fn stream_remaining_sc_hls_segments(
             return;
         }
 
-        let step = if idx == start_idx { 3usize } else { 5usize };
+        let requested_sample = state.lock().map(|g| g.requested_seek_sample).unwrap_or(0);
+        let mut step = if idx == start_idx { 3usize } else { 5usize };
+        if requested_sample > decoded_pcm_len {
+            let missing_secs = ((requested_sample - decoded_pcm_len) as f64) / (44_100.0 * 2.0);
+            let mut accum_secs = 0.0;
+            let mut needed_segs = 0usize;
+            for seg in &playlist.segments[idx..] {
+                accum_secs += seg.duration_secs.max(4.0);
+                needed_segs += 1;
+                if accum_secs >= missing_secs + 6.0 {
+                    break;
+                }
+            }
+            step = step.max(needed_segs);
+        }
         let end_idx = (idx + step).min(playlist.segments.len());
 
         // Retry transient CDN errors up to 3 times before falling back to single-segment download

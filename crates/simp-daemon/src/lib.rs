@@ -73,8 +73,36 @@ pub async fn run_daemon() -> anyhow::Result<()> {
     // 2c. Spawn native OpenVR (`libopenvr_api.so`) dashboard & `.vrmanifest` overlay bridge for Steam Frame / SteamVR
     simp_core::vr_overlay::spawn_openvr_overlay_bridge(orchestrator_state.clone(), cmd_tx.clone());
 
-    // 3. Trigger initial non-blocking background storage & Steam OST crawl
-    let _ = cmd_tx.send(AudioCommand::RescanStorage);
+    // 3. Only trigger automatic storage & Steam OST discovery on first run / onboarding.
+    // On subsequent launches, prune any ignored/removed mounts from SQLite in-place without
+    // re-discovering or re-crawling folders unless the user explicitly clicks Rescan or adds a path.
+    let should_run_initial_scan = {
+        let mut cfg = settings.lock().unwrap();
+        simp_core::library::indexer::prune_ignored_and_stale_mounts(&db, &cfg);
+        if cfg.library.initial_scan_completed {
+            false
+        } else {
+            let has_existing_db_data = db
+                .get_mounts()
+                .map(|m| !m.is_empty())
+                .unwrap_or(false)
+                || db
+                    .get_library_counts()
+                    .map(|(albums, tracks)| albums > 0 || tracks > 0)
+                    .unwrap_or(false);
+            let has_user_customized_paths = !cfg.library.ignored_paths.is_empty();
+            if has_existing_db_data || has_user_customized_paths {
+                cfg.library.initial_scan_completed = true;
+                let _ = crate::config::save_settings(&cfg);
+                false
+            } else {
+                true
+            }
+        }
+    };
+    if should_run_initial_scan {
+        let _ = cmd_tx.send(AudioCommand::RescanStorage);
+    }
 
     // 3. Run the local loopback WebSocket + Artwork HTTP server on 127.0.0.1:18888
     let ipc_state = DaemonIpcState {

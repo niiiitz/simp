@@ -291,11 +291,39 @@ impl Default for ProvisioningSettings {
     }
 }
 
+fn default_master_volume() -> f64 {
+    0.80
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_modality() -> String {
+    "oled_console".to_string()
+}
+
+fn default_burn_in_cycle_seconds() -> u32 {
+    180
+}
+
+fn default_battery_dim_timeout_sec() -> u32 {
+    30
+}
+
+fn default_battery_dim_opacity() -> f64 {
+    0.15
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AudioSettings {
+    #[serde(default = "default_master_volume")]
     pub master_volume: f64,
+    #[serde(default = "default_true")]
     pub normalize_volume: bool,
+    #[serde(default = "default_true")]
     pub steam_ost_arbitration: bool,
+    #[serde(default = "default_true")]
     pub pause_on_headphone_disconnect: bool,
 }
 
@@ -305,11 +333,17 @@ fn default_brightness_pct() -> u8 {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiSettings {
+    #[serde(default = "default_modality")]
     pub modality: String,
+    #[serde(default = "default_true")]
     pub oled_pixel_shift: bool,
+    #[serde(default = "default_burn_in_cycle_seconds")]
     pub burn_in_cycle_seconds: u32,
+    #[serde(default = "default_true")]
     pub battery_auto_dim: bool,
+    #[serde(default = "default_battery_dim_timeout_sec")]
     pub battery_dim_timeout_sec: u32,
+    #[serde(default = "default_battery_dim_opacity")]
     pub battery_dim_opacity: f64,
     #[serde(default = "default_brightness_pct")]
     pub brightness_pct: u8,
@@ -317,11 +351,16 @@ pub struct UiSettings {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LibrarySettings {
+    #[serde(default = "default_true")]
     pub scan_steam_osts: bool,
+    #[serde(default)]
     pub auto_mount_removable: bool,
+    #[serde(default)]
     pub custom_paths: BTreeMap<String, String>,
     #[serde(default)]
     pub ignored_paths: BTreeMap<String, String>,
+    #[serde(default)]
+    pub initial_scan_completed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -394,6 +433,7 @@ impl Default for SimpSettings {
                 auto_mount_removable: false,
                 custom_paths,
                 ignored_paths: BTreeMap::new(),
+                initial_scan_completed: false,
             },
             services: ServiceSettings {
                 apple_music_enabled: false,
@@ -424,11 +464,17 @@ impl Default for SimpSettings {
 /// Cross-reboot & sleep session state (`~/.local/share/simp/session_state.vdf`)
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SessionState {
+    #[serde(default)]
     pub current_uri: Option<String>,
+    #[serde(default)]
     pub position_ms: u32,
+    #[serde(default)]
     pub queue_index: usize,
+    #[serde(default)]
     pub shuffle: bool,
+    #[serde(default)]
     pub repeat_mode: RepeatMode,
+    #[serde(default)]
     pub queue_uris: BTreeMap<String, String>,
 }
 

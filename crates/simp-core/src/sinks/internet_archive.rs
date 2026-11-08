@@ -4,7 +4,9 @@
 //! through SIMP's in-process `http_pool` (`libcurl`) and `LocalAudioEngine` (`Symphonia + Rodio -> PipeWire`).
 //! See `ATTRIBUTIONS.md` for credits to `@jjjake/internetarchive` and `archive.org`.
 
-use crate::sinks::apple_native::source::{DecryptedFmp4RodioSource, StreamingPcmState};
+use crate::sinks::apple_native::source::{
+    DecryptedFmp4RodioSource, StreamCompletionGuard, StreamingPcmState,
+};
 use crate::sinks::internet_archive_api::{resolve_internet_archive_credentials, IA_USER_AGENT};
 use crate::sinks::local::LocalAudioEngine;
 use crate::sinks::soundcloud::decode_clear_audio_bytes_to_pcm;
@@ -174,12 +176,7 @@ pub fn spawn_progressive_internet_archive_rodio_source(
     let (download_url, ext_hint) = resolve_ia_audio_download_url(&track_uri)
         .ok_or_else(|| anyhow!("Invalid Internet Archive audio URI: {track_uri}"))?;
 
-    let state = Arc::new(Mutex::new(StreamingPcmState {
-        samples: Vec::new(),
-        total_expected_samples: 0,
-        is_complete: false,
-        aborted: false,
-    }));
+    let state = Arc::new(Mutex::new(StreamingPcmState::default()));
     let source = DecryptedFmp4RodioSource::new_progressive(
         state.clone(),
         start_pos_ms,
@@ -191,6 +188,7 @@ pub fn spawn_progressive_internet_archive_rodio_source(
     std::thread::Builder::new()
         .name("simp-ia-audio".to_string())
         .spawn(move || {
+            let _completion_guard = StreamCompletionGuard(state.clone());
             let mark_aborted = |st: &Arc<Mutex<StreamingPcmState>>| {
                 if let Ok(mut g) = st.lock() {
                     g.aborted = true;

@@ -19,10 +19,6 @@ pub fn load_or_create_settings() -> SimpSettings {
     if let Ok(text) = fs::read_to_string(&path) {
         if let Ok(mut parsed) = keyvalues_serde::from_str::<SimpSettings>(&text) {
             let mut dirty = false;
-            if !parsed.library.scan_steam_osts {
-                parsed.library.scan_steam_osts = true;
-                dirty = true;
-            }
             if parsed
                 .provisioning
                 .widevine_cdm_url_aarch64_linux
@@ -68,6 +64,30 @@ mod tests {
             keyvalues_serde::from_str(&vdf_str).expect("deserialize settings.vdf");
         assert_eq!(parsed.ui.modality, "oled_console");
         assert_eq!(parsed.ui.battery_dim_timeout_sec, 30);
+    }
+
+    #[test]
+    fn test_settings_vdf_empty_custom_paths_and_ignored_paths_roundtrip() {
+        let mut cfg = SimpSettings::default();
+        cfg.library.custom_paths.clear();
+        cfg.library
+            .ignored_paths
+            .insert("0".to_string(), "/home/player/Music".to_string());
+        cfg.library.initial_scan_completed = true;
+        cfg.library.scan_steam_osts = false;
+
+        let vdf_str = keyvalues_serde::to_string_with_key(&cfg, "SimpSettings")
+            .expect("serialize settings.vdf with empty custom_paths");
+        let parsed: SimpSettings = keyvalues_serde::from_str(&vdf_str)
+            .expect("deserialize settings.vdf with empty custom_paths");
+
+        assert!(parsed.library.custom_paths.is_empty());
+        assert_eq!(
+            parsed.library.ignored_paths.get("0").map(|s| s.as_str()),
+            Some("/home/player/Music")
+        );
+        assert!(parsed.library.initial_scan_completed);
+        assert!(!parsed.library.scan_steam_osts);
     }
 }
 

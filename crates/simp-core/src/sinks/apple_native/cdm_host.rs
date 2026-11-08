@@ -2080,7 +2080,7 @@ pub fn negotiate_apple_license_for_epoch(
         }
 
         pool.sessions.retain(|e| e.song_id != song_key);
-        while pool.sessions.len() >= 4 {
+        while pool.sessions.len() >= 6 {
             pool.sessions.pop_front();
         }
 
@@ -2192,17 +2192,22 @@ pub fn decrypt_segments_for_epoch(
 ) -> Result<Vec<Vec<u8>>> {
     let song_key = song_id.to_string();
     run_on_cdm_worker(move |pool| {
-        let entry = pool
+        let pos = pool
             .sessions
-            .iter_mut()
-            .rev()
-            .find(|e| e.song_id == song_key && e.licensed)
+            .iter()
+            .rposition(|e| e.song_id == song_key && e.licensed)
             .ok_or_else(|| anyhow!("Licensed Widevine CDM session missing for song {song_key}"))?;
-        for seg in &mut segments {
-            entry
-                .session
-                .decrypt_fmp4_media_segment_in_place(seg, &tenc)?;
-        }
+        let mut entry = pool.sessions.remove(pos).unwrap();
+        let res = (|| -> Result<()> {
+            for seg in &mut segments {
+                entry
+                    .session
+                    .decrypt_fmp4_media_segment_in_place(seg, &tenc)?;
+            }
+            Ok(())
+        })();
+        pool.sessions.push_back(entry);
+        res?;
         Ok(segments)
     })
 }

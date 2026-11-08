@@ -54,6 +54,13 @@ pub enum PlaybackEvent {
     ProgressTick {
         position_ms: u32,
     },
+    /// Emitted at ~15–20Hz by the native Rust `AudioTapSource` while playing audio
+    AudioSpectrumTick {
+        rms: f32,
+        peak: f32,
+        onset: f32,
+        bands: [u8; 16],
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

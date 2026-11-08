@@ -2,6 +2,7 @@ import type {
   AlbumRecord,
   AppleMusicAuthConfig,
   AppleSinkCommandPayload,
+  AudioSpectrumFrame,
   InternetArchiveConfig,
   OpticalDiscStatus,
   PlaylistRecord,
@@ -19,6 +20,7 @@ type ProgressListener = (
   isTick?: boolean
 ) => void;
 type AppleSinkListener = (cmd: AppleSinkCommandPayload) => void;
+type SpectrumListener = (frame: AudioSpectrumFrame) => void;
 
 /**
  * Shared auto-reconnecting WebSocket client connecting to `simp --daemon` (`ws://127.0.0.1:18888/ws`).
@@ -52,6 +54,7 @@ export class SimpDaemonClient {
   private stateListeners = new Set<StateListener>();
   private progressListeners = new Set<ProgressListener>();
   private appleSinkListeners = new Set<AppleSinkListener>();
+  private spectrumListeners = new Set<SpectrumListener>();
   private state: SimpStateSnapshot = {
     active_engine: 'none',
     is_playing: false,
@@ -151,6 +154,20 @@ export class SimpDaemonClient {
           // High-frequency tick: ONLY notify rAF progress listeners (never re-render React tree!)
           this.state.position_ms = msg.data.position_ms;
           this.notifyProgress(msg.data.position_ms, true);
+          break;
+        case 'audio_spectrum_tick':
+          if (this.spectrumListeners.size > 0 && msg.data) {
+            const frame: AudioSpectrumFrame = {
+              rms: typeof msg.data.rms === 'number' ? msg.data.rms : 0,
+              peak: typeof msg.data.peak === 'number' ? msg.data.peak : 0,
+              onset: typeof msg.data.onset === 'number' ? msg.data.onset : 0,
+              bands: Array.isArray(msg.data.bands) ? msg.data.bands : [],
+              timestamp: performance.now(),
+            };
+            for (const fn of this.spectrumListeners) {
+              fn(frame);
+            }
+          }
           break;
         case 'track_changed':
           this.state = {
@@ -386,6 +403,11 @@ export class SimpDaemonClient {
     this.progressListeners.add(fn);
     fn(this.state.position_ms, performance.now(), this.state.is_playing, false);
     return () => this.progressListeners.delete(fn);
+  }
+
+  public subscribeSpectrum(fn: SpectrumListener): () => void {
+    this.spectrumListeners.add(fn);
+    return () => this.spectrumListeners.delete(fn);
   }
 
   private notifyState(): void {

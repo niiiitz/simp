@@ -37,6 +37,7 @@ pub struct LocalAudioEngine {
     current_uri: Option<String>,
     volume: f32,
     tracker: Arc<Mutex<LocalTimeTracker>>,
+    tap_buffer: Arc<crate::viz::AudioTapBuffer>,
     active_epoch: Arc<AtomicU64>,
     user_paused: Arc<AtomicBool>,
     monitor_handle: Option<JoinHandle<()>>,
@@ -59,6 +60,7 @@ impl LocalAudioEngine {
             current_uri: None,
             volume: perceptual_cubic_gain(0.80),
             tracker: Arc::new(Mutex::new(LocalTimeTracker::new())),
+            tap_buffer: Arc::new(crate::viz::AudioTapBuffer::new()),
             active_epoch: Arc::new(AtomicU64::new(0)),
             user_paused: Arc::new(AtomicBool::new(false)),
             monitor_handle: None,
@@ -141,7 +143,12 @@ impl LocalAudioEngine {
         epoch: u64,
         event_tx: mpsc::UnboundedSender<PlaybackEvent>,
     ) -> Result<()> {
-        self.active_epoch.store(epoch, Ordering::SeqCst);
+        let stream_epoch = self
+            .active_epoch
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1)
+            .max(epoch);
+        self.active_epoch.store(stream_epoch, Ordering::SeqCst);
         self.user_paused.store(false, Ordering::SeqCst);
         self.abort_monitor();
         self.ensure_stream()?;
@@ -169,7 +176,7 @@ impl LocalAudioEngine {
         if uri.starts_with("cdda://") {
             let source = crate::sinks::cdda::CddaTrackSource::open_uri(uri)
                 .with_context(|| format!("Failed to open Audio CD track: {uri}"))?;
-            sink.append(source);
+            sink.append(crate::viz::AudioTapSource::new(source, self.tap_buffer.clone()));
         } else if uri.starts_with("applemusic:") {
             let settings = load_local_settings_vdf();
             let source =
@@ -178,13 +185,13 @@ impl LocalAudioEngine {
                     uri.to_string(),
                     None,
                     start_pos_ms,
-                    epoch,
+                    stream_epoch,
                     self.active_epoch.clone(),
                     self.tracker.clone(),
                     self.user_paused.clone(),
                 )
                 .with_context(|| format!("Failed to load native Apple Music stream: {uri}"))?;
-            sink.append(source);
+            sink.append(crate::viz::AudioTapSource::new(source, self.tap_buffer.clone()));
         } else if uri.starts_with("soundcloud:") {
             let settings = load_local_settings_vdf();
             let source =
@@ -193,13 +200,13 @@ impl LocalAudioEngine {
                     uri.to_string(),
                     None,
                     start_pos_ms,
-                    epoch,
+                    stream_epoch,
                     self.active_epoch.clone(),
                     self.tracker.clone(),
                     self.user_paused.clone(),
                 )
                 .with_context(|| format!("Failed to load native SoundCloud stream: {uri}"))?;
-            sink.append(source);
+            sink.append(crate::viz::AudioTapSource::new(source, self.tap_buffer.clone()));
         } else if uri.starts_with("ia:audio:") || uri.starts_with("ia://audio/") {
             let settings = load_local_settings_vdf();
             let source =
@@ -207,13 +214,13 @@ impl LocalAudioEngine {
                     settings,
                     uri.to_string(),
                     start_pos_ms,
-                    epoch,
+                    stream_epoch,
                     self.active_epoch.clone(),
                     self.tracker.clone(),
                     self.user_paused.clone(),
                 )
                 .with_context(|| format!("Failed to load native Internet Archive stream: {uri}"))?;
-            sink.append(source);
+            sink.append(crate::viz::AudioTapSource::new(source, self.tap_buffer.clone()));
         } else {
             let path = resolve_local_file_path(uri);
             let file = File::open(&path)
@@ -224,7 +231,7 @@ impl LocalAudioEngine {
             let source = SymphoniaFileSource::from_file(file, &path)
                 .with_context(|| format!("Failed to decode audio file: {}", path.display()))?;
 
-            sink.append(source);
+            sink.append(crate::viz::AudioTapSource::new(source, self.tap_buffer.clone()));
         }
         sink.set_volume(self.volume);
 
@@ -244,6 +251,7 @@ impl LocalAudioEngine {
         self.monitor_handle = Some(spawn_rodio_monitor(
             sink.clone(),
             self.tracker.clone(),
+            self.tap_buffer.clone(),
             epoch,
             event_tx,
         ));
@@ -341,7 +349,7 @@ impl LocalAudioEngine {
             if uri.starts_with("cdda://") {
                 let mut source = crate::sinks::cdda::CddaTrackSource::open_uri(&uri)?;
                 let _ = source.try_seek(target);
-                sink.append(source);
+                sink.append(crate::viz::AudioTapSource::new(source, self.tap_buffer.clone()));
             } else if uri.starts_with("applemusic:") {
                 let settings = load_local_settings_vdf();
                 let source =
@@ -355,7 +363,7 @@ impl LocalAudioEngine {
                         self.tracker.clone(),
                         self.user_paused.clone(),
                     )?;
-                sink.append(source);
+                sink.append(crate::viz::AudioTapSource::new(source, self.tap_buffer.clone()));
             } else if uri.starts_with("soundcloud:") {
                 let settings = load_local_settings_vdf();
                 let source =
@@ -369,7 +377,7 @@ impl LocalAudioEngine {
                         self.tracker.clone(),
                         self.user_paused.clone(),
                     )?;
-                sink.append(source);
+                sink.append(crate::viz::AudioTapSource::new(source, self.tap_buffer.clone()));
             } else if uri.starts_with("ia:audio:") || uri.starts_with("ia://audio/") {
                 let settings = load_local_settings_vdf();
                 let source =
@@ -382,13 +390,13 @@ impl LocalAudioEngine {
                         self.tracker.clone(),
                         self.user_paused.clone(),
                     )?;
-                sink.append(source);
+                sink.append(crate::viz::AudioTapSource::new(source, self.tap_buffer.clone()));
             } else {
                 let path = resolve_local_file_path(&uri);
                 let file = File::open(&path)?;
                 let source = SymphoniaFileSource::from_file(file, &path)?;
                 let skipped = source.skip_duration(target);
-                sink.append(skipped);
+                sink.append(crate::viz::AudioTapSource::new(skipped, self.tap_buffer.clone()));
             }
             if was_playing {
                 sink.play();
@@ -399,7 +407,8 @@ impl LocalAudioEngine {
             self.monitor_handle = Some(spawn_rodio_monitor(
                 sink.clone(),
                 self.tracker.clone(),
-                seek_epoch,
+                self.tap_buffer.clone(),
+                epoch,
                 event_tx,
             ));
         }
@@ -510,18 +519,25 @@ impl crate::sinks::AudioSink for LocalAudioEngine {
 fn spawn_rodio_monitor(
     sink: Arc<Sink>,
     tracker: Arc<Mutex<LocalTimeTracker>>,
+    tap_buffer: Arc<crate::viz::AudioTapBuffer>,
     epoch: u64,
     tx: mpsc::UnboundedSender<PlaybackEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut started = false;
+        let mut tick_counter: u32 = 0;
         loop {
             // Poll at 50ms until the first audio chunk starts playing so the initial `ProgressTick`
-            // fires within <= 50ms of audio start, then tick at 250ms (4 Hz) during active playback.
-            let sleep_ms = if started { 250 } else { 50 };
+            // fires within <= 50ms of audio start, then tick at 80ms (~12.5 Hz) during active playback
+            // so `AudioSpectrumTick` drives responsive 60fps interpolated visualizers and `ProgressTick`
+            // fires every 3rd tick (~240ms).
+            let sleep_ms = if started { 80 } else { 50 };
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
 
             if sink.empty() {
+                if let Ok(mut guard) = tracker.lock() {
+                    guard.pause();
+                }
                 let _ = tx.send(PlaybackEvent::EndOfTrack { epoch });
                 break;
             }
@@ -532,8 +548,19 @@ fn spawn_rodio_monitor(
             };
 
             if is_playing {
+                let first_start = !started;
                 started = true;
-                let _ = tx.send(PlaybackEvent::ProgressTick { position_ms });
+                let (rms, peak, onset, bands) = tap_buffer.compute_spectrum_tick();
+                let _ = tx.send(PlaybackEvent::AudioSpectrumTick {
+                    rms,
+                    peak,
+                    onset,
+                    bands,
+                });
+                if first_start || tick_counter % 3 == 0 {
+                    let _ = tx.send(PlaybackEvent::ProgressTick { position_ms });
+                }
+                tick_counter = tick_counter.wrapping_add(1);
             }
         }
     })
@@ -757,7 +784,7 @@ impl SymphoniaFileSource {
     }
 }
 
-fn resolve_local_file_path(uri: &str) -> std::path::PathBuf {
+pub fn resolve_local_file_path(uri: &str) -> std::path::PathBuf {
     let raw = uri.strip_prefix("file://").unwrap_or(uri);
     let direct = Path::new(raw);
     if direct.exists() || !raw.contains('%') {

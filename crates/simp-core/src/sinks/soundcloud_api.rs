@@ -2212,7 +2212,7 @@ pub fn fetch_track_waveform(
         if let Ok(bytes) = crate::http_pool::http_get_bytes(&json_url, &[], None, 8) {
             if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
                 if let Some(samples) = val.get("samples").and_then(|v| v.as_array()) {
-                    bars = downsample_waveform_samples(samples, 96);
+                    bars = downsample_waveform_samples(samples, crate::viz::DEFAULT_WAVEFORM_BARS);
                 }
             }
         }
@@ -2220,16 +2220,10 @@ pub fn fetch_track_waveform(
 
     // Deterministic fallback silhouette if `wis.sndcdn.com` returned a PNG-only asset
     if bars.is_empty() {
-        let hash = blake3::hash(track_id.as_bytes());
-        let hb = hash.as_bytes();
-        bars = (0..96)
-            .map(|i| {
-                let b1 = hb[i % 32] as f32 / 255.0;
-                let b2 = hb[(i * 7 + 3) % 32] as f32 / 255.0;
-                let env = ((i as f32 / 96.0) * std::f32::consts::PI).sin().powf(0.35);
-                ((0.25 + 0.75 * (0.6 * b1 + 0.4 * b2)) * env).clamp(0.12, 1.0)
-            })
-            .collect();
+        bars = crate::viz::synthesize_seeded_waveform_bars(
+            &track_id,
+            crate::viz::DEFAULT_WAVEFORM_BARS,
+        );
     }
 
     let waveform = SoundCloudWaveform {
@@ -2258,24 +2252,7 @@ fn downsample_waveform_samples(raw_samples: &[Value], target_bars: usize) -> Vec
         .iter()
         .filter_map(|v| v.as_f64().map(|n| n as f32))
         .collect();
-    if vals.is_empty() || target_bars == 0 {
-        return Vec::new();
-    }
-    let max_val = vals
-        .iter()
-        .copied()
-        .fold(1.0f32, |acc, x| if x > acc { x } else { acc })
-        .max(1.0);
-
-    let mut out = Vec::with_capacity(target_bars);
-    for i in 0..target_bars {
-        let start = (i * vals.len()) / target_bars;
-        let end = (((i + 1) * vals.len()) / target_bars).max(start + 1).min(vals.len());
-        let slice = &vals[start..end];
-        let avg = slice.iter().copied().sum::<f32>() / (slice.len() as f32);
-        out.push((avg / max_val).clamp(0.08, 1.0));
-    }
-    out
+    crate::viz::downsample_peak_weighted_rms_f32(&vals, target_bars)
 }
 
 /// Likes (`POST /likes/tracks/{id}`) a SoundCloud track on the user's account.
