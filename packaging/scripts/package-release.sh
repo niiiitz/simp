@@ -307,7 +307,12 @@ cp "${REPO_ROOT}/packaging/scripts/uninstall-steamos.sh" "${OUT_DIR}/uninstall-s
 cp "${REPO_ROOT}/packaging/scripts/uninstall-steamos.sh" "${OUT_DIR}/bin/uninstall-steamos.sh"
 chmod +x "${OUT_DIR}/install-steamos.sh" "${OUT_DIR}/uninstall-steamos.sh" "${OUT_DIR}/bin/uninstall-steamos.sh" "${OUT_DIR}/bin/simp"
 
-tar -C "${REPO_ROOT}/dist" -czf "${ARCH_ARCHIVE}" "simp-steamos-userland"
+if [[ "${HOST_OS}" == "Darwin" ]]; then
+  xattr -cr "${OUT_DIR}" 2>/dev/null || true
+  COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "${REPO_ROOT}/dist" -czf "${ARCH_ARCHIVE}" "simp-steamos-userland"
+else
+  tar --no-xattrs -C "${REPO_ROOT}/dist" -czf "${ARCH_ARCHIVE}" "simp-steamos-userland"
+fi
 if [[ "${ARCH}" == "x86_64" ]]; then
   cp "${ARCH_ARCHIVE}" "${ARCHIVE}"
 fi
