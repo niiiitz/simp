@@ -261,8 +261,7 @@ pub fn settings_vdf_path() -> PathBuf {
 pub fn load_or_create_settings() -> SimpSettings {
     let path = settings_vdf_path();
     if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(mut settings) = keyvalues_serde::from_str::<SimpSettings>(&content) {
-            settings.library.scan_steam_osts = true;
+        if let Ok(settings) = keyvalues_serde::from_str::<SimpSettings>(&content) {
             return settings;
         }
     }

@@ -265,13 +265,60 @@ impl AudioOrchestrator {
                 }
                 self.active_station = None;
                 self.heal_and_prewarm_queue(&mut queue);
+                let is_already_current_track = {
+                    let st = self.state.lock().unwrap();
+                    let target = &queue[idx];
+                    let same_track = st
+                        .current_track
+                        .as_ref()
+                        .map(|cur| {
+                            if cur.uri == target.uri {
+                                return true;
+                            }
+                            if cur.source == "apple_music"
+                                && target.source == "apple_music"
+                                && !cur.title.trim().is_empty()
+                                && cur.title.trim().eq_ignore_ascii_case(target.title.trim())
+                                && cur.artists.first().map(|a| a.trim().to_lowercase())
+                                    == target.artists.first().map(|a| a.trim().to_lowercase())
+                            {
+                                return true;
+                            }
+                            false
+                        })
+                        .unwrap_or(false);
+                    let engine_loaded = st.active_engine != ActiveEngine::None
+                        || is_ui_video_track_uri(&target.uri);
+                    same_track && engine_loaded
+                };
                 {
                     let mut st = self.state.lock().unwrap();
+                    if is_already_current_track {
+                        if let Some(ref mut cur) = st.current_track {
+                            let existing_art = cur.art_url.clone();
+                            let existing_dur = cur.duration_ms;
+                            *cur = queue[idx].clone();
+                            if cur.art_url.is_none() && existing_art.is_some() {
+                                cur.art_url = existing_art;
+                            }
+                            if cur.duration_ms == 0 && existing_dur > 0 {
+                                cur.duration_ms = existing_dur;
+                            }
+                        }
+                    }
                     st.queue = queue;
                     st.queue_index = idx;
                 }
                 self.emit_queue_updated();
-                self.transition_to_index(idx);
+                if is_already_current_track {
+                    self.persist_session_to_vdf();
+                    let is_playing = self.state.lock().unwrap().is_playing;
+                    if !is_playing {
+                        self.handle_command(AudioCommand::Play);
+                    }
+                } else {
+                    self.transition_to_index(idx);
+                }
             }
             AudioCommand::PlayAlbum { album_id, shuffle } => {
                 self.active_station = None;
@@ -481,6 +528,8 @@ impl AudioOrchestrator {
                     for (idx, p) in remaining_ignored.into_iter().enumerate() {
                         cfg.library.ignored_paths.insert(idx.to_string(), p);
                     }
+                    cfg.library.initial_scan_completed = true;
+                    let _ = crate::library::vdf::save_settings(&cfg);
                 }
                 self.handle_command(AudioCommand::RescanStorage);
             }
@@ -491,14 +540,14 @@ impl AudioOrchestrator {
                 {
                     let mut cfg = self.settings.lock().unwrap();
                     let mut remaining: Vec<String> = Vec::new();
-                    let mut was_custom = false;
                     for existing in cfg.library.custom_paths.values() {
                         let norm_existing = crate::library::vdf::normalize_platform_path(existing)
                             .to_string_lossy()
                             .to_string();
-                        if existing == &path || norm_existing == target_norm {
-                            was_custom = true;
-                        } else if !remaining.contains(&norm_existing) {
+                        if existing != &path
+                            && norm_existing != target_norm
+                            && !remaining.contains(&norm_existing)
+                        {
                             remaining.push(norm_existing);
                         }
                     }
@@ -506,19 +555,19 @@ impl AudioOrchestrator {
                     for (idx, p) in remaining.into_iter().enumerate() {
                         cfg.library.custom_paths.insert(idx.to_string(), p);
                     }
-                    // If this was an auto-discovered mount (e.g., removable drive or Steam OST),
-                    // remember it in `ignored_paths` so `RescanStorage` on restart never re-adds it.
-                    if !was_custom && !target_norm.is_empty() {
-                        let mut ignored_list: Vec<String> = cfg
-                            .library
-                            .ignored_paths
-                            .values()
-                            .map(|s| {
-                                crate::library::vdf::normalize_platform_path(s)
-                                    .to_string_lossy()
-                                    .to_string()
-                            })
-                            .collect();
+                    // Always record the removed mount in `ignored_paths` (whether it was a default
+                    // custom path like `~/Music`, a Steam OST library root, or a removable drive)
+                    // so `RescanStorage` or restarts never re-add it unless explicitly re-added via `AddLibraryPath`.
+                    if !target_norm.is_empty() {
+                        let mut ignored_list: Vec<String> = Vec::new();
+                        for s in cfg.library.ignored_paths.values() {
+                            let norm_s = crate::library::vdf::normalize_platform_path(s)
+                                .to_string_lossy()
+                                .to_string();
+                            if !norm_s.is_empty() && !ignored_list.contains(&norm_s) {
+                                ignored_list.push(norm_s);
+                            }
+                        }
                         if !ignored_list.contains(&target_norm) {
                             ignored_list.push(target_norm.clone());
                         }
@@ -527,6 +576,8 @@ impl AudioOrchestrator {
                             cfg.library.ignored_paths.insert(idx.to_string(), p);
                         }
                     }
+                    cfg.library.initial_scan_completed = true;
+                    let _ = crate::library::vdf::save_settings(&cfg);
                 }
                 let _ = self.db.remove_mount(&path);
                 let _ = self.db.remove_mount(&target_norm);
@@ -543,7 +594,14 @@ impl AudioOrchestrator {
             }
             AudioCommand::RescanStorage => {
                 let db = self.db.clone();
-                let cfg = self.settings.lock().unwrap().clone();
+                let cfg = {
+                    let mut guard = self.settings.lock().unwrap();
+                    if !guard.library.initial_scan_completed {
+                        guard.library.initial_scan_completed = true;
+                        let _ = crate::library::vdf::save_settings(&guard);
+                    }
+                    guard.clone()
+                };
                 let bcast = self.broadcast_tx.clone();
                 let state_ref = self.state.clone();
                 tokio::task::spawn_blocking(move || {
@@ -994,6 +1052,7 @@ impl AudioOrchestrator {
                 {
                     let mut cfg = self.settings.lock().unwrap();
                     *cfg = SimpSettings::default();
+                    let _ = crate::library::vdf::save_settings_raw(&cfg);
                 }
                 self.apple_sink.is_authenticated = false;
                 self.soundcloud_sink.is_authenticated = false;

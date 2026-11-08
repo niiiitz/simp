@@ -190,6 +190,7 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/soundcloud/search", get(soundcloud_search_handler))
         .route("/api/soundcloud/comments", get(soundcloud_comments_handler))
         .route("/api/soundcloud/waveform", get(soundcloud_waveform_handler))
+        .route("/api/audio/waveform", get(audio_waveform_handler))
         .route("/api/soundcloud/like", post(soundcloud_like_handler))
         .route("/api/soundcloud/like-playlist", post(soundcloud_like_playlist_handler))
         .route("/api/soundcloud/followings", get(soundcloud_followings_handler))
@@ -997,6 +998,32 @@ async fn soundcloud_waveform_handler(
     match res {
         Ok(Ok(wf)) => Json(serde_json::json!({ "ok": true, "data": wf })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn audio_waveform_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let uri = params
+        .get("uri")
+        .or_else(|| params.get("id"))
+        .cloned()
+        .unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::viz::resolve_waveform_envelope_180(&cfg, &uri)
+    })
+    .await;
+    match res {
+        Ok(bars) => Json(serde_json::json!({
+            "ok": true,
+            "data": {
+                "uri": params.get("uri").cloned().unwrap_or_default(),
+                "bars": bars,
+            }
+        })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
 }

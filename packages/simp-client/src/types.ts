@@ -149,6 +149,14 @@ export interface SoundCloudComment {
   created_at?: string | null;
 }
 
+export interface AudioSpectrumFrame {
+  rms: number;
+  peak: number;
+  onset: number;
+  bands: number[];
+  timestamp: number;
+}
+
 export interface AppleMusicAuthConfig {
   configured: boolean;
   team_id: string;

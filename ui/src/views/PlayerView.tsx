@@ -12,6 +12,11 @@ import {
 } from '@simp/client';
 import { ProgressBarRaf } from '../components/ProgressBarRaf';
 import {
+  PlayerBackgroundVisualizer,
+  VISUALIZER_MODES,
+  type VisualizerMode,
+} from '../components/PlayerBackgroundVisualizer';
+import {
   fetchSoundCloudTrackComments,
   fetchSoundCloudTrackWaveform,
   likeSoundCloudTrack,
@@ -138,9 +143,19 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   });
   const [scComments, setScComments] = useState<SoundCloudComment[]>([]);
   const [scWaveformBars, setScWaveformBars] = useState<number[] | null>(null);
+  const [scTrackBpm, setScTrackBpm] = useState<number | null>(null);
   const [scMixChapters, setScMixChapters] = useState<SoundCloudMixChapter[]>([]);
   const [scTrackUserId, setScTrackUserId] = useState<string | null>(null);
   const [scCreatorFollowed, setScCreatorFollowed] = useState<boolean>(false);
+  const [vizMode, setVizMode] = useState<VisualizerMode>(() => {
+    try {
+      const saved = window.localStorage.getItem('simp.visualizer_mode') as VisualizerMode | null;
+      if (saved === 'glyph' || saved === 'avs' || saved === 'demoscene' || saved === 'off') {
+        return saved;
+      }
+    } catch {}
+    return 'glyph';
+  });
   const [rightColMode, setRightColMode] = useState<'queue' | 'chapters'>('queue');
   const [activeBubbles, setActiveBubbles] = useState<ActiveCommentBubble[]>([]);
   const [playerActionsOpen, setPlayerActionsOpen] = useState<boolean>(false);
@@ -544,6 +559,18 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return () => window.clearTimeout(t);
   }, [playerActionsOpen, applyFocusMarker]);
 
+  const cycleVisualizerMode = useCallback(() => {
+    setVizMode((prev) => {
+      const idx = VISUALIZER_MODES.findIndex((m) => m.id === prev);
+      const next = VISUALIZER_MODES[(idx + 1) % VISUALIZER_MODES.length];
+      try {
+        window.localStorage.setItem('simp.visualizer_mode', next.id);
+      } catch {}
+      showToast?.(`✨ Visualizer: ${next.label}`);
+      return next.id;
+    });
+  }, [showToast]);
+
   const toggleScComments = useCallback(() => {
     setScCommentsEnabled((prev) => {
       const next = !prev;
@@ -565,9 +592,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     setActiveBubbles([]);
     lastPlayheadMsRef.current = 0;
 
-    if (!isSoundCloudTrack || !track?.uri) {
+    if (!track?.uri || isVideoTrack) {
       setScComments([]);
       setScWaveformBars(null);
+      setScTrackBpm(null);
       setScMixChapters([]);
       setScTrackUserId(null);
       setScCreatorFollowed(false);
@@ -576,6 +604,32 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     }
 
     let cancelled = false;
+
+    if (!isSoundCloudTrack) {
+      setScComments([]);
+      setScTrackBpm(null);
+      setScMixChapters([]);
+      setScTrackUserId(null);
+      setScCreatorFollowed(false);
+      setRightColMode('queue');
+
+      fetch(`/api/audio/waveform?uri=${encodeURIComponent(track.uri)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!cancelled) {
+            const bars = d?.data?.bars;
+            setScWaveformBars(Array.isArray(bars) && bars.length > 0 ? bars : null);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setScWaveformBars(null);
+        });
+
+      return () => {
+        cancelled = true;
+      };
+    }
+
     fetchSoundCloudTrackComments(track.uri)
       .then((comments) => {
         if (!cancelled) {
@@ -588,6 +642,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       .then((wf) => {
         if (!cancelled) {
           setScWaveformBars(wf?.bars || null);
+          setScTrackBpm(typeof wf?.bpm === 'number' && wf.bpm > 0 ? wf.bpm : null);
           const chapters = wf?.chapters || [];
           setScMixChapters(chapters);
           setScTrackUserId(wf?.user_id || null);
@@ -600,7 +655,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isSoundCloudTrack, track?.uri]);
+  }, [isSoundCloudTrack, isVideoTrack, track?.uri]);
 
   // Periodically prune expired comment speech bubbles
   useEffect(() => {
@@ -942,6 +997,21 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           position: 'relative',
         }}
       >
+      {!isVideoTrack && !hidden && (
+        <PlayerBackgroundVisualizer
+          mode={vizMode}
+          isPlaying={isPlaying}
+          track={track || null}
+          artUrl={track?.art_url || opticalDisc?.art_url || null}
+          bpm={scTrackBpm}
+          waveformBars={scWaveformBars}
+          activeComment={activeBubbles[activeBubbles.length - 1]?.comment || null}
+          comments={scComments}
+          activeChapterLabel={
+            chapterModalItems.find((c) => c.isCurrent)?.title || null
+          }
+        />
+      )}
       <div
         style={{
           display: 'grid',
@@ -951,6 +1021,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           maxWidth: isVideoTrack ? 1140 : 1060,
           width: '100%',
           margin: '0 auto',
+          position: 'relative',
+          zIndex: 2,
           transform:
             !videoTheatreExpanded && playerScale > 1.02 ? `scale(${playerScale})` : undefined,
           transformOrigin: 'center center',
@@ -990,14 +1062,15 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     height: isVideoTrack ? 236 : 240,
                     borderRadius: 20,
                     background: '#050508',
-                    border: isVideoTrack ? '2px solid #2aa3c4' : '1px solid #1e1e28',
+                    border: isVideoTrack ? '2px solid #2aa3c4' : '1px solid #2b2d3c',
                     overflow: 'hidden',
                     display: 'flex',
                     flexDirection: 'column',
                     alignItems: 'center',
                     justifyContent: 'center',
                     position: 'relative',
-                    boxShadow: '0 14px 34px rgba(0, 0, 0, 0.65)',
+                    boxShadow:
+                      '0 18px 44px rgba(0, 0, 0, 0.94), 0 4px 14px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
                     cursor: isVideoTrack ? 'pointer' : 'default',
                   }
             }
@@ -1428,26 +1501,80 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             position: 'relative',
           }}
         >
-          <div style={{ minWidth: 0, position: 'relative' }}>
-            <h1
+          <div
+            style={{
+              minWidth: 0,
+              position: 'relative',
+              padding: '10px 14px',
+              margin: '-10px -14px',
+              borderRadius: 16,
+              background:
+                !isVideoTrack && vizMode !== 'off'
+                  ? 'radial-gradient(ellipse at 35% 50%, rgba(6, 7, 12, 0.72) 0%, rgba(6, 7, 12, 0.38) 68%, rgba(6, 7, 12, 0) 100%)'
+                  : 'transparent',
+            }}
+          >
+            <div
               style={{
-                margin: 0,
-                fontSize: 30,
-                fontWeight: 800,
-                letterSpacing: -0.5,
-                color: '#d4d4dc',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
               }}
             >
-              {track?.title || 'No Track Loaded'}
-            </h1>
+              <h1
+                style={{
+                  margin: 0,
+                  fontSize: 30,
+                  fontWeight: 800,
+                  letterSpacing: -0.5,
+                  color: '#f4f4fa',
+                  textShadow:
+                    '0 2px 6px rgba(0, 0, 0, 0.98), 0 0 18px rgba(0, 0, 0, 0.96), 0 0 34px rgba(0, 0, 0, 0.9)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  flex: 1,
+                  minWidth: 0,
+                }}
+              >
+                {track?.title || 'No Track Loaded'}
+              </h1>
+              {!isVideoTrack && (
+                <button
+                  type="button"
+                  onClick={cycleVisualizerMode}
+                  title="Cycle Background Visualizer (GLYPH MATRIX • WINAMP AVS • DEMOSCENE 64K • OFF)"
+                  style={{
+                    padding: '5px 11px',
+                    borderRadius: 999,
+                    background: vizMode !== 'off' ? 'rgba(11, 24, 32, 0.94)' : 'rgba(14, 14, 22, 0.92)',
+                    border:
+                      vizMode !== 'off'
+                        ? '1px solid rgba(42, 163, 196, 0.78)'
+                        : '1px solid rgba(82, 82, 102, 0.65)',
+                    boxShadow: '0 6px 18px rgba(0, 0, 0, 0.92), 0 2px 6px rgba(0, 0, 0, 0.95)',
+                    color: vizMode !== 'off' ? '#7dd3fc' : '#a1a1b5',
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                    letterSpacing: 0.4,
+                  }}
+                >
+                  ✨ VIZ: {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'}
+                </button>
+              )}
+            </div>
             <p
               style={{
                 margin: '6px 0 0',
                 fontSize: 16,
-                color: '#8e8e99',
+                fontWeight: 600,
+                color: '#d4d4e2',
+                textShadow:
+                  '0 2px 5px rgba(0, 0, 0, 0.98), 0 0 14px rgba(0, 0, 0, 0.96), 0 0 26px rgba(0, 0, 0, 0.92)',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
@@ -1595,7 +1722,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             <ProgressBarRaf
               durationMs={track?.duration_ms ?? 0}
               trackUri={track?.uri}
-              waveformBars={isSoundCloudTrack ? scWaveformBars : null}
+              waveformBars={!isVideoTrack ? scWaveformBars : null}
               commentTimestampsMs={
                 isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
               }
@@ -1626,6 +1753,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 background: isPlaying ? '#0f222a' : '#12121a',
                 color: isPlaying ? '#bfeaf5' : '#d4d4dc',
                 border: isPlaying ? '2px solid #2aa3c4' : '2px solid #3f3f4e',
+                boxShadow:
+                  '0 12px 32px rgba(0, 0, 0, 0.94), 0 3px 10px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
@@ -1669,10 +1798,12 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 width: '100%',
                 padding: '9px 14px',
                 borderRadius: 12,
-                background: '#08080c',
-                border: '1px solid #1a202c',
+                background: 'rgba(8, 9, 14, 0.94)',
+                border: '1px solid #283044',
+                boxShadow:
+                  '0 10px 26px rgba(0, 0, 0, 0.92), 0 2px 8px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.8)',
                 fontSize: 12,
-                color: '#a1a1aa',
+                color: '#c4c4d0',
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
@@ -2119,6 +2250,39 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     </span>
                   </button>
                 )}
+
+                {/* 7. Cycle Background Visualizer Mode (Audio only) */}
+                {!isVideoTrack && (
+                  <button
+                    type="button"
+                    onClick={cycleVisualizerMode}
+                    style={{
+                      ...actionRowBtnStyle,
+                      background: vizMode !== 'off' ? '#0f222a' : '#101018',
+                      border: vizMode !== 'off' ? '1px solid #2aa3c4' : '1px solid #222230',
+                    }}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
+                        ✨ Background Visualizer:{' '}
+                        {VISUALIZER_MODES.find((m) => m.id === vizMode)?.label || 'GLYPH MATRIX'}
+                      </span>
+                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                        Cycle between GLYPH MATRIX (3D ASCII), WINAMP AVS (Tunnel), DEMOSCENE 64K (DYCP Scroller) & OFF
+                      </span>
+                    </div>
+                    <span
+                      style={{
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        color: vizMode !== 'off' ? '#67e8f9' : '#71717a',
+                      }}
+                    >
+                      {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'}
+                    </span>
+                  </button>
+                )}
               </div>
 
               {/* Right Column: Queue / Mix Chapters / Episodes / DVD Titles Browser (D-Pad Right jumps straight to current item) */}
@@ -2281,8 +2445,10 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({ icon, badge, active,
       width: 76,
       height: 76,
       borderRadius: 18,
-      background: active ? '#0d1b22' : '#0a0a0e',
-      border: active ? '2px solid #2aa3c4' : '2px solid #1e1e28',
+      background: active ? '#0d1b22' : '#0b0c12',
+      border: active ? '2px solid #2aa3c4' : '2px solid #2a2c3c',
+      boxShadow:
+        '0 10px 26px rgba(0, 0, 0, 0.94), 0 3px 8px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
       color: '#d4d4dc',
       display: 'flex',
       flexDirection: 'column',

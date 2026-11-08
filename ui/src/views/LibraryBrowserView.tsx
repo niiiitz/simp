@@ -3639,14 +3639,27 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               openLocalVideoFile(s);
               return;
             }
-            setPlayingContextId(`${ctxPrefix}:${s.uri}`);
+            const rowCtxKey = `${ctxPrefix}:${s.uri}`;
             const idx = Math.max(0, peerList.findIndex((tr) => tr.uri === s.uri));
-            defaultSimpClient.loadQueue(
-              peerList.map((tr) => tr.uri),
-              idx,
-              peerList
-            );
-            setView('lock');
+            const queueAlreadyMatches =
+              snap?.queue &&
+              snap.queue.length === peerList.length &&
+              snap.queue_index === idx &&
+              snap.queue[idx]?.uri === s.uri;
+            setPlayingContextId(rowCtxKey);
+            if (track?.uri === s.uri && queueAlreadyMatches) {
+              if (!snap?.is_playing) {
+                defaultSimpClient.play();
+              }
+              setView('lock');
+            } else {
+              defaultSimpClient.loadQueue(
+                peerList.map((tr) => tr.uri),
+                idx,
+                peerList
+              );
+              setView('lock');
+            }
           }}
           style={{
             flex: 1,
@@ -7483,10 +7496,18 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       openLocalVideoFile(t);
                       return;
                     }
-                    if (track?.uri === t.uri && playingContextId === currentCtxKey) {
+                    const queueAlreadyMatches =
+                      snap?.queue &&
+                      snap.queue.length === browserTracks.length &&
+                      snap.queue_index === i &&
+                      snap.queue[i]?.uri === t.uri;
+                    setPlayingContextId(currentCtxKey);
+                    if (track?.uri === t.uri && playingContextId === currentCtxKey && queueAlreadyMatches) {
+                      if (!snap?.is_playing) {
+                        defaultSimpClient.play();
+                      }
                       setView('lock');
                     } else {
-                      setPlayingContextId(currentCtxKey);
                       defaultSimpClient.loadQueue(
                         browserTracks.map((tr) => tr.uri),
                         i,

@@ -126,11 +126,29 @@ pub fn probe_apple_native_pipeline(
 
 /// Shared progressive PCM buffer populated by the background HLS + Widevine decryption worker
 /// while `DecryptedFmp4RodioSource` streams audio to `rodio::Sink`.
+#[derive(Default)]
 pub struct StreamingPcmState {
     pub samples: Vec<f32>,
     pub total_expected_samples: usize,
+    pub requested_seek_sample: usize,
     pub is_complete: bool,
     pub aborted: bool,
+}
+
+/// RAII guard that ensures `StreamingPcmState.is_complete` is always set to `true` when a
+/// background progressive stream worker thread exits (normal return, early error, or panic),
+/// preventing `DecryptedFmp4RodioSource::next()` from ever spinning in infinite silence (`Some(0.0)`).
+pub struct StreamCompletionGuard(pub Arc<Mutex<StreamingPcmState>>);
+
+impl Drop for StreamCompletionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.0.lock() {
+            if g.samples.is_empty() && !g.is_complete {
+                g.aborted = true;
+            }
+            g.is_complete = true;
+        }
+    }
 }
 
 /// Decodes a decrypted fMP4 stream (`clear_init_segment` + one or more decrypted `moof+mdat` segments)
@@ -203,6 +221,7 @@ impl DecryptedFmp4RodioSource {
             state: Arc::new(Mutex::new(StreamingPcmState {
                 samples,
                 total_expected_samples: len,
+                requested_seek_sample: 0,
                 is_complete: true,
                 aborted: false,
             })),
@@ -241,6 +260,7 @@ impl DecryptedFmp4RodioSource {
             state: Arc::new(Mutex::new(StreamingPcmState {
                 samples,
                 total_expected_samples: len,
+                requested_seek_sample: 0,
                 is_complete: true,
                 aborted: false,
             })),
@@ -381,17 +401,19 @@ impl Iterator for DecryptedFmp4RodioSource {
             if self.cursor < guard.samples.len() {
                 if !self.started_tracker {
                     self.started_tracker = true;
+                    let ch = self.channels.max(1) as usize;
+                    let sr = self.sample_rate.max(1) as f64;
+                    let cursor_ms = (((self.cursor / ch) as f64 / sr) * 1000.0).round() as u32;
                     let is_paused = self
                         .user_paused
                         .as_ref()
                         .map(|p| p.load(Ordering::Relaxed))
                         .unwrap_or(false);
-                    if !is_paused {
-                        if let Some(ref tr_arc) = self.tracker {
-                            if let Ok(mut tr) = tr_arc.lock() {
-                                if !tr.is_playing() {
-                                    tr.play();
-                                }
+                    if let Some(ref tr_arc) = self.tracker {
+                        if let Ok(mut tr) = tr_arc.lock() {
+                            tr.seek(cursor_ms);
+                            if !is_paused && !tr.is_playing() {
+                                tr.play();
                             }
                         }
                     }
@@ -405,8 +427,33 @@ impl Iterator for DecryptedFmp4RodioSource {
                 return Some(s);
             }
             if !guard.is_complete {
-                // Initial or mid-track segments still downloading in background; yield silence sample
+                // Initial or mid-track segments still downloading in background;
+                // pause the playhead tracker while waiting for samples at `self.cursor`!
+                if self.started_tracker {
+                    self.started_tracker = false;
+                    if let Some(ref tr_arc) = self.tracker {
+                        if let Ok(mut tr) = tr_arc.lock() {
+                            tr.pause();
+                        }
+                    }
+                }
                 return Some(0.0);
+            }
+            // Stream is complete and `self.cursor >= guard.samples.len()` (EOF):
+            // Ensure the tracker records a non-zero end position and pauses cleanly so
+            // `AudioOrchestrator` advances to the next track instead of tripping the 0ms circuit breaker.
+            if !guard.samples.is_empty() {
+                let ch = self.channels.max(1) as usize;
+                let sr = self.sample_rate.max(1) as f64;
+                let eof_ms = (((guard.samples.len() / ch) as f64 / sr) * 1000.0).round() as u32;
+                if let Some(ref tr_arc) = self.tracker {
+                    if let Ok(mut tr) = tr_arc.lock() {
+                        if tr.get_position_ms() == 0 && eof_ms > 0 {
+                            tr.seek(eof_ms);
+                        }
+                        tr.pause();
+                    }
+                }
             }
         }
         None
@@ -445,18 +492,53 @@ impl Source for DecryptedFmp4RodioSource {
         let ch = self.channels.max(1) as usize;
         let target_frame = (pos.as_secs_f64() * (self.sample_rate.max(1) as f64)).round() as usize;
         let mut target_sample_idx = target_frame * ch;
-        if let Ok(guard) = self.state.lock() {
-            if !guard.is_complete && target_sample_idx > guard.samples.len() {
-                return Err(RodioSeekError::NotSupported {
-                    underlying_source: std::any::type_name::<Self>(),
-                });
-            }
+        let mut is_buffered = false;
+        if let Ok(mut guard) = self.state.lock() {
             if guard.is_complete && !guard.samples.is_empty() {
-                target_sample_idx = target_sample_idx.min(guard.samples.len());
+                // Keep a tiny ~50ms tail when seeking to the very end of a completed buffer
+                // so rodio plays the final frame and cleanly hits `None` -> `sink.empty()` -> `EndOfTrack`.
+                let tail_samples = ((self.sample_rate.max(1) as usize) / 20) * ch;
+                let max_seek = guard
+                    .samples
+                    .len()
+                    .saturating_sub(tail_samples.min(guard.samples.len()));
+                target_sample_idx = target_sample_idx.min(max_seek);
+                is_buffered = true;
+            } else {
+                is_buffered = target_sample_idx < guard.samples.len();
             }
+            guard.requested_seek_sample = target_sample_idx;
         }
         self.cursor = target_sample_idx - (target_sample_idx % ch);
         self.local_chunk.clear();
+        let pos_ms = pos.as_millis() as u32;
+        if is_buffered {
+            self.started_tracker = true;
+            let is_paused = self
+                .user_paused
+                .as_ref()
+                .map(|p| p.load(Ordering::Relaxed))
+                .unwrap_or(false);
+            if let Some(ref tr_arc) = self.tracker {
+                if let Ok(mut tr) = tr_arc.lock() {
+                    tr.seek(pos_ms);
+                    if !is_paused {
+                        tr.play();
+                    }
+                }
+            }
+        } else {
+            // Seeking ahead of currently buffered segments: pause the tracker at `pos_ms`
+            // without tearing down the Widevine stream; `next()` will automatically call `tr.play()`
+            // the instant the background worker's `guard.samples.len()` catches up to `self.cursor`!
+            self.started_tracker = false;
+            if let Some(ref tr_arc) = self.tracker {
+                if let Ok(mut tr) = tr_arc.lock() {
+                    tr.pause();
+                    tr.seek(pos_ms);
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -816,12 +898,7 @@ pub fn spawn_progressive_apple_music_rodio_source(
         .filter(|t| !t.trim().is_empty())
         .ok_or_else(|| anyhow!("Apple Music user token is not configured"))?;
 
-    let state = Arc::new(Mutex::new(StreamingPcmState {
-        samples: Vec::new(),
-        total_expected_samples: 0,
-        is_complete: false,
-        aborted: false,
-    }));
+    let state = Arc::new(Mutex::new(StreamingPcmState::default()));
     let source = DecryptedFmp4RodioSource::new_progressive(
         state.clone(),
         start_pos_ms,
@@ -840,6 +917,7 @@ pub fn spawn_progressive_apple_music_rodio_source(
     std::thread::Builder::new()
         .name("simp-apple-stream".to_string())
         .spawn(move || {
+            let _completion_guard = StreamCompletionGuard(state.clone());
             if active_epoch.load(Ordering::SeqCst) != epoch {
                 mark_aborted(&state);
                 return;
@@ -897,7 +975,23 @@ pub fn spawn_progressive_apple_music_rodio_source(
                             mark_aborted(&state);
                             return;
                         }
-                        let step = if idx == 1 { 3usize } else { 5usize };
+                        let requested_sample =
+                            state.lock().map(|g| g.requested_seek_sample).unwrap_or(0);
+                        let mut step = if idx == 1 { 3usize } else { 5usize };
+                        if requested_sample > decoded_pcm_len {
+                            let missing_secs =
+                                ((requested_sample - decoded_pcm_len) as f64) / (44_100.0 * 2.0);
+                            let mut accum_secs = 0.0;
+                            let mut needed_segs = 0usize;
+                            for seg in &pf.playlist.segments[idx..] {
+                                accum_secs += seg.duration_secs.max(5.0);
+                                needed_segs += 1;
+                                if accum_secs >= missing_secs + 6.0 {
+                                    break;
+                                }
+                            }
+                            step = step.max(needed_segs);
+                        }
                         let end_idx = (idx + step).min(pf.playlist.segments.len());
                         let Ok(batch_segs) =
                             download_hls_segment_slice(&pf.playlist.segments[idx..end_idx])
@@ -908,13 +1002,55 @@ pub fn spawn_progressive_apple_music_rodio_source(
                             mark_aborted(&state);
                             return;
                         }
-                        let Ok(dec_batch) = decrypt_segments_for_epoch(
+                        let dec_batch = match decrypt_segments_for_epoch(
                             epoch,
                             &pf.manifest.song_id,
-                            batch_segs,
+                            batch_segs.clone(),
                             pf.tenc.clone(),
-                        ) else {
-                            break;
+                        ) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                // Re-negotiate license if the prefetched CDM session was evicted
+                                let pssh_opt = if !pf.playlist.widevine_pssh_bytes.is_empty() {
+                                    Some(pf.playlist.widevine_pssh_bytes.clone())
+                                } else {
+                                    find_widevine_pssh_in_mp4(&pf.init_bytes)
+                                };
+                                let lic_url = pf.manifest.key_server_url.clone().unwrap_or_else(|| {
+                                    "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense"
+                                        .to_string()
+                                });
+                                if let Some(pssh_bytes) = pssh_opt {
+                                    if negotiate_apple_license_for_epoch(
+                                        &cdm_lib.library_path,
+                                        epoch,
+                                        &active_epoch,
+                                        &lic_url,
+                                        &dev_token,
+                                        &user_token,
+                                        &pf.manifest.song_id,
+                                        &pf.playlist,
+                                        &pssh_bytes,
+                                    )
+                                    .is_ok()
+                                    {
+                                        if let Ok(s2) = decrypt_segments_for_epoch(
+                                            epoch,
+                                            &pf.manifest.song_id,
+                                            batch_segs,
+                                            pf.tenc.clone(),
+                                        ) {
+                                            s2
+                                        } else {
+                                            break;
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
                         };
                         all_decrypted_segs.extend(dec_batch);
                         if let Ok((full_pcm, _, _)) = decode_clear_init_and_segments_to_pcm(
@@ -1097,6 +1233,7 @@ fn stream_cold_or_partial_track(
     // Default to 1 segment (~10s of audio, ~165 KB coalesced with init_segment in 1 request!)
     let mut initial_count = 1usize.min(playlist.segments.len());
     if start_pos_ms > 0 {
+        initial_count = playlist.segments.len();
         let target_sec = (start_pos_ms as f64 / 1000.0) + 6.0;
         let mut accum = 0.0;
         for (i, seg) in playlist.segments.iter().enumerate() {
@@ -1319,12 +1456,21 @@ fn stream_cold_or_partial_track(
         }
     }
 
-    // Start the progress clock at the exact instant the first audio samples begin playing!
+    // Start the progress clock once initial samples cover the current playhead cursor!
     if active_epoch.load(Ordering::SeqCst) == epoch {
+        let target_sample = state
+            .lock()
+            .map(|g| {
+                let initial_sample = (((start_pos_ms as f64 / 1000.0) * 44_100.0).round() as usize) * 2;
+                g.requested_seek_sample.max(initial_sample)
+            })
+            .unwrap_or(0);
         if let Ok(mut tr) = tracker.lock() {
             tr.reset();
             tr.seek(start_pos_ms);
-            if !user_paused_flag.load(Ordering::SeqCst) {
+            if (decoded_pcm_len > target_sample || is_already_complete)
+                && !user_paused_flag.load(Ordering::SeqCst)
+            {
                 tr.play();
             }
         }
@@ -1346,7 +1492,21 @@ fn stream_cold_or_partial_track(
             return;
         }
 
-        let step = if idx == initial_count { 3usize } else { 5usize };
+        let requested_sample = state.lock().map(|g| g.requested_seek_sample).unwrap_or(0);
+        let mut step = if idx == initial_count { 3usize } else { 5usize };
+        if requested_sample > decoded_pcm_len {
+            let missing_secs = ((requested_sample - decoded_pcm_len) as f64) / (44_100.0 * 2.0);
+            let mut accum_secs = 0.0;
+            let mut needed_segs = 0usize;
+            for seg in &playlist.segments[idx..] {
+                accum_secs += seg.duration_secs.max(5.0);
+                needed_segs += 1;
+                if accum_secs >= missing_secs + 6.0 {
+                    break;
+                }
+            }
+            step = step.max(needed_segs);
+        }
         let end_idx = (idx + step).min(playlist.segments.len());
         let batch_segs = match download_hls_segment_slice(&playlist.segments[idx..end_idx]) {
             Ok(s) => s,
@@ -1500,5 +1660,80 @@ pub fn run_isolated_cdm_probe_subprocess(
         Err(e) => format!("ERR spawning isolated CDM worker: {e}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn test_progressive_source_seek_ahead_and_clean_eof() {
+        let state = Arc::new(Mutex::new(StreamingPcmState {
+            samples: vec![0.25f32; 44_100 * 2], // 1.0s of stereo audio initially buffered
+            total_expected_samples: 44_100 * 2 * 3, // 3.0s total expected
+            requested_seek_sample: 0,
+            is_complete: false,
+            aborted: false,
+        }));
+        let active_epoch = Arc::new(AtomicU64::new(7));
+        let tracker = Arc::new(Mutex::new(LocalTimeTracker::new()));
+        let user_paused = Arc::new(AtomicBool::new(false));
+
+        let mut source =
+            DecryptedFmp4RodioSource::new_progressive(state.clone(), 0, 7, active_epoch)
+                .with_tracker(tracker.clone(), user_paused);
+
+        // 1. Pulling first sample from buffered 0..1s starts the tracker
+        assert_eq!(source.next(), Some(0.25));
+        assert!(tracker.lock().unwrap().is_playing());
+
+        // 2. Seeking ahead of buffered audio (to 2.0s while only 1.0s is buffered)
+        // must succeed in-place (`Ok(())`), record `requested_seek_sample`, and pause `tracker` at 2000ms
+        assert!(source.try_seek(Duration::from_millis(2000)).is_ok());
+        assert_eq!(
+            state.lock().unwrap().requested_seek_sample,
+            44_100 * 2 * 2
+        );
+        assert!(
+            !tracker.lock().unwrap().is_playing(),
+            "tracker must pause while waiting for unbuffered forward seek"
+        );
+        assert_eq!(tracker.lock().unwrap().get_position_ms(), 2000);
+
+        // Pulling while unbuffered yields silence (0.0) without advancing the tracker
+        assert_eq!(source.next(), Some(0.0));
+        assert!(!tracker.lock().unwrap().is_playing());
+
+        // 3. Background worker appends remaining 2.0s of audio (0.5f32) and marks complete
+        {
+            let mut g = state.lock().unwrap();
+            g.samples.extend(vec![0.5f32; 44_100 * 2 * 2]);
+            g.is_complete = true;
+        }
+
+        // Next pull immediately resumes real audio (0.5) and restarts `tracker.play()` at 2000ms!
+        assert_eq!(source.next(), Some(0.5));
+        assert!(tracker.lock().unwrap().is_playing());
+
+        // 4. Seeking past/near the very end of a completed 3.0s buffer clamps to a ~50ms tail,
+        // plays the final tail, and then cleanly returns `None` (EOF) with `tracker` paused and position > 0.
+        assert!(source.try_seek(Duration::from_millis(3500)).is_ok());
+        let mut tail_count = 0usize;
+        while source.next().is_some() {
+            tail_count += 1;
+            assert!(tail_count <= 44_100, "EOF must terminate after ~50ms tail");
+        }
+        assert!(tail_count > 0, "expected ~50ms tail before EOF");
+        assert!(
+            !tracker.lock().unwrap().is_playing(),
+            "tracker must pause on EOF"
+        );
+        assert!(
+            tracker.lock().unwrap().get_position_ms() >= 2900,
+            "tracker position at EOF must be non-zero so EndOfTrack advances queue"
+        );
+    }
+}
+
 
 

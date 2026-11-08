@@ -32,8 +32,77 @@ export const ProgressBarRaf: React.FC<Props> = ({
   const barRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
   const timeTextRef = useRef<HTMLSpanElement | null>(null);
+  const waveformCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const waveformBarsRef = useRef<number[] | null | undefined>(waveformBars);
+  waveformBarsRef.current = waveformBars;
   const onPlayheadTickRef = useRef(onPlayheadTick);
   onPlayheadTickRef.current = onPlayheadTick;
+
+  const isSoundCloudTrack = Boolean(trackUri && trackUri.startsWith('soundcloud:'));
+  const isSoundCloudRef = useRef(isSoundCloudTrack);
+  isSoundCloudRef.current = isSoundCloudTrack;
+
+  const drawWaveformCanvas = (progressRatio: number) => {
+    const canvas = waveformCanvasRef.current;
+    const bars = waveformBarsRef.current;
+    if (!canvas || !bars || bars.length === 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const n = bars.length;
+    const step = w / n;
+    const barW = Math.max(1.2, step * 0.66);
+    const midY = Math.round(h * 0.62);
+    const maxTop = midY - 2;
+    const maxBottom = h - midY - 2;
+    const splitIdx = Math.floor(Math.max(0, Math.min(1, progressRatio)) * n);
+    const isSc = isSoundCloudRef.current;
+
+    const playedTop = isSc ? '#fb923c' : '#38bdf8';
+    const playedBot = isSc ? 'rgba(234, 88, 12, 0.50)' : 'rgba(14, 165, 233, 0.46)';
+    const unplayedTop = isSc ? 'rgba(251, 146, 60, 0.34)' : 'rgba(56, 189, 248, 0.32)';
+    const unplayedBot = isSc ? 'rgba(194, 65, 12, 0.18)' : 'rgba(14, 116, 144, 0.18)';
+
+    // Pass 1: Played Top
+    ctx.fillStyle = playedTop;
+    for (let i = 0; i < splitIdx; i++) {
+      const amp = Math.max(0.1, Math.min(1, bars[i]));
+      const topH = Math.max(2, Math.round(amp * maxTop));
+      const x = Math.round(i * step);
+      ctx.fillRect(x, midY - topH, barW, topH);
+    }
+
+    // Pass 2: Played Bottom Reflection
+    ctx.fillStyle = playedBot;
+    for (let i = 0; i < splitIdx; i++) {
+      const amp = Math.max(0.1, Math.min(1, bars[i]));
+      const botH = Math.max(1, Math.round(amp * maxBottom));
+      const x = Math.round(i * step);
+      ctx.fillRect(x, midY + 1, barW, botH);
+    }
+
+    // Pass 3: Unplayed Top
+    ctx.fillStyle = unplayedTop;
+    for (let i = splitIdx; i < n; i++) {
+      const amp = Math.max(0.1, Math.min(1, bars[i]));
+      const topH = Math.max(2, Math.round(amp * maxTop));
+      const x = Math.round(i * step);
+      ctx.fillRect(x, midY - topH, barW, topH);
+    }
+
+    // Pass 4: Unplayed Bottom Reflection
+    ctx.fillStyle = unplayedBot;
+    for (let i = splitIdx; i < n; i++) {
+      const amp = Math.max(0.1, Math.min(1, bars[i]));
+      const botH = Math.max(1, Math.round(amp * maxBottom));
+      const x = Math.round(i * step);
+      ctx.fillRect(x, midY + 1, barW, botH);
+    }
+  };
 
   const anchorPosRef = useRef(0);
   const anchorPerfRef = useRef(performance.now());
@@ -49,6 +118,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
   useEffect(() => {
     let rafId = 0;
     let lastDomPct = -1;
+    let lastWaveformStep = -1;
     let lastDomTimeText = '';
 
     // Reset monotonic playhead state when switching tracks or mounting back onto PlayerView
@@ -90,10 +160,11 @@ export const ProgressBarRaf: React.FC<Props> = ({
       ) {
         const elapsedSinceTick = Math.min(performance.now() - anchorPerfRef.current, 1500);
         const rawMs = anchorPosRef.current + elapsedSinceTick;
-        // Monotonic forward guard during active playback
-        currentMs = Math.max(lastRenderedMsRef.current, rawMs);
+        // Monotonic forward guard during active playback, clamped to track duration
+        currentMs = Math.min(durationMs, Math.max(lastRenderedMsRef.current, rawMs));
         lastRenderedMsRef.current = currentMs;
       } else {
+        currentMs = durationMs > 0 ? Math.min(durationMs, currentMs) : currentMs;
         lastRenderedMsRef.current = currentMs;
       }
 
@@ -107,6 +178,11 @@ export const ProgressBarRaf: React.FC<Props> = ({
         }
         if (thumbRef.current) {
           thumbRef.current.style.left = `${roundedPct}%`;
+        }
+        const wfStep = Math.round(roundedPct * 3.6);
+        if (wfStep !== lastWaveformStep) {
+          lastWaveformStep = wfStep;
+          drawWaveformCanvas(roundedPct / 100);
         }
       }
       const nextTimeText = formatTime(currentMs);
@@ -125,7 +201,8 @@ export const ProgressBarRaf: React.FC<Props> = ({
       }
     };
 
-    const unsub = defaultSimpClient.subscribeProgress((posMs, perfNow, playing, isTick) => {
+    const unsub = defaultSimpClient.subscribeProgress((rawPosMs, perfNow, playing, isTick) => {
+      const posMs = durationMs > 0 ? Math.min(rawPosMs, durationMs) : rawPosMs;
       const wasPlaying = isPlayingRef.current;
       isPlayingRef.current = playing;
 
@@ -195,6 +272,13 @@ export const ProgressBarRaf: React.FC<Props> = ({
       unsub();
     };
   }, [durationMs, trackUri]);
+
+  useEffect(() => {
+    if (waveformBars && waveformBars.length > 0) {
+      const ratio = durationMs > 0 ? Math.max(0, Math.min(1, lastRenderedMsRef.current / durationMs)) : 0;
+      drawWaveformCanvas(ratio);
+    }
+  }, [waveformBars, durationMs, trackUri]);
 
   const computeMsFromPointer = (clientX: number): number => {
     const el = railRef.current || trackContainerRef.current;
@@ -280,42 +364,30 @@ export const ProgressBarRaf: React.FC<Props> = ({
             style={{
               width: '100%',
               height: 22,
-              background: '#0d0d12',
+              background: '#0b0c12',
               borderRadius: 999,
               overflow: 'hidden',
-              border: '1px solid #1e1e28',
+              border: '1px solid #2b2d3c',
+              boxShadow:
+                '0 8px 24px rgba(0, 0, 0, 0.94), 0 2px 8px rgba(0, 0, 0, 0.98), 0 0 0 1px rgba(0, 0, 0, 0.75)',
               position: 'relative',
             }}
           >
-            {/* SoundCloud Waveform Beat-Drop Silhouette (96 low-luminance vertical bars) */}
+            {/* 180-Tick HiDPI Waveform Envelope Canvas (Mirrored Peak-Weighted RMS) */}
             {waveformBars && waveformBars.length > 0 && (
-              <div
+              <canvas
+                ref={waveformCanvasRef}
+                width={540}
+                height={40}
                 style={{
                   position: 'absolute',
-                  inset: '2px 8px',
-                  display: 'flex',
-                  alignItems: 'flex-end',
-                  justifyContent: 'space-between',
-                  gap: 1,
+                  inset: '1px 8px',
+                  width: 'calc(100% - 16px)',
+                  height: 'calc(100% - 2px)',
                   pointerEvents: 'none',
-                  zIndex: 1,
+                  zIndex: 3,
                 }}
-              >
-                {waveformBars.map((val, idx) => {
-                  const pctHeight = Math.max(14, Math.min(100, Math.round(val * 100)));
-                  return (
-                    <div
-                      key={idx}
-                      style={{
-                        flex: 1,
-                        height: `${pctHeight}%`,
-                        background: 'rgba(251, 146, 60, 0.28)',
-                        borderRadius: 1,
-                      }}
-                    />
-                  );
-                })}
-              </div>
+              />
             )}
 
             <div
@@ -323,10 +395,10 @@ export const ProgressBarRaf: React.FC<Props> = ({
               style={{
                 width: '100%',
                 height: '100%',
-                background:
-                  waveformBars && waveformBars.length > 0
-                    ? 'linear-gradient(90deg, rgba(124, 45, 18, 0.78) 0%, rgba(234, 88, 12, 0.82) 100%)'
-                    : 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
+                background: isSoundCloudTrack
+                  ? 'linear-gradient(90deg, rgba(124, 45, 18, 0.78) 0%, rgba(234, 88, 12, 0.82) 100%)'
+                  : 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
+                opacity: waveformBars && waveformBars.length > 0 ? 0.34 : 1,
                 transformOrigin: 'left center',
                 transform: 'scaleX(0)',
                 position: 'relative',
@@ -341,7 +413,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
                   position: 'absolute',
                   inset: 0,
                   pointerEvents: 'none',
-                  zIndex: 3,
+                  zIndex: 4,
                 }}
               >
                 {commentTimestampsMs.slice(0, 80).map((ts, idx) => {
@@ -356,7 +428,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
                         width: 3,
                         height: 3,
                         borderRadius: 99,
-                        background: 'rgba(253, 186, 116, 0.72)',
+                        background: 'rgba(253, 186, 116, 0.78)',
                         transform: 'translateX(-50%)',
                       }}
                     />
@@ -377,10 +449,11 @@ export const ProgressBarRaf: React.FC<Props> = ({
               height: 26,
               borderRadius: 999,
               background: '#c8c8d2',
-              border: '3px solid #2aa3c4',
+              border: isSoundCloudTrack ? '3px solid #fb923c' : '3px solid #2aa3c4',
               transform: 'translate(-50%, -50%)',
               boxShadow: '0 1px 6px rgba(0, 0, 0, 0.7)',
               pointerEvents: 'none',
+              zIndex: 5,
             }}
           />
         </div>
@@ -394,14 +467,38 @@ export const ProgressBarRaf: React.FC<Props> = ({
           alignItems: 'center',
           fontSize: 13,
           fontFamily: 'monospace',
-          color: '#8a8a96',
+          color: '#d4d4e0',
           marginTop: 2,
         }}
       >
-        <span ref={timeTextRef} style={{ fontWeight: 700, color: '#c8c8d2', minWidth: 48 }}>
+        <span
+          ref={timeTextRef}
+          style={{
+            fontWeight: 800,
+            color: '#f0f0f6',
+            minWidth: 48,
+            padding: '2px 8px',
+            borderRadius: 6,
+            background: 'rgba(8, 9, 14, 0.78)',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.88)',
+            textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
+          }}
+        >
           00:00
         </span>
-        <span style={{ fontWeight: 700, minWidth: 48, textAlign: 'right' }}>
+        <span
+          style={{
+            fontWeight: 800,
+            color: '#d4d4e0',
+            minWidth: 48,
+            textAlign: 'right',
+            padding: '2px 8px',
+            borderRadius: 6,
+            background: 'rgba(8, 9, 14, 0.78)',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.88)',
+            textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
+          }}
+        >
           {formatTime(durationMs)}
         </span>
       </div>

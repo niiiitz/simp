@@ -7,6 +7,7 @@ pub mod sinks;
 pub mod time_tracker;
 pub mod tray;
 pub mod updater;
+pub mod viz;
 pub mod vr_overlay;
 
 pub use orchestrator::AudioOrchestrator;

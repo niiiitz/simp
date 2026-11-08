@@ -20,6 +20,61 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
 
 const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &["mp4", "webm", "m4v", "mov", "mkv", "ogv"];
 
+/// Lightweight startup check that removes any SQLite mounts/tracks whose root was removed
+/// from `custom_paths` or added to `ignored_paths`, without crawling the filesystem.
+pub fn prune_ignored_and_stale_mounts(db: &LibraryDatabase, settings: &SimpSettings) {
+    let ignored_roots: HashSet<String> = settings
+        .library
+        .ignored_paths
+        .values()
+        .map(|s| normalize_platform_path(s).to_string_lossy().to_string())
+        .collect();
+
+    let active_custom_roots: HashSet<String> = settings
+        .library
+        .custom_paths
+        .values()
+        .map(|s| normalize_platform_path(s).to_string_lossy().to_string())
+        .filter(|norm_str| !ignored_roots.contains(norm_str))
+        .collect();
+
+    if let Ok(existing_mounts) = db.get_mounts() {
+        for m in existing_mounts {
+            let norm_mount = normalize_platform_path(&m.mount_root)
+                .to_string_lossy()
+                .to_string();
+            let is_ignored =
+                ignored_roots.contains(&m.mount_root) || ignored_roots.contains(&norm_mount);
+            #[cfg(target_os = "windows")]
+            let is_misclassified_fixed = m.mount_kind == "removable_media"
+                && crate::library::mounts::is_windows_non_removable_drive_root(&m.mount_root);
+            #[cfg(target_os = "macos")]
+            let is_misclassified_fixed = m.mount_kind == "removable_media";
+            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+            let is_misclassified_fixed = false;
+
+            let is_shadow_timemachine = m.mount_root.contains(".timemachine")
+                || m.mount_root.contains("TimeMachine")
+                || m.mount_root.contains("Backups.backupdb");
+
+            if is_ignored
+                || (m.mount_kind == "user_custom"
+                    && !active_custom_roots.contains(&m.mount_root)
+                    && !active_custom_roots.contains(&norm_mount))
+                || (m.mount_kind == "removable_media" && !settings.library.auto_mount_removable)
+                || (m.mount_kind == "steam_vdf" && !settings.library.scan_steam_osts)
+                || is_misclassified_fixed
+                || is_shadow_timemachine
+            {
+                let _ = db.remove_mount(&m.mount_root);
+                if norm_mount != m.mount_root {
+                    let _ = db.remove_mount(&norm_mount);
+                }
+            }
+        }
+    }
+}
+
 /// Crawls configured local directories, Steam OST directories (`libraryfolders.vdf`),
 /// and removable USB/MicroSD mounts (`/run/media`), incrementally indexing tracks into SQLite.
 pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize, usize) {
@@ -35,6 +90,9 @@ pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize
     for (_key, raw_path_str) in &settings.library.custom_paths {
         let norm_path = normalize_platform_path(raw_path_str);
         let norm_str = norm_path.to_string_lossy().to_string();
+        if ignored_roots.contains(&norm_str) || ignored_roots.contains(raw_path_str) {
+            continue;
+        }
         if !active_custom_roots.insert(norm_str.clone()) {
             continue;
         }
@@ -52,32 +110,7 @@ pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize
     // Prune any stale `user_custom` mounts in SQLite that are no longer in `custom_paths`,
     // or any mounts explicitly added to `ignored_paths`, or any fixed/optical Windows drive roots
     // or macOS `/Volumes` Time Machine shadow mounts that were previously misclassified as `removable_media`.
-    if let Ok(existing_mounts) = db.get_mounts() {
-        for m in existing_mounts {
-            let is_ignored = ignored_roots.contains(&m.mount_root);
-            #[cfg(target_os = "windows")]
-            let is_misclassified_fixed = m.mount_kind == "removable_media"
-                && crate::library::mounts::is_windows_non_removable_drive_root(&m.mount_root);
-            #[cfg(target_os = "macos")]
-            let is_misclassified_fixed = m.mount_kind == "removable_media";
-            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-            let is_misclassified_fixed = false;
-
-            let is_shadow_timemachine = m.mount_root.contains(".timemachine")
-                || m.mount_root.contains("TimeMachine")
-                || m.mount_root.contains("Backups.backupdb");
-
-            if (m.mount_kind == "user_custom" && !active_custom_roots.contains(&m.mount_root))
-                || (m.mount_kind != "user_custom" && is_ignored)
-                || (m.mount_kind == "removable_media" && !settings.library.auto_mount_removable)
-                || (m.mount_kind == "steam_vdf" && !settings.library.scan_steam_osts)
-                || is_misclassified_fixed
-                || is_shadow_timemachine
-            {
-                let _ = db.remove_mount(&m.mount_root);
-            }
-        }
-    }
+    prune_ignored_and_stale_mounts(db, settings);
 
     // 2. Steam Soundtracks (`libraryfolders.vdf`)
     if settings.library.scan_steam_osts {
