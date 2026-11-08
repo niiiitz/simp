@@ -202,6 +202,7 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/video/ia_stream", get(ia_video_stream_handler))
         .route("/api/video/subtitles", get(video_subtitles_handler))
         .route("/api/dvd/stream", get(dvd_stream_handler))
+        .route("/apple-worker", get(apple_worker_html_handler))
         .route("/ws", get(ws_handler))
         .nest_service("/art", ServeDir::new(art_cache_dir));
 
@@ -284,6 +285,23 @@ async fn health_handler() -> impl IntoResponse {
         "ui_served": ui_dir.is_some(),
         "ui_dir": ui_dir,
     }))
+}
+
+async fn apple_worker_html_handler() -> impl IntoResponse {
+    if let Some(ui_dir) = resolve_ui_dir() {
+        let index_path = ui_dir.join("index.html");
+        if let Ok(raw) = std::fs::read_to_string(&index_path) {
+            let worker_html = raw.replace(
+                "<title>SIMP — Simple Integrated Media Player</title>",
+                "<title>SIMP Headless Audio Worker</title>",
+            );
+            return axum::response::Html(worker_html);
+        }
+    }
+    axum::response::Html(
+        "<!DOCTYPE html><html><head><title>SIMP Headless Audio Worker</title></head><body></body></html>"
+            .to_string(),
+    )
 }
 
 async fn system_perf_handler() -> impl IntoResponse {

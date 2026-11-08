@@ -1,5 +1,6 @@
 #![allow(unexpected_cfgs)]
 
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -7,11 +8,58 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 pub mod macos_app;
 
+fn query_running_daemon_health(addr: &SocketAddr) -> Option<(String, Option<u32>)> {
+    let mut stream = TcpStream::connect_timeout(addr, Duration::from_millis(150)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:18888\r\nConnection: close\r\n\r\n")
+        .ok()?;
+    let mut resp = String::new();
+    let _ = stream.read_to_string(&mut resp);
+    let body = resp.split("\r\n\r\n").nth(1)?;
+    let val: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    let ver = val.get("version")?.as_str()?.to_string();
+    let pid = val.get("pid").and_then(|v| v.as_u64()).map(|n| n as u32);
+    Some((ver, pid))
+}
+
 /// Ensures `simp --daemon` is listening on `127.0.0.1:18888`.
-/// If not running, spawns `simp --daemon` as a detached background process.
+/// If not running (or if an older daemon binary is running after an update), spawns `simp --daemon` as a detached background process.
 pub fn ensure_daemon_running() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 18888));
-    if TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok() {
+    if let Some((running_ver, running_pid)) = query_running_daemon_health(&addr) {
+        if running_ver == env!("CARGO_PKG_VERSION") {
+            return;
+        }
+        // A stale daemon from a previous version is listening on :18888 — replace it cleanly
+        #[cfg(target_os = "windows")]
+        {
+            simp_core::close_windows_headless_worker_windows();
+            if let Some(pid) = running_pid {
+                let mut tk = Command::new("taskkill");
+                tk.args(["/F", "/PID", &pid.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                simp_core::configure_background_command(&mut tk);
+                let _ = tk.status();
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Some(pid) = running_pid {
+                let _ = Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+    } else if TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok() {
         return;
     }
 
@@ -76,6 +124,7 @@ pub fn run_ui() {
 
         #[cfg(target_os = "windows")]
         {
+            let _ = simp_core::hide_windows_headless_worker_windows();
             if simp_core::focus_existing_windows_ui_window() {
                 return;
             }

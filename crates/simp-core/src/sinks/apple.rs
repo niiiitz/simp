@@ -993,7 +993,7 @@ fn spawn_windows_headless_widevine_browser() -> Option<Child> {
         return None;
     }
 
-    let worker_url = "http://127.0.0.1:18888/?worker=apple";
+    let worker_url = "http://127.0.0.1:18888/apple-worker?worker=apple";
     let worker_profile = crate::simp_data_dir().join("simp-widevine-worker");
     let _ = std::fs::create_dir_all(&worker_profile);
     let _ = std::fs::write(worker_profile.join("First Run"), "");
@@ -1024,9 +1024,9 @@ fn spawn_windows_headless_widevine_browser() -> Option<Child> {
 
         if let Ok(child) = cmd.spawn() {
             std::thread::spawn(|| {
-                for _ in 0..125 {
+                for _ in 0..350 {
                     let _ = crate::hide_windows_headless_worker_windows();
-                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    std::thread::sleep(std::time::Duration::from_millis(15));
                 }
             });
             return Some(child);

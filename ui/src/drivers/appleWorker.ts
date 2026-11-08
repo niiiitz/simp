@@ -99,7 +99,8 @@ export function useAppleMusicWorker(): void {
 
     const isDedicatedWorker =
       typeof window !== 'undefined' &&
-      new URLSearchParams(window.location.search).get('worker') === 'apple';
+      (new URLSearchParams(window.location.search).get('worker') === 'apple' ||
+        window.location.pathname.startsWith('/apple-worker'));
 
     const ensureInstance = async (fromCommand = false): Promise<any | null> => {
       const cfg = await defaultSimpClient.getAppleMusicAuthConfig();

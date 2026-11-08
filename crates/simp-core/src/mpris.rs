@@ -112,6 +112,7 @@ pub fn launch_simp_desktop_window() {
 
     #[cfg(target_os = "windows")]
     {
+        let _ = crate::hide_windows_headless_worker_windows();
         if crate::focus_existing_windows_ui_window() {
             return;
         }

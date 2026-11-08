@@ -251,6 +251,15 @@ mod win32_window_mgr {
     type Lparam = isize;
     type Wparam = usize;
 
+    #[repr(C)]
+    #[derive(Default)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
     const SW_HIDE: i32 = 0;
     const SW_SHOW: i32 = 5;
     const SW_RESTORE: i32 = 9;
@@ -266,6 +275,7 @@ mod win32_window_mgr {
             l_param: Lparam,
         ) -> i32;
         fn GetWindowTextW(h_wnd: Hwnd, lp_string: *mut u16, n_max_count: i32) -> i32;
+        fn GetWindowRect(h_wnd: Hwnd, lp_rect: *mut Rect) -> i32;
         fn IsWindowVisible(h_wnd: Hwnd) -> i32;
         fn IsIconic(h_wnd: Hwnd) -> i32;
         fn ShowWindow(h_wnd: Hwnd, n_cmd_show: i32) -> i32;
@@ -286,16 +296,66 @@ mod win32_window_mgr {
         String::from_utf16_lossy(&buf[..len as usize])
     }
 
-    unsafe extern "system" fn enum_focus_ui_cb(hwnd: Hwnd, l_param: Lparam) -> i32 {
-        let title = read_window_title(hwnd);
+    unsafe fn is_worker_hwnd(hwnd: Hwnd, title: &str) -> bool {
+        if title.starts_with("SIMP Headless Audio Worker")
+            || title.contains("apple-worker")
+            || title.contains("worker=apple")
+        {
+            return true;
+        }
+        // Also catch any 320x240 worker window whose title is still the default index.html title
+        if (title.starts_with("SIMP — Simple Integrated Media Player")
+            || title.starts_with("SIMP - Simple Integrated Media Player"))
+            && IsIconic(hwnd) == 0
+        {
+            let mut rect = Rect::default();
+            if GetWindowRect(hwnd, &mut rect) != 0 {
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
+                if (w > 0 && w <= 450 && h > 0 && h <= 350) || rect.left < -10000 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    unsafe fn is_main_ui_hwnd(hwnd: Hwnd, title: &str) -> bool {
+        if IsWindowVisible(hwnd) == 0 {
+            return false;
+        }
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if (ex_style & WS_EX_TOOLWINDOW) != 0 {
+            return false;
+        }
+        if is_worker_hwnd(hwnd, title) {
+            return false;
+        }
         if title.starts_with("SIMP — Simple Integrated Media Player")
             || title.starts_with("SIMP - Simple Integrated Media Player")
         {
+            if IsIconic(hwnd) == 0 {
+                let mut rect = Rect::default();
+                if GetWindowRect(hwnd, &mut rect) != 0 {
+                    let w = rect.right - rect.left;
+                    if w <= 450 || rect.left < -10000 {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    unsafe extern "system" fn enum_focus_ui_cb(hwnd: Hwnd, l_param: Lparam) -> i32 {
+        let title = read_window_title(hwnd);
+        if is_main_ui_hwnd(hwnd, &title) {
             let found_ptr = l_param as *mut bool;
             if !found_ptr.is_null() {
                 *found_ptr = true;
             }
-            if IsIconic(hwnd) != 0 || IsWindowVisible(hwnd) == 0 {
+            if IsIconic(hwnd) != 0 {
                 ShowWindow(hwnd, SW_RESTORE);
             } else {
                 ShowWindow(hwnd, SW_SHOW);
@@ -319,19 +379,19 @@ mod win32_window_mgr {
 
     unsafe extern "system" fn enum_hide_worker_cb(hwnd: Hwnd, l_param: Lparam) -> i32 {
         let title = read_window_title(hwnd);
-        if title.starts_with("SIMP Headless Audio Worker")
-            || title.contains("127.0.0.1:18888/?worker=apple")
-        {
+        if is_worker_hwnd(hwnd, &title) {
             let found_ptr = l_param as *mut bool;
             if !found_ptr.is_null() {
                 *found_ptr = true;
+            }
+            // Hide BEFORE changing GWL_EXSTYLE so Windows Taskbar (ITaskbarList) immediately removes the taskbar button
+            if IsWindowVisible(hwnd) != 0 {
+                ShowWindow(hwnd, SW_HIDE);
             }
             let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             let next_style = (ex_style | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
             if next_style != ex_style {
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_style);
-            }
-            if IsWindowVisible(hwnd) != 0 {
                 ShowWindow(hwnd, SW_HIDE);
             }
         }
@@ -348,9 +408,7 @@ mod win32_window_mgr {
 
     unsafe extern "system" fn enum_check_worker_cb(hwnd: Hwnd, l_param: Lparam) -> i32 {
         let title = read_window_title(hwnd);
-        if title.starts_with("SIMP Headless Audio Worker")
-            || title.contains("127.0.0.1:18888/?worker=apple")
-        {
+        if is_worker_hwnd(hwnd, &title) {
             let found_ptr = l_param as *mut bool;
             if !found_ptr.is_null() {
                 *found_ptr = true;
@@ -370,9 +428,7 @@ mod win32_window_mgr {
 
     unsafe extern "system" fn enum_close_worker_cb(hwnd: Hwnd, _l_param: Lparam) -> i32 {
         let title = read_window_title(hwnd);
-        if title.starts_with("SIMP Headless Audio Worker")
-            || title.contains("127.0.0.1:18888/?worker=apple")
-        {
+        if is_worker_hwnd(hwnd, &title) {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
         1
