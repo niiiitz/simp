@@ -8,19 +8,35 @@ set -euo pipefail
 # produces a portable ARM64 ELF binary compatible with SteamOS / Steam Frame (glibc >= 2.35).
 # ==============================================================================
 
+TARGET_ARCH="${1:-aarch64}"
 TOOLCHAIN_DIR="${HOME}/.cache/simp-toolchain"
 BIN_DIR="${TOOLCHAIN_DIR}/bin"
-LIB_DIR="${TOOLCHAIN_DIR}/lib-aarch64"
+LIB_DIR="${TOOLCHAIN_DIR}/lib-${TARGET_ARCH}"
 ZIG_VER="0.13.0"
-ZIG_DIR="${TOOLCHAIN_DIR}/zig-linux-x86_64-${ZIG_VER}"
+HOST_OS="$(uname -s)"
+HOST_ARCH="$(uname -m)"
+if [[ "${HOST_OS}" == "Darwin" ]]; then
+  if [[ "${HOST_ARCH}" == "arm64" || "${HOST_ARCH}" == "aarch64" ]]; then
+    ZIG_SLUG="zig-macos-aarch64-${ZIG_VER}"
+  else
+    ZIG_SLUG="zig-macos-x86_64-${ZIG_VER}"
+  fi
+else
+  if [[ "${HOST_ARCH}" == "aarch64" || "${HOST_ARCH}" == "arm64" ]]; then
+    ZIG_SLUG="zig-linux-aarch64-${ZIG_VER}"
+  else
+    ZIG_SLUG="zig-linux-x86_64-${ZIG_VER}"
+  fi
+fi
+ZIG_DIR="${TOOLCHAIN_DIR}/${ZIG_SLUG}"
 ZIG_BIN="${ZIG_DIR}/zig"
 
 [[ -d "${BIN_DIR}" && -d "${LIB_DIR}" ]] || mkdir -p "${BIN_DIR}" "${LIB_DIR}"
 
 if [[ ! -x "${ZIG_BIN}" ]]; then
-  echo "   • Downloading userland Zig ${ZIG_VER} cross-compiler into ${TOOLCHAIN_DIR}..." >&2
-  TARBALL="${TOOLCHAIN_DIR}/zig-${ZIG_VER}.tar.xz"
-  curl -fsSL "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" -o "${TARBALL}"
+  echo "   • Downloading userland Zig ${ZIG_VER} (${ZIG_SLUG}) cross-compiler into ${TOOLCHAIN_DIR}..." >&2
+  TARBALL="${TOOLCHAIN_DIR}/${ZIG_SLUG}.tar.xz"
+  curl -fsSL "https://ziglang.org/download/${ZIG_VER}/${ZIG_SLUG}.tar.xz" -o "${TARBALL}"
   tar -xJf "${TARBALL}" -C "${TOOLCHAIN_DIR}"
   rm -f "${TARBALL}"
 fi
@@ -212,17 +228,17 @@ EOF
 void __simp_nspr4_placeholder(void) {}
 EOF
 
-  "${ZIG_BIN}" cc -target aarch64-linux-gnu.2.35 -shared -Wl,-soname,libasound.so.2 \
+  "${ZIG_BIN}" cc -target "${TARGET_ARCH}-linux-gnu.2.35" -shared -Wl,-soname,libasound.so.2 \
     -Wl,--version-script="${LIB_DIR}/asound.map" \
     "${LIB_DIR}/alsa_stubs.c" -o "${LIB_DIR}/libasound.so.2"
   ln -sf "${LIB_DIR}/libasound.so.2" "${LIB_DIR}/libasound.so"
 
-  "${ZIG_BIN}" cc -target aarch64-linux-gnu.2.35 -shared -Wl,-soname,libdbus-1.so.3 \
+  "${ZIG_BIN}" cc -target "${TARGET_ARCH}-linux-gnu.2.35" -shared -Wl,-soname,libdbus-1.so.3 \
     -Wl,--version-script="${LIB_DIR}/dbus.map" \
     "${LIB_DIR}/dbus_stubs.c" -o "${LIB_DIR}/libdbus-1.so.3"
   ln -sf "${LIB_DIR}/libdbus-1.so.3" "${LIB_DIR}/libdbus-1.so"
 
-  "${ZIG_BIN}" cc -target aarch64-linux-gnu.2.35 -shared -Wl,-soname,libnspr4.so \
+  "${ZIG_BIN}" cc -target "${TARGET_ARCH}-linux-gnu.2.35" -shared -Wl,-soname,libnspr4.so \
     "${LIB_DIR}/nspr4_stub.c" -o "${LIB_DIR}/libnspr4.so"
 fi
 
@@ -236,7 +252,7 @@ libdir=${LIB_DIR}
 includedir=/usr/include
 
 Name: alsa
-Description: Advanced Linux Sound Architecture (ALSA) - Library (ARM64 Stub)
+Description: Advanced Linux Sound Architecture (ALSA) - Library (${TARGET_ARCH} Stub)
 Version: 1.2.10
 Libs: -L\${libdir} -lasound
 Cflags: -I\${includedir}
@@ -249,36 +265,34 @@ libdir=${LIB_DIR}
 includedir=/usr/include/dbus-1.0
 
 Name: dbus
-Description: Free desktop message bus (ARM64 Stub)
+Description: Free desktop message bus (${TARGET_ARCH} Stub)
 Version: 1.14.10
 Libs: -L\${libdir} -ldbus-1
 Cflags: -I\${includedir}
 EOF
 fi
 
-# 2. Create `aarch64-linux-gnu-gcc` and `aarch64-linux-gnu-ar` wrappers
-if [[ ! -x "${BIN_DIR}/aarch64-linux-gnu-gcc" || ! -x "${BIN_DIR}/aarch64-linux-gnu-ar" ]]; then
-  cat > "${BIN_DIR}/aarch64-linux-gnu-gcc" <<EOF
+# 2. Create `${TARGET_ARCH}-linux-gnu-gcc` and `${TARGET_ARCH}-linux-gnu-ar` wrappers
+cat > "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-gcc" <<EOF
 #!/usr/bin/env bash
 ARGS=()
 for arg in "\$@"; do
   case "\$arg" in
-    --target=aarch64-unknown-linux-gnu|-target|aarch64-unknown-linux-gnu|-Wl,--fix-cortex-a53-843419)
+    --target=${TARGET_ARCH}-unknown-linux-gnu|-target|${TARGET_ARCH}-unknown-linux-gnu|-Wl,--fix-cortex-a53-843419)
       ;;
     *)
       ARGS+=("\$arg")
       ;;
   esac
 done
-exec "${ZIG_BIN}" cc -target aarch64-linux-gnu.2.35 -L"${LIB_DIR}" "\${ARGS[@]}"
+exec "${ZIG_BIN}" cc -target ${TARGET_ARCH}-linux-gnu.2.35 -L"${LIB_DIR}" "\${ARGS[@]}"
 EOF
-  chmod +x "${BIN_DIR}/aarch64-linux-gnu-gcc"
+chmod +x "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-gcc"
 
-  cat > "${BIN_DIR}/aarch64-linux-gnu-ar" <<EOF
+cat > "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-ar" <<EOF
 #!/usr/bin/env bash
 exec "${ZIG_BIN}" ar "\$@"
 EOF
-  chmod +x "${BIN_DIR}/aarch64-linux-gnu-ar"
-fi
+chmod +x "${BIN_DIR}/${TARGET_ARCH}-linux-gnu-ar"
 
 echo "${BIN_DIR}"

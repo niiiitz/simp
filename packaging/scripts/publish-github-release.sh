@@ -22,6 +22,22 @@ if [[ -z "${TAG}" ]]; then
 fi
 
 TAG="v${TAG#v}"
+VERSION="${TAG#v}"
+
+if [[ "${SIMP_SKIP_BUILD:-0}" != "1" ]]; then
+  if [[ "$(uname -s)" == "Darwin" && ! -f "dist/SIMP-macos-arm64.zip" ]]; then
+    ./packaging/scripts/package-macos.sh
+  fi
+  if [[ ! -f "dist/simp-steamos-userland-x86_64.tar.gz" || ! -f "dist/simp-decky.zip" ]]; then
+    SIMP_TARGET_ARCH=x86_64 ./packaging/scripts/package-release.sh "${VERSION}"
+  fi
+  if [[ ! -f "dist/simp-steamos-userland-aarch64.tar.gz" ]]; then
+    SIMP_TARGET_ARCH=aarch64 SIMP_SKIP_UI_BUILD=1 SIMP_SKIP_DECKY_BUILD=1 ./packaging/scripts/package-release.sh "${VERSION}"
+  fi
+  if [[ ! -f "dist/simp-windows-portable-x86_64.zip" ]]; then
+    SIMP_SKIP_UI_BUILD=1 ./packaging/scripts/package-windows.sh
+  fi
+fi
 
 python3 - "${TAG}" "${NOTES_FILE}" <<'PY'
 import json
@@ -79,27 +95,30 @@ check_cmd = [
 rel_raw = subprocess.check_output(check_cmd, text=True)
 rel = json.loads(rel_raw)
 
-is_prerelease = any(tok in tag.lower() for tok in ("-alpha", "-beta", "-rc"))
+rel_body = notes
+if not notes_file and "body" in rel and rel["body"]:
+    rel_body = rel["body"]
+
 rel_payload = {
     "tag_name": tag,
+    "target_commitish": "main",
     "name": f"SIMP {tag}",
-    "body": notes,
+    "body": rel_body,
     "draft": False,
-    "prerelease": is_prerelease,
+    "prerelease": False,
+    "make_latest": "true",
 }
-if not is_prerelease:
-    rel_payload["make_latest"] = "true"
 
 if "id" in rel:
     rel_id = rel["id"]
-    print(f"Updating existing release {tag} (ID {rel_id}, prerelease={is_prerelease})...")
+    print(f"Updating existing release {tag} (ID {rel_id}, Latest)...")
     rel = api_call(
         "PATCH",
         f"https://api.github.com/repos/{repo}/releases/{rel_id}",
         rel_payload,
     )
 else:
-    print(f"Creating release {tag} (prerelease={is_prerelease})...")
+    print(f"Creating release {tag} (Latest)...")
     rel = api_call(
         "POST",
         f"https://api.github.com/repos/{repo}/releases",

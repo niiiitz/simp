@@ -11,9 +11,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 
+export PATH="/usr/local/opt/node@24/bin:/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/local/bin:${HOME}/.cargo/bin:${PATH}"
 CARGO_BIN="${CARGO_BIN:-$(command -v cargo || echo "${HOME}/.cargo/bin/cargo")}"
+HOST_OS="$(uname -s)"
 HOST_ARCH="$(uname -m)"
-ARCH="${SIMP_TARGET_ARCH:-${HOST_ARCH}}"
+if [[ "${HOST_OS}" == "Darwin" ]]; then
+  ARCH="${SIMP_TARGET_ARCH:-x86_64}"
+else
+  ARCH="${SIMP_TARGET_ARCH:-${HOST_ARCH}}"
+fi
 OUT_DIR="${REPO_ROOT}/dist/simp-steamos-userland"
 ARCHIVE="${REPO_ROOT}/dist/simp-steamos-userland.tar.gz"
 ARCH_ARCHIVE="${REPO_ROOT}/dist/simp-steamos-userland-${ARCH}.tar.gz"
@@ -234,22 +240,31 @@ if [[ -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then
   echo "   ❌ ERROR: SIMP_EMBEDDED_APPLE_DEV_TOKEN was not generated (check APPLE_PRIVATE_KEY_PATH accessibility; run outside sandbox if key is on /mnt/c)." >&2
   exit 1
 fi
-if [[ "${ARCH}" != "${HOST_ARCH}" ]]; then
+if [[ "${HOST_OS}" != "Linux" || "${ARCH}" != "${HOST_ARCH}" ]]; then
   RUST_TARGET="${ARCH}-unknown-linux-gnu"
+  chmod +x "${REPO_ROOT}/packaging/scripts/setup-aarch64-toolchain.sh"
+  TOOLCHAIN_BIN="$("${REPO_ROOT}/packaging/scripts/setup-aarch64-toolchain.sh" "${ARCH}")"
+  TOOLCHAIN_LIB="${HOME}/.cache/simp-toolchain/lib-${ARCH}"
+  mkdir -p /tmp/simp-zig-cache
+  export ZIG_GLOBAL_CACHE_DIR=/tmp/simp-zig-cache
+  export ZIG_LOCAL_CACHE_DIR=/tmp/simp-zig-cache
+  export PATH="${TOOLCHAIN_BIN}:${PATH}"
   if [[ "${ARCH}" == "aarch64" ]]; then
-    chmod +x "${REPO_ROOT}/packaging/scripts/setup-aarch64-toolchain.sh"
-    TOOLCHAIN_BIN="$("${REPO_ROOT}/packaging/scripts/setup-aarch64-toolchain.sh")"
-    TOOLCHAIN_LIB="${HOME}/.cache/simp-toolchain/lib-aarch64"
-    mkdir -p /tmp/simp-zig-cache
-    export ZIG_GLOBAL_CACHE_DIR=/tmp/simp-zig-cache
-    export ZIG_LOCAL_CACHE_DIR=/tmp/simp-zig-cache
-    export PATH="${TOOLCHAIN_BIN}:${PATH}"
     export CC_aarch64_unknown_linux_gnu="${TOOLCHAIN_BIN}/aarch64-linux-gnu-gcc"
+    export CXX_aarch64_unknown_linux_gnu="${TOOLCHAIN_BIN}/aarch64-linux-gnu-gcc"
     export AR_aarch64_unknown_linux_gnu="${TOOLCHAIN_BIN}/aarch64-linux-gnu-ar"
     export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="${TOOLCHAIN_BIN}/aarch64-linux-gnu-gcc"
     export PKG_CONFIG_ALLOW_CROSS=1
     export PKG_CONFIG_PATH_aarch64_unknown_linux_gnu="${TOOLCHAIN_LIB}/pkgconfig"
     export PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu="${TOOLCHAIN_LIB}/pkgconfig"
+  else
+    export CC_x86_64_unknown_linux_gnu="${TOOLCHAIN_BIN}/x86_64-linux-gnu-gcc"
+    export CXX_x86_64_unknown_linux_gnu="${TOOLCHAIN_BIN}/x86_64-linux-gnu-gcc"
+    export AR_x86_64_unknown_linux_gnu="${TOOLCHAIN_BIN}/x86_64-linux-gnu-ar"
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${TOOLCHAIN_BIN}/x86_64-linux-gnu-gcc"
+    export PKG_CONFIG_ALLOW_CROSS=1
+    export PKG_CONFIG_PATH_x86_64_unknown_linux_gnu="${TOOLCHAIN_LIB}/pkgconfig"
+    export PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu="${TOOLCHAIN_LIB}/pkgconfig"
   fi
   "${CARGO_BIN}" build --release -p simp --target "${RUST_TARGET}" --offline
   BUILT_BIN="${REPO_ROOT}/target/${RUST_TARGET}/release/simp"
