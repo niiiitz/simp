@@ -129,7 +129,39 @@ rm -rf "${OUT_DIR}" "${ZIP_ARCHIVE}"
 mkdir -p "${OUT_DIR}/ui" "${OUT_DIR}/data/lib" "${OUT_DIR}/data/bin"
 
 cp "${BUILT_EXE}" "${OUT_DIR}/simp.exe"
+if [[ -f "${REPO_ROOT}/packaging/windows/simp.ico" ]]; then
+  cp "${REPO_ROOT}/packaging/windows/simp.ico" "${OUT_DIR}/simp.ico"
+fi
 cp -r "${REPO_ROOT}/ui/dist/"* "${OUT_DIR}/ui/"
+
+# Optional Authenticode Code Signing (via osslsigncode on Linux/macOS or signtool.exe)
+WINDOWS_TIMESTAMP_URL="${WINDOWS_TIMESTAMP_URL:-http://timestamp.digicert.com}"
+if [[ -n "${SIMP_WINDOWS_SIGN_CMD:-}" ]]; then
+  echo "   • Signing simp.exe via custom SIMP_WINDOWS_SIGN_CMD..."
+  ${SIMP_WINDOWS_SIGN_CMD} "${OUT_DIR}/simp.exe"
+elif [[ -n "${WINDOWS_PFX_PATH:-}" && -f "${WINDOWS_PFX_PATH}" ]]; then
+  if command -v osslsigncode >/dev/null 2>&1; then
+    echo "   • Signing simp.exe with Authenticode certificate (${WINDOWS_PFX_PATH})..."
+    mv "${OUT_DIR}/simp.exe" "${OUT_DIR}/simp-unsigned.exe"
+    osslsigncode sign \
+      -pkcs12 "${WINDOWS_PFX_PATH}" \
+      -pass "${WINDOWS_PFX_PASSWORD:-}" \
+      -n "SIMP (Simple Integrated Media Player)" \
+      -i "https://github.com/alliancedude/simp" \
+      -h sha256 \
+      -t "${WINDOWS_TIMESTAMP_URL}" \
+      -in "${OUT_DIR}/simp-unsigned.exe" \
+      -out "${OUT_DIR}/simp.exe"
+    rm -f "${OUT_DIR}/simp-unsigned.exe"
+    echo "   ✓ Authenticode signature embedded into simp.exe"
+  elif command -v signtool.exe >/dev/null 2>&1; then
+    echo "   • Signing simp.exe with signtool.exe (${WINDOWS_PFX_PATH})..."
+    signtool.exe sign /f "${WINDOWS_PFX_PATH}" /p "${WINDOWS_PFX_PASSWORD:-}" /fd SHA256 /tr "${WINDOWS_TIMESTAMP_URL}" /td SHA256 "${OUT_DIR}/simp.exe"
+    echo "   ✓ Authenticode signature embedded into simp.exe"
+  else
+    echo "   ⚠ WINDOWS_PFX_PATH is set, but neither osslsigncode nor signtool.exe was found in PATH"
+  fi
+fi
 
 cat > "${OUT_DIR}/portable.txt" <<'EOF'
 SIMP Portable Mode Marker
@@ -178,11 +210,25 @@ cat > "${OUT_DIR}/README-WINDOWS.txt" <<'EOF'
      inside the local `data\` folder. You can move this folder anywhere
      (including an external SSD or USB drive).
 
-4. OPTICAL DISC DRIVES (AUDIO CD & DVD-VIDEO)
+4. IN-PLACE SELF-UPDATE & AUTHENTICODE SIGNING
+   - Open Settings -> Updates inside SIMP (or run `simp.exe update` from
+     PowerShell / Command Prompt) to check GitHub and self-update in-place.
+   - SIMP downloads `simp-windows-portable-x86_64.zip`, renames the running
+     `simp.exe` -> `simp.exe.old` (cleaned up automatically on next startup),
+     updates `simp.exe` and `ui\` in place while preserving your `data\`
+     folder, and restarts the background audio daemon automatically.
+   - To produce an Authenticode-signed binary that avoids Windows SmartScreen
+     prompts, provide an OV or EV Code Signing `.pfx` (or Azure Artifact
+     Signing / Certum Open Source Code Signing certificate) when running
+     `package-windows.sh` via `WINDOWS_PFX_PATH=/path/to/cert.pfx` and
+     `WINDOWS_PFX_PASSWORD=...` (uses `osslsigncode` or `signtool.exe` with
+     SHA-256 + RFC3161 timestamping).
+
+5. OPTICAL DISC DRIVES (AUDIO CD & DVD-VIDEO)
    - Audio CDs (`CD-DA`) are read directly from any Windows optical drive
      (`D:\`, `E:\`, etc.) with automatic MusicBrainz & Cover Art Archive lookup.
-   - For encrypted DVD-Video discs, place `libdvdcss-2.dll` in `data\lib\`
-     and `ffmpeg.exe` in `data\bin\` (or system PATH).
+   - For encrypted DVD-Video discs, install VLC (64-bit) or place
+     `libdvdcss-2.dll` in `data\lib\` and `ffmpeg.exe` in `data\bin\`.
 EOF
 
 (cd "${REPO_ROOT}/dist" && python3 -m zipfile -c "${ZIP_ARCHIVE}" simp-windows-portable)

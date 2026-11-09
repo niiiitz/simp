@@ -61,14 +61,60 @@ pub struct AppleFullAlbumResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppleRecommendationShelf {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub playlists: Vec<AppleCloudPlaylistSummary>,
+    #[serde(default)]
+    pub albums: Vec<AppleCloudAlbumSummary>,
+    #[serde(default)]
+    pub stations: Vec<AppleRadioStationSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppleArtistSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub genre: String,
+    pub art_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppleArtistProfileResponse {
+    pub artist: AppleArtistSummary,
+    #[serde(default)]
+    pub top_tracks: Vec<TrackMetadata>,
+    #[serde(default)]
+    pub albums: Vec<AppleCloudAlbumSummary>,
+    #[serde(default)]
+    pub singles: Vec<AppleCloudAlbumSummary>,
+    #[serde(default)]
+    pub related_artists: Vec<AppleArtistSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppleRadioAndForYouResponse {
     pub stations: Vec<AppleRadioStationSummary>,
+    #[serde(default)]
+    pub personal_stations: Vec<AppleRadioStationSummary>,
+    #[serde(default)]
+    pub live_stations: Vec<AppleRadioStationSummary>,
     pub playlists: Vec<AppleCloudPlaylistSummary>,
     pub albums: Vec<AppleCloudAlbumSummary>,
+    #[serde(default)]
+    pub new_releases: Vec<AppleCloudAlbumSummary>,
+    #[serde(default)]
+    pub shelves: Vec<AppleRecommendationShelf>,
+    #[serde(default)]
+    pub recently_played: Vec<TrackMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppleNewFeedResponse {
+    #[serde(default)]
+    pub recent_releases: Vec<AppleCloudAlbumSummary>,
     pub albums: Vec<AppleCloudAlbumSummary>,
     pub playlists: Vec<AppleCloudPlaylistSummary>,
     pub songs: Vec<TrackMetadata>,
@@ -80,6 +126,8 @@ pub struct AppleCatalogSearchResults {
     pub albums: Vec<AppleCloudAlbumSummary>,
     pub playlists: Vec<AppleCloudPlaylistSummary>,
     pub stations: Vec<AppleRadioStationSummary>,
+    #[serde(default)]
+    pub artists: Vec<AppleArtistSummary>,
 }
 
 /// Stage C Browserless Foundation: Metadata returned by Apple's `webPlayback` endpoint
@@ -855,6 +903,7 @@ pub fn search_catalog(settings: &SimpSettings, term: &str) -> Result<AppleCatalo
             albums: Vec::new(),
             playlists: Vec::new(),
             stations: Vec::new(),
+            artists: Vec::new(),
         });
     }
 
@@ -863,7 +912,7 @@ pub fn search_catalog(settings: &SimpSettings, term: &str) -> Result<AppleCatalo
     let encoded_term = urlencode(cleaned);
 
     let catalog_url = format!(
-        "/v1/catalog/{}/search?term={}&types=songs,albums,playlists,stations&limit=15",
+        "/v1/catalog/{}/search?term={}&types=songs,albums,playlists,stations,artists&limit=15",
         storefront, encoded_term
     );
     let library_url = format!(
@@ -889,10 +938,12 @@ pub fn search_catalog(settings: &SimpSettings, term: &str) -> Result<AppleCatalo
     let mut albums: Vec<AppleCloudAlbumSummary> = Vec::new();
     let mut playlists: Vec<AppleCloudPlaylistSummary> = Vec::new();
     let mut stations: Vec<AppleRadioStationSummary> = Vec::new();
+    let mut artists: Vec<AppleArtistSummary> = Vec::new();
 
     let mut seen_song_uris = HashSet::new();
     let mut seen_album_ids = HashSet::new();
     let mut seen_playlist_ids = HashSet::new();
+    let mut seen_artist_ids = HashSet::new();
 
     // 1. Parse Personal Cloud Library ("Your Library") matches first
     if let Some(Ok(lib_json)) = lib_res {
@@ -964,6 +1015,38 @@ pub fn search_catalog(settings: &SimpSettings, term: &str) -> Result<AppleCatalo
     // 2. Parse Public Storefront Catalog matches & heal any blobstore artwork on matching Library Albums
     if let Some(Ok(json)) = cat_res {
         let results = json.get("results").unwrap_or(&json);
+
+        if let Some(arr) = results.pointer("/artists/data").and_then(|v| v.as_array()) {
+            for art_item in arr {
+                let Some(id) = art_item.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !seen_artist_ids.insert(id.to_string()) {
+                    continue;
+                }
+                let attrs = art_item.get("attributes").unwrap_or(art_item);
+                let name = attrs
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Artist")
+                    .to_string();
+                let genre = attrs
+                    .pointer("/genreNames/0")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Apple Music Artist")
+                    .to_string();
+                let art_url = format_apple_art_url(
+                    attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
+                    300,
+                );
+                artists.push(AppleArtistSummary {
+                    id: id.to_string(),
+                    name,
+                    genre,
+                    art_url,
+                });
+            }
+        }
 
         if let Some(arr) = results.pointer("/albums/data").and_then(|v| v.as_array()) {
             for alb in arr {
@@ -1077,6 +1160,7 @@ pub fn search_catalog(settings: &SimpSettings, term: &str) -> Result<AppleCatalo
         albums,
         playlists,
         stations,
+        artists,
     })
 }
 
@@ -1138,26 +1222,51 @@ pub fn fetch_radio_and_for_you(settings: &SimpSettings) -> Result<AppleRadioAndF
     let storefront = get_storefront(&dev_token, &user_token);
 
     let mut stations = Vec::new();
+    let mut personal_stations = Vec::new();
+    let mut live_stations = Vec::new();
     let mut playlists = Vec::new();
     let mut albums = Vec::new();
+    let mut new_releases = Vec::new();
     let mut seen_stations = HashSet::new();
+    let mut seen_personal_stations = HashSet::new();
+    let mut seen_live_stations = HashSet::new();
     let mut seen_playlists = HashSet::new();
     let mut seen_albums = HashSet::new();
+    let mut seen_new_releases = HashSet::new();
 
-    fn push_station_to(
-        stations: &mut Vec<AppleRadioStationSummary>,
-        seen_stations: &mut HashSet<String>,
-        st: &Value,
-        fallback_sub: &str,
-    ) {
-        let Some(id) = st.get("id").and_then(|v| v.as_str()) else {
-            return;
-        };
-        if !seen_stations.insert(id.to_string()) {
-            return;
+    fn is_live_broadcast_station(st: &Value, fallback_sub: &str) -> bool {
+        let id = st.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.contains("u-") {
+            return false;
         }
         let attrs = st.get("attributes").unwrap_or(st);
-        stations.push(AppleRadioStationSummary {
+        if attrs.get("isLive").and_then(|v| v.as_bool()) == Some(true) {
+            return true;
+        }
+        let name_lower = attrs
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if name_lower.contains("'s station")
+            || name_lower.contains("’s station")
+            || name_lower.contains("discovery station")
+        {
+            return false;
+        }
+        if name_lower.starts_with("apple music ")
+            || name_lower.starts_with("apple música ")
+            || fallback_sub == "Live Global Radio"
+        {
+            return true;
+        }
+        false
+    }
+
+    fn build_station_summary(st: &Value, fallback_sub: &str) -> Option<AppleRadioStationSummary> {
+        let id = st.get("id").and_then(|v| v.as_str())?;
+        let attrs = st.get("attributes").unwrap_or(st);
+        Some(AppleRadioStationSummary {
             id: id.to_string(),
             name: attrs
                 .get("name")
@@ -1173,99 +1282,307 @@ pub fn fetch_radio_and_for_you(settings: &SimpSettings) -> Result<AppleRadioAndF
                 attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
                 300,
             ),
-        });
+        })
     }
 
-    let mut push_item = |item: &Value,
-                         group_title: &str,
-                         stations: &mut Vec<AppleRadioStationSummary>,
-                         seen_stations: &mut HashSet<String>| {
-        let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
-            return;
-        };
-        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let attrs = item.get("attributes").unwrap_or(item);
-        match item_type {
-            "stations" => push_station_to(
-                stations,
-                seen_stations,
-                item,
-                if group_title.is_empty() {
-                    "Personal Station"
-                } else {
-                    group_title
-                },
-            ),
-            "playlists" | "library-playlists" => {
-                if !seen_playlists.insert(id.to_string()) {
-                    return;
-                }
-                playlists.push(AppleCloudPlaylistSummary {
-                    id: id.to_string(),
-                    name: attrs
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Mix")
-                        .to_string(),
-                    description: attrs
-                        .get("curatorName")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(if group_title.is_empty() { "Made For You" } else { group_title })
-                        .to_string(),
-                    art_url: format_apple_art_url(
-                        attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
-                        300,
-                    ),
-                    kind: if id.starts_with("pl.") { "catalog" } else { "library" }.to_string(),
-                });
+    fn push_station_to(
+        stations: &mut Vec<AppleRadioStationSummary>,
+        seen_stations: &mut HashSet<String>,
+        st: &Value,
+        fallback_sub: &str,
+    ) {
+        if let Some(summary) = build_station_summary(st, fallback_sub) {
+            if seen_stations.insert(summary.id.clone()) {
+                stations.push(summary);
             }
-            "albums" | "library-albums" => {
-                if !seen_albums.insert(id.to_string()) {
-                    return;
-                }
-                if let Some(alb) = parse_apple_album_summary(
-                    item,
-                    if id.starts_with("l.") { "library" } else { "catalog" },
-                ) {
-                    albums.push(alb);
-                }
+        }
+    }
+
+    let mut push_classified_station = |st: &Value, fallback_sub: &str| {
+        if let Some(summary) = build_station_summary(st, fallback_sub) {
+            if seen_stations.insert(summary.id.clone()) {
+                stations.push(summary.clone());
             }
-            _ => {}
+            if is_live_broadcast_station(st, fallback_sub) {
+                if seen_live_stations.insert(summary.id.clone()) {
+                    live_stations.push(summary);
+                }
+            } else if seen_personal_stations.insert(summary.id.clone()) {
+                personal_stations.push(summary);
+            }
         }
     };
+
+    let mut shelves: Vec<AppleRecommendationShelf> = Vec::new();
+    let mut recently_played: Vec<TrackMetadata> = Vec::new();
 
     if let Ok(json) = apple_get_json("/v1/me/recent/radio-stations?limit=12", &dev_token, &user_token) {
         if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
             for st in arr {
-                push_station_to(&mut stations, &mut seen_stations, st, "Recent Radio Station");
+                push_classified_station(st, "Recent Radio Station");
             }
         }
     }
+
+    // Recently Played Albums / Playlists / Stations (`/v1/me/recent/played?limit=12`)
+    if let Ok(json) = apple_get_json("/v1/me/recent/played?limit=12", &dev_token, &user_token) {
+        if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
+            let mut recent_shelf = AppleRecommendationShelf {
+                id: "recently-played-items".to_string(),
+                title: "Recently Played".to_string(),
+                playlists: Vec::new(),
+                albums: Vec::new(),
+                stations: Vec::new(),
+            };
+            let mut shelf_seen_st = HashSet::new();
+            for item in arr {
+                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let attrs = item.get("attributes").unwrap_or(item);
+                let Some(id) = item.get("id").and_then(|v| v.as_str()) else { continue };
+                match item_type {
+                    "stations" => {
+                        push_classified_station(item, "Recently Played");
+                        if ! is_live_broadcast_station(item, "Recently Played") {
+                            push_station_to(&mut recent_shelf.stations, &mut shelf_seen_st, item, "Recently Played");
+                        }
+                    }
+                    "playlists" | "library-playlists" => {
+                        recent_shelf.playlists.push(AppleCloudPlaylistSummary {
+                            id: id.to_string(),
+                            name: attrs.get("name").and_then(|v| v.as_str()).unwrap_or("Playlist").to_string(),
+                            description: attrs.get("curatorName").and_then(|v| v.as_str()).unwrap_or("Recently Played").to_string(),
+                            art_url: format_apple_art_url(attrs.pointer("/artwork/url").and_then(|v| v.as_str()), 300),
+                            kind: if id.starts_with("pl.") { "catalog" } else { "library" }.to_string(),
+                        });
+                    }
+                    "albums" | "library-albums" => {
+                        if let Some(alb) = parse_apple_album_summary(
+                            item,
+                            if id.starts_with("l.") { "library" } else { "catalog" },
+                        ) {
+                            recent_shelf.albums.push(alb);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !recent_shelf.playlists.is_empty()
+                || !recent_shelf.albums.is_empty()
+                || !recent_shelf.stations.is_empty()
+            {
+                shelves.push(recent_shelf);
+            }
+        }
+    }
+
     if let Ok(json) = apple_get_json("/v1/me/history/heavy-rotation?limit=15", &dev_token, &user_token) {
         if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
+            let mut heavy_shelf = AppleRecommendationShelf {
+                id: "heavy-rotation".to_string(),
+                title: "Heavy Rotation".to_string(),
+                playlists: Vec::new(),
+                albums: Vec::new(),
+                stations: Vec::new(),
+            };
+            let mut shelf_seen_stations = HashSet::new();
             for item in arr {
-                push_item(item, "Heavy Rotation", &mut stations, &mut seen_stations);
+                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let attrs = item.get("attributes").unwrap_or(item);
+                let Some(id) = item.get("id").and_then(|v| v.as_str()) else { continue };
+                match item_type {
+                    "stations" => {
+                        push_classified_station(item, "Heavy Rotation");
+                        if !is_live_broadcast_station(item, "Heavy Rotation") {
+                            push_station_to(
+                                &mut heavy_shelf.stations,
+                                &mut shelf_seen_stations,
+                                item,
+                                "Heavy Rotation",
+                            );
+                        }
+                    }
+                    "playlists" | "library-playlists" => {
+                        let pl = AppleCloudPlaylistSummary {
+                            id: id.to_string(),
+                            name: attrs.get("name").and_then(|v| v.as_str()).unwrap_or("Mix").to_string(),
+                            description: attrs.get("curatorName").and_then(|v| v.as_str()).unwrap_or("Heavy Rotation").to_string(),
+                            art_url: format_apple_art_url(attrs.pointer("/artwork/url").and_then(|v| v.as_str()), 300),
+                            kind: if id.starts_with("pl.") { "catalog" } else { "library" }.to_string(),
+                        };
+                        if seen_playlists.insert(id.to_string()) {
+                            playlists.push(pl.clone());
+                        }
+                        heavy_shelf.playlists.push(pl);
+                    }
+                    "albums" | "library-albums" => {
+                        if let Some(alb) = parse_apple_album_summary(
+                            item,
+                            if id.starts_with("l.") { "library" } else { "catalog" },
+                        ) {
+                            if seen_albums.insert(id.to_string()) {
+                                albums.push(alb.clone());
+                            }
+                            heavy_shelf.albums.push(alb);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !heavy_shelf.playlists.is_empty()
+                || !heavy_shelf.albums.is_empty()
+                || !heavy_shelf.stations.is_empty()
+            {
+                shelves.push(heavy_shelf);
             }
         }
     }
-    if let Ok(json) = apple_get_json("/v1/me/recommendations?limit=10", &dev_token, &user_token) {
+
+    if let Ok(json) = apple_get_json("/v1/me/recommendations?limit=12", &dev_token, &user_token) {
         if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
-            for rec in arr {
+            for (idx, rec) in arr.iter().enumerate() {
+                let rec_id = rec
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("rec-{idx}"));
                 let title = rec
                     .pointer("/attributes/title/stringForDisplay")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("For You");
+                    .unwrap_or("Made For You");
+                let title_lower = title.to_lowercase();
+                let is_new_release_shelf = title_lower.contains("new release")
+                    || title_lower.contains("recent release")
+                    || title_lower == "new music";
+
+                let mut shelf = AppleRecommendationShelf {
+                    id: rec_id,
+                    title: title.to_string(),
+                    playlists: Vec::new(),
+                    albums: Vec::new(),
+                    stations: Vec::new(),
+                };
+                let mut shelf_seen_stations = HashSet::new();
                 if let Some(contents) = rec
                     .pointer("/relationships/contents/data")
                     .and_then(|v| v.as_array())
                 {
                     for item in contents {
-                        push_item(item, title, &mut stations, &mut seen_stations);
+                        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        let attrs = item.get("attributes").unwrap_or(item);
+                        let Some(id) = item.get("id").and_then(|v| v.as_str()) else { continue };
+                        match item_type {
+                            "stations" => {
+                                push_classified_station(item, title);
+                                if !is_live_broadcast_station(item, title) {
+                                    push_station_to(
+                                        &mut shelf.stations,
+                                        &mut shelf_seen_stations,
+                                        item,
+                                        title,
+                                    );
+                                }
+                            }
+                            "playlists" | "library-playlists" => {
+                                let pl = AppleCloudPlaylistSummary {
+                                    id: id.to_string(),
+                                    name: attrs.get("name").and_then(|v| v.as_str()).unwrap_or("Mix").to_string(),
+                                    description: attrs.get("curatorName").and_then(|v| v.as_str()).unwrap_or(title).to_string(),
+                                    art_url: format_apple_art_url(attrs.pointer("/artwork/url").and_then(|v| v.as_str()), 300),
+                                    kind: if id.starts_with("pl.") { "catalog" } else { "library" }.to_string(),
+                                };
+                                if seen_playlists.insert(id.to_string()) {
+                                    playlists.push(pl.clone());
+                                }
+                                shelf.playlists.push(pl);
+                            }
+                            "albums" | "library-albums" => {
+                                if let Some(alb) = parse_apple_album_summary(
+                                    item,
+                                    if id.starts_with("l.") { "library" } else { "catalog" },
+                                ) {
+                                    if is_new_release_shelf {
+                                        if seen_new_releases.insert(alb.id.clone()) {
+                                            new_releases.push(alb.clone());
+                                        }
+                                    }
+                                    if seen_albums.insert(id.to_string()) {
+                                        albums.push(alb.clone());
+                                    }
+                                    shelf.albums.push(alb);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if !shelf.playlists.is_empty()
+                    || !shelf.albums.is_empty()
+                    || !shelf.stations.is_empty()
+                {
+                    shelves.push(shelf);
+                }
+            }
+        }
+    }
+
+    if let Ok(json) = apple_get_json("/v1/me/recent/played/tracks?limit=24", &dev_token, &user_token) {
+        if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
+            let mut seen_recent = HashSet::new();
+            for item in arr {
+                if let Some(tr) = map_apple_item_to_track(item) {
+                    if seen_recent.insert(tr.uri.clone()) {
+                        recently_played.push(tr);
                     }
                 }
             }
         }
     }
+
+    // If `/v1/me/recommendations` didn't include a dedicated "New Releases For You" shelf (or had very few items),
+    // also surface the newest releases from the user's top/recently played artists!
+    if new_releases.len() < 4 {
+        let mut seed_artists = Vec::new();
+        let mut seen_seed_artists = HashSet::new();
+        for alb in albums.iter().take(6) {
+            let a = alb.artist.trim();
+            if !a.is_empty() && a != "Various Artists" && seen_seed_artists.insert(a.to_lowercase()) {
+                seed_artists.push(a.to_string());
+            }
+        }
+        for tr in recently_played.iter().take(8) {
+            if let Some(a) = tr.artists.first().map(|s| s.trim()) {
+                if !a.is_empty() && seen_seed_artists.insert(a.to_lowercase()) {
+                    seed_artists.push(a.to_string());
+                }
+            }
+        }
+        for artist_name in seed_artists.into_iter().take(3) {
+            if let Ok(search_json) = apple_get_json(
+                &format!(
+                    "/v1/catalog/{storefront}/search?term={}&types=albums&limit=3",
+                    urlencode(&artist_name)
+                ),
+                &dev_token,
+                &user_token,
+            ) {
+                if let Some(arr) = search_json
+                    .pointer("/results/albums/data")
+                    .and_then(|v| v.as_array())
+                {
+                    for alb_val in arr {
+                        if let Some(alb) = parse_apple_album_summary(alb_val, "catalog") {
+                            if alb.release_year.unwrap_or(0) >= 2024
+                                && seen_new_releases.insert(alb.id.clone())
+                            {
+                                new_releases.push(alb);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if let Ok(json) = apple_get_json(
         &format!("/v1/catalog/{storefront}/stations?filter[featured]=apple-music-live-radio"),
         &dev_token,
@@ -1273,15 +1590,396 @@ pub fn fetch_radio_and_for_you(settings: &SimpSettings) -> Result<AppleRadioAndF
     ) {
         if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
             for st in arr {
-                push_station_to(&mut stations, &mut seen_stations, st, "Live Global Radio");
+                push_classified_station(st, "Live Global Radio");
             }
         }
     }
 
     Ok(AppleRadioAndForYouResponse {
         stations,
+        personal_stations,
+        live_stations,
         playlists,
         albums,
+        new_releases,
+        shelves,
+        recently_played,
+    })
+}
+
+/// Sets or clears a user's Apple Music Favorite/Love rating (`PUT` or `DELETE` `/v1/me/ratings/{kind}/{id}`).
+/// Kept strictly separate from `add_to_apple_cloud_library` per Item #4.
+pub fn set_apple_item_rating(
+    settings: &SimpSettings,
+    item_id_or_uri: &str,
+    item_kind: &str,
+    favorited: bool,
+) -> Result<()> {
+    let (dev_token, user_token) = resolve_tokens(settings)?;
+    let clean_id = item_id_or_uri
+        .strip_prefix("applemusic:song:")
+        .or_else(|| item_id_or_uri.strip_prefix("applemusic:track:"))
+        .or_else(|| item_id_or_uri.strip_prefix("applemusic:album:"))
+        .or_else(|| item_id_or_uri.strip_prefix("applemusic:playlist:"))
+        .or_else(|| item_id_or_uri.strip_prefix("applemusic:"))
+        .unwrap_or(item_id_or_uri)
+        .trim();
+    if clean_id.is_empty() {
+        return Err(anyhow!("Missing Apple Music item ID for rating"));
+    }
+
+    let endpoint_kind = match item_kind.trim().to_ascii_lowercase().as_str() {
+        "album" | "albums" => {
+            if clean_id.starts_with("l.") {
+                "library-albums"
+            } else {
+                "albums"
+            }
+        }
+        "playlist" | "playlists" => {
+            if clean_id.starts_with("p.") {
+                "library-playlists"
+            } else {
+                "playlists"
+            }
+        }
+        _ => {
+            if clean_id.starts_with("i.") {
+                "library-songs"
+            } else {
+                "songs"
+            }
+        }
+    };
+
+    let url = format!(
+        "https://api.music.apple.com/v1/me/ratings/{}/{}",
+        endpoint_kind,
+        urlencode(clean_id)
+    );
+    let auth_header = format!("Bearer {}", dev_token.trim());
+    let headers = [
+        ("Authorization", auth_header.as_str()),
+        ("Music-User-Token", user_token.trim()),
+        ("X-Apple-Music-User-Token", user_token.trim()),
+        ("Content-Type", "application/json"),
+        ("Origin", "https://music.apple.com"),
+        ("Referer", "https://music.apple.com/"),
+    ];
+
+    if favorited {
+        let body = serde_json::json!({
+            "type": "ratings",
+            "attributes": {
+                "value": 1
+            }
+        });
+        let body_bytes = serde_json::to_vec(&body)?;
+        crate::http_pool::http_custom_bytes("PUT", &url, &headers, Some(&body_bytes), 12)
+            .with_context(|| format!("Failed to favorite Apple Music item {clean_id}"))?;
+    } else {
+        crate::http_pool::http_custom_bytes("DELETE", &url, &headers, None, 12)
+            .with_context(|| format!("Failed to remove Apple Music rating for {clean_id}"))?;
+    }
+    Ok(())
+}
+
+/// Adds a catalog song, album, or playlist to the user's personal Apple Music Cloud Library
+/// (`POST /v1/me/library?ids[{songs|albums|playlists}]={id}`).
+/// Kept strictly separate from `set_apple_item_rating` (`♥ Favorite`) per Item #4.
+pub fn add_to_apple_cloud_library(
+    settings: &SimpSettings,
+    item_id_or_uri: &str,
+    item_kind: &str,
+) -> Result<()> {
+    let (dev_token, user_token) = resolve_tokens(settings)?;
+    let clean_id = item_id_or_uri
+        .strip_prefix("applemusic:song:")
+        .or_else(|| item_id_or_uri.strip_prefix("applemusic:track:"))
+        .or_else(|| item_id_or_uri.strip_prefix("applemusic:album:"))
+        .or_else(|| item_id_or_uri.strip_prefix("applemusic:playlist:"))
+        .or_else(|| item_id_or_uri.strip_prefix("applemusic:"))
+        .unwrap_or(item_id_or_uri)
+        .trim();
+    if clean_id.is_empty() {
+        return Err(anyhow!("Missing Apple Music catalog ID to add to library"));
+    }
+
+    let query_type = match item_kind.trim().to_ascii_lowercase().as_str() {
+        "album" | "albums" => "albums",
+        "playlist" | "playlists" => "playlists",
+        _ => "songs",
+    };
+
+    let url = format!(
+        "https://api.music.apple.com/v1/me/library?ids[{}]={}",
+        query_type,
+        urlencode(clean_id)
+    );
+    let auth_header = format!("Bearer {}", dev_token.trim());
+    let headers = [
+        ("Authorization", auth_header.as_str()),
+        ("Music-User-Token", user_token.trim()),
+        ("X-Apple-Music-User-Token", user_token.trim()),
+        ("Origin", "https://music.apple.com"),
+        ("Referer", "https://music.apple.com/"),
+    ];
+
+    crate::http_pool::http_custom_bytes("POST", &url, &headers, Some(b""), 15)
+        .with_context(|| format!("Failed to add {clean_id} to Apple Music Cloud Library"))?;
+    Ok(())
+}
+
+/// Resolves an Apple Music Artist Profile (`Top Tracks`, `Albums`, `Singles & EPs`, and `Related Artists`)
+/// by catalog artist ID or artist name (`name:<artist>`).
+pub fn fetch_apple_artist_profile(
+    settings: &SimpSettings,
+    artist_id_or_name: &str,
+) -> Result<AppleArtistProfileResponse> {
+    let (dev_token, user_token) = resolve_tokens(settings)?;
+    let storefront = get_storefront(&dev_token, &user_token);
+    let raw = artist_id_or_name
+        .strip_prefix("applemusic:artist:")
+        .unwrap_or(artist_id_or_name)
+        .trim();
+    if raw.is_empty() {
+        return Err(anyhow!("Missing Apple Music artist ID or name"));
+    }
+
+    let resolved_id = if let Some(name_query) = raw.strip_prefix("name:") {
+        let q = name_query.trim();
+        let search_json = apple_get_json(
+            &format!(
+                "/v1/catalog/{storefront}/search?term={}&types=artists&limit=5",
+                urlencode(q)
+            ),
+            &dev_token,
+            &user_token,
+        )?;
+        let q_lower = q.to_lowercase();
+        let arr = search_json
+            .pointer("/results/artists/data")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("No Apple Music artist found matching '{q}'"))?;
+        arr.iter()
+            .find(|a| {
+                a.pointer("/attributes/name")
+                    .and_then(|v| v.as_str())
+                    .map(|n| n.trim().to_lowercase() == q_lower)
+                    .unwrap_or(false)
+            })
+            .or_else(|| arr.first())
+            .and_then(|a| a.get("id").and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("No Apple Music artist found matching '{q}'"))?
+    } else if raw.chars().all(|c| c.is_ascii_digit()) {
+        raw.to_string()
+    } else {
+        let search_json = apple_get_json(
+            &format!(
+                "/v1/catalog/{storefront}/search?term={}&types=artists&limit=5",
+                urlencode(raw)
+            ),
+            &dev_token,
+            &user_token,
+        )?;
+        let raw_lower = raw.to_lowercase();
+        let arr = search_json
+            .pointer("/results/artists/data")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("No Apple Music artist found matching '{raw}'"))?;
+        arr.iter()
+            .find(|a| {
+                a.pointer("/attributes/name")
+                    .and_then(|v| v.as_str())
+                    .map(|n| n.trim().to_lowercase() == raw_lower)
+                    .unwrap_or(false)
+            })
+            .or_else(|| arr.first())
+            .and_then(|a| a.get("id").and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("No Apple Music artist found matching '{raw}'"))?
+    };
+
+    let artist_json = apple_get_json(
+        &format!(
+            "/v1/catalog/{storefront}/artists/{}?views=top-songs,full-albums,singles,similar-artists&include=albums",
+            urlencode(&resolved_id)
+        ),
+        &dev_token,
+        &user_token,
+    )
+    .or_else(|_| {
+        apple_get_json(
+            &format!(
+                "/v1/catalog/{storefront}/artists/{}?include=albums",
+                urlencode(&resolved_id)
+            ),
+            &dev_token,
+            &user_token,
+        )
+    })?;
+
+    let artist_node = artist_json
+        .pointer("/data/0")
+        .ok_or_else(|| anyhow!("Artist {resolved_id} not found in Apple Music catalog"))?;
+    let attrs = artist_node.get("attributes").unwrap_or(artist_node);
+    let artist_summary = AppleArtistSummary {
+        id: resolved_id.clone(),
+        name: attrs
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Artist")
+            .to_string(),
+        genre: attrs
+            .pointer("/genreNames/0")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Apple Music Artist")
+            .to_string(),
+        art_url: format_apple_art_url(
+            attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
+            400,
+        ),
+    };
+
+    let mut top_tracks: Vec<TrackMetadata> = Vec::new();
+    let mut seen_tracks = HashSet::new();
+    if let Some(arr) = artist_node
+        .pointer("/views/top-songs/data")
+        .and_then(|v| v.as_array())
+    {
+        for item in arr {
+            if let Some(tr) = map_apple_item_to_track(item) {
+                if seen_tracks.insert(tr.uri.clone()) {
+                    top_tracks.push(tr);
+                }
+            }
+        }
+    }
+    if top_tracks.is_empty() {
+        if let Ok(songs_json) = apple_get_json(
+            &format!(
+                "/v1/catalog/{storefront}/artists/{}/songs?limit=25",
+                urlencode(&resolved_id)
+            ),
+            &dev_token,
+            &user_token,
+        ) {
+            if let Some(arr) = songs_json.get("data").and_then(|v| v.as_array()) {
+                for item in arr {
+                    if let Some(tr) = map_apple_item_to_track(item) {
+                        if seen_tracks.insert(tr.uri.clone()) {
+                            top_tracks.push(tr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut albums: Vec<AppleCloudAlbumSummary> = Vec::new();
+    let mut singles: Vec<AppleCloudAlbumSummary> = Vec::new();
+    let mut seen_albums = HashSet::new();
+
+    if let Some(arr) = artist_node
+        .pointer("/views/full-albums/data")
+        .and_then(|v| v.as_array())
+    {
+        for alb in arr {
+            if let Some(summary) = parse_apple_album_summary(alb, "catalog") {
+                if seen_albums.insert(summary.id.clone()) {
+                    albums.push(summary);
+                }
+            }
+        }
+    }
+    if let Some(arr) = artist_node
+        .pointer("/views/singles/data")
+        .and_then(|v| v.as_array())
+    {
+        for alb in arr {
+            if let Some(summary) = parse_apple_album_summary(alb, "catalog") {
+                if seen_albums.insert(summary.id.clone()) {
+                    singles.push(summary);
+                }
+            }
+        }
+    }
+    if let Some(arr) = artist_node
+        .pointer("/relationships/albums/data")
+        .and_then(|v| v.as_array())
+    {
+        for alb in arr {
+            let is_single = alb
+                .pointer("/attributes/isSingle")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if let Some(summary) = parse_apple_album_summary(alb, "catalog") {
+                if !seen_albums.insert(summary.id.clone()) {
+                    continue;
+                }
+                let title_lower = summary.title.to_lowercase();
+                if is_single
+                    || summary.track_count <= 3
+                    || title_lower.contains("- single")
+                    || title_lower.contains("- ep")
+                {
+                    singles.push(summary);
+                } else {
+                    albums.push(summary);
+                }
+            }
+        }
+    }
+
+    let mut related_artists: Vec<AppleArtistSummary> = Vec::new();
+    let mut seen_related = HashSet::new();
+    if let Some(arr) = artist_node
+        .pointer("/views/similar-artists/data")
+        .and_then(|v| v.as_array())
+    {
+        for rel in arr {
+            let Some(id) = rel.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if !seen_related.insert(id.to_string()) {
+                continue;
+            };
+            let rel_attrs = rel.get("attributes").unwrap_or(rel);
+            related_artists.push(AppleArtistSummary {
+                id: id.to_string(),
+                name: rel_attrs
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Artist")
+                    .to_string(),
+                genre: rel_attrs
+                    .pointer("/genreNames/0")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Similar Artist")
+                    .to_string(),
+                art_url: format_apple_art_url(
+                    rel_attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
+                    300,
+                ),
+            });
+        }
+    }
+
+    let mut final_artist = artist_summary;
+    if final_artist.art_url.is_none() {
+        final_artist.art_url = top_tracks
+            .first()
+            .and_then(|t| t.art_url.clone())
+            .or_else(|| albums.first().and_then(|a| a.art_url.clone()));
+    }
+
+    Ok(AppleArtistProfileResponse {
+        artist: final_artist,
+        top_tracks,
+        albums,
+        singles,
+        related_artists,
     })
 }
 
@@ -1290,12 +1988,49 @@ pub fn fetch_new_feed(settings: &SimpSettings) -> Result<AppleNewFeedResponse> {
     let (dev_token, user_token) = resolve_tokens(settings)?;
     let storefront = get_storefront(&dev_token, &user_token);
 
+    let mut recent_releases = Vec::new();
     let mut albums = Vec::new();
     let mut playlists = Vec::new();
     let mut songs = Vec::new();
+    let mut seen_recent_releases = HashSet::new();
     let mut seen_albums = HashSet::new();
     let mut seen_playlists = HashSet::new();
     let mut seen_songs = HashSet::new();
+
+    // 1. Personalized "New Releases For You" / "Recent Releases" from `/v1/me/recommendations`
+    if let Ok(rec_json) = apple_get_json("/v1/me/recommendations?limit=12", &dev_token, &user_token)
+    {
+        if let Some(arr) = rec_json.get("data").and_then(|v| v.as_array()) {
+            for rec in arr {
+                let title = rec
+                    .pointer("/attributes/title/stringForDisplay")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if title.contains("new release")
+                    || title.contains("recent release")
+                    || title == "new music"
+                {
+                    if let Some(contents) = rec
+                        .pointer("/relationships/contents/data")
+                        .and_then(|v| v.as_array())
+                    {
+                        for item in contents {
+                            let item_type =
+                                item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            if item_type == "albums" || item_type == "library-albums" {
+                                if let Some(alb) = parse_apple_album_summary(item, "catalog") {
+                                    if seen_recent_releases.insert(alb.id.clone()) {
+                                        recent_releases.push(alb);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if let Ok(json) = apple_get_json(
         &format!("/v1/catalog/{storefront}/charts?types=albums,playlists,songs&limit=15"),
@@ -1357,6 +2092,7 @@ pub fn fetch_new_feed(settings: &SimpSettings) -> Result<AppleNewFeedResponse> {
     }
 
     Ok(AppleNewFeedResponse {
+        recent_releases,
         albums,
         playlists,
         songs,
@@ -1557,32 +2293,31 @@ pub fn fetch_radio_station_tracks(
     }
 
     let safe_limit = limit.clamp(5, 25);
-    let next_tracks_url = format!(
-        "https://api.music.apple.com/v1/me/stations/next-tracks/{}?limit={}",
-        urlencode(station_id),
-        safe_limit
-    );
-
-    if let Ok(json) = apple_post_json(
-        &next_tracks_url,
-        &dev_token,
-        &user_token,
-        &serde_json::json!({}),
-    ) {
-        if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
-            let tracks: Vec<TrackMetadata> = arr
-                .iter()
-                .filter_map(map_apple_item_to_track)
-                .collect();
-            if !tracks.is_empty() {
-                return Ok(tracks);
+    for base_host in [
+        "https://amp-api.music.apple.com",
+        "https://api.music.apple.com",
+    ] {
+        let next_tracks_url = format!(
+            "{base_host}/v1/me/stations/next-tracks/{}?limit={}",
+            urlencode(station_id),
+            safe_limit
+        );
+        if let Ok(json) = apple_post_json(
+            &next_tracks_url,
+            &dev_token,
+            &user_token,
+            &serde_json::json!({}),
+        ) {
+            if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
+                let tracks: Vec<TrackMetadata> =
+                    arr.iter().filter_map(map_apple_item_to_track).collect();
+                if !tracks.is_empty() {
+                    return Ok(tracks);
+                }
             }
         }
     }
 
-    // Fallback for global live broadcast stations (`isLive: true`, e.g. `ra.978194965` Apple Music 1,
-    // Apple Music Hits, Apple Music Country, Apple Music Club, Apple Musica Uno, Apple Music Chill)
-    // where `/v1/me/stations/next-tracks` returns empty `data: []`:
     let storefront = get_storefront(&dev_token, &user_token);
     let raw_hint = station_title_hint
         .unwrap_or("")
@@ -1590,8 +2325,127 @@ pub fn fetch_radio_station_tracks(
         .trim();
     let lower_hint = raw_hint.to_lowercase();
 
+    // Check if this is a Personal User Station (e.g. `ra.u-...`, `"[My Name]'s Station"`, `"Discovery Station"`).
+    // Never search the public catalog for the user's literal name! Instead, synthesize a personalized
+    // station queue from their personal mixes (`Favorites Mix`, `Get Up! Mix`, `New Music Mix`, `Chill Mix`),
+    // recently played tracks, and personal Cloud Library songs.
+    let is_personal_station = station_id.contains("u-")
+        || lower_hint.contains("'s station")
+        || lower_hint.contains("’s station")
+        || lower_hint.contains("discovery station")
+        || lower_hint.contains("personal station")
+        || lower_hint.contains("my station");
+
+    if is_personal_station {
+        let mut personal_pool: Vec<TrackMetadata> = Vec::new();
+        let mut seen_uris = HashSet::new();
+
+        // 1. Pull tracks from the user's "Made For You" personal mix playlists (`Favorites Mix`, `Get Up! Mix`, etc.)
+        if let Ok(rec_json) =
+            apple_get_json("/v1/me/recommendations?limit=8", &dev_token, &user_token)
+        {
+            if let Some(arr) = rec_json.get("data").and_then(|v| v.as_array()) {
+                let mut mix_playlist_ids = Vec::new();
+                for rec in arr {
+                    if let Some(contents) = rec
+                        .pointer("/relationships/contents/data")
+                        .and_then(|v| v.as_array())
+                    {
+                        for item in contents {
+                            let item_type =
+                                item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            if item_type == "playlists" || item_type == "library-playlists" {
+                                if let Some(pid) = item.get("id").and_then(|v| v.as_str()) {
+                                    mix_playlist_ids.push(pid.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                for pid in mix_playlist_ids.into_iter().take(2) {
+                    if let Ok(pl_tracks) = fetch_playlist_tracks(settings, &pid, Some("catalog")) {
+                        for tr in pl_tracks.into_iter().take(20) {
+                            if seen_uris.insert(tr.uri.clone()) {
+                                personal_pool.push(tr);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Pull the user's Recently Played Apple Music tracks
+        if let Ok(recent_json) = apple_get_json(
+            "/v1/me/recent/played/tracks?limit=25",
+            &dev_token,
+            &user_token,
+        ) {
+            if let Some(arr) = recent_json.get("data").and_then(|v| v.as_array()) {
+                for item in arr {
+                    if let Some(tr) = map_apple_item_to_track(item) {
+                        if seen_uris.insert(tr.uri.clone()) {
+                            personal_pool.push(tr);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Pull songs from the user's personal Apple Music Cloud Library
+        if let Ok(lib_json) = apple_get_json(
+            "/v1/me/library/songs?include=catalog&limit=35",
+            &dev_token,
+            &user_token,
+        ) {
+            if let Some(arr) = lib_json.get("data").and_then(|v| v.as_array()) {
+                for item in arr {
+                    if let Some(tr) = map_apple_item_to_track(item) {
+                        if seen_uris.insert(tr.uri.clone()) {
+                            personal_pool.push(tr);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !personal_pool.is_empty() {
+            // Deterministic pseudo-random rotation seeded from wall-clock time so each tune-in feels fresh
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as usize)
+                .unwrap_or(7);
+            let len = personal_pool.len();
+            let mut rotated = Vec::with_capacity(len.min(safe_limit));
+            let step = if len > 3 { (seed % (len - 1)).max(1) } else { 1 };
+            for i in 0..len {
+                let idx = (seed + i * step) % len;
+                let candidate = &personal_pool[idx];
+                if !rotated.iter().any(|t: &TrackMetadata| t.uri == candidate.uri) {
+                    rotated.push(candidate.clone());
+                    if rotated.len() >= safe_limit {
+                        break;
+                    }
+                }
+            }
+            for tr in personal_pool {
+                if rotated.len() >= safe_limit {
+                    break;
+                }
+                if !rotated.iter().any(|t| t.uri == tr.uri) {
+                    rotated.push(tr);
+                }
+            }
+            if !rotated.is_empty() {
+                return Ok(rotated);
+            }
+        }
+    }
+
+    // Fallback for global live broadcast stations (`isLive: true`, e.g. `ra.978194965` Apple Music 1,
+    // Apple Music Hits, Apple Music Country, Apple Music Club, Apple Musica Uno, Apple Music Chill)
+    // where `/v1/me/stations/next-tracks` returns empty `data: []`:
     // If it's "Apple Music 1" or no specific genre hint, try storefront Top Songs chart first
-    if lower_hint.is_empty() || lower_hint.contains("apple music 1") {
+    if lower_hint.is_empty() || lower_hint.contains("apple music 1") || is_personal_station {
         let chart_url = format!("/v1/catalog/{storefront}/charts?types=songs&limit=25");
         if let Ok(json) = apple_get_json(&chart_url, &dev_token, &user_token) {
             if let Some(arr) = json

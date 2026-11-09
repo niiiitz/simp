@@ -1,9 +1,19 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use simp_protocol::{AlbumRecord, MountStatus, PlaylistRecord, TrackMetadata};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalArtistProfile {
+    pub name: String,
+    pub art_url: Option<String>,
+    pub tracks: Vec<TrackMetadata>,
+    pub albums: Vec<AlbumRecord>,
+    pub related_artists: Vec<String>,
+}
 
 #[derive(Clone)]
 pub struct LibraryDatabase {
@@ -115,6 +125,23 @@ impl LibraryDatabase {
                 playlist_id     TEXT PRIMARY KEY,
                 art_url         TEXT NOT NULL,
                 updated_at      INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS play_history (
+                uri             TEXT PRIMARY KEY,
+                track_json      TEXT NOT NULL,
+                source          TEXT NOT NULL,
+                played_at       INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_play_history_source ON play_history(source, played_at DESC);
+
+            CREATE TABLE IF NOT EXISTS local_favorites (
+                uri             TEXT PRIMARY KEY,
+                track_json      TEXT NOT NULL,
+                source          TEXT NOT NULL,
+                added_at        INTEGER NOT NULL
             );
             ",
         )?;
@@ -423,7 +450,8 @@ impl LibraryDatabase {
         let search_pattern = search.map(|s| format!("%{}%", s)).unwrap_or_else(|| "%".to_string());
         let mut stmt = conn.prepare(
             "SELECT a.id, a.title, a.album_artist, a.release_year, a.steam_app_id, a.art_cache_path,
-                    COUNT(t.uri) as track_count
+                    COUNT(t.uri) as track_count,
+                    GROUP_CONCAT(t.uri, '|') as uri_list
              FROM albums a
              JOIN tracks t ON t.album_id = a.id
              LEFT JOIN storage_mounts m ON t.mount_root = m.mount_root
@@ -441,10 +469,44 @@ impl LibraryDatabase {
         let rows = stmt.query_map(
             params![source, mount_root, search_pattern, limit as i64, offset as i64],
             |row| {
+                let mut album_artist: String = row.get(2)?;
+                let uri_list: Option<String> = row.get(7).ok();
+                if let Some(uris) = uri_list {
+                    let mut exts: Vec<&'static str> = Vec::new();
+                    for u in uris.split('|') {
+                        if u.starts_with("file://") || u.starts_with('/') {
+                            if let Some((_, ext_raw)) = u.rsplit_once('.') {
+                                let known = match ext_raw.to_ascii_uppercase().as_str() {
+                                    "FLAC" => Some("FLAC"),
+                                    "MP3" => Some("MP3"),
+                                    "WAV" => Some("WAV"),
+                                    "OGG" => Some("OGG"),
+                                    "OPUS" => Some("OPUS"),
+                                    "M4A" => Some("M4A"),
+                                    "AAC" => Some("AAC"),
+                                    "ALAC" => Some("ALAC"),
+                                    "AIFF" => Some("AIFF"),
+                                    _ => None,
+                                };
+                                if let Some(k) = known {
+                                    if !exts.contains(&k) {
+                                        exts.push(k);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !exts.is_empty() {
+                        let fmt_badge = exts.join(" + ");
+                        if !album_artist.contains(&fmt_badge) {
+                            album_artist = format!("{album_artist} • {fmt_badge}");
+                        }
+                    }
+                }
                 Ok(AlbumRecord {
                     id: row.get(0)?,
                     title: row.get(1)?,
-                    album_artist: row.get(2)?,
+                    album_artist,
                     release_year: row.get(3)?,
                     steam_app_id: row.get(4)?,
                     art_url: row.get(5)?,
@@ -1154,6 +1216,200 @@ impl LibraryDatabase {
             params![art_url, pinned_id],
         );
         Ok(())
+    }
+
+    pub fn record_play_history(&self, track: &TrackMetadata) -> Result<()> {
+        if track.uri.trim().is_empty() {
+            return Ok(());
+        }
+        let Ok(track_json) = serde_json::to_string(track) else {
+            return Ok(());
+        };
+        let conn = self.conn.lock().unwrap();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT INTO play_history (uri, track_json, source, played_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(uri) DO UPDATE SET
+               track_json = excluded.track_json,
+               source = excluded.source,
+               played_at = excluded.played_at",
+            params![track.uri, track_json, track.source, now_ms],
+        )?;
+        // Cap table at 200 most recent entries
+        let _ = conn.execute(
+            "DELETE FROM play_history
+             WHERE uri NOT IN (
+                 SELECT uri FROM play_history ORDER BY played_at DESC LIMIT 200
+             )",
+            [],
+        );
+        Ok(())
+    }
+
+    pub fn get_play_history(
+        &self,
+        source: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TrackMetadata>> {
+        let conn = self.conn.lock().unwrap();
+        let max_rows = limit.clamp(1, 200) as i64;
+        let mut out = Vec::new();
+        if let Some(src) = source.map(|s| s.trim()).filter(|s| !s.is_empty() && *s != "all") {
+            let mut stmt = conn.prepare(
+                "SELECT track_json FROM play_history
+                 WHERE source = ?1
+                 ORDER BY played_at DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![src, max_rows], |r| r.get::<_, String>(0))?;
+            for json_str in rows.flatten() {
+                if let Ok(t) = serde_json::from_str::<TrackMetadata>(&json_str) {
+                    out.push(t);
+                }
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT track_json FROM play_history
+                 ORDER BY played_at DESC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![max_rows], |r| r.get::<_, String>(0))?;
+            for json_str in rows.flatten() {
+                if let Ok(t) = serde_json::from_str::<TrackMetadata>(&json_str) {
+                    out.push(t);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn set_track_favorited(&self, track: &TrackMetadata, favorited: bool) -> Result<bool> {
+        let uri = track.uri.trim();
+        if uri.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().unwrap();
+        if favorited {
+            let track_json = serde_json::to_string(track).unwrap_or_else(|_| "{}".to_string());
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            conn.execute(
+                "INSERT INTO local_favorites (uri, track_json, source, added_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(uri) DO UPDATE SET
+                   track_json = excluded.track_json,
+                   source = excluded.source,
+                   added_at = excluded.added_at",
+                params![uri, track_json, track.source, now_ms],
+            )?;
+            Ok(true)
+        } else {
+            conn.execute("DELETE FROM local_favorites WHERE uri = ?1", params![uri])?;
+            Ok(false)
+        }
+    }
+
+    pub fn get_favorited_uris(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT uri FROM local_favorites ORDER BY added_at DESC LIMIT 1000")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn get_favorited_tracks(&self, source: Option<&str>) -> Result<Vec<TrackMetadata>> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = Vec::new();
+        if let Some(src) = source.map(|s| s.trim()).filter(|s| !s.is_empty() && *s != "all") {
+            let mut stmt = conn.prepare(
+                "SELECT track_json FROM local_favorites
+                 WHERE source = ?1
+                 ORDER BY added_at DESC
+                 LIMIT 500",
+            )?;
+            let rows = stmt.query_map(params![src], |r| r.get::<_, String>(0))?;
+            for json_str in rows.flatten() {
+                if let Ok(t) = serde_json::from_str::<TrackMetadata>(&json_str) {
+                    out.push(t);
+                }
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT track_json FROM local_favorites
+                 ORDER BY added_at DESC
+                 LIMIT 500",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for json_str in rows.flatten() {
+                if let Ok(t) = serde_json::from_str::<TrackMetadata>(&json_str) {
+                    out.push(t);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn get_local_artist_profile(&self, artist_name: &str) -> Result<LocalArtistProfile> {
+        let cleaned = artist_name.trim();
+        let all_albums = self.get_albums_filtered(None, None, Some(cleaned), 200, 0)?;
+        let lower = cleaned.to_lowercase();
+        let mut albums: Vec<AlbumRecord> = all_albums
+            .into_iter()
+            .filter(|a| {
+                a.album_artist.trim().to_lowercase() == lower
+                    || a.album_artist.to_lowercase().contains(&lower)
+            })
+            .collect();
+        albums.sort_by(|a, b| b.release_year.cmp(&a.release_year).then_with(|| a.title.cmp(&b.title)));
+
+        let all_tracks = self.get_tracks_filtered(None, None, Some(cleaned), 500, 0)?;
+        let mut tracks: Vec<TrackMetadata> = all_tracks
+            .into_iter()
+            .filter(|t| {
+                t.artists
+                    .iter()
+                    .any(|ar| ar.trim().to_lowercase() == lower || ar.to_lowercase().contains(&lower))
+            })
+            .collect();
+        tracks.sort_by(|a, b| {
+            a.album
+                .cmp(&b.album)
+                .then_with(|| a.disc_number.cmp(&b.disc_number))
+                .then_with(|| a.track_number.cmp(&b.track_number))
+        });
+
+        let art_url = albums
+            .iter()
+            .find_map(|a| a.art_url.clone())
+            .or_else(|| tracks.iter().find_map(|t| t.art_url.clone()));
+
+        // Related artists: co-credited artists on those tracks or artists from the same mount_root
+        let mut related_artists = Vec::new();
+        for t in &tracks {
+            for ar in &t.artists {
+                let trim_ar = ar.trim();
+                if !trim_ar.is_empty()
+                    && trim_ar.to_lowercase() != lower
+                    && !related_artists.iter().any(|r: &String| r.eq_ignore_ascii_case(trim_ar))
+                {
+                    related_artists.push(trim_ar.to_string());
+                }
+            }
+        }
+
+        Ok(LocalArtistProfile {
+            name: cleaned.to_string(),
+            art_url,
+            tracks,
+            albums,
+            related_artists,
+        })
     }
 }
 

@@ -40,8 +40,12 @@ pub enum AudioCommand {
     DisconnectAppleMusic,
     #[serde(rename = "configure_soundcloud")]
     ConfigureSoundCloud {
+        #[serde(default)]
         client_id: String,
+        #[serde(default)]
         client_secret: String,
+        #[serde(default)]
+        api_v2: Option<bool>,
     },
     #[serde(rename = "set_soundcloud_tokens")]
     SetSoundCloudTokens {

@@ -331,9 +331,15 @@ export class SimpDaemonClient {
 
   // SoundCloud Native Sink & OAuth 2.1 helpers
   public configureSoundCloud = (params: {
-    client_id: string;
-    client_secret: string;
-  }) => this.sendCommand('configure_soundcloud', params);
+    client_id?: string;
+    client_secret?: string;
+    api_v2?: boolean;
+  }) =>
+    this.sendCommand('configure_soundcloud', {
+      client_id: params.client_id ?? '',
+      client_secret: params.client_secret ?? '',
+      ...(typeof params.api_v2 === 'boolean' ? { api_v2: params.api_v2 } : {}),
+    });
 
   public setSoundCloudTokens = (params: {
     access_token: string;

@@ -1,13 +1,17 @@
 import React, { useEffect, useRef } from 'react';
 import { defaultSimpClient, type SoundCloudComment, type TrackMetadata } from '@simp/client';
 
-export type VisualizerMode = 'glyph' | 'avs' | 'demoscene' | 'off';
+export type VisualizerMode = 'glyph' | 'avs' | 'demoscene' | 'cycle' | 'off';
+export type VisualizerEngine = 'glyph' | 'avs' | 'demoscene';
+
+export const VISUALIZER_ENGINES: VisualizerEngine[] = ['glyph', 'avs', 'demoscene'];
 
 export const VISUALIZER_MODES: { id: VisualizerMode; label: string; shortLabel: string }[] = [
-  { id: 'glyph', label: 'GLYPH MATRIX (Micro-ASCII + Glitch)', shortLabel: 'GLYPH' },
-  { id: 'avs', label: 'WINAMP AVS (Feedback + Rez Wireframe)', shortLabel: 'AVS' },
-  { id: 'demoscene', label: 'DEMOSCENE 64K (Copper + DYCP Scroller)', shortLabel: '64K' },
-  { id: 'off', label: 'OFF (Static Minimal)', shortLabel: 'OFF' },
+  { id: 'glyph', label: 'Glyph Matrix', shortLabel: 'GLYPH' },
+  { id: 'avs', label: 'Winamp AVS', shortLabel: 'AVS' },
+  { id: 'demoscene', label: 'Demoscene 64K', shortLabel: '64K' },
+  { id: 'cycle', label: 'Cycle on Track Change', shortLabel: 'CYCLE' },
+  { id: 'off', label: 'Off', shortLabel: 'OFF' },
 ];
 
 interface Props {
@@ -214,6 +218,7 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
   // Track transition impulse (1.0 -> 0.0 over ~1.25s when track.uri or mode changes)
   const prevTrackUriRef = useRef<string | undefined>(track?.uri);
   const prevModeRef = useRef<VisualizerMode>(mode);
+  const cycleIndexRef = useRef<number>(0);
   const transitionImpulseRef = useRef<number>(0);
 
   // Live audio spectrum state (updated by `subscribeSpectrum` or synthesized from waveform/BPM)
@@ -315,6 +320,9 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
   useEffect(() => {
     const uriChanged = Boolean(track?.uri && track.uri !== prevTrackUriRef.current);
     const modeChanged = mode !== prevModeRef.current && mode !== 'off';
+    if (uriChanged) {
+      cycleIndexRef.current = (cycleIndexRef.current + 1) % VISUALIZER_ENGINES.length;
+    }
     if (uriChanged || modeChanged) {
       prevTrackUriRef.current = track?.uri;
       prevModeRef.current = mode;
@@ -658,7 +666,10 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
       const glitch = glitchTimerRef.current;
       const trans = transitionImpulseRef.current;
       const palette = paletteRef.current;
-      const activeMode = modeRef.current;
+      const activeMode =
+        modeRef.current === 'cycle'
+          ? VISUALIZER_ENGINES[cycleIndexRef.current % VISUALIZER_ENGINES.length]
+          : modeRef.current;
 
       // =======================================================================
       // MODE 1: GLYPH MATRIX (80x45 Micro-ASCII + Artwork Relief + Glitch Tear)

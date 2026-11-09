@@ -11,11 +11,13 @@ import {
 } from '@simp/client';
 import { CompanionPairView } from './components/CompanionPairView';
 import {
+  addAppleItemToCloudLibrary,
   AppleCatalogSearchResults,
   AppleCloudAlbumSummary,
   AppleCloudPlaylistSummary,
   AppleMusicDriver,
   AppleRadioStationSummary,
+  AppleRecommendationShelf,
   fetchAppleCloudPlaylists,
   fetchAppleNewFeed,
   fetchApplePlaylistTracks,
@@ -24,18 +26,22 @@ import {
   pinAppleAlbumToSimp,
   pinApplePlaylistToSimp,
   searchAppleMusicCatalog,
+  setAppleItemFavorited,
 } from './drivers/AppleMusicDriver';
 import {
   fetchSoundCloudDiscover,
   fetchSoundCloudLikesAndPlaylists,
   fetchSoundCloudPlaylistTracks,
   fetchSoundCloudStreamAndRadio,
+  likeSoundCloudTrack,
   pinSoundCloudPlaylistToSimp,
   searchSoundCloudCatalog,
   setSoundCloudPlaylistLiked,
   SoundCloudCatalogSearchResults,
   SoundCloudPlaylistSummary,
+  SoundCloudUserSummary,
   startSoundCloudTrackRadio,
+  unlikeSoundCloudTrack,
 } from './drivers/SoundCloudDriver';
 import { OskTargetKind, useGamepadNavigation } from './hooks/useGamepadNavigation';
 import { BrowserTarget, isUiVideoTrack, PlayerView } from './views/PlayerView';
@@ -109,14 +115,14 @@ const ConsoleMainApp: React.FC = () => {
   // Source Visibility preferences (Show / Hide Internet Archive, Apple Music, SoundCloud, Optical Drive)
   const [sourceVisibility, setSourceVisibility] = useState<SourceVisibilityPrefs>(() => {
     try {
-      const raw = window.localStorage.getItem('simp_source_visibility_v1');
+      const raw = window.localStorage.getItem('simp_source_visibility_v2');
       if (raw) {
         const parsed = JSON.parse(raw);
         return {
           internet_archive: parsed.internet_archive !== false,
           apple_music: parsed.apple_music !== false,
           soundcloud: parsed.soundcloud !== false,
-          optical_drive: parsed.optical_drive !== false,
+          optical_drive: parsed.optical_drive === true,
         };
       }
     } catch {
@@ -126,38 +132,79 @@ const ConsoleMainApp: React.FC = () => {
       internet_archive: true,
       apple_music: true,
       soundcloud: true,
-      optical_drive: true,
+      optical_drive: false,
     };
   });
 
   useEffect(() => {
     try {
-      window.localStorage.setItem('simp_source_visibility_v1', JSON.stringify(sourceVisibility));
+      window.localStorage.setItem('simp_source_visibility_v2', JSON.stringify(sourceVisibility));
     } catch {
       // Ignore storage access errors
     }
   }, [sourceVisibility]);
 
-  // Recently Played history (`simp_recently_played_v1`, max 24 items)
+  // Recently Played history (`simp_recently_played_v1` + SQLite `/api/history`, max 40 items)
   const [recentlyPlayed, setRecentlyPlayed] = useState<TrackMetadata[]>(() => {
     try {
       const raw = window.localStorage.getItem('simp_recently_played_v1');
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed.slice(0, 24);
+        if (Array.isArray(parsed)) return parsed.slice(0, 40);
       }
     } catch {
       // Ignore storage access errors
     }
     return [];
   });
+  const [favoritedUris, setFavoritedUris] = useState<string[]>([]);
+
+  // Hydrate persistent SQLite `play_history` and `local_favorites` on mount
+  useEffect(() => {
+    fetch('http://127.0.0.1:18888/api/history?limit=40')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok && Array.isArray(d.data) && d.data.length > 0) {
+          setRecentlyPlayed((prev) => {
+            const seen = new Set<string>();
+            const merged: TrackMetadata[] = [];
+            for (const item of [...d.data, ...prev]) {
+              if (item?.uri && !seen.has(item.uri)) {
+                seen.add(item.uri);
+                merged.push(item);
+              }
+            }
+            const next = merged.slice(0, 40);
+            try {
+              window.localStorage.setItem('simp_recently_played_v1', JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+        }
+      })
+      .catch(() => {});
+
+    fetch('http://127.0.0.1:18888/api/favorites')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok && Array.isArray(d.uris)) {
+          setFavoritedUris(d.uris);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const cur = snap?.current_track;
     if (!cur?.uri || !snap?.is_playing) return;
+    fetch('http://127.0.0.1:18888/api/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cur),
+    }).catch(() => {});
     setRecentlyPlayed((prev) => {
       if (prev[0]?.uri === cur.uri) return prev;
-      const next = [cur, ...prev.filter((t) => t.uri !== cur.uri)].slice(0, 24);
+      const next = [cur, ...prev.filter((t) => t.uri !== cur.uri)].slice(0, 40);
       try {
         window.localStorage.setItem('simp_recently_played_v1', JSON.stringify(next));
       } catch {
@@ -168,11 +215,19 @@ const ConsoleMainApp: React.FC = () => {
   }, [snap?.current_track?.uri, snap?.is_playing]);
 
   // Apple Music Cloud Hub state
-  const [appleSubTab, setAppleSubTab] = useState<'pinned' | 'cloud_playlists' | 'radio' | 'new'>('pinned');
+  const [appleSubTab, setAppleSubTab] = useState<
+    'pinned' | 'for_you' | 'cloud_playlists' | 'new' | 'radio'
+  >('pinned');
   const [cloudPlaylists, setCloudPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
   const [radioStations, setRadioStations] = useState<AppleRadioStationSummary[]>([]);
+  const [personalRadioStations, setPersonalRadioStations] = useState<AppleRadioStationSummary[]>([]);
+  const [liveRadioStations, setLiveRadioStations] = useState<AppleRadioStationSummary[]>([]);
   const [forYouPlaylists, setForYouPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
   const [forYouAlbums, setForYouAlbums] = useState<AppleCloudAlbumSummary[]>([]);
+  const [forYouNewReleases, setForYouNewReleases] = useState<AppleCloudAlbumSummary[]>([]);
+  const [forYouShelves, setForYouShelves] = useState<AppleRecommendationShelf[]>([]);
+  const [appleRecentlyPlayedTracks, setAppleRecentlyPlayedTracks] = useState<TrackMetadata[]>([]);
+  const [newFeedRecentReleases, setNewFeedRecentReleases] = useState<AppleCloudAlbumSummary[]>([]);
   const [newFeedAlbums, setNewFeedAlbums] = useState<AppleCloudAlbumSummary[]>([]);
   const [newFeedPlaylists, setNewFeedPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
   const [newFeedSongs, setNewFeedSongs] = useState<TrackMetadata[]>([]);
@@ -181,6 +236,7 @@ const ConsoleMainApp: React.FC = () => {
     albums: [],
     playlists: [],
     stations: [],
+    artists: [],
   });
   const [cloudLoading, setCloudLoading] = useState(false);
   const [activeCloudAlbum, setActiveCloudAlbum] = useState<AppleCloudAlbumSummary | null>(null);
@@ -197,11 +253,17 @@ const ConsoleMainApp: React.FC = () => {
   const [scTrendingTracks, setScTrendingTracks] = useState<TrackMetadata[]>([]);
   const [scTrendingMixes, setScTrendingMixes] = useState<TrackMetadata[]>([]);
   const [scTrendingPlaylists, setScTrendingPlaylists] = useState<SoundCloudPlaylistSummary[]>([]);
+  const [scMoreOfWhatYouLike, setScMoreOfWhatYouLike] = useState<TrackMetadata[]>([]);
+  const [scFreshUploads, setScFreshUploads] = useState<TrackMetadata[]>([]);
+  const [scRecommendedArtists, setScRecommendedArtists] = useState<SoundCloudUserSummary[]>([]);
+  const [scDiscoverNextHref, setScDiscoverNextHref] = useState<string | null>(null);
   const [scSelectedGenre, setScSelectedGenre] = useState<string>('');
   const [scCatalogSearchResults, setScCatalogSearchResults] =
     useState<SoundCloudCatalogSearchResults>({
       songs: [],
       playlists: [],
+      users: [],
+      next_tracks_href: null,
     });
   const [activeScPlaylist, setActiveScPlaylist] = useState<SoundCloudPlaylistSummary | null>(null);
 
@@ -215,6 +277,56 @@ const ConsoleMainApp: React.FC = () => {
   const [customFolderPath, setCustomFolderPath] = useState('');
   const [oskTarget, setOskTarget] = useState<OskTargetKind>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [pendingHybridAdd, setPendingHybridAdd] = useState<{
+    uris: string[];
+    label: string;
+    trackMetadata?: TrackMetadata[];
+    creatingNew?: boolean;
+  } | null>(null);
+
+  // Automatically dismiss the On-Screen Keyboard whenever its target context closes or view switches to Player
+  useEffect(() => {
+    if (!oskTarget) return;
+    if (oskTarget === 'search' && view !== 'browser') {
+      setOskTarget(null);
+      return;
+    }
+    if (oskTarget === 'folder' && !sourceModalOpen && !powerModalOpen) {
+      setOskTarget(null);
+      return;
+    }
+    if (oskTarget === 'playlist' && !creatingPlaylist && !pendingHybridAdd) {
+      setOskTarget(null);
+      return;
+    }
+    if (view !== 'browser' && !sourceModalOpen && !powerModalOpen && !pendingHybridAdd) {
+      setOskTarget(null);
+    }
+  }, [oskTarget, view, sourceModalOpen, powerModalOpen, creatingPlaylist, pendingHybridAdd]);
+
+  // Dismiss the On-Screen Keyboard when clicking outside it (and outside its target input) or pressing Escape
+  useEffect(() => {
+    if (!oskTarget) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('[data-osk-root="true"]') || target.closest('[data-osk-input]')) {
+        return;
+      }
+      setOskTarget(null);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOskTarget(null);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [oskTarget]);
 
   // Apple Music & SoundCloud Auth Modal state
   const [appleAuthCfg, setAppleAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
@@ -227,7 +339,7 @@ const ConsoleMainApp: React.FC = () => {
   const [isDimmed, setIsDimmed] = useState(false);
   const [brightnessPct, setBrightnessPct] = useState<number>(() => {
     try {
-      const saved = window.localStorage.getItem('simp_brightness_pct');
+      const saved = window.localStorage.getItem('simp_brightness_pct_v2');
       if (saved) {
         const parsed = Number(saved);
         if (Number.isFinite(parsed) && parsed >= 25 && parsed <= 100) {
@@ -237,7 +349,7 @@ const ConsoleMainApp: React.FC = () => {
     } catch {
       // Ignore storage access errors
     }
-    return 100;
+    return 80;
   });
   const brightnessHydratedRef = useRef(false);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
@@ -249,7 +361,7 @@ const ConsoleMainApp: React.FC = () => {
     if (!brightnessHydratedRef.current && snap?.brightness_pct && snap.brightness_pct >= 25) {
       brightnessHydratedRef.current = true;
       try {
-        if (!window.localStorage.getItem('simp_brightness_pct')) {
+        if (!window.localStorage.getItem('simp_brightness_pct_v2')) {
           setBrightnessPct(Math.max(25, Math.min(100, Math.round(snap.brightness_pct))));
         }
       } catch {
@@ -262,7 +374,7 @@ const ConsoleMainApp: React.FC = () => {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
-        window.localStorage.setItem('simp_brightness_pct', String(brightnessPct));
+        window.localStorage.setItem('simp_brightness_pct_v2', String(brightnessPct));
       } catch {
         // Ignore storage errors
       }
@@ -492,6 +604,23 @@ const ConsoleMainApp: React.FC = () => {
     return unsub;
   }, []);
 
+  // 1b. Auto-reload open UI window when background daemon restarts on a new version (e.g. after CLI `simp update`)
+  const knownDaemonVersionRef = useRef<string | null>(null);
+  useEffect(() => {
+    const reported = (snap?.daemon_version || '').trim().replace(/^v/, '');
+    if (!reported) return;
+    if (!knownDaemonVersionRef.current) {
+      knownDaemonVersionRef.current = reported;
+      return;
+    }
+    if (knownDaemonVersionRef.current !== reported && !updateStatus.applying) {
+      knownDaemonVersionRef.current = reported;
+      window.location.replace(
+        `${window.location.pathname}?v=${encodeURIComponent(reported)}&t=${Date.now()}`
+      );
+    }
+  }, [snap?.daemon_version, updateStatus.applying]);
+
   // 2. Refresh Albums & Playlists helper
   const refreshLibraryData = useCallback(() => {
     const sourceParam =
@@ -535,26 +664,24 @@ const ConsoleMainApp: React.FC = () => {
     if (view === 'browser' || sourceModalOpen || powerModalOpen) {
       refreshLibraryData();
     }
-    if (view === 'browser' || sourceModalOpen || powerModalOpen) {
-      defaultSimpClient
-        .getSoundCloudAuthConfig()
-        .then((cfg) => {
-          setSoundcloudAuthCfg(cfg);
-          // Auto-bootstrap Tier 1 Public Mode (client_credentials) if credentials exist and not yet authenticated
-          if (
-            cfg.configured &&
-            !cfg.soundcloud_authenticated &&
-            !scAutoClientAuthRef.current
-          ) {
-            scAutoClientAuthRef.current = true;
-            fetch('/api/soundcloud/client-auth', { method: 'POST' })
-              .then(() => defaultSimpClient.getSoundCloudAuthConfig())
-              .then((nextCfg) => setSoundcloudAuthCfg(nextCfg))
-              .catch(() => {});
-          }
-        })
-        .catch(() => {});
-    }
+    defaultSimpClient
+      .getSoundCloudAuthConfig()
+      .then((cfg) => {
+        setSoundcloudAuthCfg(cfg);
+        // Auto-bootstrap Tier 1 Public Mode (client_credentials) if credentials exist and not yet authenticated
+        if (
+          cfg.configured &&
+          !cfg.soundcloud_authenticated &&
+          !scAutoClientAuthRef.current
+        ) {
+          scAutoClientAuthRef.current = true;
+          fetch('/api/soundcloud/client-auth', { method: 'POST' })
+            .then(() => defaultSimpClient.getSoundCloudAuthConfig())
+            .then((nextCfg) => setSoundcloudAuthCfg(nextCfg))
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
     if (sourceModalOpen || powerModalOpen) {
       defaultSimpClient
         .getAppleMusicAuthConfig()
@@ -761,7 +888,7 @@ const ConsoleMainApp: React.FC = () => {
         .catch((err: any) => showToast(err?.message || 'Failed to load Cloud Playlists'))
         .finally(() => setCloudLoading(false));
     } else if (
-      appleSubTab === 'radio' &&
+      (appleSubTab === 'for_you' || appleSubTab === 'radio') &&
       radioStations.length === 0 &&
       forYouPlaylists.length === 0 &&
       forYouAlbums.length === 0
@@ -770,10 +897,15 @@ const ConsoleMainApp: React.FC = () => {
       fetchAppleRadioAndForYou()
         .then((res) => {
           setRadioStations(res.stations);
+          setPersonalRadioStations(res.personal_stations || []);
+          setLiveRadioStations(res.live_stations || []);
           setForYouPlaylists(res.playlists);
           setForYouAlbums(res.albums);
+          setForYouNewReleases(res.new_releases || []);
+          setForYouShelves(res.shelves || []);
+          setAppleRecentlyPlayedTracks(res.recently_played || []);
         })
-        .catch((err: any) => showToast(err?.message || 'Failed to load Radio & For You'))
+        .catch((err: any) => showToast(err?.message || 'Failed to load For You & Radio'))
         .finally(() => setCloudLoading(false));
     } else if (
       appleSubTab === 'new' &&
@@ -784,6 +916,7 @@ const ConsoleMainApp: React.FC = () => {
       setCloudLoading(true);
       fetchAppleNewFeed()
         .then((res) => {
+          setNewFeedRecentReleases(res.recent_releases || []);
           setNewFeedAlbums(res.albums);
           setNewFeedPlaylists(res.playlists);
           setNewFeedSongs(res.songs);
@@ -854,6 +987,10 @@ const ConsoleMainApp: React.FC = () => {
           setScTrendingTracks(res.tracks);
           setScTrendingMixes(res.mixes);
           setScTrendingPlaylists(res.playlists);
+          setScMoreOfWhatYouLike(res.more_of_what_you_like || []);
+          setScFreshUploads(res.fresh_uploads || []);
+          setScRecommendedArtists(res.recommended_artists || []);
+          setScDiscoverNextHref(res.next_tracks_href || null);
         })
         .catch((err: any) =>
           showToast(err?.message || 'Failed to load SoundCloud Trending & Mixes')
@@ -1195,13 +1332,6 @@ const ConsoleMainApp: React.FC = () => {
     }
   };
 
-  const [pendingHybridAdd, setPendingHybridAdd] = useState<{
-    uris: string[];
-    label: string;
-    trackMetadata?: TrackMetadata[];
-    creatingNew?: boolean;
-  } | null>(null);
-
   const commitAddTracksToPlaylist = async (
     uris: string[],
     label: string,
@@ -1335,44 +1465,120 @@ const ConsoleMainApp: React.FC = () => {
   };
 
   const handleFavoriteTrack = async (favTrack: TrackMetadata) => {
+    const isCurrentlyFav = favoritedUris.includes(favTrack.uri);
+    const nextFav = !isCurrentlyFav;
+    setFavoritedUris((prev) =>
+      nextFav
+        ? prev.includes(favTrack.uri)
+          ? prev
+          : [favTrack.uri, ...prev]
+        : prev.filter((u) => u !== favTrack.uri)
+    );
+    fetch(`http://127.0.0.1:18888/api/favorites?favorited=${nextFav ? '1' : '0'}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(favTrack),
+    }).catch(() => {});
+
+    if (favTrack.source === 'apple_music') {
+      setAppleItemFavorited(favTrack.uri, 'songs', nextFav, showToast).catch(() => {});
+    } else if (favTrack.source === 'soundcloud') {
+      if (nextFav) {
+        likeSoundCloudTrack(favTrack.uri, showToast).catch(() => {});
+        setScLikedTracks((prev) =>
+          prev.some((t) => t.uri === favTrack.uri) ? prev : [favTrack, ...prev]
+        );
+      } else {
+        unlikeSoundCloudTrack(favTrack.uri, showToast).catch(() => {});
+        setScLikedTracks((prev) => prev.filter((t) => t.uri !== favTrack.uri));
+      }
+    }
+
     const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
     const favPl = writablePlaylists.find(
       (p) =>
         p.name.toLowerCase().includes('favorite') ||
         p.name.toLowerCase().includes('liked')
     );
-    if (favPl) {
-      await commitAddTracksToPlaylist(
-        [favTrack.uri],
-        `"${favTrack.title}"`,
-        [favTrack],
-        favPl.id
-      );
-    } else {
-      await commitAddTracksToPlaylist(
-        [favTrack.uri],
-        `"${favTrack.title}"`,
-        [favTrack],
-        undefined,
-        '❤️ Favorites'
-      );
+    if (nextFav) {
+      if (favPl) {
+        await commitAddTracksToPlaylist(
+          [favTrack.uri],
+          `"${favTrack.title}"`,
+          [favTrack],
+          favPl.id
+        );
+      } else {
+        await commitAddTracksToPlaylist(
+          [favTrack.uri],
+          `"${favTrack.title}"`,
+          [favTrack],
+          undefined,
+          '❤️ Favorites'
+        );
+      }
+    } else if (favPl) {
+      await defaultSimpClient
+        .query('remove_track_from_playlist', {
+          playlist_id: favPl.id,
+          track_uri: favTrack.uri,
+        })
+        .catch(() => {});
+      refreshLibraryData();
+      if (favTrack.source !== 'apple_music' && favTrack.source !== 'soundcloud') {
+        showToast(`Removed "${favTrack.title}" from ❤️ Favorites`);
+      }
     }
   };
 
-  const handleMoreByArtist = (artistName: string, preferredSource?: string) => {
+  const handleAddAppleToCloudLibrary = useCallback(
+    async (
+      idOrUri: string,
+      kind: 'songs' | 'albums' | 'playlists' = 'songs',
+      label?: string
+    ) => {
+      try {
+        await addAppleItemToCloudLibrary(idOrUri, kind, (msg) => {
+          showToast(label ? `☁️ Added "${label}" to Apple Music Cloud Library!` : msg);
+        });
+      } catch (err: any) {
+        showToast(err?.message || 'Could not add to Apple Music Cloud Library');
+      }
+    },
+    [showToast]
+  );
+
+  const handleMoreByArtist = (
+    artistName: string,
+    preferredSource?: string,
+    artistId?: string
+  ) => {
     const cleaned = artistName.trim();
     if (!cleaned) return;
     const raw = (preferredSource || snap?.current_track?.source || '').toLowerCase();
-    let mapped: 'local' | 'apple_music' | 'soundcloud' | 'internet_archive' | null = null;
+    let mapped: 'local' | 'apple_music' | 'soundcloud' | 'internet_archive' = 'local';
     if (raw === 'apple_music') mapped = 'apple_music';
     else if (raw === 'soundcloud') mapped = 'soundcloud';
     else if (raw === 'internet_archive' || raw === 'ia_video') mapped = 'internet_archive';
-    else if (raw) mapped = 'local';
     setSearchPreferredSource(mapped);
-    setSelectedSources([]);
-    setBrowserSourceFilterState('all');
-    setBrowserSearch(cleaned);
     setView('browser');
+    if (mapped === 'internet_archive') {
+      setSelectedSources(['internet_archive']);
+      setBrowserSourceFilterState('internet_archive');
+      setBrowserSearch(cleaned);
+    } else {
+      window.setTimeout(() => {
+        window.dispatchEvent(
+          new CustomEvent('simp-open-artist-profile', {
+            detail: {
+              artistName: cleaned,
+              source: mapped,
+              artistId: artistId || null,
+            },
+          })
+        );
+      }, 20);
+    }
   };
 
   // Automatically reset `browserSourceFilter` to `'all'` if the user disconnects or is not signed into that service
@@ -1516,6 +1722,18 @@ const ConsoleMainApp: React.FC = () => {
 
   return (
     <div
+      onDoubleClick={(e) => {
+        const target = e.target as HTMLElement | null;
+        if (!target) return;
+        if (
+          target.closest(
+            'button, input, select, textarea, a, [role="button"], [data-osk-root="true"], [data-modal-root="true"], [data-focusable="true"]'
+          )
+        ) {
+          return;
+        }
+        window.dispatchEvent(new CustomEvent('simp-player-fullscreen-toggle'));
+      }}
       style={{
         width: '100%',
         maxWidth: '100vw',
@@ -1686,13 +1904,16 @@ const ConsoleMainApp: React.FC = () => {
             setBrightnessPopoverOpen(false);
             setPowerModalOpen(false);
             setSourceModalOpen(false);
+            if (view !== 'lock') {
+              setView('lock');
+            }
             window.dispatchEvent(new CustomEvent('simp-player-actions-toggle'));
           }}
-          title="Current Track & Source (Click to open Track Actions & Queue)"
+          title="Track Options, Visualizer & Active Queue (SELECT)"
           style={{
             minHeight: 44,
-            maxWidth: 'clamp(170px, 28vw, 340px)',
-            padding: '0 12px 0 8px',
+            maxWidth: 'clamp(190px, 32vw, 380px)',
+            padding: '0 12px 0 10px',
             borderRadius: 12,
             background: '#0a0a0e',
             border: '1px solid #22222c',
@@ -1706,6 +1927,23 @@ const ConsoleMainApp: React.FC = () => {
             minWidth: 0,
           }}
         >
+          <span style={{ fontSize: 15, lineHeight: 1, color: '#9ca3af', flexShrink: 0 }}>⚙</span>
+          <span
+            className="simp-gp-badge"
+            style={{
+              padding: '2px 6px',
+              borderRadius: 6,
+              background: '#14141e',
+              border: '1px solid #2a2a38',
+              color: '#9ca3af',
+              fontSize: 10,
+              fontFamily: 'monospace',
+              fontWeight: 700,
+              flexShrink: 0,
+            }}
+          >
+            SELECT
+          </span>
           <img
             src="/favicon.png"
             alt="SIMP"
@@ -1844,8 +2082,29 @@ const ConsoleMainApp: React.FC = () => {
               alignItems: 'stretch',
               position: 'relative',
               fontFamily: 'monospace',
+              overflow: 'visible',
             }}
           >
+            {view === 'lock' && (
+              <span
+                className="simp-gp-badge"
+                title="D-Pad Down: Volume Down (-5%)"
+                onClick={() => applyVolume(currentVolume - 0.05)}
+                style={{
+                  padding: '0 8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  color: '#71717a',
+                  borderRight: '1px solid #1e1e28',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                }}
+              >
+                ▼
+              </span>
+            )}
             <button
               onClick={() => defaultSimpClient.togglePlayPause()}
               title={isPlaying ? 'Audio Active — Click to Pause (Silence)' : 'Paused (Silenced) — Click to Resume'}
@@ -1853,8 +2112,8 @@ const ConsoleMainApp: React.FC = () => {
                 padding: '0 10px',
                 border: 'none',
                 borderRight: '1px solid #1e1e28',
-                borderTopLeftRadius: 11,
-                borderBottomLeftRadius: 11,
+                borderTopLeftRadius: view === 'lock' ? 0 : 11,
+                borderBottomLeftRadius: view === 'lock' ? 0 : 11,
                 background: isPlaying ? 'rgba(42, 163, 196, 0.1)' : '#12121a',
                 color: isPlaying ? '#2aa3c4' : '#9ca3af',
                 fontSize: 14,
@@ -1880,8 +2139,8 @@ const ConsoleMainApp: React.FC = () => {
               style={{
                 padding: '0 10px',
                 border: 'none',
-                borderTopRightRadius: 11,
-                borderBottomRightRadius: 11,
+                borderTopRightRadius: view === 'lock' ? 0 : 11,
+                borderBottomRightRadius: view === 'lock' ? 0 : 11,
                 background: volumePopoverOpen ? '#0f222a' : 'transparent',
                 color: isPlaying ? '#c8c8d2' : '#8e8e99',
                 fontSize: 12,
@@ -1896,6 +2155,26 @@ const ConsoleMainApp: React.FC = () => {
               <span>{volPct}%</span>
               <span style={{ fontSize: 10, color: '#71717a' }}>▾</span>
             </button>
+            {view === 'lock' && (
+              <span
+                className="simp-gp-badge"
+                title="D-Pad Up: Volume Up (+5%)"
+                onClick={() => applyVolume(currentVolume + 0.05)}
+                style={{
+                  padding: '0 8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  color: '#71717a',
+                  borderLeft: '1px solid #1e1e28',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                }}
+              >
+                ▲
+              </span>
+            )}
 
             {volumePopoverOpen && (
               <div
@@ -2115,6 +2394,8 @@ const ConsoleMainApp: React.FC = () => {
         handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
         handleAddTracksToPlaylist={handleAddTracksToPlaylist}
         handleFavoriteTrack={handleFavoriteTrack}
+        handleAddAppleToCloudLibrary={handleAddAppleToCloudLibrary}
+        favoritedUris={favoritedUris}
         handleMoreByArtist={handleMoreByArtist}
         applyFocusMarker={applyFocusMarker}
         showToast={showToast}
@@ -2147,10 +2428,22 @@ const ConsoleMainApp: React.FC = () => {
           setCloudPlaylists={setCloudPlaylists}
           radioStations={radioStations}
           setRadioStations={setRadioStations}
+          personalRadioStations={personalRadioStations}
+          setPersonalRadioStations={setPersonalRadioStations}
+          liveRadioStations={liveRadioStations}
+          setLiveRadioStations={setLiveRadioStations}
           forYouPlaylists={forYouPlaylists}
           setForYouPlaylists={setForYouPlaylists}
           forYouAlbums={forYouAlbums}
           setForYouAlbums={setForYouAlbums}
+          forYouNewReleases={forYouNewReleases}
+          setForYouNewReleases={setForYouNewReleases}
+          forYouShelves={forYouShelves}
+          setForYouShelves={setForYouShelves}
+          appleRecentlyPlayedTracks={appleRecentlyPlayedTracks}
+          setAppleRecentlyPlayedTracks={setAppleRecentlyPlayedTracks}
+          newFeedRecentReleases={newFeedRecentReleases}
+          setNewFeedRecentReleases={setNewFeedRecentReleases}
           newFeedAlbums={newFeedAlbums}
           setNewFeedAlbums={setNewFeedAlbums}
           newFeedPlaylists={newFeedPlaylists}
@@ -2178,9 +2471,15 @@ const ConsoleMainApp: React.FC = () => {
           setScTrendingMixes={setScTrendingMixes}
           scTrendingPlaylists={scTrendingPlaylists}
           setScTrendingPlaylists={setScTrendingPlaylists}
+          scMoreOfWhatYouLike={scMoreOfWhatYouLike}
+          scFreshUploads={scFreshUploads}
+          scRecommendedArtists={scRecommendedArtists}
+          scDiscoverNextHref={scDiscoverNextHref}
+          setScDiscoverNextHref={setScDiscoverNextHref}
           scSelectedGenre={scSelectedGenre}
           setScSelectedGenre={setScSelectedGenre}
           scCatalogSearchResults={scCatalogSearchResults}
+          setScCatalogSearchResults={setScCatalogSearchResults}
           activeScPlaylist={activeScPlaylist}
           creatingPlaylist={creatingPlaylist}
           setCreatingPlaylist={setCreatingPlaylist}
@@ -2196,6 +2495,9 @@ const ConsoleMainApp: React.FC = () => {
           applyFocusMarker={applyFocusMarker}
           handleCreatePlaylist={handleCreatePlaylist}
           handleAddTracksToPlaylist={handleAddTracksToPlaylist}
+          handleFavoriteTrack={handleFavoriteTrack}
+          handleAddAppleToCloudLibrary={handleAddAppleToCloudLibrary}
+          favoritedUris={favoritedUris}
           handleRemoveTrackFromPlaylist={handleRemoveTrackFromPlaylist}
           handleDeletePlaylist={handleDeletePlaylist}
           handleDeleteAlbum={handleDeleteAlbum}
@@ -2518,7 +2820,8 @@ const ConsoleMainApp: React.FC = () => {
       )}
 
       {/* Controller-Navigable On-Screen Keyboard (OSK) Bar for Search, Playlist Name & Folder Path */}
-      {oskTarget && (
+      {oskTarget &&
+        (view === 'browser' || sourceModalOpen || powerModalOpen || Boolean(pendingHybridAdd)) && (
         <div
           data-osk-root="true"
           style={{

@@ -446,19 +446,27 @@ mod win32_window_mgr {
 pub struct DaemonPerfSnapshot {
     pub cpu_percent: f64,
     pub rss_mb: f64,
+    pub ram_percent: f64,
     pub platform: String,
     pub audio_backend: String,
     pub portable_mode: bool,
 }
 
-/// Samples the SIMP background daemon's own process CPU usage (%) and Resident Set Size (MB).
+/// Samples the SIMP background daemon's own process CPU usage (%) and Resident Set Size (MB & % of total RAM).
 pub fn sample_daemon_perf() -> DaemonPerfSnapshot {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
     static LAST_SAMPLE: OnceLock<Mutex<(Instant, u64, f64)>> = OnceLock::new();
+    static TOTAL_RAM_MB: OnceLock<f64> = OnceLock::new();
 
     let (raw_ticks, ticks_per_sec, rss_mb) = read_process_ticks_and_rss();
+    let total_ram_mb = *TOTAL_RAM_MB.get_or_init(read_total_system_ram_mb);
+    let ram_percent = if total_ram_mb > 0.0 {
+        ((rss_mb / total_ram_mb) * 1000.0).round() / 10.0
+    } else {
+        0.0
+    };
     let now = Instant::now();
     let mutex = LAST_SAMPLE.get_or_init(|| Mutex::new((now, raw_ticks, 0.1)));
     let cpu_percent = if let Ok(mut guard) = mutex.lock() {
@@ -496,9 +504,82 @@ pub fn sample_daemon_perf() -> DaemonPerfSnapshot {
     DaemonPerfSnapshot {
         cpu_percent,
         rss_mb: (rss_mb * 10.0).round() / 10.0,
+        ram_percent,
         platform,
         audio_backend,
         portable_mode: portable_data_dir().is_some(),
+    }
+}
+
+fn read_total_system_ram_mb() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+            for line in meminfo.lines() {
+                if let Some(rest) = line.strip_prefix("MemTotal:") {
+                    let kb_str = rest.trim().split_whitespace().next().unwrap_or("0");
+                    if let Ok(kb) = kb_str.parse::<f64>() {
+                        return kb / 1024.0;
+                    }
+                }
+            }
+        }
+        0.0
+    }
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct MemoryStatusEx {
+            dw_length: u32,
+            dw_memory_load: u32,
+            ull_total_phys: u64,
+            ull_avail_phys: u64,
+            ull_total_page_file: u64,
+            ull_avail_page_file: u64,
+            ull_total_virtual: u64,
+            ull_avail_virtual: u64,
+            ull_avail_extended_virtual: u64,
+        }
+        extern "system" {
+            fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+        }
+        unsafe {
+            let mut ms = MemoryStatusEx {
+                dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
+                ..Default::default()
+            };
+            if GlobalMemoryStatusEx(&mut ms) != 0 {
+                (ms.ull_total_phys as f64) / (1024.0 * 1024.0)
+            } else {
+                0.0
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            let mut memsize: u64 = 0;
+            let mut size = std::mem::size_of::<u64>();
+            let mut mib = [libc::CTL_HW, libc::HW_MEMSIZE];
+            if libc::sysctl(
+                mib.as_mut_ptr(),
+                2,
+                &mut memsize as *mut _ as *mut libc::c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            ) == 0
+            {
+                (memsize as f64) / (1024.0 * 1024.0)
+            } else {
+                0.0
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        0.0
     }
 }
 

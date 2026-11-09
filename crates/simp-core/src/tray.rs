@@ -258,10 +258,15 @@ mod linux_sni {
                 |_, ctx, (ids, _prop_names): (Vec<i32>, Vec<String>)| {
                     let (now_label, is_playing) = build_now_playing_label(&ctx.state);
                     let play_label = if is_playing {
-                        "⏸ Pause (Silence Audio)"
+                        "⏸ Pause"
                     } else {
-                        "▶ Play / Resume Audio"
+                        "▶ Resume"
                     };
+                    let perf = crate::sample_daemon_perf();
+                    let perf_label = format!(
+                        "⚡ CPU: {:.1}% • RAM: {:.1}% ({:.0} MB)",
+                        perf.cpu_percent, perf.ram_percent, perf.rss_mb
+                    );
                     let mut out: Vec<(i32, HashMap<String, Variant<Box<dyn RefArg>>>)> = Vec::new();
                     for id in ids {
                         let mut map: HashMap<String, Variant<Box<dyn RefArg>>> = HashMap::new();
@@ -321,7 +326,7 @@ mod linux_sni {
                             6 => {
                                 map.insert(
                                     "label".to_string(),
-                                    Variant(Box::new("↗ Open SIMP Window".to_string()) as Box<dyn RefArg>),
+                                    Variant(Box::new("↗ Open SIMP".to_string()) as Box<dyn RefArg>),
                                 );
                                 map.insert(
                                     "enabled".to_string(),
@@ -331,7 +336,7 @@ mod linux_sni {
                             7 => {
                                 map.insert(
                                     "label".to_string(),
-                                    Variant(Box::new("🔄 Restart Background Daemon".to_string()) as Box<dyn RefArg>),
+                                    Variant(Box::new("🔄 Reset Service".to_string()) as Box<dyn RefArg>),
                                 );
                                 map.insert(
                                     "enabled".to_string(),
@@ -341,11 +346,21 @@ mod linux_sni {
                             8 => {
                                 map.insert(
                                     "label".to_string(),
-                                    Variant(Box::new("⏻ Quit SIMP".to_string()) as Box<dyn RefArg>),
+                                    Variant(Box::new("⏻ Quit".to_string()) as Box<dyn RefArg>),
                                 );
                                 map.insert(
                                     "enabled".to_string(),
                                     Variant(Box::new(true) as Box<dyn RefArg>),
+                                );
+                            }
+                            9 => {
+                                map.insert(
+                                    "label".to_string(),
+                                    Variant(Box::new(perf_label.clone()) as Box<dyn RefArg>),
+                                );
+                                map.insert(
+                                    "enabled".to_string(),
+                                    Variant(Box::new(false) as Box<dyn RefArg>),
                                 );
                             }
                             _ => {}
@@ -363,10 +378,15 @@ mod linux_sni {
                 |_, ctx, (parent_id, _depth, _props): (i32, i32, Vec<String>)| {
                     let (now_label, is_playing) = build_now_playing_label(&ctx.state);
                     let play_label = if is_playing {
-                        "⏸ Pause (Silence Audio)"
+                        "⏸ Pause"
                     } else {
-                        "▶ Play / Resume Audio"
+                        "▶ Resume"
                     };
+                    let perf = crate::sample_daemon_perf();
+                    let perf_label = format!(
+                        "⚡ CPU: {:.1}% • RAM: {:.1}% ({:.0} MB)",
+                        perf.cpu_percent, perf.ram_percent, perf.rss_mb
+                    );
 
                     let mut root_props: HashMap<String, Variant<Box<dyn RefArg>>> = HashMap::new();
                     root_props.insert(
@@ -377,13 +397,14 @@ mod linux_sni {
                     let children = if parent_id == 0 {
                         vec![
                             make_menu_item(1, &now_label, false, false),
+                            make_menu_item(9, &perf_label, false, false),
                             make_menu_item(2, play_label, true, false),
                             make_menu_item(3, "⏭ Next Track", true, false),
                             make_menu_item(4, "⏮ Previous Track", true, false),
                             make_menu_item(5, "", true, true),
-                            make_menu_item(6, "↗ Open SIMP Window", true, false),
-                            make_menu_item(7, "🔄 Restart Background Daemon", true, false),
-                            make_menu_item(8, "⏻ Quit SIMP", true, false),
+                            make_menu_item(6, "↗ Open SIMP", true, false),
+                            make_menu_item(7, "🔄 Reset Service", true, false),
+                            make_menu_item(8, "⏻ Quit", true, false),
                         ]
                     } else {
                         Vec::new()
@@ -706,6 +727,7 @@ mod win32_tray {
         fn PostMessageW(h_wnd: Hwnd, msg: u32, w_param: Wparam, l_param: Lparam) -> i32;
         fn PostQuitMessage(n_exit_code: i32);
         fn CreateIconIndirect(piconinfo: *const IconInfo) -> Hicon;
+        fn LoadIconW(h_instance: Hinstance, lp_icon_name: *const u16) -> Hicon;
     }
 
     #[link(name = "gdi32")]
@@ -856,17 +878,23 @@ mod win32_tray {
         };
 
         let header_w = to_wide(&header_label);
+        let perf = crate::sample_daemon_perf();
+        let perf_w = to_wide(&format!(
+            "⚡ CPU: {:.1}% • RAM: {:.1}% ({:.0} MB)",
+            perf.cpu_percent, perf.ram_percent, perf.rss_mb
+        ));
         let play_w = to_wide(if is_playing {
-            "⏸ Pause (Silence)"
+            "⏸ Pause"
         } else {
-            "▶ Play / Resume"
+            "▶ Resume"
         });
         let next_w = to_wide("⏭ Next Track");
         let prev_w = to_wide("⏮ Previous Track");
-        let open_w = to_wide("🖥 Open SIMP Console");
-        let quit_w = to_wide("⏻ Quit SIMP");
+        let open_w = to_wide("↗ Open SIMP");
+        let quit_w = to_wide("⏻ Quit");
 
         AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, header_w.as_ptr());
+        AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, perf_w.as_ptr());
         AppendMenuW(hmenu, MF_SEPARATOR, 0, null());
         AppendMenuW(hmenu, MF_STRING, ID_TRAY_PLAY_PAUSE, play_w.as_ptr());
         AppendMenuW(hmenu, MF_STRING, ID_TRAY_NEXT, next_w.as_ptr());
@@ -962,6 +990,12 @@ mod win32_tray {
     ) {
         unsafe {
             let h_instance = GetModuleHandleW(null());
+            let embedded_hicon = LoadIconW(h_instance, 1 as *const u16);
+            let hicon = if !embedded_hicon.is_null() {
+                embedded_hicon
+            } else {
+                create_simp_portal_hicon()
+            };
             let class_name = to_wide("SimpWin32TrayWindowClass");
             let wnd_class = WndClassExW {
                 cb_size: std::mem::size_of::<WndClassExW>() as u32,
@@ -970,12 +1004,12 @@ mod win32_tray {
                 cb_cls_extra: 0,
                 cb_wnd_extra: 0,
                 h_instance,
-                h_icon: null_mut(),
+                h_icon: hicon,
                 h_cursor: null_mut(),
                 hbr_background: null_mut(),
                 lpsz_menu_name: null(),
                 lpsz_class_name: class_name.as_ptr(),
-                h_icon_sm: null_mut(),
+                h_icon_sm: hicon,
             };
             RegisterClassExW(&wnd_class);
 
@@ -998,7 +1032,6 @@ mod win32_tray {
                 return;
             }
 
-            let hicon = create_simp_portal_hicon();
             let mut nid: NotifyIconDataW = zeroed();
             nid.cb_size = std::mem::size_of::<NotifyIconDataW>() as u32;
             nid.h_wnd = hwnd;

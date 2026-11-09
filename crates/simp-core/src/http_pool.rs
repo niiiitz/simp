@@ -303,7 +303,7 @@ mod winhttp_ffi {
     type LPCVOID = *const c_void;
 
     const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: DWORD = 0;
-    const WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY: DWORD = 4;
+    const WINHTTP_ACCESS_TYPE_NO_PROXY: DWORD = 1;
     const WINHTTP_FLAG_SECURE: DWORD = 0x00800000;
     const WINHTTP_ADDREQ_FLAG_ADD: DWORD = 0x20000000;
     const WINHTTP_ADDREQ_FLAG_REPLACE: DWORD = 0x80000000;
@@ -398,7 +398,7 @@ mod winhttp_ffi {
                 let ua = to_wide("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
                 let mut h = WinHttpOpen(
                     ua.as_ptr(),
-                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                     std::ptr::null(),
                     std::ptr::null(),
                     0,
@@ -406,7 +406,7 @@ mod winhttp_ffi {
                 if h.is_null() {
                     h = WinHttpOpen(
                         ua.as_ptr(),
-                        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                        WINHTTP_ACCESS_TYPE_NO_PROXY,
                         std::ptr::null(),
                         std::ptr::null(),
                         0,
@@ -655,10 +655,10 @@ pub fn http_get_bytes(
     }
     #[cfg(target_os = "windows")]
     {
-        if let Some(res) =
+        if let Some(Ok(bytes)) =
             winhttp_ffi::execute_winhttp_request(url, headers, None, None, byte_range, timeout_secs)
         {
-            return res;
+            return Ok(bytes);
         }
     }
     fallback_curl_subprocess(url, headers, None, None, byte_range, timeout_secs)
@@ -687,7 +687,7 @@ pub fn http_post_bytes(
     }
     #[cfg(target_os = "windows")]
     {
-        if let Some(res) = winhttp_ffi::execute_winhttp_request(
+        if let Some(Ok(bytes)) = winhttp_ffi::execute_winhttp_request(
             url,
             headers,
             Some(body),
@@ -695,7 +695,7 @@ pub fn http_post_bytes(
             None,
             timeout_secs,
         ) {
-            return res;
+            return Ok(bytes);
         }
     }
     fallback_curl_subprocess(url, headers, Some(body), None, None, timeout_secs)
@@ -724,7 +724,7 @@ pub fn http_custom_bytes(
     }
     #[cfg(target_os = "windows")]
     {
-        if let Some(res) = winhttp_ffi::execute_winhttp_request(
+        if let Some(Ok(bytes)) = winhttp_ffi::execute_winhttp_request(
             url,
             headers,
             body,
@@ -732,10 +732,20 @@ pub fn http_custom_bytes(
             None,
             timeout_secs,
         ) {
-            return res;
+            return Ok(bytes);
         }
     }
     fallback_curl_subprocess(url, headers, body, Some(method), None, timeout_secs)
+}
+
+fn resolve_curl_binary() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        if std::path::Path::new(r"C:\Windows\System32\curl.exe").is_file() {
+            return r"C:\Windows\System32\curl.exe";
+        }
+    }
+    "curl"
 }
 
 fn fallback_curl_subprocess(
@@ -768,7 +778,7 @@ fn fallback_curl_subprocess(
     }
 
     let timeout_str = timeout_secs.max(5).to_string();
-    let mut cmd = Command::new("curl");
+    let mut cmd = Command::new(resolve_curl_binary());
     cmd.args(["-fsSL", "--max-time", &timeout_str, "--config", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

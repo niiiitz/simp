@@ -719,6 +719,7 @@ impl AudioOrchestrator {
             AudioCommand::ConfigureSoundCloud {
                 client_id,
                 client_secret,
+                api_v2,
             } => {
                 let is_ready = {
                     let mut cfg = self.settings.lock().unwrap();
@@ -728,9 +729,25 @@ impl AudioOrchestrator {
                     if !client_secret.trim().is_empty() {
                         cfg.services.soundcloud_client_secret = client_secret.trim().to_string();
                     }
+                    if let Some(v2) = api_v2 {
+                        cfg.services.soundcloud_api_v2 = v2;
+                    }
                     cfg.services.soundcloud_enabled = true;
                     crate::sinks::soundcloud_api::is_soundcloud_ready(&cfg)
                 };
+                if let Some(v2) = api_v2 {
+                    crate::sinks::soundcloud_api::clear_soundcloud_track_hints();
+                    crate::sinks::soundcloud::clear_soundcloud_prefetch_cache();
+                    if v2 {
+                        if let Some(cdm) =
+                            crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library()
+                        {
+                            crate::sinks::apple_native::cdm_host::prewarm_standby_cdm_session(
+                                &cdm.library_path,
+                            );
+                        }
+                    }
+                }
                 self.soundcloud_sink.is_authenticated = is_ready;
                 self.state.lock().unwrap().soundcloud_authenticated = is_ready;
                 let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
@@ -1049,20 +1066,29 @@ impl AudioOrchestrator {
                     volume: None,
                 });
                 AppleMusicSink::purge_worker_auth_storage();
-                {
+                crate::sinks::soundcloud_api::clear_cached_soundcloud_state();
+                let (default_vol, default_brightness, sc_ok, ia_ok) = {
                     let mut cfg = self.settings.lock().unwrap();
                     *cfg = SimpSettings::default();
                     let _ = crate::library::vdf::save_settings_raw(&cfg);
-                }
+                    let sc = crate::sinks::soundcloud_api::is_soundcloud_ready(&cfg);
+                    let ia = crate::sinks::internet_archive_api::is_internet_archive_ready(&cfg);
+                    (cfg.audio.master_volume, cfg.ui.brightness_pct, sc, ia)
+                };
+                self.local_engine.set_volume(default_vol);
+                self.apple_sink.set_volume(default_vol);
+                self.soundcloud_sink.set_volume(default_vol);
+                self.internet_archive_sink.set_volume(default_vol);
                 self.apple_sink.is_authenticated = false;
-                self.soundcloud_sink.is_authenticated = false;
-                self.internet_archive_sink.is_authenticated = false;
-                crate::sinks::soundcloud_api::clear_cached_soundcloud_state();
+                self.soundcloud_sink.is_authenticated = sc_ok;
+                self.internet_archive_sink.is_authenticated = ia_ok;
                 {
                     let mut st = self.state.lock().unwrap();
+                    st.volume = default_vol;
+                    st.brightness_pct = default_brightness;
                     st.apple_authenticated = false;
-                    st.soundcloud_authenticated = false;
-                    st.internet_archive_authenticated = false;
+                    st.soundcloud_authenticated = sc_ok;
+                    st.internet_archive_authenticated = ia_ok;
                     st.queue.clear();
                     st.queue_index = 0;
                     st.current_track = None;
@@ -1520,6 +1546,7 @@ impl AudioOrchestrator {
 
         update_mpris_metadata(&mut self.mpris_controls, &track);
         update_mpris_playback(&mut self.mpris_controls, true, 0);
+        let _ = self.db.record_play_history(&track);
 
         let _ = self.broadcast_tx.send(PlaybackEvent::TrackChanged {
             metadata: track,

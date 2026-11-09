@@ -139,12 +139,12 @@ fn sync_soundcloud_tokens_into_daemon_state(state: &DaemonIpcState) {
 pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
     let sc_bg_state = ipc_state.clone();
     tokio::spawn(async move {
-        // Wait 5s after startup, then check every 10 minutes to proactively rotate SoundCloud OAuth tokens
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // Wait 2s after startup to bootstrap SoundCloud Public Mode (or rotate OAuth token), then check every 10 minutes
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         loop {
             let cfg_snapshot = sc_bg_state.settings.lock().unwrap().clone();
             let creds = simp_core::sinks::soundcloud_api::resolve_soundcloud_credentials(&cfg_snapshot);
-            if !creds.refresh_token.is_empty()
+            if cfg_snapshot.services.soundcloud_enabled
                 && !creds.client_id.is_empty()
                 && !creds.client_secret.is_empty()
             {
@@ -177,6 +177,9 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/apple/radio", get(apple_radio_handler))
         .route("/api/apple/new", get(apple_new_handler))
         .route("/api/apple/search", get(apple_search_handler))
+        .route("/api/apple/artist", get(apple_artist_handler))
+        .route("/api/apple/rate", post(apple_rate_handler))
+        .route("/api/apple/library-add", post(apple_library_add_handler))
         .route("/api/apple/resolve-track", get(apple_resolve_track_handler))
         .route("/api/apple/web-playback", get(apple_web_playback_handler))
         .route("/api/apple/native-probe", get(apple_native_probe_handler))
@@ -187,6 +190,7 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/soundcloud/playlist-tracks", get(soundcloud_playlist_tracks_handler))
         .route("/api/soundcloud/stream", get(soundcloud_stream_handler))
         .route("/api/soundcloud/discover", get(soundcloud_discover_handler))
+        .route("/api/soundcloud/paginate", get(soundcloud_paginate_handler))
         .route("/api/soundcloud/search", get(soundcloud_search_handler))
         .route("/api/soundcloud/comments", get(soundcloud_comments_handler))
         .route("/api/soundcloud/waveform", get(soundcloud_waveform_handler))
@@ -196,6 +200,9 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/soundcloud/followings", get(soundcloud_followings_handler))
         .route("/api/soundcloud/user-tracks", get(soundcloud_user_tracks_handler))
         .route("/api/soundcloud/follow", post(soundcloud_follow_handler))
+        .route("/api/local/artist", get(local_artist_handler))
+        .route("/api/history", get(history_get_handler).post(history_post_handler))
+        .route("/api/favorites", get(favorites_get_handler).post(favorites_post_handler))
         .route("/api/ia/discover", get(ia_discover_handler))
         .route("/api/ia/item", get(ia_item_handler))
         .route("/api/ia/search", get(ia_search_handler))
@@ -620,6 +627,73 @@ async fn apple_search_handler(
     }
 }
 
+async fn apple_artist_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id_or_name = params
+        .get("id")
+        .or_else(|| params.get("name"))
+        .cloned()
+        .unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::fetch_apple_artist_profile(&cfg, &id_or_name)
+    })
+    .await;
+    match res {
+        Ok(Ok(profile)) => Json(serde_json::json!({ "ok": true, "data": profile })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_rate_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let kind = params
+        .get("kind")
+        .cloned()
+        .unwrap_or_else(|| "songs".to_string());
+    let favorited = params
+        .get("favorited")
+        .map(|v| v != "0" && v != "false")
+        .unwrap_or(true);
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::set_apple_item_rating(&cfg, &id, &kind, favorited)
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn apple_library_add_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let id = params.get("id").cloned().unwrap_or_default();
+    let kind = params
+        .get("kind")
+        .cloned()
+        .unwrap_or_else(|| "songs".to_string());
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::add_to_apple_cloud_library(&cfg, &id, &kind)
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
 async fn apple_resolve_track_handler(
     State(state): State<DaemonIpcState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -932,16 +1006,41 @@ async fn soundcloud_discover_handler(
         .get("mixes_only")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
+    let seed_uris: Vec<String> = state
+        .db
+        .get_play_history(Some("soundcloud"), 6)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.uri)
+        .collect();
     let res = tokio::task::spawn_blocking(move || {
-        simp_core::sinks::soundcloud_api::fetch_trending_and_mixes(
+        simp_core::sinks::soundcloud_api::fetch_trending_and_mixes_with_seeds(
             &cfg,
             genre.as_deref(),
             mixes_only,
+            &seed_uris,
         )
     })
     .await;
     match res {
         Ok(Ok(feed)) => Json(serde_json::json!({ "ok": true, "data": feed })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn soundcloud_paginate_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let next_href = params.get("next_href").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::fetch_soundcloud_next_page(&cfg, &next_href)
+    })
+    .await;
+    match res {
+        Ok(Ok(page)) => Json(serde_json::json!({ "ok": true, "data": page })),
         Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
@@ -1211,6 +1310,102 @@ async fn dvd_stream_handler(
         .unwrap()
 }
 
+async fn local_artist_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let name = params
+        .get("name")
+        .or_else(|| params.get("id"))
+        .cloned()
+        .unwrap_or_default();
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || db.get_local_artist_profile(&name)).await;
+    match res {
+        Ok(Ok(profile)) => Json(serde_json::json!({ "ok": true, "data": profile })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn history_get_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let source = params
+        .get("source")
+        .cloned()
+        .filter(|s| !s.trim().is_empty() && s != "all");
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50);
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        db.get_play_history(source.as_deref(), limit)
+    })
+    .await;
+    match res {
+        Ok(Ok(tracks)) => Json(serde_json::json!({ "ok": true, "data": tracks })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string(), "data": [] })),
+    }
+}
+
+async fn history_post_handler(
+    State(state): State<DaemonIpcState>,
+    Json(track): Json<simp_protocol::TrackMetadata>,
+) -> impl IntoResponse {
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || db.record_play_history(&track)).await;
+    match res {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn favorites_get_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let uris = db.get_favorited_uris().unwrap_or_default();
+        let tracks = db.get_favorited_tracks(None).unwrap_or_default();
+        (uris, tracks)
+    })
+    .await;
+    match res {
+        Ok((uris, tracks)) => Json(serde_json::json!({
+            "ok": true,
+            "uris": uris,
+            "tracks": tracks,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+            "uris": [],
+            "tracks": [],
+        })),
+    }
+}
+
+async fn favorites_post_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    Json(track): Json<simp_protocol::TrackMetadata>,
+) -> impl IntoResponse {
+    let favorited = params
+        .get("favorited")
+        .map(|v| v != "0" && v != "false")
+        .unwrap_or(true);
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || db.set_track_favorited(&track, favorited)).await;
+    match res {
+        Ok(Ok(is_fav)) => Json(serde_json::json!({ "ok": true, "favorited": is_fav })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
 async fn ia_discover_handler(
     State(state): State<DaemonIpcState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -1221,18 +1416,44 @@ async fn ia_discover_handler(
         .cloned()
         .unwrap_or_else(|| "trending".to_string());
     let sub = params.get("sub").cloned();
+    let page = params
+        .get("page")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
     let res = tokio::task::spawn_blocking(move || {
-        simp_core::sinks::internet_archive_api::fetch_discover_hub(&cfg, &hub, sub.as_deref())
+        simp_core::sinks::internet_archive_api::fetch_discover_hub_paged(
+            &cfg,
+            &hub,
+            sub.as_deref(),
+            page,
+        )
     })
     .await;
     match res {
-        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "items": items, "data": items })),
-        Ok(Err(e)) => Json(
-            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
-        ),
-        Err(e) => Json(
-            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
-        ),
+        Ok(Ok((items, has_more))) => Json(serde_json::json!({
+            "ok": true,
+            "items": items,
+            "data": items,
+            "page": page,
+            "has_more": has_more
+        })),
+        Ok(Err(e)) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+            "items": [],
+            "data": [],
+            "page": page,
+            "has_more": false
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+            "items": [],
+            "data": [],
+            "page": page,
+            "has_more": false
+        })),
     }
 }
 
@@ -1260,18 +1481,44 @@ async fn ia_search_handler(
     let cfg = state.settings.lock().unwrap().clone();
     let q = params.get("q").cloned().unwrap_or_default();
     let mediatype = params.get("mediatype").cloned();
+    let page = params
+        .get("page")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
     let res = tokio::task::spawn_blocking(move || {
-        simp_core::sinks::internet_archive_api::search_catalog(&cfg, &q, mediatype.as_deref())
+        simp_core::sinks::internet_archive_api::search_catalog_paged(
+            &cfg,
+            &q,
+            mediatype.as_deref(),
+            page,
+        )
     })
     .await;
     match res {
-        Ok(Ok(items)) => Json(serde_json::json!({ "ok": true, "items": items, "data": items })),
-        Ok(Err(e)) => Json(
-            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
-        ),
-        Err(e) => Json(
-            serde_json::json!({ "ok": false, "error": e.to_string(), "items": [], "data": [] }),
-        ),
+        Ok(Ok((items, has_more))) => Json(serde_json::json!({
+            "ok": true,
+            "items": items,
+            "data": items,
+            "page": page,
+            "has_more": has_more
+        })),
+        Ok(Err(e)) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+            "items": [],
+            "data": [],
+            "page": page,
+            "has_more": false
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+            "items": [],
+            "data": [],
+            "page": page,
+            "has_more": false
+        })),
     }
 }
 
@@ -1868,6 +2115,7 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                     "soundcloud_authenticated": soundcloud_authenticated,
                     "auth_mode": auth_mode,
                     "username": creds.username,
+                    "api_v2": cfg.services.soundcloud_api_v2,
                     "redirect_uri": simp_core::sinks::soundcloud_api::SOUNDCLOUD_DEFAULT_REDIRECT_URI,
                     "lan_ip": lan_ip,
                     "lan_ips": lan_ips,

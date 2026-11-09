@@ -84,7 +84,7 @@ export interface SettingsModalProps {
     React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive'>
   >;
   setAppleSubTab: React.Dispatch<
-    React.SetStateAction<'pinned' | 'cloud_playlists' | 'radio' | 'new'>
+    React.SetStateAction<'pinned' | 'for_you' | 'cloud_playlists' | 'new' | 'radio'>
   >;
   setSoundCloudSubTab: React.Dispatch<
     React.SetStateAction<'pinned' | 'likes_sets' | 'stream_radio' | 'trending'>
@@ -146,9 +146,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [iaAccessKey, setIaAccessKey] = useState('');
   const [iaSecretKey, setIaSecretKey] = useState('');
   const [iaEnabledLocal, setIaEnabledLocal] = useState(
-    !!snap?.internet_archive_authenticated
+    snap?.internet_archive_authenticated ?? true
   );
-  const [iaSafeSearch, setIaSafeSearch] = useState(false);
+  const [iaSafeSearch, setIaSafeSearch] = useState(true);
   const [perfSnap, setPerfSnap] = useState<DaemonPerfSnapshot | null>(null);
 
   const closeSettingsDrawer = () => {
@@ -158,14 +158,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   useEffect(() => {
-    setIaEnabledLocal(!!snap?.internet_archive_authenticated);
+    setIaEnabledLocal(snap?.internet_archive_authenticated ?? true);
     defaultSimpClient
       .getInternetArchiveConfig()
       .then((cfg) => {
         if (cfg) {
-          setIaEnabledLocal(!!cfg.enabled);
+          setIaEnabledLocal(cfg.enabled ?? true);
           setIaUsername(cfg.username || '');
-          setIaSafeSearch(!!cfg.safe_search);
+          setIaSafeSearch(cfg.safe_search ?? true);
         }
       })
       .catch(() => {});
@@ -192,12 +192,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     };
   }, []);
 
+  const [brightnessScrubActive, setBrightnessScrubActive] = useState(false);
+
+  useEffect(() => {
+    const onBrightnessStep = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ delta?: number }>).detail;
+      const delta = typeof detail?.delta === 'number' ? detail.delta : 0;
+      if (delta !== 0) {
+        setBrightnessPct((b) => Math.max(25, Math.min(100, b + delta)));
+      }
+    };
+    const onBrightnessExit = () => {
+      setBrightnessScrubActive(false);
+    };
+    const onFoldersFocus = (ev: Event) => {
+      const open = Boolean((ev as CustomEvent<{ open?: boolean }>).detail?.open);
+      setFoldersAccountsOpen(open);
+    };
+    window.addEventListener('simp-brightness-step', onBrightnessStep);
+    window.addEventListener('simp-brightness-exit', onBrightnessExit);
+    window.addEventListener('simp-settings-folders-focus', onFoldersFocus);
+    return () => {
+      window.removeEventListener('simp-brightness-step', onBrightnessStep);
+      window.removeEventListener('simp-brightness-exit', onBrightnessExit);
+      window.removeEventListener('simp-settings-folders-focus', onFoldersFocus);
+    };
+  }, [setBrightnessPct]);
+
   const toggleSourceVisible = (key: keyof SourceVisibilityPrefs) => {
     setSourceVisibility((prev) => {
       const nextVal = !prev[key];
       const next = { ...prev, [key]: nextVal };
       try {
-        window.localStorage.setItem('simp_source_visibility_v1', JSON.stringify(next));
+        window.localStorage.setItem('simp_source_visibility_v2', JSON.stringify(next));
       } catch {}
       if (key === 'internet_archive') {
         defaultSimpClient.configureInternetArchive({
@@ -240,17 +267,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }, 35);
   };
 
-  // Determine if a sub-level or slide-out column is open so `B` / `ESC` walks back cleanly
+  // Determine if a sub-level inside Folders & Accounts or Brightness scrub is open so `B` / `ESC` walks back cleanly
   const hasNestedChildOpen =
+    brightnessScrubActive ||
     confirmHardReset ||
     addPathOpen ||
     iaAuthOpen ||
     appleAuthOpen ||
-    scAuthOpen ||
-    foldersAccountsOpen;
+    scAuthOpen;
 
   const handleWalkBackNested = () => {
-    if (confirmHardReset) {
+    if (brightnessScrubActive) {
+      setBrightnessScrubActive(false);
+    } else if (confirmHardReset) {
       setConfirmHardReset(false);
     } else if (addPathOpen) {
       setAddPathOpen(false);
@@ -260,8 +289,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setAppleAuthOpen(false);
     } else if (scAuthOpen) {
       setScAuthOpen(false);
-    } else if (foldersAccountsOpen) {
-      closeFoldersAccountsPanel();
     }
   };
 
@@ -367,7 +394,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('internet_archive')}
                     style={pillToggleStyle(sourceVisibility.internet_archive, '#34d399')}
                   >
-                    {sourceVisibility.internet_archive ? '🚫 Hide' : '👁 Show'}
+                    {sourceVisibility.internet_archive ? '👁 Shown' : '🚫 Hidden'}
                   </button>
                   <button
                     type="button"
@@ -442,22 +469,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       Save
                     </button>
                   </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <input
-                      type="text"
-                      placeholder="Optional IAS3 Access Key"
-                      value={iaAccessKey}
-                      onChange={(e) => setIaAccessKey(e.target.value)}
-                      style={compactInputStyle}
-                    />
-                    <input
-                      type="password"
-                      placeholder="Optional IAS3 Secret Key"
-                      value={iaSecretKey}
-                      onChange={(e) => setIaSecretKey(e.target.value)}
-                      style={compactInputStyle}
-                    />
-                  </div>
                 </div>
               )}
             </div>
@@ -474,7 +485,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('apple_music')}
                     style={pillToggleStyle(sourceVisibility.apple_music, '#f43f5e')}
                   >
-                    {sourceVisibility.apple_music ? '🚫 Hide' : '👁 Show'}
+                    {sourceVisibility.apple_music ? '👁 Shown' : '🚫 Hidden'}
                   </button>
                   <button
                     type="button"
@@ -496,7 +507,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     borderTop: '1px solid #281820',
                   }}
                 >
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                     {!snap?.apple_authenticated ? (
                       <button
                         type="button"
@@ -524,37 +535,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         {appleBusy ? 'Working...' : 'Authorize Apple ID'}
                       </button>
                     ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setBrowserSourceFilter('apple_music');
-                            setAppleSubTab('cloud_playlists');
-                            setView('browser');
-                            closeSettingsDrawer();
-                          }}
-                          style={compactPrimaryBtnStyle}
-                        >
-                          Open Cloud Hub
-                        </button>
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            await disconnectAppleMusicCleanSlate(showToast);
-                            const updated = await defaultSimpClient
-                              .getAppleMusicAuthConfig()
-                              .catch(() => null);
-                            if (updated) setAppleAuthCfg(updated);
-                          }}
-                          style={compactDangerBtnStyle}
-                        >
-                          Disconnect
-                        </button>
-                      </>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await disconnectAppleMusicCleanSlate(showToast);
+                          const updated = await defaultSimpClient
+                            .getAppleMusicAuthConfig()
+                            .catch(() => null);
+                          if (updated) setAppleAuthCfg(updated);
+                        }}
+                        style={compactDangerBtnStyle}
+                      >
+                        Disconnect
+                      </button>
                     )}
                   </div>
 
-                  {appleAuthCfg?.pair_url && (
+                  {!snap?.apple_authenticated && appleAuthCfg?.pair_url && (
                     <div
                       style={{
                         display: 'flex',
@@ -602,7 +599,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('soundcloud')}
                     style={pillToggleStyle(sourceVisibility.soundcloud, '#ea580c')}
                   >
-                    {sourceVisibility.soundcloud ? '🚫 Hide' : '👁 Show'}
+                    {sourceVisibility.soundcloud ? '👁 Shown' : '🚫 Hidden'}
                   </button>
                   <button
                     type="button"
@@ -620,7 +617,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       ? `@${soundcloudAuthCfg.username}`
                       : snap?.soundcloud_authenticated ||
                         soundcloudAuthCfg?.soundcloud_authenticated
-                      ? '🟢 Public'
+                      ? '🟢 Connected'
                       : 'Sign In'}{' '}
                     {scAuthOpen ? '▾' : '▸'}
                   </button>
@@ -632,6 +629,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   style={{
                     display: 'flex',
                     flexWrap: 'wrap',
+                    justifyContent: 'flex-end',
                     gap: 6,
                     paddingTop: 6,
                     borderTop: '1px solid #281c14',
@@ -661,26 +659,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     }}
                   >
                     {soundcloudBusy ? 'Working...' : 'OAuth Sign In'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={soundcloudBusy}
-                    onClick={async () => {
-                      setSoundcloudBusy(true);
-                      try {
-                        await enableSoundCloudPublicMode(showToast);
-                        const updated = await defaultSimpClient.getSoundCloudAuthConfig();
-                        setSoundcloudAuthCfg(updated);
-                        refreshLibraryData();
-                      } catch (err: any) {
-                        showToast(err?.message || 'Public Mode failed');
-                      } finally {
-                        setSoundcloudBusy(false);
-                      }
-                    }}
-                    style={compactPrimaryBtnStyle}
-                  >
-                    ⚡ Public Mode
                   </button>
                   {(snap?.soundcloud_authenticated ||
                     soundcloudAuthCfg?.soundcloud_authenticated) && (
@@ -714,7 +692,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('optical_drive')}
                     style={pillToggleStyle(sourceVisibility.optical_drive, '#f59e0b')}
                   >
-                    {sourceVisibility.optical_drive ? '🚫 Hide' : '👁 Show'}
+                    {sourceVisibility.optical_drive ? '👁 Shown' : '🚫 Hidden'}
                   </button>
                   {sourceVisibility.optical_drive && (
                     <>
@@ -785,10 +763,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       placeholder="/path/to/music-or-videos"
                       value={customFolderPath}
                       onChange={(e) => setCustomFolderPath(e.target.value)}
-                      onClick={() => {
-                        setOskTarget('folder');
-                        if (window.parent && window.parent !== window) {
-                          window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                      onClick={(e) => {
+                        if (
+                          e.detail === 0 ||
+                          document.documentElement.dataset.simpInput === 'gamepad'
+                        ) {
+                          setOskTarget('folder');
+                          if (window.parent && window.parent !== window) {
+                            window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                          }
                         }
                       }}
                       onKeyDown={(e) => {
@@ -924,6 +907,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     type="button"
                     onClick={() => {
                       defaultSimpClient.factoryReset();
+                      try {
+                        window.localStorage.removeItem('simp_source_visibility_v2');
+                        window.localStorage.removeItem('simp_brightness_pct_v2');
+                        window.localStorage.setItem('simp.visualizer_mode', 'cycle');
+                      } catch {}
+                      setBrightnessPct(80);
+                      setSourceVisibility({
+                        internet_archive: true,
+                        apple_music: true,
+                        soundcloud: true,
+                        optical_drive: false,
+                      });
+                      setIaEnabledLocal(true);
+                      setIaSafeSearch(true);
                       closeSettingsDrawer();
                       showToast('Factory reset complete');
                       window.setTimeout(() => refreshLibraryData(), 600);
@@ -1020,37 +1017,55 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           {/* Row 1: [BRIGHTNESS SLIDER] [SLEEP SCREEN] */}
           <div style={{ display: 'grid', gridTemplateColumns: '1.35fr 1fr', gap: 8 }}>
-            <div
+            <button
+              type="button"
+              data-default-focus="true"
+              data-brightness-slider="true"
+              data-brightness-scrub-active={brightnessScrubActive ? 'true' : undefined}
+              onClick={() => setBrightnessScrubActive((v) => !v)}
+              onBlur={() => setBrightnessScrubActive(false)}
               style={{
                 padding: '8px 10px',
                 borderRadius: 12,
-                background: '#0e0e16',
-                border: '1px solid #222230',
+                background: brightnessScrubActive ? '#0f222a' : '#0e0e16',
+                border: brightnessScrubActive ? '2px solid #2aa3c4' : '1px solid #222230',
                 display: 'flex',
                 flexDirection: 'column',
                 justifyContent: 'space-between',
                 gap: 6,
+                textAlign: 'left',
+                cursor: 'pointer',
               }}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  width: '100%',
+                }}
+              >
                 <span style={{ fontSize: 11.5, fontWeight: 800, color: '#bfeaf5' }}>
                   🔅 Brightness
                 </span>
                 <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#67e8f9' }}>
-                  {brightnessPct}%
+                  {brightnessScrubActive ? `◄ ${brightnessPct}% ►` : `${brightnessPct}%`}
                 </span>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <button
-                  type="button"
-                  data-default-focus="true"
-                  onClick={() => setBrightnessPct((b) => Math.max(25, b - 10))}
-                  style={smallStepBtnStyle}
+              <div
+                style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <span
+                  role="button"
+                  onClick={() => setBrightnessPct((b) => Math.max(25, b - 5))}
+                  style={{ ...smallStepBtnStyle, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none' }}
                 >
                   −
-                </button>
+                </span>
                 <input
                   type="range"
+                  tabIndex={-1}
                   min={25}
                   max={100}
                   step={5}
@@ -1063,15 +1078,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     minWidth: 0,
                   }}
                 />
-                <button
-                  type="button"
-                  onClick={() => setBrightnessPct((b) => Math.min(100, b + 10))}
-                  style={smallStepBtnStyle}
+                <span
+                  role="button"
+                  onClick={() => setBrightnessPct((b) => Math.min(100, b + 5))}
+                  style={{ ...smallStepBtnStyle, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none' }}
                 >
                   +
-                </button>
+                </span>
               </div>
-            </div>
+            </button>
 
             <button
               type="button"
@@ -1080,7 +1095,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 setIsSleeping(true);
               }}
               style={{
-                minHeight: 56,
+                minHeight: 46,
                 padding: '8px 12px',
                 borderRadius: 12,
                 background: '#0d1b22',
@@ -1088,18 +1103,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 color: '#bfeaf5',
                 textAlign: 'left',
                 display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'center',
-                gap: 3,
+                alignItems: 'center',
                 cursor: 'pointer',
               }}
             >
               <span style={{ fontSize: 12.5, fontWeight: 800 }}>🌙 Sleep Screen</span>
-              <span style={{ fontSize: 10.5, color: '#8e8e99' }}>True-black OLED saver</span>
             </button>
           </div>
 
-          {/* Row 2: [POWER OFF] [RESET SERVICE] */}
+          {/* Row 2: [SHUTDOWN] [RESET SERVICE] */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
             <button
               type="button"
@@ -1109,7 +1121,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 window.setTimeout(() => dismissConsole(), 250);
               }}
               style={{
-                minHeight: 50,
+                minHeight: 44,
                 padding: '8px 12px',
                 borderRadius: 12,
                 background: '#221014',
@@ -1117,16 +1129,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 color: '#fca5a5',
                 textAlign: 'left',
                 display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'center',
-                gap: 2,
+                alignItems: 'center',
                 cursor: 'pointer',
               }}
             >
-              <span style={{ fontSize: 12.5, fontWeight: 800 }}>⏻ Power Off</span>
-              <span style={{ fontSize: 10.5, color: '#fca5a5', opacity: 0.8 }}>
-                Stop daemon & exit
-              </span>
+              <span style={{ fontSize: 12.5, fontWeight: 800 }}>⏻ Shutdown</span>
             </button>
 
             <button
@@ -1143,7 +1150,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 }
               }}
               style={{
-                minHeight: 50,
+                minHeight: 44,
                 padding: '8px 12px',
                 borderRadius: 12,
                 background: '#151320',
@@ -1151,31 +1158,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 color: '#ddd6fe',
                 textAlign: 'left',
                 display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'center',
-                gap: 2,
+                alignItems: 'center',
                 cursor: 'pointer',
               }}
             >
               <span style={{ fontSize: 12.5, fontWeight: 800 }}>🔄 Reset Service</span>
-              <span style={{ fontSize: 10.5, color: '#a1a1aa' }}>Restart audio daemon</span>
             </button>
           </div>
 
-          {/* Row 3: [Folders & Accounts] Slide-Out Trigger */}
+          {/* Row 3: [Folders & Accounts] XMB Auto-Expanding Shelf Trigger */}
           <button
             type="button"
             data-settings-folders-trigger="true"
-            onClick={() => {
-              if (foldersAccountsOpen) {
-                closeFoldersAccountsPanel();
-              } else {
-                openFoldersAccountsPanel();
-              }
-            }}
+            onMouseEnter={() => setFoldersAccountsOpen(true)}
+            onFocus={() => setFoldersAccountsOpen(true)}
+            onClick={() => openFoldersAccountsPanel()}
             style={{
               width: '100%',
-              minHeight: 48,
+              minHeight: 44,
               padding: '10px 14px',
               borderRadius: 14,
               background: foldersAccountsOpen ? '#0f222a' : '#0d0d14',
@@ -1187,16 +1187,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               textAlign: 'left',
             }}
           >
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
-                📁 Folders & Accounts
-              </span>
-              <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
-                Internet Archive, Apple Music, SoundCloud, Optical & Local Paths
-              </span>
-            </div>
-            <span style={{ fontFamily: 'monospace', fontSize: 13, color: '#67e8f9', fontWeight: 900 }}>
-              {foldersAccountsOpen ? '▸ Shut' : '◄ Open'}
+            <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
+              📁 Folders & Accounts
+            </span>
+            <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9', fontWeight: 900 }}>
+              ◄
             </span>
           </button>
 
@@ -1214,7 +1209,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: 12, fontWeight: 800, color: '#d4d4dc' }}>
-                📊 Perf Metrics
+                📊 System Load
               </span>
               <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#8e8e99' }}>
                 {perfSnap?.audio_backend || 'PipeWire'} • {perfSnap?.platform || 'Linux'}
@@ -1225,14 +1220,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <strong style={{ color: '#6ee7b7' }}>
                 {perfSnap?.cpu_percent.toFixed(1) ?? '0.0'}%
               </strong>{' '}
-              • RAM (RSS):{' '}
+              • RAM:{' '}
               <strong style={{ color: '#67e8f9' }}>
                 {perfSnap?.rss_mb.toFixed(1) ?? '0.0'} MB
+                {typeof (perfSnap as any)?.ram_percent === 'number'
+                  ? ` (${((perfSnap as any).ram_percent as number).toFixed(1)}%)`
+                  : ''}
               </strong>
             </div>
           </div>
 
-          {/* Row 5: Upgrade Check (Always Visible Inline — Not Hidden Behind +) */}
+          {/* Row 5: Updates */}
           <div
             style={{
               padding: '10px 12px',
@@ -1246,7 +1244,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 12.5, fontWeight: 800, color: '#bfeaf5' }}>
-                ⬆️ Upgrade Check{' '}
+                ⬆️ Updates{' '}
                 {updateStatus.current_version ? (
                   <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#8e8e99' }}>
                     (v{updateStatus.current_version})
@@ -1263,7 +1261,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   : updateStatus.update_available
                   ? `🟢 ${updateStatus.latest_tag} Ready`
                   : updateStatus.latest_tag
-                  ? `Up to date`
+                  ? 'Up to date'
                   : ''}
               </span>
             </div>
@@ -1287,8 +1285,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     });
                     showToast(
                       nextChannel === 'stable'
-                        ? 'Update channel set to Stable (official releases only)'
-                        : 'Update channel set to Alpha (includes pre-releases)'
+                        ? 'Channel: Stable'
+                        : 'Channel: Alpha'
                     );
                     checkSimpUpdates(false);
                   } catch {
@@ -1301,32 +1299,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               >
                 {(updateStatus.channel || 'alpha').toLowerCase() === 'stable'
-                  ? '🛡️ Channel: Stable'
-                  : '🧪 Channel: Alpha'}
+                  ? '🛡️ Stable'
+                  : '🧪 Alpha'}
               </button>
-              <button
-                type="button"
-                disabled={Boolean(updateStatus.checking || updateStatus.applying)}
-                onClick={() => checkSimpUpdates(false)}
-                style={compactPrimaryBtnStyle}
-              >
-                {updateStatus.checking ? 'Checking...' : '🔍 Check for Updates'}
-              </button>
-              <button
-                type="button"
-                disabled={Boolean(updateStatus.applying)}
-                onClick={applySimpUpdate}
-                style={{
-                  ...compactPrimaryBtnStyle,
-                  background: updateStatus.update_available ? '#0f2936' : '#181824',
-                }}
-              >
-                {updateStatus.applying
-                  ? '⏳ Updating...'
-                  : updateStatus.update_available
-                  ? `⬆️ Install ${updateStatus.latest_tag}`
-                  : `🔄 Reinstall ${updateStatus.latest_tag || 'Latest'}`}
-              </button>
+              {updateStatus.update_available ? (
+                <button
+                  type="button"
+                  disabled={Boolean(updateStatus.applying)}
+                  onClick={applySimpUpdate}
+                  style={{
+                    ...compactPrimaryBtnStyle,
+                    background: '#0f2936',
+                  }}
+                >
+                  {updateStatus.applying
+                    ? '⏳ Updating...'
+                    : `⬆️ Install ${updateStatus.latest_tag}`}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={Boolean(updateStatus.checking || updateStatus.applying)}
+                  onClick={() => checkSimpUpdates(false)}
+                  style={compactPrimaryBtnStyle}
+                >
+                  {updateStatus.checking ? 'Checking...' : '🔍 Check Now'}
+                </button>
+              )}
             </div>
           </div>
         </div>

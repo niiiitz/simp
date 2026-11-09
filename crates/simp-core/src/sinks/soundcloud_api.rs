@@ -72,6 +72,12 @@ pub struct SoundCloudUserProfileResponse {
     pub user: Option<SoundCloudUserSummary>,
     pub tracks: Vec<TrackMetadata>,
     pub playlists: Vec<SoundCloudPlaylistSummary>,
+    #[serde(default)]
+    pub liked_tracks: Vec<TrackMetadata>,
+    #[serde(default)]
+    pub followings: Vec<SoundCloudUserSummary>,
+    #[serde(default)]
+    pub next_tracks_href: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +85,14 @@ pub struct SoundCloudDiscoverResponse {
     pub tracks: Vec<TrackMetadata>,
     pub mixes: Vec<TrackMetadata>,
     pub playlists: Vec<SoundCloudPlaylistSummary>,
+    #[serde(default)]
+    pub more_of_what_you_like: Vec<TrackMetadata>,
+    #[serde(default)]
+    pub fresh_uploads: Vec<TrackMetadata>,
+    #[serde(default)]
+    pub recommended_artists: Vec<SoundCloudUserSummary>,
+    #[serde(default)]
+    pub next_tracks_href: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +101,17 @@ pub struct SoundCloudSearchResults {
     pub mixes: Vec<TrackMetadata>,
     pub playlists: Vec<SoundCloudPlaylistSummary>,
     pub stations: Vec<SoundCloudStationSummary>,
+    #[serde(default)]
+    pub users: Vec<SoundCloudUserSummary>,
+    #[serde(default)]
+    pub next_tracks_href: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoundCloudPaginateResponse {
+    pub tracks: Vec<TrackMetadata>,
+    pub playlists: Vec<SoundCloudPlaylistSummary>,
+    pub next_href: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +149,10 @@ pub struct SoundCloudStreamUrls {
     pub hls_mp3_128_url: Option<String>,
     pub http_mp3_128_url: Option<String>,
     pub preview_mp3_128_url: Option<String>,
+    #[serde(default)]
+    pub drm_hls_url: Option<String>,
+    #[serde(default)]
+    pub drm_license_auth_token: Option<String>,
 }
 
 impl SoundCloudStreamUrls {
@@ -132,7 +161,8 @@ impl SoundCloudStreamUrls {
     /// 2. `hls_mp3_128_url` (128 kbps MP3 HLS)
     /// 3. `http_mp3_128_url` (128 kbps progressive HTTP MP3)
     /// 4. `hls_aac_96_url`
-    /// 5. `preview_mp3_128_url` (last-resort fallback)
+    /// 5. `drm_hls_url` (160 kbps AAC `cenc` encrypted HLS via API v2 + Widevine CDM)
+    /// 6. `preview_mp3_128_url` (last-resort fallback when unsigned)
     pub fn preferred_stream(&self) -> Option<(&str, bool)> {
         if let Some(ref u) = self.hls_aac_160_url {
             if !u.trim().is_empty() {
@@ -150,6 +180,11 @@ impl SoundCloudStreamUrls {
             }
         }
         if let Some(ref u) = self.hls_aac_96_url {
+            if !u.trim().is_empty() {
+                return Some((u.as_str(), true));
+            }
+        }
+        if let Some(ref u) = self.drm_hls_url {
             if !u.trim().is_empty() {
                 return Some((u.as_str(), true));
             }
@@ -239,6 +274,15 @@ pub fn clear_cached_soundcloud_state() {
         *g = None;
     }
     if let Ok(mut g) = comments_cache().lock() {
+        g.clear();
+    }
+    if let Ok(mut g) = track_hints().lock() {
+        g.clear();
+    }
+}
+
+pub fn clear_soundcloud_track_hints() {
+    if let Ok(mut g) = track_hints().lock() {
         g.clear();
     }
 }
@@ -447,14 +491,36 @@ pub fn map_soundcloud_item_to_track(item: &Value) -> Option<TrackMetadata> {
         }
     }
 
-    // Respect `access` tier: skip tracks marked `blocked` (no stream URLs at all).
-    // Allow `preview` (major-label Go+ tier) since `/tracks/{id}/streams` provides `preview_mp3_128_url`
-    // (or full `hls_aac_160_url` when signed into a Go+ account).
-    let access_tier = obj.get("access").and_then(|v| v.as_str()).unwrap_or("playable");
-    if access_tier == "blocked" {
-        return None;
-    }
-    let is_preview = access_tier == "preview";
+    // Respect `access` tier (API v1) and `media.transcodings` / `policy` (API v2):
+    // - On API v2 (`media.transcodings` array present), a track with `policy: "BLOCK"` or empty
+    //   `transcodings` has no streams; a track with at least one `snipped: false` transcoding is
+    //   full-length (`is_preview = false`), whereas a track where all transcodings are `snipped: true`
+    //   (or `policy == "SNIP"`) is a 30s preview (`is_preview = true`).
+    // - On API v1, skip `access == "blocked"` and mark `access == "preview"` as `is_preview = true`.
+    let is_preview = if let Some(transcodings) =
+        obj.pointer("/media/transcodings").and_then(|v| v.as_array())
+    {
+        let policy = obj
+            .get("policy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ALLOW");
+        if policy == "BLOCK" || transcodings.is_empty() {
+            return None;
+        }
+        let has_full_transcoding = transcodings
+            .iter()
+            .any(|t| !t.get("snipped").and_then(|v| v.as_bool()).unwrap_or(false));
+        policy == "SNIP" || !has_full_transcoding
+    } else {
+        let access_tier = obj
+            .get("access")
+            .and_then(|v| v.as_str())
+            .unwrap_or("playable");
+        if access_tier == "blocked" {
+            return None;
+        }
+        access_tier == "preview"
+    };
 
     let raw_id = if let Some(urn) = obj.get("urn").and_then(|v| v.as_str()) {
         clean_soundcloud_id(urn)
@@ -653,19 +719,22 @@ pub fn map_soundcloud_item_to_playlist(item: &Value, default_kind: &str) -> Opti
     let has_tracks_array = if let Some(arr) = obj.get("tracks").and_then(|v| v.as_array()) {
         for t_val in arr {
             let t_obj = t_val.get("origin").unwrap_or(t_val);
-            if t_obj.get("access").and_then(|v| v.as_str()) != Some("blocked") {
+            let acc = t_obj.get("access").and_then(|v| v.as_str());
+            let pol = t_obj.get("policy").and_then(|v| v.as_str());
+            if acc != Some("blocked") && pol != Some("BLOCK") && pol != Some("SNIP") {
                 non_blocked_in_array += 1;
             }
             if let Some(t) = map_soundcloud_item_to_track(t_val) {
                 embedded_tracks.push(t);
             }
         }
-        // If `tracks` is explicitly populated with items, and 100% of them are `access: "blocked"`,
-        // skip this playlist so unstreamable region-locked sets do not appear as broken empty cards.
-        if !arr.is_empty() && non_blocked_in_array == 0 {
+        // If `tracks` is present as an array on the playlist object and has 0 non-blocked tracks
+        // (either `arr` is empty after SoundCloud's server-side filter, or every item in `arr`
+        // is `blocked`), skip this playlist so unstreamable sets do not appear as cards that open to "0 tracks".
+        if non_blocked_in_array == 0 {
             return None;
         }
-        !arr.is_empty()
+        true
     } else {
         false
     };
@@ -1408,6 +1477,177 @@ pub fn is_soundcloud_ready(settings: &SimpSettings) -> bool {
         || (!creds.client_id.is_empty() && !creds.client_secret.is_empty())
 }
 
+/// Returns `true` when the user is signed in with a personal SoundCloud OAuth account (`auth_mode == "user"`),
+/// as opposed to anonymous `client_credentials` Public Discovery mode.
+pub fn is_soundcloud_user_signed_in(settings: &SimpSettings) -> bool {
+    let creds = resolve_soundcloud_credentials(settings);
+    !creds.refresh_token.trim().is_empty()
+        || (creds.auth_mode.trim() == "user"
+            && !creds.access_token.trim().is_empty()
+            && creds.username != "Public Discovery (Client Credentials)")
+}
+
+fn access_param_for_session(settings: &SimpSettings) -> &'static str {
+    if is_soundcloud_user_signed_in(settings) {
+        "playable"
+    } else {
+        "playable,preview"
+    }
+}
+
+fn is_preview_track_meta(t: &TrackMetadata) -> bool {
+    t.album.contains("• Preview") || t.album.ends_with("Preview")
+}
+
+fn should_keep_track_for_session(t: &TrackMetadata, signed_in: bool) -> bool {
+    if signed_in && is_preview_track_meta(t) {
+        return false;
+    }
+    true
+}
+
+fn should_keep_playlist_for_session(pl: &mut SoundCloudPlaylistSummary, signed_in: bool) -> bool {
+    if signed_in && !pl.tracks.is_empty() {
+        pl.tracks.retain(|t| !is_preview_track_meta(t));
+        if pl.tracks.is_empty() {
+            return false;
+        }
+        pl.track_count = pl.tracks.len();
+    }
+    pl.track_count > 0 || !pl.tracks.is_empty()
+}
+
+const DEFAULT_SOUNDCLOUD_V2_CLIENT_ID: &str = "39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ";
+static V2_CLIENT_ID_CACHE: OnceLock<Mutex<String>> = OnceLock::new();
+
+fn v2_client_id_cache() -> &'static Mutex<String> {
+    V2_CLIENT_ID_CACHE.get_or_init(|| Mutex::new(DEFAULT_SOUNDCLOUD_V2_CLIENT_ID.to_string()))
+}
+
+pub fn resolve_soundcloud_v2_client_id() -> String {
+    v2_client_id_cache()
+        .lock()
+        .ok()
+        .map(|g| g.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_SOUNDCLOUD_V2_CLIENT_ID.to_string())
+}
+
+fn refresh_soundcloud_v2_client_id() -> Option<String> {
+    let html_bytes = crate::http_pool::http_get_bytes("https://soundcloud.com", &[], None, 10).ok()?;
+    let html = String::from_utf8_lossy(&html_bytes);
+    let mut script_urls = Vec::new();
+    for part in html.split("https://a-v2.sndcdn.com/assets/") {
+        if let Some(end) = part.find(".js") {
+            let asset = &part[..end + 3];
+            if !asset.is_empty() && asset.len() < 80 {
+                script_urls.push(format!("https://a-v2.sndcdn.com/assets/{asset}"));
+            }
+        }
+    }
+    for url in script_urls.into_iter().rev().take(6) {
+        let Ok(js_bytes) = crate::http_pool::http_get_bytes(&url, &[], None, 10) else {
+            continue;
+        };
+        let js = String::from_utf8_lossy(&js_bytes);
+        for needle in ["client_id:\"", "client_id: \"", "\"client_id\":\""] {
+            if let Some(idx) = js.find(needle) {
+                let rest = &js[idx + needle.len()..];
+                if let Some(end_q) = rest.find('"') {
+                    let candidate = &rest[..end_q];
+                    if candidate.len() == 32 && candidate.chars().all(|c| c.is_ascii_alphanumeric()) {
+                        if let Ok(mut guard) = v2_client_id_cache().lock() {
+                            *guard = candidate.to_string();
+                        }
+                        return Some(candidate.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn build_v2_url_with_client_id(path_or_url: &str, client_id: &str) -> String {
+    let base = if path_or_url.starts_with("https://") || path_or_url.starts_with("http://") {
+        path_or_url.to_string()
+    } else if path_or_url.starts_with('/') {
+        format!("https://api-v2.soundcloud.com{path_or_url}")
+    } else {
+        format!("https://api-v2.soundcloud.com/{path_or_url}")
+    };
+    let sep = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{sep}client_id={}", url_encode_component(client_id))
+}
+
+pub fn soundcloud_v2_get_json(path_or_url: &str) -> Result<Value> {
+    let cid = resolve_soundcloud_v2_client_id();
+    let url = build_v2_url_with_client_id(path_or_url, &cid);
+    let headers = [
+        ("Accept", "application/json; charset=utf-8"),
+        ("Origin", "https://soundcloud.com"),
+        ("Referer", "https://soundcloud.com/"),
+    ];
+    match crate::http_pool::http_get_bytes(&url, &headers, None, 15) {
+        Ok(bytes) => {
+            let parsed: Value =
+                serde_json::from_slice(&bytes).context("Invalid JSON from SoundCloud API v2")?;
+            Ok(parsed)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("HTTP 401") || msg.contains("HTTP 403") {
+                if let Some(new_cid) = refresh_soundcloud_v2_client_id() {
+                    let retry_url = build_v2_url_with_client_id(path_or_url, &new_cid);
+                    let bytes = crate::http_pool::http_get_bytes(&retry_url, &headers, None, 15)?;
+                    let parsed: Value = serde_json::from_slice(&bytes)
+                        .context("Invalid JSON from SoundCloud API v2")?;
+                    return Ok(parsed);
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+fn hydrate_v2_tracks_by_ids(track_ids: &[String], signed_in: bool) -> Vec<TrackMetadata> {
+    if track_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut by_id: HashMap<String, TrackMetadata> = HashMap::new();
+    for chunk in track_ids.chunks(50) {
+        let ids_str = chunk.join(",");
+        let path = format!("/tracks?ids={}", url_encode_component(&ids_str));
+        if let Ok(json) = soundcloud_v2_get_json(&path) {
+            for item in extract_collection_items(&json) {
+                if let Some(t) = map_soundcloud_item_to_track(item) {
+                    if should_keep_track_for_session(&t, signed_in) {
+                        let cid = clean_soundcloud_id(&t.uri);
+                        by_id.insert(cid, t);
+                    }
+                }
+            }
+        }
+    }
+    let mut ordered = Vec::with_capacity(by_id.len());
+    let mut seen = std::collections::HashSet::new();
+    for id in track_ids {
+        if seen.insert(id.clone()) {
+            if let Some(t) = by_id.remove(id) {
+                ordered.push(t);
+            }
+        }
+    }
+    ordered
+}
+
+fn extract_next_href(json: &Value) -> Option<String> {
+    json.get("next_href")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn soundcloud_get_json(url: &str, access_token: &str) -> Result<Value> {
     let full_url = if url.starts_with("https://") || url.starts_with("http://") {
         url.to_string()
@@ -1519,15 +1759,117 @@ pub fn resolve_track_metadata_by_uri(
             return Some(entry.meta.clone());
         }
     }
-    let json = soundcloud_authed_get(
-        settings,
-        &format!("/tracks/{}", url_encode_component(&track_id)),
-    )
-    .ok()?;
+    let encoded_id = url_encode_component(&track_id);
+    if settings.services.soundcloud_api_v2 {
+        if let Ok(v2_json) = soundcloud_v2_get_json(&format!("/tracks/{encoded_id}")) {
+            if let Some(t) = map_soundcloud_item_to_track(&v2_json) {
+                return Some(t);
+            }
+        }
+    }
+    let json = soundcloud_authed_get(settings, &format!("/tracks/{encoded_id}")).ok()?;
     map_soundcloud_item_to_track(&json)
 }
 
-/// Fetches the streaming URLs (`hls_aac_160_url`, `hls_mp3_128_url`, `http_mp3_128_url`) for a SoundCloud track.
+fn populate_v2_track_stream_urls(track_id: &str, urls: &mut SoundCloudStreamUrls) {
+    let encoded_id = url_encode_component(track_id);
+    let Ok(track_json) = soundcloud_v2_get_json(&format!("/tracks/{encoded_id}")) else {
+        return;
+    };
+    let Some(transcodings) = track_json
+        .pointer("/media/transcodings")
+        .and_then(|v| v.as_array())
+    else {
+        return;
+    };
+
+    // 1. Prefer clear (unencrypted) full-length transcodings if available
+    let mut clear_candidates: Vec<(&str, &str, &str)> = Vec::new();
+    let mut drm_candidates: Vec<(&str, &str)> = Vec::new();
+
+    for tr in transcodings {
+        let snipped = tr.get("snipped").and_then(|v| v.as_bool()).unwrap_or(false);
+        if snipped {
+            continue;
+        }
+        let Some(tr_url) = tr
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let protocol = tr
+            .pointer("/format/protocol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let preset = tr.get("preset").and_then(|v| v.as_str()).unwrap_or("");
+
+        if protocol == "ctr-encrypted-hls" || protocol == "cbc-encrypted-hls" || tr_url.contains("encrypted") {
+            drm_candidates.push((tr_url, preset));
+        } else {
+            clear_candidates.push((tr_url, protocol, preset));
+        }
+    }
+
+    for (tr_url, protocol, preset) in clear_candidates {
+        if let Ok(res_json) = soundcloud_v2_get_json(tr_url) {
+            if let Some(stream_u) = res_json
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                if protocol.contains("hls") {
+                    if preset.contains("aac_160") && urls.hls_aac_160_url.is_none() {
+                        urls.hls_aac_160_url = Some(stream_u);
+                    } else if preset.contains("mp3") && urls.hls_mp3_128_url.is_none() {
+                        urls.hls_mp3_128_url = Some(stream_u);
+                    } else if urls.hls_aac_96_url.is_none() {
+                        urls.hls_aac_96_url = Some(stream_u);
+                    }
+                } else if urls.http_mp3_128_url.is_none() {
+                    urls.http_mp3_128_url = Some(stream_u);
+                }
+            }
+        }
+    }
+
+    if urls.hls_aac_160_url.is_some()
+        || urls.hls_mp3_128_url.is_some()
+        || urls.http_mp3_128_url.is_some()
+        || urls.hls_aac_96_url.is_some()
+    {
+        urls.preview_mp3_128_url = None;
+        return;
+    }
+
+    // 2. Resolve Widevine-encrypted `ctr-encrypted-hls` transcoding (`160 kbps AAC` preferred)
+    drm_candidates.sort_by_key(|(_, preset)| if preset.contains("aac_160") { 0 } else { 1 });
+    for (tr_url, _) in drm_candidates {
+        if let Ok(res_json) = soundcloud_v2_get_json(tr_url) {
+            let stream_u = res_json
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let lic_token = res_json
+                .get("licenseAuthToken")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let (Some(u), Some(tok)) = (stream_u, lic_token) {
+                urls.drm_hls_url = Some(u);
+                urls.drm_license_auth_token = Some(tok);
+                urls.preview_mp3_128_url = None;
+                return;
+            }
+        }
+    }
+}
+
+/// Fetches the streaming URLs (`hls_aac_160_url`, `hls_mp3_128_url`, `http_mp3_128_url`, or v2 `drm_hls_url`) for a SoundCloud track.
 pub fn fetch_track_streams(
     settings: &SimpSettings,
     track_uri_or_id: &str,
@@ -1537,29 +1879,44 @@ pub fn fetch_track_streams(
         return Err(anyhow!("Empty SoundCloud track ID"));
     }
 
+    let signed_in = is_soundcloud_user_signed_in(settings);
     let path = format!("/tracks/{}/streams", url_encode_component(&track_id));
-    let json = soundcloud_authed_get(settings, &path)
-        .with_context(|| format!("Failed to fetch SoundCloud streams for track {track_id}"))?;
-
-    let get_str = |key: &str| -> Option<String> {
-        json.get(key)
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+    let mut urls = SoundCloudStreamUrls {
+        track_id: track_id.clone(),
+        ..Default::default()
     };
 
-    let urls = SoundCloudStreamUrls {
-        track_id,
-        hls_aac_160_url: get_str("hls_aac_160_url"),
-        hls_aac_96_url: get_str("hls_aac_96_url"),
-        hls_mp3_128_url: get_str("hls_mp3_128_url"),
-        http_mp3_128_url: get_str("http_mp3_128_url"),
-        preview_mp3_128_url: get_str("preview_mp3_128_url"),
-    };
+    if let Ok(json) = soundcloud_authed_get(settings, &path) {
+        let get_str = |key: &str| -> Option<String> {
+            json.get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        urls.hls_aac_160_url = get_str("hls_aac_160_url");
+        urls.hls_aac_96_url = get_str("hls_aac_96_url");
+        urls.hls_mp3_128_url = get_str("hls_mp3_128_url");
+        urls.http_mp3_128_url = get_str("http_mp3_128_url");
+        urls.preview_mp3_128_url = get_str("preview_mp3_128_url");
+    }
+
+    let has_full_v1_stream = urls.hls_aac_160_url.is_some()
+        || urls.hls_mp3_128_url.is_some()
+        || urls.http_mp3_128_url.is_some()
+        || urls.hls_aac_96_url.is_some();
+
+    if !has_full_v1_stream && settings.services.soundcloud_api_v2 {
+        populate_v2_track_stream_urls(&track_id, &mut urls);
+    }
+
+    // Never play 30-second preview snips when signed into a user account
+    if signed_in {
+        urls.preview_mp3_128_url = None;
+    }
 
     if urls.preferred_stream().is_none() {
         return Err(anyhow!(
-            "SoundCloud track has no playable HLS or HTTP stream URLs available"
+            "SoundCloud track has no playable full-length HLS or HTTP stream URLs available"
         ));
     }
 
@@ -1570,18 +1927,22 @@ pub fn fetch_track_streams(
 pub fn fetch_user_playlists_and_likes(
     settings: &SimpSettings,
 ) -> Result<SoundCloudPlaylistsResponse> {
+    let signed_in = is_soundcloud_user_signed_in(settings);
+    let access_q = access_param_for_session(settings);
     let mut playlists = Vec::new();
     let mut liked_tracks_preview = Vec::new();
     let mut likes_authed = false;
 
     if let Ok(likes_json) = soundcloud_authed_get(
         settings,
-        "/me/likes/tracks?limit=100&access=playable,preview&linked_partitioning=true",
+        &format!("/me/likes/tracks?limit=100&access={access_q}&linked_partitioning=true"),
     ) {
         likes_authed = true;
         for item in extract_collection_items(&likes_json) {
             if let Some(track) = map_soundcloud_item_to_track(item) {
-                liked_tracks_preview.push(track);
+                if should_keep_track_for_session(&track, signed_in) {
+                    liked_tracks_preview.push(track);
+                }
             }
         }
     }
@@ -1610,22 +1971,26 @@ pub fn fetch_user_playlists_and_likes(
 
     if let Ok(my_sets_json) = soundcloud_authed_get(
         settings,
-        "/me/playlists?limit=50&show_tracks=true&access=playable,preview&linked_partitioning=true",
+        &format!("/me/playlists?limit=50&show_tracks=true&access={access_q}&linked_partitioning=true"),
     ) {
         for item in extract_collection_items(&my_sets_json) {
-            if let Some(pl) = map_soundcloud_item_to_playlist(item, "user_set") {
-                playlists.push(pl);
+            if let Some(mut pl) = map_soundcloud_item_to_playlist(item, "user_set") {
+                if should_keep_playlist_for_session(&mut pl, signed_in) {
+                    playlists.push(pl);
+                }
             }
         }
     }
 
     if let Ok(liked_sets_json) = soundcloud_authed_get(
         settings,
-        "/me/likes/playlists?limit=50&show_tracks=true&access=playable,preview&linked_partitioning=true",
+        &format!("/me/likes/playlists?limit=50&show_tracks=true&access={access_q}&linked_partitioning=true"),
     ) {
         for item in extract_collection_items(&liked_sets_json) {
-            if let Some(pl) = map_soundcloud_item_to_playlist(item, "liked_set") {
-                if !playlists.iter().any(|existing| existing.id == pl.id) {
+            if let Some(mut pl) = map_soundcloud_item_to_playlist(item, "liked_set") {
+                if should_keep_playlist_for_session(&mut pl, signed_in)
+                    && !playlists.iter().any(|existing| existing.id == pl.id)
+                {
                     playlists.push(pl);
                 }
             }
@@ -1643,37 +2008,111 @@ pub fn fetch_playlist_tracks(
     settings: &SimpSettings,
     playlist_id: &str,
 ) -> Result<Vec<TrackMetadata>> {
+    let signed_in = is_soundcloud_user_signed_in(settings);
+    let access_q = access_param_for_session(settings);
     let clean_id = clean_soundcloud_id(playlist_id);
     if clean_id.eq_ignore_ascii_case("likes") {
-        let json = soundcloud_authed_get(
-            settings,
-            "/me/likes/tracks?limit=150&access=playable,preview&linked_partitioning=true",
-        )?;
-        let tracks: Vec<TrackMetadata> = extract_collection_items(&json)
-            .into_iter()
-            .filter_map(map_soundcloud_item_to_track)
-            .collect();
+        let mut tracks = Vec::new();
+        let mut next_url = Some(format!(
+            "/me/likes/tracks?limit=150&access={access_q}&linked_partitioning=true"
+        ));
+        for _ in 0..3 {
+            let Some(ref u) = next_url else { break };
+            let Ok(json) = soundcloud_authed_get(settings, u) else {
+                break;
+            };
+            for item in extract_collection_items(&json) {
+                if let Some(t) = map_soundcloud_item_to_track(item) {
+                    if should_keep_track_for_session(&t, signed_in) {
+                        tracks.push(t);
+                    }
+                }
+            }
+            next_url = extract_next_href(&json);
+        }
         return Ok(tracks);
     }
 
     let mut tracks = Vec::new();
     let mut seen_uris = std::collections::HashSet::new();
     let encoded_id = url_encode_component(&clean_id);
-    let tracks_url = format!(
-        "/playlists/{encoded_id}/tracks?limit=200&access=playable,preview&linked_partitioning=true"
-    );
-    if let Ok(json) = soundcloud_authed_get(settings, &tracks_url) {
-        for item in extract_collection_items(&json) {
-            if let Some(t) = map_soundcloud_item_to_track(item) {
-                if seen_uris.insert(t.uri.clone()) {
-                    tracks.push(t);
+
+    // When API v2 mode is enabled, resolve the playlist and batch-hydrate its track stubs via `api-v2.soundcloud.com`
+    // so monetized/distributor albums & sets return their full tracklists (`snipped: false`).
+    if settings.services.soundcloud_api_v2 {
+        if let Ok(v2_pl) = soundcloud_v2_get_json(&format!("/playlists/{encoded_id}?representation=full")) {
+            if let Some(arr) = v2_pl.get("tracks").and_then(|v| v.as_array()) {
+                let mut ordered_ids: Vec<String> = Vec::with_capacity(arr.len());
+                let mut hydrated_map: HashMap<String, TrackMetadata> = HashMap::new();
+                let mut stub_ids: Vec<String> = Vec::new();
+                for item in arr {
+                    let obj = item.get("origin").unwrap_or(item);
+                    let pol = obj.get("policy").and_then(|v| v.as_str()).unwrap_or("ALLOW");
+                    if pol == "BLOCK" {
+                        continue;
+                    }
+                    let tid = obj
+                        .get("urn")
+                        .and_then(|v| v.as_str())
+                        .map(clean_soundcloud_id)
+                        .or_else(|| obj.get("id").and_then(|v| v.as_u64()).map(|n| n.to_string()))
+                        .or_else(|| obj.get("id").and_then(|v| v.as_str()).map(clean_soundcloud_id))
+                        .unwrap_or_default();
+                    if tid.is_empty() {
+                        continue;
+                    }
+                    ordered_ids.push(tid.clone());
+                    if let Some(t) = map_soundcloud_item_to_track(item) {
+                        if should_keep_track_for_session(&t, signed_in) {
+                            hydrated_map.insert(tid, t);
+                        }
+                    } else {
+                        stub_ids.push(tid);
+                    }
+                }
+                if !stub_ids.is_empty() {
+                    for t in hydrate_v2_tracks_by_ids(&stub_ids, signed_in) {
+                        let cid = clean_soundcloud_id(&t.uri);
+                        hydrated_map.insert(cid, t);
+                    }
+                }
+                for tid in ordered_ids {
+                    if let Some(t) = hydrated_map.remove(&tid) {
+                        if seen_uris.insert(t.uri.clone()) {
+                            tracks.push(t);
+                        }
+                    }
+                }
+                if !tracks.is_empty() {
+                    return Ok(tracks);
                 }
             }
         }
     }
 
+    let mut next_url = Some(format!(
+        "/playlists/{encoded_id}/tracks?limit=200&access={access_q}&linked_partitioning=true"
+    ));
+    for _ in 0..3 {
+        let Some(ref u) = next_url else { break };
+        if let Ok(json) = soundcloud_authed_get(settings, u) {
+            for item in extract_collection_items(&json) {
+                if let Some(t) = map_soundcloud_item_to_track(item) {
+                    if should_keep_track_for_session(&t, signed_in)
+                        && seen_uris.insert(t.uri.clone())
+                    {
+                        tracks.push(t);
+                    }
+                }
+            }
+            next_url = extract_next_href(&json);
+        } else {
+            break;
+        }
+    }
+
     if tracks.is_empty() {
-        let pl_url = format!("/playlists/{encoded_id}?show_tracks=true&access=playable,preview");
+        let pl_url = format!("/playlists/{encoded_id}?show_tracks=true&access={access_q}");
         let pl_json = soundcloud_authed_get(settings, &pl_url)
             .or_else(|_| soundcloud_authed_get(settings, &format!("/playlists/{encoded_id}")));
         if let Ok(json) = pl_json {
@@ -1681,12 +2120,15 @@ pub fn fetch_playlist_tracks(
             if let Some(arr) = json.get("tracks").and_then(|v| v.as_array()) {
                 for item in arr {
                     if let Some(t) = map_soundcloud_item_to_track(item) {
-                        if seen_uris.insert(t.uri.clone()) {
+                        if should_keep_track_for_session(&t, signed_in)
+                            && seen_uris.insert(t.uri.clone())
+                        {
                             tracks.push(t);
                         }
                     } else {
                         let obj = item.get("origin").unwrap_or(item);
-                        if obj.get("access").and_then(|v| v.as_str()) == Some("blocked") {
+                        let acc = obj.get("access").and_then(|v| v.as_str()).unwrap_or("playable");
+                        if acc == "blocked" {
                             continue;
                         }
                         let sid = obj
@@ -1714,11 +2156,13 @@ pub fn fetch_playlist_tracks(
                 let ids_param = url_encode_component(&stub_ids.join(","));
                 if let Ok(batch_json) = soundcloud_authed_get(
                     settings,
-                    &format!("/tracks?ids={ids_param}&access=playable,preview&linked_partitioning=true"),
+                    &format!("/tracks?ids={ids_param}&access={access_q}&linked_partitioning=true"),
                 ) {
                     for item in extract_collection_items(&batch_json) {
                         if let Some(t) = map_soundcloud_item_to_track(item) {
-                            if seen_uris.insert(t.uri.clone()) {
+                            if should_keep_track_for_session(&t, signed_in)
+                                && seen_uris.insert(t.uri.clone())
+                            {
                                 tracks.push(t);
                             }
                         }
@@ -1727,7 +2171,9 @@ pub fn fetch_playlist_tracks(
                 if tracks.is_empty() {
                     for sid in stub_ids.into_iter().take(20) {
                         if let Some(t) = resolve_track_metadata_by_uri(settings, &sid) {
-                            if seen_uris.insert(t.uri.clone()) {
+                            if should_keep_track_for_session(&t, signed_in)
+                                && seen_uris.insert(t.uri.clone())
+                            {
                                 tracks.push(t);
                             }
                         }
@@ -1825,20 +2271,34 @@ pub fn fetch_stream_and_stations(settings: &SimpSettings) -> Result<SoundCloudSt
     })
 }
 
-/// Fetches Trending tracks, long-form DJ Mixes (`20m+`), and sets for a genre/vibe filter.
+/// Fetches Trending tracks, long-form DJ Mixes (`20m+`), sets, and personalized discovery shelves for a genre/vibe filter.
 pub fn fetch_trending_and_mixes(
     settings: &SimpSettings,
     genre: Option<&str>,
     mixes_only: bool,
 ) -> Result<SoundCloudDiscoverResponse> {
+    fetch_trending_and_mixes_with_seeds(settings, genre, mixes_only, &[])
+}
+
+pub fn fetch_trending_and_mixes_with_seeds(
+    settings: &SimpSettings,
+    genre: Option<&str>,
+    mixes_only: bool,
+    seed_track_ids: &[String],
+) -> Result<SoundCloudDiscoverResponse> {
+    let signed_in = is_soundcloud_user_signed_in(settings);
+    let access_q = access_param_for_session(settings);
     let clean_genre = genre
         .map(|g| g.trim())
         .filter(|g| !g.is_empty() && !g.eq_ignore_ascii_case("all"));
 
-    let mut tracks_url =
-        String::from("/tracks?access=playable&linked_partitioning=true&limit=45");
+    let mut tracks_url = format!("/tracks?access={access_q}&linked_partitioning=true&limit=45");
     if let Some(g) = clean_genre {
-        tracks_url.push_str(&format!("&genres={}&q={}", url_encode_component(g), url_encode_component(g)));
+        tracks_url.push_str(&format!(
+            "&genres={}&q={}",
+            url_encode_component(g),
+            url_encode_component(g)
+        ));
     }
     if mixes_only {
         tracks_url.push_str("&duration%5Bfrom%5D=1200000");
@@ -1846,9 +2306,22 @@ pub fn fetch_trending_and_mixes(
 
     let mut tracks = Vec::new();
     let mut mixes = Vec::new();
+    let mut recommended_artists = Vec::new();
+    let mut seen_artist_ids = std::collections::HashSet::new();
+    let mut next_tracks_href = None;
+
     if let Ok(json) = soundcloud_authed_get(settings, &tracks_url) {
+        next_tracks_href = extract_next_href(&json);
         for item in extract_collection_items(&json) {
+            if let Some(u) = item.get("user").and_then(map_soundcloud_item_to_user) {
+                if seen_artist_ids.insert(u.id.clone()) && recommended_artists.len() < 16 {
+                    recommended_artists.push(u);
+                }
+            }
             if let Some(t) = map_soundcloud_item_to_track(item) {
+                if !should_keep_track_for_session(&t, signed_in) {
+                    continue;
+                }
                 if t.duration_ms >= 20 * 60 * 1000 {
                     mixes.push(t.clone());
                 }
@@ -1859,8 +2332,8 @@ pub fn fetch_trending_and_mixes(
 
     // Also fetch dedicated 20m+ DJ Mixes if `mixes` is sparse
     if mixes.len() < 6 {
-        let mut mix_url = String::from(
-            "/tracks?access=playable&linked_partitioning=true&duration%5Bfrom%5D=1200000&limit=20",
+        let mut mix_url = format!(
+            "/tracks?access={access_q}&linked_partitioning=true&duration%5Bfrom%5D=1200000&limit=20",
         );
         if let Some(g) = clean_genre {
             mix_url.push_str(&format!("&q={}%20mix", url_encode_component(g)));
@@ -1870,7 +2343,9 @@ pub fn fetch_trending_and_mixes(
         if let Ok(mix_json) = soundcloud_authed_get(settings, &mix_url) {
             for item in extract_collection_items(&mix_json) {
                 if let Some(t) = map_soundcloud_item_to_track(item) {
-                    if !mixes.iter().any(|m| m.uri == t.uri) {
+                    if should_keep_track_for_session(&t, signed_in)
+                        && !mixes.iter().any(|m| m.uri == t.uri)
+                    {
                         mixes.push(t);
                     }
                 }
@@ -1881,21 +2356,89 @@ pub fn fetch_trending_and_mixes(
     let mut playlists = Vec::new();
     let pl_query = clean_genre.unwrap_or("electronic underground");
     let pl_url = format!(
-        "/playlists?q={}&show_tracks=true&access=playable,preview&linked_partitioning=true&limit=20",
+        "/playlists?q={}&show_tracks=true&access={access_q}&linked_partitioning=true&limit=20",
         url_encode_component(pl_query)
     );
     if let Ok(pl_json) = soundcloud_authed_get(settings, &pl_url) {
         for item in extract_collection_items(&pl_json) {
-            if let Some(pl) = map_soundcloud_item_to_playlist(item, "catalog_set") {
-                playlists.push(pl);
+            if let Some(mut pl) = map_soundcloud_item_to_playlist(item, "catalog_set") {
+                if should_keep_playlist_for_session(&mut pl, signed_in) {
+                    playlists.push(pl);
+                }
             }
         }
     }
+
+    // Build "More of What You Like" shelf seeded from recent SIMP history or user Likes
+    let mut more_of_what_you_like = Vec::new();
+    let mut seed_ids: Vec<String> = seed_track_ids
+        .iter()
+        .map(|s| clean_soundcloud_id(s))
+        .filter(|s| !s.is_empty())
+        .take(2)
+        .collect();
+    if seed_ids.is_empty() && signed_in {
+        if let Ok(likes_json) = soundcloud_authed_get(
+            settings,
+            &format!("/me/likes/tracks?limit=4&access={access_q}&linked_partitioning=true"),
+        ) {
+            for item in extract_collection_items(&likes_json).into_iter().take(2) {
+                if let Some(t) = map_soundcloud_item_to_track(item) {
+                    let cid = clean_soundcloud_id(&t.uri);
+                    if !cid.is_empty() && !seed_ids.contains(&cid) {
+                        seed_ids.push(cid);
+                    }
+                }
+            }
+        }
+    }
+    if seed_ids.is_empty() {
+        if let Some(first_t) = tracks.first() {
+            let cid = clean_soundcloud_id(&first_t.uri);
+            if !cid.is_empty() {
+                seed_ids.push(cid);
+            }
+        }
+    }
+    for sid in seed_ids.iter().take(2) {
+        let rel_url = format!(
+            "/tracks/{}/related?access={access_q}&linked_partitioning=true&limit=12",
+            url_encode_component(sid)
+        );
+        if let Ok(rel_json) = soundcloud_authed_get(settings, &rel_url) {
+            for item in extract_collection_items(&rel_json) {
+                if let Some(u) = item.get("user").and_then(map_soundcloud_item_to_user) {
+                    if seen_artist_ids.insert(u.id.clone()) && recommended_artists.len() < 16 {
+                        recommended_artists.push(u);
+                    }
+                }
+                if let Some(t) = map_soundcloud_item_to_track(item) {
+                    if should_keep_track_for_session(&t, signed_in)
+                        && !more_of_what_you_like.iter().any(|m: &TrackMetadata| m.uri == t.uri)
+                    {
+                        more_of_what_you_like.push(t);
+                    }
+                }
+            }
+        }
+    }
+
+    // Build "Fresh Uploads" shelf (shorter tracks < 12m that aren't already in mixes)
+    let fresh_uploads: Vec<TrackMetadata> = tracks
+        .iter()
+        .filter(|t| t.duration_ms > 0 && t.duration_ms < 12 * 60 * 1000)
+        .take(16)
+        .cloned()
+        .collect();
 
     Ok(SoundCloudDiscoverResponse {
         tracks,
         mixes,
         playlists,
+        more_of_what_you_like,
+        fresh_uploads,
+        recommended_artists,
+        next_tracks_href,
     })
 }
 
@@ -1939,7 +2482,7 @@ pub fn fetch_related_station_tracks(
     Ok(out)
 }
 
-/// Searches the SoundCloud catalog across tracks, 20m+ DJ mixes, playlists/sets, and track radio seeds.
+/// Searches the SoundCloud catalog across tracks, 20m+ DJ mixes, playlists/sets, creators/artists (`users`), and track radio seeds.
 /// If `query` is a `soundcloud.com` / `on.soundcloud.com` URL, resolves the exact resource first via `GET /resolve?url=...`.
 pub fn search_catalog(settings: &SimpSettings, query: &str) -> Result<SoundCloudSearchResults> {
     let q = query.trim();
@@ -1949,12 +2492,19 @@ pub fn search_catalog(settings: &SimpSettings, query: &str) -> Result<SoundCloud
             mixes: Vec::new(),
             playlists: Vec::new(),
             stations: Vec::new(),
+            users: Vec::new(),
+            next_tracks_href: None,
         });
     }
+
+    let signed_in = is_soundcloud_user_signed_in(settings);
+    let access_q = access_param_for_session(settings);
 
     let mut tracks = Vec::new();
     let mut mixes = Vec::new();
     let mut playlists = Vec::new();
+    let mut users = Vec::new();
+    let mut next_tracks_href = None;
 
     // 1. Check if the user pasted a SoundCloud link (`https://soundcloud.com/...` or `soundcloud.com/...`)
     if q.starts_with("https://soundcloud.com/")
@@ -1971,32 +2521,47 @@ pub fn search_catalog(settings: &SimpSettings, query: &str) -> Result<SoundCloud
             "/resolve?url={}",
             url_encode_component(&full_sc_url)
         );
-        if let Ok(resolved) = soundcloud_authed_get(settings, &resolve_path) {
+        let resolved_opt = if settings.services.soundcloud_api_v2 {
+            soundcloud_v2_get_json(&resolve_path)
+                .or_else(|_| soundcloud_authed_get(settings, &resolve_path))
+                .ok()
+        } else {
+            soundcloud_authed_get(settings, &resolve_path).ok()
+        };
+        if let Some(resolved) = resolved_opt {
             let kind = resolved.get("kind").and_then(|v| v.as_str()).unwrap_or("");
             if kind == "track" {
                 if let Some(t) = map_soundcloud_item_to_track(&resolved) {
-                    if t.duration_ms >= 20 * 60 * 1000 {
-                        mixes.push(t.clone());
+                    if should_keep_track_for_session(&t, signed_in) {
+                        if t.duration_ms >= 20 * 60 * 1000 {
+                            mixes.push(t.clone());
+                        }
+                        tracks.push(t);
                     }
-                    tracks.push(t);
                 }
             } else if kind == "playlist" {
-                if let Some(pl) = map_soundcloud_item_to_playlist(&resolved, "catalog_set") {
-                    playlists.push(pl);
-                }
-                if let Some(arr) = resolved.get("tracks").and_then(|v| v.as_array()) {
-                    for item in arr {
-                        if let Some(t) = map_soundcloud_item_to_track(item) {
-                            tracks.push(t);
+                if let Some(mut pl) = map_soundcloud_item_to_playlist(&resolved, "catalog_set") {
+                    if settings.services.soundcloud_api_v2 && pl.tracks.len() < pl.track_count {
+                        if let Ok(hydrated) = fetch_playlist_tracks(settings, &pl.id) {
+                            if !hydrated.is_empty() {
+                                pl.track_count = hydrated.len();
+                                pl.tracks = hydrated.clone();
+                            }
                         }
+                    }
+                    if should_keep_playlist_for_session(&mut pl, signed_in) {
+                        for t in &pl.tracks {
+                            if !tracks.iter().any(|existing: &TrackMetadata| existing.uri == t.uri) {
+                                tracks.push(t.clone());
+                            }
+                        }
+                        playlists.push(pl);
                     }
                 }
             } else if kind == "user" {
-                if let Some(uid) = resolved
-                    .get("id")
-                    .and_then(|v| v.as_u64().map(|n| n.to_string()).or_else(|| v.as_str().map(clean_soundcloud_id)))
-                {
-                    if let Ok(profile) = fetch_user_profile_tracks(settings, &uid) {
+                if let Some(u) = map_soundcloud_item_to_user(&resolved) {
+                    users.push(u.clone());
+                    if let Ok(profile) = fetch_user_profile_tracks(settings, &u.id) {
                         for t in profile.tracks {
                             if t.duration_ms >= 20 * 60 * 1000 {
                                 mixes.push(t.clone());
@@ -2012,16 +2577,22 @@ pub fn search_catalog(settings: &SimpSettings, query: &str) -> Result<SoundCloud
 
     let encoded_q = url_encode_component(q);
     let tracks_url = format!(
-        "/tracks?q={encoded_q}&access=playable,preview&linked_partitioning=true&limit=40"
+        "/tracks?q={encoded_q}&access={access_q}&linked_partitioning=true&limit=40"
     );
     let playlists_url = format!(
-        "/playlists?q={encoded_q}&show_tracks=true&access=playable,preview&linked_partitioning=true&limit=20"
+        "/playlists?q={encoded_q}&show_tracks=true&access={access_q}&linked_partitioning=true&limit=20"
+    );
+    let users_url = format!(
+        "/users?q={encoded_q}&linked_partitioning=true&limit=12"
     );
 
     if let Ok(t_json) = soundcloud_authed_get(settings, &tracks_url) {
+        next_tracks_href = extract_next_href(&t_json);
         for item in extract_collection_items(&t_json) {
             if let Some(t) = map_soundcloud_item_to_track(item) {
-                if !tracks.iter().any(|existing| existing.uri == t.uri) {
+                if should_keep_track_for_session(&t, signed_in)
+                    && !tracks.iter().any(|existing| existing.uri == t.uri)
+                {
                     if t.duration_ms >= 20 * 60 * 1000 {
                         mixes.push(t.clone());
                     }
@@ -2033,9 +2604,53 @@ pub fn search_catalog(settings: &SimpSettings, query: &str) -> Result<SoundCloud
 
     if let Ok(p_json) = soundcloud_authed_get(settings, &playlists_url) {
         for item in extract_collection_items(&p_json) {
-            if let Some(pl) = map_soundcloud_item_to_playlist(item, "catalog_set") {
-                if !playlists.iter().any(|existing| existing.id == pl.id) {
+            if let Some(mut pl) = map_soundcloud_item_to_playlist(item, "catalog_set") {
+                if should_keep_playlist_for_session(&mut pl, signed_in)
+                    && !playlists.iter().any(|existing| existing.id == pl.id)
+                {
                     playlists.push(pl);
+                }
+            }
+        }
+    }
+
+    if let Ok(u_json) = soundcloud_authed_get(settings, &users_url) {
+        for item in extract_collection_items(&u_json) {
+            if let Some(u) = map_soundcloud_item_to_user(item) {
+                if !users.iter().any(|existing| existing.id == u.id) {
+                    users.push(u);
+                }
+            }
+        }
+    }
+
+    if settings.services.soundcloud_api_v2 {
+        if let Ok(v2_t_json) =
+            soundcloud_v2_get_json(&format!("/search/tracks?q={encoded_q}&limit=30"))
+        {
+            for item in extract_collection_items(&v2_t_json) {
+                if let Some(t) = map_soundcloud_item_to_track(item) {
+                    if should_keep_track_for_session(&t, signed_in)
+                        && !tracks.iter().any(|existing| existing.uri == t.uri)
+                    {
+                        if t.duration_ms >= 20 * 60 * 1000 {
+                            mixes.push(t.clone());
+                        }
+                        tracks.push(t);
+                    }
+                }
+            }
+        }
+        if let Ok(v2_p_json) =
+            soundcloud_v2_get_json(&format!("/search/playlists?q={encoded_q}&limit=20"))
+        {
+            for item in extract_collection_items(&v2_p_json) {
+                if let Some(mut pl) = map_soundcloud_item_to_playlist(item, "catalog_set") {
+                    if should_keep_playlist_for_session(&mut pl, signed_in)
+                        && !playlists.iter().any(|existing| existing.id == pl.id)
+                    {
+                        playlists.push(pl);
+                    }
                 }
             }
         }
@@ -2061,6 +2676,8 @@ pub fn search_catalog(settings: &SimpSettings, query: &str) -> Result<SoundCloud
         mixes,
         playlists,
         stations,
+        users,
+        next_tracks_href,
     })
 }
 
@@ -2427,12 +3044,18 @@ pub fn fetch_user_followings(settings: &SimpSettings) -> Result<Vec<SoundCloudUs
     Ok(users)
 }
 
-/// Fetches a SoundCloud creator's uploaded tracks (`GET /users/{id}/tracks`) and sets (`GET /users/{id}/playlists`).
+/// Fetches a SoundCloud creator's uploaded tracks (`GET /users/{id}/tracks` with pagination),
+/// sets/albums (`GET /users/{id}/playlists`), liked tracks (`GET /users/{id}/likes/tracks`),
+/// and followed artists (`GET /users/{id}/followings`).
+/// Also supports resolving by artist name if `user_id_or_urn` is non-numeric or prefixed with `name:`.
 pub fn fetch_user_profile_tracks(
     settings: &SimpSettings,
     user_id_or_urn: &str,
 ) -> Result<SoundCloudUserProfileResponse> {
-    let clean_uid = clean_soundcloud_id(user_id_or_urn)
+    let signed_in = is_soundcloud_user_signed_in(settings);
+    let access_q = access_param_for_session(settings);
+
+    let mut clean_uid = clean_soundcloud_id(user_id_or_urn)
         .trim_start_matches("users:")
         .trim()
         .to_string();
@@ -2440,31 +3063,152 @@ pub fn fetch_user_profile_tracks(
         return Err(anyhow!("Empty SoundCloud user ID"));
     }
 
-    let encoded_uid = url_encode_component(&clean_uid);
-    let user = soundcloud_authed_get(settings, &format!("/users/{encoded_uid}"))
-        .ok()
-        .and_then(|v| map_soundcloud_item_to_user(&v));
+    let mut user: Option<SoundCloudUserSummary> = None;
 
-    let mut tracks = Vec::new();
-    if let Ok(t_json) = soundcloud_authed_get(
-        settings,
-        &format!("/users/{encoded_uid}/tracks?limit=100&access=playable,preview&linked_partitioning=true"),
-    ) {
-        for item in extract_collection_items(&t_json) {
-            if let Some(t) = map_soundcloud_item_to_track(item) {
-                tracks.push(t);
+    // If caller passed a username / artist name instead of a numeric SoundCloud user ID, resolve via `/users?q=...`
+    let is_name_lookup = clean_uid.starts_with("name:")
+        || !clean_uid.chars().all(|c| c.is_ascii_digit());
+    if is_name_lookup {
+        let name_q = clean_uid.trim_start_matches("name:").trim();
+        let search_u = format!(
+            "/users?q={}&limit=5&linked_partitioning=true",
+            url_encode_component(name_q)
+        );
+        if let Ok(u_json) = soundcloud_authed_get(settings, &search_u) {
+            let candidates: Vec<SoundCloudUserSummary> = extract_collection_items(&u_json)
+                .into_iter()
+                .filter_map(map_soundcloud_item_to_user)
+                .collect();
+            if let Some(matched) = candidates
+                .iter()
+                .find(|u| u.username.eq_ignore_ascii_case(name_q))
+                .or_else(|| candidates.first())
+            {
+                clean_uid = matched.id.clone();
+                user = Some(matched.clone());
             }
         }
     }
 
+    let encoded_uid = url_encode_component(&clean_uid);
+    if user.is_none() {
+        user = soundcloud_authed_get(settings, &format!("/users/{encoded_uid}"))
+            .ok()
+            .and_then(|v| map_soundcloud_item_to_user(&v));
+    }
+
+    // Fetch up to 2 pages of `/users/{id}/tracks` initially (up to 200 tracks instead of 20!) and retain `next_tracks_href`
+    let mut tracks = Vec::new();
+    let mut seen_track_uris = std::collections::HashSet::new();
+    let mut next_tracks_href = Some(format!(
+        "/users/{encoded_uid}/tracks?limit=100&access={access_q}&linked_partitioning=true"
+    ));
+    for _ in 0..2 {
+        let Some(ref page_url) = next_tracks_href else {
+            break;
+        };
+        let Ok(t_json) = soundcloud_authed_get(settings, page_url) else {
+            next_tracks_href = None;
+            break;
+        };
+        for item in extract_collection_items(&t_json) {
+            if let Some(t) = map_soundcloud_item_to_track(item) {
+                if should_keep_track_for_session(&t, signed_in)
+                    && seen_track_uris.insert(t.uri.clone())
+                {
+                    tracks.push(t);
+                }
+            }
+        }
+        next_tracks_href = extract_next_href(&t_json);
+    }
+
     let mut playlists = Vec::new();
+    let mut seen_playlist_ids = std::collections::HashSet::new();
     if let Ok(p_json) = soundcloud_authed_get(
         settings,
-        &format!("/users/{encoded_uid}/playlists?limit=50&show_tracks=true&access=playable,preview&linked_partitioning=true"),
+        &format!(
+            "/users/{encoded_uid}/playlists?limit=50&show_tracks=true&access={access_q}&linked_partitioning=true"
+        ),
     ) {
         for item in extract_collection_items(&p_json) {
-            if let Some(pl) = map_soundcloud_item_to_playlist(item, "catalog_set") {
-                playlists.push(pl);
+            if let Some(mut pl) = map_soundcloud_item_to_playlist(item, "catalog_set") {
+                if should_keep_playlist_for_session(&mut pl, signed_in)
+                    && seen_playlist_ids.insert(pl.id.clone())
+                {
+                    playlists.push(pl);
+                }
+            }
+        }
+    }
+
+    // When API v2 mode is enabled, also fetch the creator's full v2 tracks, albums, and sets so
+    // distributor-monetized releases (`policy: MONETIZE` / `AD_SUPPORTED`) appear with full track counts.
+    if settings.services.soundcloud_api_v2 {
+        if let Ok(v2_tracks) = soundcloud_v2_get_json(&format!(
+            "/users/{encoded_uid}/tracks?representation=full&limit=100"
+        )) {
+            for item in extract_collection_items(&v2_tracks) {
+                if let Some(t) = map_soundcloud_item_to_track(item) {
+                    if should_keep_track_for_session(&t, signed_in)
+                        && seen_track_uris.insert(t.uri.clone())
+                    {
+                        tracks.push(t);
+                    }
+                }
+            }
+        }
+        for v2_pl_endpoint in [
+            format!("/users/{encoded_uid}/albums?representation=full&limit=50"),
+            format!("/users/{encoded_uid}/playlists_without_albums?representation=full&limit=50"),
+        ] {
+            if let Ok(v2_pl_json) = soundcloud_v2_get_json(&v2_pl_endpoint) {
+                for item in extract_collection_items(&v2_pl_json) {
+                    if let Some(mut pl) = map_soundcloud_item_to_playlist(item, "catalog_set") {
+                        if should_keep_playlist_for_session(&mut pl, signed_in) {
+                            if let Some(existing) = playlists.iter_mut().find(|e| e.id == pl.id) {
+                                if pl.track_count > existing.track_count {
+                                    *existing = pl;
+                                }
+                            } else if seen_playlist_ids.insert(pl.id.clone()) {
+                                playlists.push(pl);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fetch what this artist likes (`GET /users/{id}/likes/tracks`) for rabbit-hole discovery
+    let mut liked_tracks = Vec::new();
+    if let Ok(l_json) = soundcloud_authed_get(
+        settings,
+        &format!(
+            "/users/{encoded_uid}/likes/tracks?limit=40&access={access_q}&linked_partitioning=true"
+        ),
+    ) {
+        for item in extract_collection_items(&l_json) {
+            if let Some(t) = map_soundcloud_item_to_track(item) {
+                if should_keep_track_for_session(&t, signed_in) {
+                    liked_tracks.push(t);
+                }
+            }
+        }
+    }
+
+    // Fetch who this artist follows (`GET /users/{id}/followings`) to step artist-to-artist
+    let mut followings = Vec::new();
+    let mut seen_f = std::collections::HashSet::new();
+    if let Ok(f_json) = soundcloud_authed_get(
+        settings,
+        &format!("/users/{encoded_uid}/followings?limit=40&linked_partitioning=true"),
+    ) {
+        for item in extract_collection_items(&f_json) {
+            if let Some(u) = map_soundcloud_item_to_user(item) {
+                if seen_f.insert(u.id.clone()) {
+                    followings.push(u);
+                }
             }
         }
     }
@@ -2473,6 +3217,49 @@ pub fn fetch_user_profile_tracks(
         user,
         tracks,
         playlists,
+        liked_tracks,
+        followings,
+        next_tracks_href,
+    })
+}
+
+/// Follows a SoundCloud `next_href` pagination cursor and maps the next page of tracks or playlists.
+pub fn fetch_soundcloud_next_page(
+    settings: &SimpSettings,
+    next_href: &str,
+) -> Result<SoundCloudPaginateResponse> {
+    let trimmed = next_href.trim();
+    if trimmed.is_empty() {
+        return Ok(SoundCloudPaginateResponse {
+            tracks: Vec::new(),
+            playlists: Vec::new(),
+            next_href: None,
+        });
+    }
+    let signed_in = is_soundcloud_user_signed_in(settings);
+    let json = soundcloud_authed_get(settings, trimmed)?;
+    let next_cursor = extract_next_href(&json);
+    let mut tracks = Vec::new();
+    let mut playlists = Vec::new();
+    for item in extract_collection_items(&json) {
+        let origin = item.get("origin").unwrap_or(item);
+        let kind = origin.get("kind").and_then(|v| v.as_str()).unwrap_or("track");
+        if kind == "playlist" {
+            if let Some(mut pl) = map_soundcloud_item_to_playlist(origin, "catalog_set") {
+                if should_keep_playlist_for_session(&mut pl, signed_in) {
+                    playlists.push(pl);
+                }
+            }
+        } else if let Some(t) = map_soundcloud_item_to_track(item) {
+            if should_keep_track_for_session(&t, signed_in) {
+                tracks.push(t);
+            }
+        }
+    }
+    Ok(SoundCloudPaginateResponse {
+        tracks,
+        playlists,
+        next_href: next_cursor,
     })
 }
 
@@ -2578,6 +3365,77 @@ mod tests {
             "kind": "track"
         });
         assert!(map_soundcloud_item_to_track(&stub_item).is_none());
+
+        // Verify playlists whose `tracks` array was emptied by SoundCloud's `access=playable,preview`
+        // filter (meaning 100% of tracks are `access: "blocked"`) return `None` instead of reporting
+        // a phantom `track_count` that opens to "No streamable tracks available".
+        let empty_filtered_set = serde_json::json!({
+            "id": 1912676703u64,
+            "kind": "playlist",
+            "title": "Blocked Distributor Set",
+            "track_count": 5,
+            "tracks": []
+        });
+        assert!(map_soundcloud_item_to_playlist(&empty_filtered_set, "catalog_set").is_none());
+
+        // Verify sets containing only `access: "preview"` tracks on v1 are filtered out when signed in
+        // (Strict v1 mode), and kept when in anonymous Public Discovery mode.
+        let preview_set = serde_json::json!({
+            "id": 2269108565u64,
+            "kind": "playlist",
+            "title": "Label Preview Set",
+            "track_count": 2,
+            "tracks": [
+                {
+                    "id": 1001,
+                    "kind": "track",
+                    "access": "preview",
+                    "title": "Track One",
+                    "duration": 149000
+                },
+                {
+                    "id": 1002,
+                    "kind": "track",
+                    "access": "preview",
+                    "title": "Track Two",
+                    "duration": 162000
+                }
+            ]
+        });
+        let mut mapped_set_anon =
+            map_soundcloud_item_to_playlist(&preview_set, "catalog_set").expect("map preview set");
+        assert!(should_keep_playlist_for_session(&mut mapped_set_anon, false));
+        let mut mapped_set_signed_in =
+            map_soundcloud_item_to_playlist(&preview_set, "catalog_set").expect("map preview set");
+        assert!(!should_keep_playlist_for_session(&mut mapped_set_signed_in, true));
+
+        // Verify API v2 tracks with `snipped: false` transcodings map as full-length playable tracks
+        let v2_track_item = serde_json::json!({
+            "id": 2268829622u64,
+            "kind": "track",
+            "policy": "MONETIZE",
+            "monetization_model": "AD_SUPPORTED",
+            "title": "Full Length Monetized Track",
+            "duration": 149107,
+            "media": {
+                "transcodings": [
+                    {
+                        "url": "https://api-v2.soundcloud.com/media/soundcloud:tracks:2268829622/uuid/stream/ctr-encrypted-hls",
+                        "preset": "aac_160k",
+                        "duration": 149107,
+                        "snipped": false,
+                        "format": {
+                            "protocol": "ctr-encrypted-hls",
+                            "mime_type": "audio/mp4; codecs=\"mp4a.40.2\""
+                        }
+                    }
+                ]
+            }
+        });
+        let mapped_v2_track =
+            map_soundcloud_item_to_track(&v2_track_item).expect("should map v2 full track");
+        assert!(!mapped_v2_track.album.contains("Preview"));
+        assert!(should_keep_track_for_session(&mapped_v2_track, true));
     }
 
     #[test]
@@ -2589,6 +3447,8 @@ mod tests {
             hls_mp3_128_url: Some("https://cf-hls-media.sndcdn.com/playlist_mp3128.m3u8".to_string()),
             http_mp3_128_url: Some("https://cf-media.sndcdn.com/stream.128.mp3".to_string()),
             preview_mp3_128_url: None,
+            drm_hls_url: None,
+            drm_license_auth_token: None,
         };
         assert_eq!(
             urls.preferred_stream(),

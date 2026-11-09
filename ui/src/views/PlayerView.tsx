@@ -65,7 +65,17 @@ export interface PlayerViewProps {
     trackMetadata?: TrackMetadata[]
   ) => Promise<void>;
   handleFavoriteTrack?: (track: TrackMetadata) => Promise<void>;
-  handleMoreByArtist?: (artistName: string, preferredSource?: string) => void;
+  handleAddAppleToCloudLibrary?: (
+    idOrUri: string,
+    kind?: 'songs' | 'albums' | 'playlists',
+    label?: string
+  ) => Promise<void>;
+  favoritedUris?: string[];
+  handleMoreByArtist?: (
+    artistName: string,
+    preferredSource?: string,
+    artistId?: string
+  ) => void;
   applyFocusMarker?: (el: HTMLElement | null) => void;
   showToast?: (msg: string) => void;
 }
@@ -127,12 +137,15 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   handleStartSoundCloudTrackRadio,
   handleAddTracksToPlaylist,
   handleFavoriteTrack,
+  handleAddAppleToCloudLibrary,
+  favoritedUris = [],
   handleMoreByArtist,
   applyFocusMarker,
   showToast,
 }) => {
   const isSoundCloudTrack = track?.source === 'soundcloud';
   const isVideoTrack = isUiVideoTrack(track);
+  const isCurrentTrackFavorited = Boolean(track?.uri && favoritedUris.includes(track.uri));
 
   const [scCommentsEnabled, setScCommentsEnabled] = useState<boolean>(() => {
     try {
@@ -150,13 +163,22 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const [vizMode, setVizMode] = useState<VisualizerMode>(() => {
     try {
       const saved = window.localStorage.getItem('simp.visualizer_mode') as VisualizerMode | null;
-      if (saved === 'glyph' || saved === 'avs' || saved === 'demoscene' || saved === 'off') {
+      if (
+        saved === 'glyph' ||
+        saved === 'avs' ||
+        saved === 'demoscene' ||
+        saved === 'cycle' ||
+        saved === 'off'
+      ) {
         return saved;
       }
     } catch {}
-    return 'glyph';
+    return 'cycle';
   });
   const [rightColMode, setRightColMode] = useState<'queue' | 'chapters'>('queue');
+  const [selectCategory, setSelectCategory] = useState<
+    'track_options' | 'collection' | 'interface'
+  >('track_options');
   const [activeBubbles, setActiveBubbles] = useState<ActiveCommentBubble[]>([]);
   const [playerActionsOpen, setPlayerActionsOpen] = useState<boolean>(false);
   const [playerScale, setPlayerScale] = useState<number>(() =>
@@ -169,6 +191,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   // Unified Video Modality State (`ia_video`, `local_video`, `dvd`)
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [videoTheatreExpanded, setVideoTheatreExpanded] = useState<boolean>(false);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(() =>
+    typeof document !== 'undefined' ? Boolean(document.fullscreenElement) : false
+  );
   const [hudVisible, setHudVisible] = useState<boolean>(true);
   const hudTimerRef = useRef<number | null>(null);
   const lastTimeReportMsRef = useRef<number>(0);
@@ -191,35 +216,56 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return () => window.removeEventListener('resize', onResize);
   }, [isVideoTrack]);
 
-  // Listen for `SELECT` button (`simp-player-actions-toggle`) and `F` key (`simp-player-fullscreen-toggle`) on Player screen
+  const togglePlayerFullscreen = useCallback(() => {
+    if (isVideoTrack) {
+      setVideoTheatreExpanded((prev) => {
+        const next = !prev;
+        if (next) {
+          if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen?.().catch(() => {});
+          }
+        } else if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        }
+        return next;
+      });
+    } else {
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      } else {
+        document.documentElement.requestFullscreen?.().catch(() => {});
+      }
+    }
+  }, [isVideoTrack]);
+
+  // Listen for `SELECT` button (`simp-player-actions-toggle`), `F`/`Alt+F`/`F11` (`simp-player-fullscreen-toggle`), and `fullscreenchange`
   useEffect(() => {
     const onToggleActions = () => {
       setPlayerActionsOpen((prev) => !prev);
     };
     const onToggleFullscreen = () => {
-      if (isVideoTrack) {
-        setVideoTheatreExpanded((prev) => {
-          const next = !prev;
-          if (!next && document.fullscreenElement) {
-            document.exitFullscreen().catch(() => {});
-          }
-          return next;
-        });
-      } else {
-        if (document.fullscreenElement) {
-          document.exitFullscreen().catch(() => {});
-        } else {
-          document.documentElement.requestFullscreen?.().catch(() => {});
-        }
+      togglePlayerFullscreen();
+    };
+    const onFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    const onSelectCategoryFocus = (ev: Event) => {
+      const cat = (ev as CustomEvent<{ category?: string }>).detail?.category;
+      if (cat === 'track_options' || cat === 'collection' || cat === 'interface') {
+        setSelectCategory(cat);
       }
     };
     window.addEventListener('simp-player-actions-toggle', onToggleActions);
     window.addEventListener('simp-player-fullscreen-toggle', onToggleFullscreen);
+    window.addEventListener('simp-select-category-focus', onSelectCategoryFocus);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
     return () => {
       window.removeEventListener('simp-player-actions-toggle', onToggleActions);
       window.removeEventListener('simp-player-fullscreen-toggle', onToggleFullscreen);
+      window.removeEventListener('simp-select-category-focus', onSelectCategoryFocus);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
     };
-  }, [isVideoTrack]);
+  }, [togglePlayerFullscreen]);
 
   // 4-Second (`4000ms`) Floating Controls & Scrub Bar Auto-Hide Timer in Expanded Theatre Mode
   const wakeFloatingHud = useCallback(() => {
@@ -532,22 +578,16 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     setPlayerActionsOpen(false);
   }, []);
 
-  // Focus first item in Left Column when Player Track Actions Overlay opens, and scroll current queue item into view
+  // Focus active item in Left Column when Player Track Actions Overlay opens
   useEffect(() => {
     if (!playerActionsOpen) return;
     const t = window.setTimeout(() => {
-      const currentQueueEl = document.querySelector<HTMLElement>(
-        '[data-player-actions-modal="true"] [data-queue-current="true"]'
-      );
-      if (currentQueueEl) {
-        currentQueueEl.scrollIntoView({ block: 'center', inline: 'nearest' });
-      }
       const firstBtn =
         document.querySelector<HTMLElement>(
-          '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-default-focus="true"]:not([disabled])'
+          '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-select-active="true"]:not([disabled])'
         ) ||
         document.querySelector<HTMLElement>(
-          '[data-player-actions-modal="true"] button[data-default-focus="true"]:not([disabled])'
+          '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-default-focus="true"]:not([disabled])'
         ) ||
         document.querySelector<HTMLElement>(
           '[data-player-actions-modal="true"] button:not([disabled])'
@@ -558,6 +598,20 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     }, 30);
     return () => window.clearTimeout(t);
   }, [playerActionsOpen, applyFocusMarker]);
+
+  // Scroll active queue item into view whenever the `collection` shelf is exposed
+  useEffect(() => {
+    if (!playerActionsOpen || selectCategory !== 'collection') return;
+    const t = window.setTimeout(() => {
+      const currentQueueEl = document.querySelector<HTMLElement>(
+        '[data-player-actions-modal="true"] [data-queue-current="true"]'
+      );
+      if (currentQueueEl) {
+        currentQueueEl.scrollIntoView({ block: 'center', inline: 'nearest' });
+      }
+    }, 25);
+    return () => window.clearTimeout(t);
+  }, [playerActionsOpen, selectCategory, rightColMode]);
 
   const cycleVisualizerMode = useCallback(() => {
     setVizMode((prev) => {
@@ -1418,12 +1472,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         badge="R2"
                         onClick={() => defaultSimpClient.seekRelative(10_000)}
                       />
-                      <TransportIconButton
-                        icon="🎛️"
-                        badge="SELECT"
-                        active={playerActionsOpen}
-                        onClick={() => setPlayerActionsOpen((v) => !v)}
-                      />
                     </div>
                   </div>
                 )}
@@ -1453,7 +1501,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             )}
           </div>
 
-          {/* Queue Mode & Track Actions Controls: Shuffle (X), Loop/Repeat (Y), Theatre Expand (if video), & Track Actions (SELECT) */}
+          {/* Queue Mode Controls: Shuffle (X) & Loop/Repeat (Y) */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <TransportIconButton
               icon="🔀"
@@ -1472,20 +1520,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               }
               active={snap?.repeat_mode !== 'off'}
               onClick={() => defaultSimpClient.cycleRepeat()}
-            />
-            {isVideoTrack && (
-              <TransportIconButton
-                icon="⛶"
-                badge="THEATRE"
-                active={videoTheatreExpanded}
-                onClick={() => setVideoTheatreExpanded((v) => !v)}
-              />
-            )}
-            <TransportIconButton
-              icon="🎛️"
-              badge="SELECT"
-              active={playerActionsOpen}
-              onClick={() => setPlayerActionsOpen((v) => !v)}
             />
           </div>
         </div>
@@ -1540,32 +1574,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               >
                 {track?.title || 'No Track Loaded'}
               </h1>
-              {!isVideoTrack && (
-                <button
-                  type="button"
-                  onClick={cycleVisualizerMode}
-                  title="Cycle Background Visualizer (GLYPH MATRIX • WINAMP AVS • DEMOSCENE 64K • OFF)"
-                  style={{
-                    padding: '5px 11px',
-                    borderRadius: 999,
-                    background: vizMode !== 'off' ? 'rgba(11, 24, 32, 0.94)' : 'rgba(14, 14, 22, 0.92)',
-                    border:
-                      vizMode !== 'off'
-                        ? '1px solid rgba(42, 163, 196, 0.78)'
-                        : '1px solid rgba(82, 82, 102, 0.65)',
-                    boxShadow: '0 6px 18px rgba(0, 0, 0, 0.92), 0 2px 6px rgba(0, 0, 0, 0.95)',
-                    color: vizMode !== 'off' ? '#7dd3fc' : '#a1a1b5',
-                    fontFamily: 'monospace',
-                    fontSize: 11,
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                    flexShrink: 0,
-                    letterSpacing: 0.4,
-                  }}
-                >
-                  ✨ VIZ: {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'}
-                </button>
-              )}
             </div>
             <p
               style={{
@@ -1580,12 +1588,66 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 whiteSpace: 'nowrap',
               }}
             >
-              {track?.artists?.join(', ') || (
+              {track?.artists?.length ? (
+                <span
+                  onClick={() => {
+                    if (primaryArtist && handleMoreByArtist) {
+                      handleMoreByArtist(
+                        primaryArtist,
+                        track.source,
+                        scTrackUserId || undefined
+                      );
+                    }
+                  }}
+                  title={
+                    primaryArtist
+                      ? `Open ${primaryArtist} Artist Profile`
+                      : undefined
+                  }
+                  style={{
+                    cursor: primaryArtist && handleMoreByArtist ? 'pointer' : 'default',
+                    textDecoration: primaryArtist && handleMoreByArtist ? 'underline' : 'none',
+                    textDecorationColor: 'rgba(125, 211, 252, 0.45)',
+                    textUnderlineOffset: 3,
+                  }}
+                >
+                  {track.artists.join(', ')}
+                </span>
+              ) : (
                 <>
                   Select a track from Library & Queue<span className="simp-gp-badge"> (R1)</span>
                 </>
               )}
               {track?.album ? ` • ${track.album}` : ''}
+              {track?.source === 'soundcloud' && track?.album?.includes('• Preview') && (
+                <span
+                  style={{
+                    marginLeft: 8,
+                    padding: '2px 7px',
+                    borderRadius: 6,
+                    background: '#3b1506',
+                    border: '1px solid #f97316',
+                    color: '#fdba74',
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                    fontWeight: 800,
+                    verticalAlign: 'middle',
+                  }}
+                >
+                  30s PREVIEW • Sign in for full track
+                </span>
+              )}
+              {(() => {
+                const uri = track?.uri;
+                if (!uri || (!uri.startsWith('file://') && !uri.startsWith('/'))) return null;
+                const clean = uri.split('?')[0].split('#')[0];
+                const dot = clean.lastIndexOf('.');
+                if (dot < 0 || dot === clean.length - 1) return null;
+                const ext = clean.slice(dot + 1).toUpperCase();
+                return ['FLAC', 'MP3', 'WAV', 'OGG', 'OPUS', 'M4A', 'AAC', 'ALAC', 'AIFF'].includes(ext)
+                  ? ` • ${ext}`
+                  : null;
+              })()}
               {isVideoTrack && activeQuality ? ` • ${activeQuality.label}` : ''}
             </p>
           </div>
@@ -1607,8 +1669,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     style={{
                       position: 'absolute',
                       ...(isBelow
-                        ? { top: 'calc(100% + 6px)' }
-                        : { bottom: 'calc(100% - 8px)' }),
+                        ? { top: 62 }
+                        : { bottom: 'calc(100% - 14px)' }),
                       left: 14,
                       right: 14,
                       display: 'flex',
@@ -1849,12 +1911,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           style={{
             position: 'fixed',
             inset: 0,
-            background: 'rgba(0, 0, 0, 0.84)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: 16,
-            boxSizing: 'border-box',
+            background: 'rgba(0, 0, 0, 0.72)',
             zIndex: 55,
           }}
         >
@@ -1863,16 +1920,18 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             data-player-actions-modal="true"
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: '100%',
-              maxWidth: activeRightColItems.length > 0 ? 840 : 460,
-              maxHeight: '88vh',
+              position: 'fixed',
+              top: 58,
+              left: 16,
+              width: 'min(760px, calc(100vw - 32px))',
+              maxHeight: 'calc(100vh - 76px)',
               overflow: 'hidden',
               background: '#0a0a10',
               border: '2px solid #2aa3c4',
-              borderRadius: 20,
-              padding: 20,
+              borderRadius: 18,
+              padding: 16,
               boxSizing: 'border-box',
-              boxShadow: '0 18px 48px rgba(0, 0, 0, 0.9)',
+              boxShadow: '0 20px 52px rgba(0, 0, 0, 0.92)',
               display: 'flex',
               flexDirection: 'column',
               gap: 12,
@@ -1889,8 +1948,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               }}
             >
               <div style={{ minWidth: 0, flex: 1, marginRight: 10 }}>
-                <div style={{ fontSize: 14, fontWeight: 800, color: '#bfeaf5' }}>
-                  {isVideoTrack ? '🎬 Video & Track Actions' : '🎵 Track & Player Actions'}
+                <div style={{ fontSize: 13.5, fontWeight: 800, color: '#bfeaf5' }}>
+                  ⚙ SELECT Menu
                 </div>
                 <div
                   style={{
@@ -1910,14 +1969,14 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 data-player-actions-close="true"
                 onClick={() => setPlayerActionsOpen(false)}
                 style={{
-                  minHeight: 38,
-                  padding: '0 12px',
-                  borderRadius: 10,
+                  minHeight: 34,
+                  padding: '0 11px',
+                  borderRadius: 9,
                   background: '#16161f',
                   border: '1px solid #2e2e3a',
                   color: '#d4d4dc',
                   fontFamily: 'monospace',
-                  fontSize: 12,
+                  fontSize: 11.5,
                   cursor: 'pointer',
                   flexShrink: 0,
                 }}
@@ -1929,484 +1988,754 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: activeRightColItems.length > 0 ? '1fr 1fr' : '1fr',
-                gap: 16,
+                gridTemplateColumns: '230px 1fr',
+                gap: 14,
                 minHeight: 0,
                 flex: 1,
                 overflow: 'hidden',
               }}
             >
-              {/* Left Column: Settings & Track Actions (D-Pad Up/Down stays here without crossing hundreds of tracks) */}
+              {/* Left Column: 3-Row XMB Category Selector (Up/Down or Hover exposes Right Pane) */}
               <div
                 data-player-actions-col="left"
                 style={{
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: 9,
+                  gap: 8,
                   overflowY: 'auto',
-                  padding: '6px 8px',
+                  padding: '4px 6px',
                   boxSizing: 'border-box',
                 }}
               >
-                {isVideoTrack && (
-                  <>
-                    <button
-                      type="button"
-                      data-default-focus="true"
-                      onClick={toggleTheatreFullscreen}
-                      style={{
-                        ...actionRowBtnStyle,
-                        background: videoTheatreExpanded ? '#0f222a' : '#101018',
-                        border: videoTheatreExpanded ? '1px solid #2aa3c4' : '1px solid #222230',
-                      }}
-                    >
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
-                          {videoTheatreExpanded
-                            ? '🗗 Exit Fullscreen Theatre to Card View'
-                            : '⛶ Expand to Fullscreen Theatre'}
-                        </span>
-                        <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                          {videoTheatreExpanded
-                            ? 'Return to split-card player layout'
-                            : 'Fill screen with video stage and 4-second auto-hiding HUD'}
-                        </span>
-                      </div>
-                      <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9' }}>
-                        {videoTheatreExpanded ? 'CARD' : 'THEATRE'}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={cycleVideoQuality}
-                      style={actionRowBtnStyle}
-                    >
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
-                          🎞️ Stream Quality / Audio: {activeQuality?.label || 'Default'}
-                        </span>
-                        <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                          {videoQualities.length > 1
-                            ? `Cycle across ${videoQualities.length} available formats (MP4 prioritized)`
-                            : 'Single stream format available'}
-                        </span>
-                      </div>
-                      <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>
-                        {selectedQualityIdx + 1}/{Math.max(1, videoQualities.length)}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={cycleVideoSubtitles}
-                      style={actionRowBtnStyle}
-                    >
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
-                          💬 Subtitles / CC: {activeSubtitle ? activeSubtitle.label : 'Off'}
-                        </span>
-                        <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                          {videoSubtitles.length > 0
-                            ? `${videoSubtitles.length} subtitle track(s) available`
-                            : 'No subtitle tracks attached to this item'}
-                        </span>
-                      </div>
-                      <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>
-                        {activeSubtitle ? 'ON' : 'OFF'}
-                      </span>
-                    </button>
-                  </>
-                )}
-
-                {/* 1. Open Collection / Album / Playlist in Library */}
                 <button
                   type="button"
-                  data-default-focus={!isVideoTrack ? 'true' : undefined}
-                  onClick={handleOpenCurrentCollection}
-                  style={actionRowBtnStyle}
-                >
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ fontSize: 13, fontWeight: 800, color: '#f4f4f6' }}>
-                      💿 Open Collection in Library
-                    </span>
-                    <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                      Jump to the active album, archive item, playlist, or queue in the Right Pane
-                    </span>
-                  </div>
-                  <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>→</span>
-                </button>
-
-                {/* 2. Favorite / Like Track (Unified across SoundCloud + ❤️ Favorites SIMP Hybrid Playlist) */}
-                {track && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPlayerActionsOpen(false);
-                      if (track.source === 'soundcloud') {
-                        likeSoundCloudTrack(track.uri, showToast);
-                      }
-                      if (handleFavoriteTrack) {
-                        handleFavoriteTrack(track);
-                      }
-                    }}
-                    style={actionRowBtnStyle}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fda4af' }}>
-                        ❤️ Favorite {isVideoTrack ? 'Video / Episode' : 'Track'}
-                      </span>
-                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        {track.source === 'soundcloud'
-                          ? 'Like on SoundCloud & save to ★ Favorites playlist'
-                          : 'Save to your ★ Favorites SIMP Hybrid Playlist'}
-                      </span>
-                    </div>
-                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#fda4af' }}>+ ❤️</span>
-                  </button>
-                )}
-
-                {/* 3. Add to ★ SIMP Hybrid Playlist */}
-                {track && handleAddTracksToPlaylist && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPlayerActionsOpen(false);
-                      handleAddTracksToPlaylist([track.uri], `"${track.title}"`, [track]);
-                    }}
-                    style={actionRowBtnStyle}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
-                        ★ Add to Hybrid Playlist…
-                      </span>
-                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        Mix movies, episodes, Local, Apple Music & SoundCloud tracks in any SIMP playlist
-                      </span>
-                    </div>
-                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9' }}>+ ★</span>
-                  </button>
-                )}
-
-                {/* 4. Start Track Radio / Station */}
-                {track && !isVideoTrack && (track.source === 'soundcloud' || primaryArtist) && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPlayerActionsOpen(false);
-                      if (track.source === 'soundcloud' && handleStartSoundCloudTrackRadio) {
-                        handleStartSoundCloudTrackRadio(track);
-                      } else if (primaryArtist && handleMoreByArtist) {
-                        handleMoreByArtist(primaryArtist, track.source);
-                      }
-                    }}
-                    style={actionRowBtnStyle}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
-                        📻 {track.source === 'soundcloud' ? 'Start Track Radio' : `Artist Mix: ${primaryArtist}`}
-                      </span>
-                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        {track.source === 'soundcloud'
-                          ? `Continuous SoundCloud station seeded from "${track.title}"`
-                          : `Browse tracks, albums & stations for ${primaryArtist}`}
-                      </span>
-                    </div>
-                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#fdba74' }}>▶</span>
-                  </button>
-                )}
-
-                {/* 5. More by Artist / Creator */}
-                {primaryArtist && handleMoreByArtist && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPlayerActionsOpen(false);
-                      setVideoTheatreExpanded(false);
-                      handleMoreByArtist(primaryArtist, track?.source);
-                    }}
-                    style={actionRowBtnStyle}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 13, fontWeight: 800, color: '#d4d4dc' }}>
-                        👤 More by {primaryArtist}
-                      </span>
-                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        Search across sources for {primaryArtist} (current source prioritized first)
-                      </span>
-                    </div>
-                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#9ca3af' }}>🔍</span>
-                  </button>
-                )}
-
-                {/* 5b. Follow / Unfollow Creator on SoundCloud */}
-                {isSoundCloudTrack && scTrackUserId && primaryArtist && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const nextFollow = !scCreatorFollowed;
-                      toggleFollowSoundCloudUser(
-                        scTrackUserId,
-                        nextFollow,
-                        primaryArtist,
-                        showToast
-                      )
-                        .then((ok) => {
-                          if (ok) setScCreatorFollowed(nextFollow);
-                        })
-                        .catch((err: any) => {
-                          showToast?.(
-                            err?.message || 'Sign in with SoundCloud to follow creators'
-                          );
-                        });
-                    }}
-                    style={{
-                      ...actionRowBtnStyle,
-                      background: scCreatorFollowed ? '#1f120b' : '#101018',
-                      border: scCreatorFollowed ? '1px solid #ea580c' : '1px solid #222230',
-                    }}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
-                        {scCreatorFollowed
-                          ? `✓ Following @${primaryArtist}`
-                          : `➕ Follow @${primaryArtist} on SoundCloud`}
-                      </span>
-                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        {scCreatorFollowed
-                          ? 'In your 👥 Following list & ⚡ Following Stream'
-                          : 'Add creator to your 👥 Following list & ⚡ Following Stream'}
-                      </span>
-                    </div>
-                    <span
-                      style={{
-                        fontFamily: 'monospace',
-                        fontSize: 11,
-                        fontWeight: 800,
-                        color: scCreatorFollowed ? '#fdba74' : '#9ca3af',
-                      }}
-                    >
-                      {scCreatorFollowed ? 'FOLLOWING' : '+ FOLLOW'}
-                    </span>
-                  </button>
-                )}
-
-                {/* 5c. Switch Right Column between Mix Chapters & Active Queue when both exist */}
-                {chapterModalItems.length > 0 && queueModalItems.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setRightColMode((prev) => (prev === 'chapters' ? 'queue' : 'chapters'))
-                    }
-                    style={actionRowBtnStyle}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
-                        📑 Right Column:{' '}
-                        {rightColMode === 'chapters'
-                          ? `Mix Chapters (${chapterModalItems.length})`
-                          : `Active Queue (${queueModalItems.length})`}
-                      </span>
-                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        Toggle right column between timestamped DJ Mix Chapters and Active Queue
-                      </span>
-                    </div>
-                    <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#67e8f9' }}>
-                      {rightColMode === 'chapters' ? 'CHAPTERS' : 'QUEUE'}
-                    </span>
-                  </button>
-                )}
-
-                {/* 6. Toggle Timed Comments (SoundCloud only) */}
-                {isSoundCloudTrack && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      toggleScComments();
-                    }}
-                    style={{
-                      ...actionRowBtnStyle,
-                      background: scCommentsEnabled ? '#1f120b' : '#101018',
-                      border: scCommentsEnabled ? '1px solid #ea580c' : '1px solid #222230',
-                    }}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
-                        💬 Timed Comment Bubbles: {scCommentsEnabled ? 'ON' : 'OFF'}
-                      </span>
-                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        {scComments.length} timed comments on this track
-                      </span>
-                    </div>
-                    <span
-                      style={{
-                        fontFamily: 'monospace',
-                        fontSize: 11,
-                        fontWeight: 800,
-                        color: scCommentsEnabled ? '#fdba74' : '#71717a',
-                      }}
-                    >
-                      {scCommentsEnabled ? 'ON' : 'OFF'}
-                    </span>
-                  </button>
-                )}
-
-                {/* 7. Cycle Background Visualizer Mode (Audio only) */}
-                {!isVideoTrack && (
-                  <button
-                    type="button"
-                    onClick={cycleVisualizerMode}
-                    style={{
-                      ...actionRowBtnStyle,
-                      background: vizMode !== 'off' ? '#0f222a' : '#101018',
-                      border: vizMode !== 'off' ? '1px solid #2aa3c4' : '1px solid #222230',
-                    }}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
-                        ✨ Background Visualizer:{' '}
-                        {VISUALIZER_MODES.find((m) => m.id === vizMode)?.label || 'GLYPH MATRIX'}
-                      </span>
-                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        Cycle between GLYPH MATRIX (3D ASCII), WINAMP AVS (Tunnel), DEMOSCENE 64K (DYCP Scroller) & OFF
-                      </span>
-                    </div>
-                    <span
-                      style={{
-                        fontFamily: 'monospace',
-                        fontSize: 11,
-                        fontWeight: 800,
-                        color: vizMode !== 'off' ? '#67e8f9' : '#71717a',
-                      }}
-                    >
-                      {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'}
-                    </span>
-                  </button>
-                )}
-              </div>
-
-              {/* Right Column: Queue / Mix Chapters / Episodes / DVD Titles Browser (D-Pad Right jumps straight to current item) */}
-              {activeRightColItems.length > 0 && (
-                <div
-                  data-player-actions-col="right"
+                  data-default-focus="true"
+                  data-select-category="track_options"
+                  data-select-active={selectCategory === 'track_options' ? 'true' : undefined}
+                  onFocus={() => setSelectCategory('track_options')}
+                  onMouseEnter={() => setSelectCategory('track_options')}
+                  onClick={() => setSelectCategory('track_options')}
                   style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    background: '#0d0d15',
-                    border: '1px solid #1e1e2c',
-                    borderRadius: 14,
-                    padding: 12,
-                    minHeight: 0,
-                    overflow: 'hidden',
+                    ...actionRowBtnStyle,
+                    minHeight: 46,
+                    padding: '8px 12px',
+                    background: selectCategory === 'track_options' ? '#0f222a' : '#101018',
+                    border:
+                      selectCategory === 'track_options'
+                        ? '1px solid #2aa3c4'
+                        : '1px solid #222230',
                   }}
                 >
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      paddingBottom: 8,
-                      marginBottom: 8,
-                      borderBottom: '1px solid #1e1e2c',
-                      flexShrink: 0,
-                    }}
-                  >
-                    <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
-                      📑{' '}
-                      {rightColMode === 'chapters' && chapterModalItems.length > 0
-                        ? 'MIX CHAPTERS'
-                        : isVideoTrack
-                          ? 'EPISODES / QUEUE'
-                          : 'ACTIVE QUEUE'}{' '}
-                      ({currentQueueIdx + 1} / {activeRightColItems.length})
-                    </span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                     <span
-                      className="simp-gp-badge"
-                      style={{ fontSize: 10.5, fontFamily: 'monospace', color: '#7dd3fc' }}
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 800,
+                        color: selectCategory === 'track_options' ? '#bfeaf5' : '#e4e4ec',
+                      }}
                     >
-                      ◄ Settings | ►{' '}
-                      {rightColMode === 'chapters' && chapterModalItems.length > 0
-                        ? 'Chapters'
-                        : 'Queue'}
+                      🎵 Track Options
+                    </span>
+                    <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                      Favorite, Hybrid, Radio, Artist
                     </span>
                   </div>
+                  <span
+                    style={{
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      color: selectCategory === 'track_options' ? '#67e8f9' : '#71717a',
+                    }}
+                  >
+                    ▸
+                  </span>
+                </button>
 
+                <button
+                  type="button"
+                  data-select-category="collection"
+                  data-select-active={selectCategory === 'collection' ? 'true' : undefined}
+                  onFocus={() => setSelectCategory('collection')}
+                  onMouseEnter={() => setSelectCategory('collection')}
+                  onClick={handleOpenCurrentCollection}
+                  style={{
+                    ...actionRowBtnStyle,
+                    minHeight: 46,
+                    padding: '8px 12px',
+                    background: selectCategory === 'collection' ? '#0f222a' : '#101018',
+                    border:
+                      selectCategory === 'collection'
+                        ? '1px solid #2aa3c4'
+                        : '1px solid #222230',
+                  }}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <span
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 800,
+                        color: selectCategory === 'collection' ? '#bfeaf5' : '#e4e4ec',
+                      }}
+                    >
+                      💿 Open Collection
+                    </span>
+                    <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                      A: Open in Library • ►: Queue ({activeRightColItems.length})
+                    </span>
+                  </div>
+                  <span
+                    style={{
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      color: selectCategory === 'collection' ? '#67e8f9' : '#71717a',
+                    }}
+                  >
+                    ▸
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  data-select-category="interface"
+                  data-select-active={selectCategory === 'interface' ? 'true' : undefined}
+                  onFocus={() => setSelectCategory('interface')}
+                  onMouseEnter={() => setSelectCategory('interface')}
+                  onClick={() => setSelectCategory('interface')}
+                  style={{
+                    ...actionRowBtnStyle,
+                    minHeight: 46,
+                    padding: '8px 12px',
+                    background: selectCategory === 'interface' ? '#0f222a' : '#101018',
+                    border:
+                      selectCategory === 'interface'
+                        ? '1px solid #2aa3c4'
+                        : '1px solid #222230',
+                  }}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <span
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 800,
+                        color: selectCategory === 'interface' ? '#bfeaf5' : '#e4e4ec',
+                      }}
+                    >
+                      🖥️ Interface
+                    </span>
+                    <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                      Fullscreen, Visualizer
+                      {isSoundCloudTrack ? ', Comments' : ''}
+                      {isVideoTrack ? ', Stream' : ''}
+                    </span>
+                  </div>
+                  <span
+                    style={{
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      color: selectCategory === 'interface' ? '#67e8f9' : '#71717a',
+                    }}
+                  >
+                    ▸
+                  </span>
+                </button>
+              </div>
+
+              {/* Right Column: Context-Exposed XMB Pane */}
+              <div
+                data-player-actions-col="right"
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  background: '#0d0d15',
+                  border: '1px solid #1e1e2c',
+                  borderRadius: 14,
+                  padding: 12,
+                  minHeight: 0,
+                  overflow: 'hidden',
+                }}
+              >
+                {selectCategory === 'track_options' && (
                   <div
                     style={{
                       display: 'flex',
                       flexDirection: 'column',
-                      gap: 6,
+                      gap: 8,
                       overflowY: 'auto',
                       flex: 1,
-                      padding: '6px 8px',
+                      padding: '4px 6px',
                       boxSizing: 'border-box',
                     }}
                   >
-                    {activeRightColItems.map((item) => (
-                      <button
-                        key={item.key}
-                        type="button"
-                        data-queue-current={item.isCurrent ? 'true' : undefined}
-                        onClick={item.onSelect}
-                        style={{
-                          width: '100%',
-                          padding: '8px 11px',
-                          borderRadius: 10,
-                          background: item.isCurrent ? '#0f222a' : '#12121c',
-                          border: item.isCurrent ? '1px solid #2aa3c4' : '1px solid #222230',
-                          color: item.isCurrent ? '#7dd3fc' : '#d4d4dc',
-                          textAlign: 'left',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          gap: 10,
-                          cursor: 'pointer',
-                          flexShrink: 0,
-                        }}
-                      >
-                        <div style={{ minWidth: 0, flex: 1 }}>
-                          <div
+                    {track ? (
+                      <>
+                        {/* 1. Favorite / Like Track */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPlayerActionsOpen(false);
+                            if (handleFavoriteTrack) {
+                              handleFavoriteTrack(track);
+                            } else if (track.source === 'soundcloud') {
+                              likeSoundCloudTrack(track.uri, showToast);
+                            }
+                          }}
+                          style={{
+                            ...actionRowBtnStyle,
+                            minHeight: 46,
+                            padding: '8px 12px',
+                            background: isCurrentTrackFavorited ? '#241016' : '#101018',
+                            border: isCurrentTrackFavorited
+                              ? '1px solid #f43f5e'
+                              : '1px solid #222230',
+                          }}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            <span style={{ fontSize: 12.5, fontWeight: 800, color: '#fda4af' }}>
+                              {isCurrentTrackFavorited ? '❤️ Favorited' : '♡ Favorite'}
+                            </span>
+                            <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                              {track.source === 'apple_music'
+                                ? 'Love on Apple Music & ★ Favorites'
+                                : track.source === 'soundcloud'
+                                  ? 'Like on SoundCloud & ★ Favorites'
+                                  : 'Save to ★ Favorites playlist'}
+                            </span>
+                          </div>
+                          <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#fda4af' }}>
+                            {isCurrentTrackFavorited ? '❤️ ON' : '+ ❤️'}
+                          </span>
+                        </button>
+
+                        {/* 2. Add to Apple Cloud Library (Apple Music only) */}
+                        {track.source === 'apple_music' && handleAddAppleToCloudLibrary && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPlayerActionsOpen(false);
+                              handleAddAppleToCloudLibrary(track.uri, 'songs', track.title);
+                            }}
+                            style={{ ...actionRowBtnStyle, minHeight: 46, padding: '8px 12px' }}
+                          >
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                              <span style={{ fontSize: 12.5, fontWeight: 800, color: '#fca5a5' }}>
+                                ☁️ + Cloud Library
+                              </span>
+                              <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                                Save to personal iCloud Music Library
+                              </span>
+                            </div>
+                            <span
+                              style={{ fontFamily: 'monospace', fontSize: 11, color: '#fca5a5' }}
+                            >
+                              + ☁️
+                            </span>
+                          </button>
+                        )}
+
+                        {/* 3. + Hybrid Playlist */}
+                        {handleAddTracksToPlaylist && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPlayerActionsOpen(false);
+                              handleAddTracksToPlaylist([track.uri], `"${track.title}"`, [track]);
+                            }}
+                            style={{ ...actionRowBtnStyle, minHeight: 46, padding: '8px 12px' }}
+                          >
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                              <span style={{ fontSize: 12.5, fontWeight: 800, color: '#67e8f9' }}>
+                                ★ + Hybrid Playlist
+                              </span>
+                              <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                                Add track to active SIMP Hybrid Playlist
+                              </span>
+                            </div>
+                            <span
+                              style={{ fontFamily: 'monospace', fontSize: 11, color: '#67e8f9' }}
+                            >
+                              + ★
+                            </span>
+                          </button>
+                        )}
+
+                        {/* 4. Radio Station / Artist Mix */}
+                        {!isVideoTrack && (track.source === 'soundcloud' || primaryArtist) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPlayerActionsOpen(false);
+                              if (
+                                track.source === 'soundcloud' &&
+                                handleStartSoundCloudTrackRadio
+                              ) {
+                                handleStartSoundCloudTrackRadio(track);
+                              } else if (primaryArtist && handleMoreByArtist) {
+                                handleMoreByArtist(
+                                  primaryArtist,
+                                  track.source,
+                                  scTrackUserId || undefined
+                                );
+                              }
+                            }}
+                            style={{ ...actionRowBtnStyle, minHeight: 46, padding: '8px 12px' }}
+                          >
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                              <span style={{ fontSize: 12.5, fontWeight: 800, color: '#fdba74' }}>
+                                📻{' '}
+                                {track.source === 'soundcloud'
+                                  ? 'Radio Station'
+                                  : `Artist Mix / Station`}
+                              </span>
+                              <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                                {track.source === 'soundcloud'
+                                  ? `Continuous station from "${track.title}"`
+                                  : `Station & top mixes for ${primaryArtist}`}
+                              </span>
+                            </div>
+                            <span
+                              style={{ fontFamily: 'monospace', fontSize: 11, color: '#fdba74' }}
+                            >
+                              ▶
+                            </span>
+                          </button>
+                        )}
+
+                        {/* 5. More by Artist */}
+                        {primaryArtist && handleMoreByArtist && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPlayerActionsOpen(false);
+                              setVideoTheatreExpanded(false);
+                              handleMoreByArtist(
+                                primaryArtist,
+                                track?.source,
+                                scTrackUserId || undefined
+                              );
+                            }}
+                            style={{ ...actionRowBtnStyle, minHeight: 46, padding: '8px 12px' }}
+                          >
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                              <span style={{ fontSize: 12.5, fontWeight: 800, color: '#d4d4dc' }}>
+                                👤 More by {primaryArtist}
+                              </span>
+                              <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                                Artist profile: tracks, albums & related
+                              </span>
+                            </div>
+                            <span
+                              style={{ fontFamily: 'monospace', fontSize: 11, color: '#9ca3af' }}
+                            >
+                              →
+                            </span>
+                          </button>
+                        )}
+
+                        {/* 6. Follow Artist (SoundCloud) */}
+                        {isSoundCloudTrack && scTrackUserId && primaryArtist && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextFollow = !scCreatorFollowed;
+                              toggleFollowSoundCloudUser(
+                                scTrackUserId,
+                                nextFollow,
+                                primaryArtist,
+                                showToast
+                              )
+                                .then((ok) => {
+                                  if (ok) setScCreatorFollowed(nextFollow);
+                                })
+                                .catch((err: any) => {
+                                  showToast?.(
+                                    err?.message || 'Sign in with SoundCloud to follow creators'
+                                  );
+                                });
+                            }}
                             style={{
-                              fontSize: 12.5,
-                              fontWeight: item.isCurrent ? 800 : 600,
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
+                              ...actionRowBtnStyle,
+                              minHeight: 46,
+                              padding: '8px 12px',
+                              background: scCreatorFollowed ? '#1f120b' : '#101018',
+                              border: scCreatorFollowed
+                                ? '1px solid #ea580c'
+                                : '1px solid #222230',
                             }}
                           >
-                            {item.isCurrent ? '▶ ' : `${item.index + 1}. `}
-                            {item.title}
-                          </div>
-                          {item.subtitle && (
-                            <div
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                              <span style={{ fontSize: 12.5, fontWeight: 800, color: '#fdba74' }}>
+                                {scCreatorFollowed
+                                  ? `✓ Following @${primaryArtist}`
+                                  : `➕ Follow @${primaryArtist}`}
+                              </span>
+                              <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                                SoundCloud Following list & stream
+                              </span>
+                            </div>
+                            <span
                               style={{
+                                fontFamily: 'monospace',
                                 fontSize: 10.5,
-                                color: item.isCurrent ? '#67e8f9' : '#71717a',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                                marginTop: 1,
+                                fontWeight: 800,
+                                color: scCreatorFollowed ? '#fdba74' : '#9ca3af',
                               }}
                             >
-                              {item.subtitle}
+                              {scCreatorFollowed ? 'FOLLOWING' : '+ FOLLOW'}
+                            </span>
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <div style={{ padding: 18, color: '#8e8e99', fontSize: 12 }}>
+                        No track loaded.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {selectCategory === 'collection' && (
+                  <>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        paddingBottom: 8,
+                        marginBottom: 8,
+                        borderBottom: '1px solid #1e1e2c',
+                        flexShrink: 0,
+                        gap: 8,
+                      }}
+                    >
+                      <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
+                        📑{' '}
+                        {rightColMode === 'chapters' && chapterModalItems.length > 0
+                          ? 'MIX CHAPTERS'
+                          : isVideoTrack
+                            ? 'EPISODES / QUEUE'
+                            : 'ACTIVE QUEUE'}{' '}
+                        ({activeRightColItems.length > 0 ? currentQueueIdx + 1 : 0} /{' '}
+                        {activeRightColItems.length})
+                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {chapterModalItems.length > 0 && queueModalItems.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setRightColMode((prev) =>
+                                prev === 'chapters' ? 'queue' : 'chapters'
+                              )
+                            }
+                            style={{
+                              padding: '3px 8px',
+                              borderRadius: 6,
+                              background: '#161622',
+                              border: '1px solid #2aa3c4',
+                              color: '#67e8f9',
+                              fontSize: 10.5,
+                              fontFamily: 'monospace',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {rightColMode === 'chapters' ? 'Switch to Queue' : 'Switch to Chapters'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleOpenCurrentCollection}
+                          style={{
+                            padding: '3px 8px',
+                            borderRadius: 6,
+                            background: '#0f222a',
+                            border: '1px solid #2aa3c4',
+                            color: '#bfeaf5',
+                            fontSize: 10.5,
+                            fontFamily: 'monospace',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Open in Browser →
+                        </button>
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                        overflowY: 'auto',
+                        flex: 1,
+                        padding: '4px 6px',
+                        boxSizing: 'border-box',
+                      }}
+                    >
+                      {activeRightColItems.length > 0 ? (
+                        activeRightColItems.map((item) => (
+                          <button
+                            key={item.key}
+                            type="button"
+                            data-queue-current={item.isCurrent ? 'true' : undefined}
+                            onClick={item.onSelect}
+                            style={{
+                              width: '100%',
+                              padding: '8px 11px',
+                              borderRadius: 10,
+                              background: item.isCurrent ? '#0f222a' : '#12121c',
+                              border: item.isCurrent ? '1px solid #2aa3c4' : '1px solid #222230',
+                              color: item.isCurrent ? '#7dd3fc' : '#d4d4dc',
+                              textAlign: 'left',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: 10,
+                              cursor: 'pointer',
+                              flexShrink: 0,
+                            }}
+                          >
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <div
+                                style={{
+                                  fontSize: 12.5,
+                                  fontWeight: item.isCurrent ? 800 : 600,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {item.isCurrent ? '▶ ' : `${item.index + 1}. `}
+                                {item.title}
+                              </div>
+                              {item.subtitle && (
+                                <div
+                                  style={{
+                                    fontSize: 10.5,
+                                    color: item.isCurrent ? '#67e8f9' : '#71717a',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                    marginTop: 1,
+                                  }}
+                                >
+                                  {item.subtitle}
+                                </div>
+                              )}
                             </div>
-                          )}
+                            <span
+                              style={{
+                                fontSize: 10.5,
+                                fontFamily: 'monospace',
+                                color: item.isCurrent ? '#67e8f9' : '#71717a',
+                                flexShrink: 0,
+                              }}
+                            >
+                              {item.badgeLabel || `#${item.index + 1}`}
+                            </span>
+                          </button>
+                        ))
+                      ) : (
+                        <div style={{ padding: 18, color: '#8e8e99', fontSize: 12 }}>
+                          Queue is currently empty.
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {selectCategory === 'interface' && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                      overflowY: 'auto',
+                      flex: 1,
+                      padding: '4px 6px',
+                      boxSizing: 'border-box',
+                    }}
+                  >
+                    {/* 1. Full Screen */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPlayerActionsOpen(false);
+                        togglePlayerFullscreen();
+                      }}
+                      style={{
+                        ...actionRowBtnStyle,
+                        minHeight: 46,
+                        padding: '8px 12px',
+                        background: isFullscreen ? '#0f222a' : '#101018',
+                        border: isFullscreen ? '1px solid #2aa3c4' : '1px solid #222230',
+                      }}
+                    >
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 800, color: '#bfeaf5' }}>
+                          ⛶ {isFullscreen ? 'Exit Full Screen' : 'Full Screen'}
+                        </span>
+                        <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                          Shortcut: F / F11 / Alt+F or double-click background
+                        </span>
+                      </div>
+                      <span
+                        style={{
+                          fontFamily: 'monospace',
+                          fontSize: 11,
+                          fontWeight: 800,
+                          color: isFullscreen ? '#67e8f9' : '#71717a',
+                        }}
+                      >
+                        {isFullscreen ? 'ON' : 'OFF'}
+                      </span>
+                    </button>
+
+                    {/* 2. Visualizer (Audio tracks) */}
+                    {!isVideoTrack && (
+                      <button
+                        type="button"
+                        onClick={cycleVisualizerMode}
+                        style={{
+                          ...actionRowBtnStyle,
+                          minHeight: 46,
+                          padding: '8px 12px',
+                          background: vizMode !== 'off' ? '#0f222a' : '#101018',
+                          border: vizMode !== 'off' ? '1px solid #2aa3c4' : '1px solid #222230',
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 800, color: '#67e8f9' }}>
+                            ✨ Visualizer:{' '}
+                            {VISUALIZER_MODES.find((m) => m.id === vizMode)?.label ||
+                              'Glyph Matrix'}
+                          </span>
+                          <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                            Glyph Matrix • Winamp AVS • Demoscene 64K • Cycle • Off
+                          </span>
                         </div>
                         <span
                           style={{
-                            fontSize: 10.5,
                             fontFamily: 'monospace',
-                            color: item.isCurrent ? '#67e8f9' : '#71717a',
-                            flexShrink: 0,
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: vizMode !== 'off' ? '#67e8f9' : '#71717a',
                           }}
                         >
-                          {item.badgeLabel || `#${item.index + 1}`}
+                          {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'}
                         </span>
                       </button>
-                    ))}
+                    )}
+
+                    {/* 3. Timed Comment Bubbles (SoundCloud only) */}
+                    {isSoundCloudTrack && (
+                      <button
+                        type="button"
+                        onClick={toggleScComments}
+                        style={{
+                          ...actionRowBtnStyle,
+                          minHeight: 46,
+                          padding: '8px 12px',
+                          background: scCommentsEnabled ? '#1f120b' : '#101018',
+                          border: scCommentsEnabled ? '1px solid #ea580c' : '1px solid #222230',
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 800, color: '#fdba74' }}>
+                            💬 Timed Comment Bubbles
+                          </span>
+                          <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                            {scComments.length} timed comments on this track
+                          </span>
+                        </div>
+                        <span
+                          style={{
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: scCommentsEnabled ? '#fdba74' : '#71717a',
+                          }}
+                        >
+                          {scCommentsEnabled ? 'ON' : 'OFF'}
+                        </span>
+                      </button>
+                    )}
+
+                    {/* 4. Video Theatre & Stream Quality / Subtitles (Video tracks) */}
+                    {isVideoTrack && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={toggleTheatreFullscreen}
+                          style={{
+                            ...actionRowBtnStyle,
+                            minHeight: 46,
+                            padding: '8px 12px',
+                            background: videoTheatreExpanded ? '#0f222a' : '#101018',
+                            border: videoTheatreExpanded
+                              ? '1px solid #2aa3c4'
+                              : '1px solid #222230',
+                          }}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            <span style={{ fontSize: 12.5, fontWeight: 800, color: '#67e8f9' }}>
+                              {videoTheatreExpanded ? '🗗 Exit Theatre Stage' : '⛶ Theatre Stage'}
+                            </span>
+                            <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                              Fill window with video stage & 4s auto-hide HUD
+                            </span>
+                          </div>
+                          <span
+                            style={{ fontFamily: 'monospace', fontSize: 11, color: '#67e8f9' }}
+                          >
+                            {videoTheatreExpanded ? 'CARD' : 'THEATRE'}
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={cycleVideoQuality}
+                          style={{ ...actionRowBtnStyle, minHeight: 46, padding: '8px 12px' }}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            <span style={{ fontSize: 12.5, fontWeight: 800, color: '#f4f4f6' }}>
+                              🎞️ Stream Quality: {activeQuality?.label || 'Default'}
+                            </span>
+                            <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                              {videoQualities.length} format(s) available
+                            </span>
+                          </div>
+                          <span
+                            style={{ fontFamily: 'monospace', fontSize: 11, color: '#2aa3c4' }}
+                          >
+                            {selectedQualityIdx + 1}/{Math.max(1, videoQualities.length)}
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={cycleVideoSubtitles}
+                          style={{ ...actionRowBtnStyle, minHeight: 46, padding: '8px 12px' }}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            <span style={{ fontSize: 12.5, fontWeight: 800, color: '#f4f4f6' }}>
+                              💬 Subtitles / CC: {activeSubtitle ? activeSubtitle.label : 'Off'}
+                            </span>
+                            <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                              {videoSubtitles.length} subtitle track(s)
+                            </span>
+                          </div>
+                          <span
+                            style={{ fontFamily: 'monospace', fontSize: 11, color: '#2aa3c4' }}
+                          >
+                            {activeSubtitle ? 'ON' : 'OFF'}
+                          </span>
+                        </button>
+                      </>
+                    )}
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </div>
         </div>

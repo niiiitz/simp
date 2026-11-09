@@ -27,6 +27,12 @@ fn query_running_daemon_health(addr: &SocketAddr) -> Option<(String, Option<u32>
 /// Ensures `simp --daemon` is listening on `127.0.0.1:18888`.
 /// If not running (or if an older daemon binary is running after an update), spawns `simp --daemon` as a detached background process.
 pub fn ensure_daemon_running() {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::fs::remove_file(exe.with_extension("exe.old"));
+        }
+    }
     let addr = SocketAddr::from(([127, 0, 0, 1], 18888));
     if let Some((running_ver, running_pid)) = query_running_daemon_health(&addr) {
         if running_ver == env!("CARGO_PKG_VERSION") {

@@ -61,20 +61,29 @@ pub fn ensure_vrmanifest_installed() -> Option<PathBuf> {
         }
     };
     let icon_path = {
-        let primary = install_root.join("ui/simp-icon-dark.png");
-        if primary.is_file() {
-            primary
+        let primary_256 = install_root.join("ui/simp-icon-256.png");
+        let primary_dark = install_root.join("ui/simp-icon-dark.png");
+        if primary_256.is_file() {
+            primary_256
+        } else if primary_dark.is_file() {
+            primary_dark
         } else if let Ok(exe) = std::env::current_exe() {
-            exe.parent()
-                .map(|p| p.join("ui/simp-icon-dark.png"))
-                .unwrap_or(primary)
+            let exe_256 = exe.parent().map(|p| p.join("ui/simp-icon-256.png"));
+            let exe_dark = exe.parent().map(|p| p.join("ui/simp-icon-dark.png"));
+            if let Some(p) = exe_256.filter(|p| p.is_file()) {
+                p
+            } else {
+                exe_dark.unwrap_or(primary_256)
+            }
         } else {
-            primary
+            primary_256
         }
     };
-    let local_openvr_icon = openvr_dir.join("simp-icon-dark.png");
+    let local_openvr_icon = openvr_dir.join("simp-icon-256.png");
+    let local_openvr_dark = openvr_dir.join("simp-icon-dark.png");
     if icon_path.is_file() {
         let _ = std::fs::copy(&icon_path, &local_openvr_icon);
+        let _ = std::fs::copy(&icon_path, &local_openvr_dark);
     }
     let manifest_icon = if local_openvr_icon.is_file() {
         &local_openvr_icon
@@ -195,6 +204,10 @@ pub fn patch_shortcuts_vdf_icon(raw: &[u8], icon_path: &str) -> (Option<Vec<u8>>
                                 if key == "appname" && val.trim().to_lowercase().contains("simp") {
                                     is_simp = true;
                                 } else if key == "exe" && (val.contains("/simp") || val.contains("\"simp\"")) {
+                                    is_simp = true;
+                                } else if key == "launchoptions"
+                                    && (val.contains("org.simp.player") || val.contains("18888"))
+                                {
                                     is_simp = true;
                                 } else if key == "icon" {
                                     let trimmed = val.trim();

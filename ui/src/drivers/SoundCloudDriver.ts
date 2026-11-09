@@ -57,12 +57,19 @@ export interface SoundCloudUserProfileResponse {
   user: SoundCloudUserSummary | null;
   tracks: TrackMetadata[];
   playlists: SoundCloudPlaylistSummary[];
+  liked_tracks?: TrackMetadata[];
+  followings?: SoundCloudUserSummary[];
+  next_tracks_href?: string | null;
 }
 
 export interface SoundCloudDiscoverResponse {
   tracks: TrackMetadata[];
   mixes: TrackMetadata[];
   playlists: SoundCloudPlaylistSummary[];
+  more_of_what_you_like?: TrackMetadata[];
+  fresh_uploads?: TrackMetadata[];
+  recommended_artists?: SoundCloudUserSummary[];
+  next_tracks_href?: string | null;
 }
 
 export interface SoundCloudSearchResults {
@@ -70,11 +77,20 @@ export interface SoundCloudSearchResults {
   mixes: TrackMetadata[];
   playlists: SoundCloudPlaylistSummary[];
   stations: SoundCloudStationSummary[];
+  users?: SoundCloudUserSummary[];
+  next_tracks_href?: string | null;
 }
 
 export interface SoundCloudCatalogSearchResults {
   songs: TrackMetadata[];
   playlists: SoundCloudPlaylistSummary[];
+  users?: SoundCloudUserSummary[];
+  next_tracks_href?: string | null;
+}
+
+export interface SoundCloudPaginateResponse {
+  tracks: TrackMetadata[];
+  next_href: string | null;
 }
 
 export interface SoundCloudWaveform {
@@ -392,11 +408,22 @@ export async function fetchSoundCloudDiscover(
   );
 }
 
+export async function fetchSoundCloudNextPage(
+  nextHref: string
+): Promise<SoundCloudPaginateResponse> {
+  if (!nextHref || !nextHref.trim()) {
+    return { tracks: [], next_href: null };
+  }
+  return fetchSoundCloudDaemonJson<SoundCloudPaginateResponse>(
+    `/api/soundcloud/paginate?next_href=${encodeURIComponent(nextHref.trim())}`
+  );
+}
+
 export async function searchSoundCloudCatalog(
   term: string
 ): Promise<SoundCloudCatalogSearchResults> {
   if (!term.trim()) {
-    return { songs: [], playlists: [] };
+    return { songs: [], playlists: [], users: [], next_tracks_href: null };
   }
   const res = await fetchSoundCloudDaemonJson<SoundCloudSearchResults>(
     `/api/soundcloud/search?term=${encodeURIComponent(term.trim())}`
@@ -411,6 +438,8 @@ export async function searchSoundCloudCatalog(
   return {
     songs: uniqueSongs,
     playlists: res.playlists || [],
+    users: res.users || [],
+    next_tracks_href: res.next_tracks_href || null,
   };
 }
 
