@@ -1,7 +1,7 @@
 {
   "name": "simp-ui",
   "private": true,
-  "version": "0.1.0-alpha.69",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port 1420 --strictPort",
