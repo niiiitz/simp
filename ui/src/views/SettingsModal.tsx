@@ -205,11 +205,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const onBrightnessExit = () => {
       setBrightnessScrubActive(false);
     };
+    const onFoldersFocus = (ev: Event) => {
+      const open = Boolean((ev as CustomEvent<{ open?: boolean }>).detail?.open);
+      setFoldersAccountsOpen(open);
+    };
     window.addEventListener('simp-brightness-step', onBrightnessStep);
     window.addEventListener('simp-brightness-exit', onBrightnessExit);
+    window.addEventListener('simp-settings-folders-focus', onFoldersFocus);
     return () => {
       window.removeEventListener('simp-brightness-step', onBrightnessStep);
       window.removeEventListener('simp-brightness-exit', onBrightnessExit);
+      window.removeEventListener('simp-settings-folders-focus', onFoldersFocus);
     };
   }, [setBrightnessPct]);
 
@@ -261,15 +267,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }, 35);
   };
 
-  // Determine if a sub-level or slide-out column is open so `B` / `ESC` walks back cleanly
+  // Determine if a sub-level inside Folders & Accounts or Brightness scrub is open so `B` / `ESC` walks back cleanly
   const hasNestedChildOpen =
     brightnessScrubActive ||
     confirmHardReset ||
     addPathOpen ||
     iaAuthOpen ||
     appleAuthOpen ||
-    scAuthOpen ||
-    foldersAccountsOpen;
+    scAuthOpen;
 
   const handleWalkBackNested = () => {
     if (brightnessScrubActive) {
@@ -284,8 +289,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setAppleAuthOpen(false);
     } else if (scAuthOpen) {
       setScAuthOpen(false);
-    } else if (foldersAccountsOpen) {
-      closeFoldersAccountsPanel();
     }
   };
 
@@ -1148,17 +1151,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </button>
           </div>
 
-          {/* Row 3: [Folders & Accounts] Slide-Out Trigger */}
+          {/* Row 3: [Folders & Accounts] XMB Auto-Expanding Shelf Trigger */}
           <button
             type="button"
             data-settings-folders-trigger="true"
-            onClick={() => {
-              if (foldersAccountsOpen) {
-                closeFoldersAccountsPanel();
-              } else {
-                openFoldersAccountsPanel();
-              }
-            }}
+            onMouseEnter={() => setFoldersAccountsOpen(true)}
+            onFocus={() => setFoldersAccountsOpen(true)}
+            onClick={() => openFoldersAccountsPanel()}
             style={{
               width: '100%',
               minHeight: 44,
@@ -1176,8 +1175,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
               📁 Folders & Accounts
             </span>
-            <span style={{ fontFamily: 'monospace', fontSize: 13, color: '#67e8f9', fontWeight: 900 }}>
-              {foldersAccountsOpen ? '▸ Shut' : '◄ Open'}
+            <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9', fontWeight: 900 }}>
+              ◄
             </span>
           </button>
 

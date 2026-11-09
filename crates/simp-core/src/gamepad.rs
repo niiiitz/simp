@@ -350,6 +350,12 @@ fn read_joystick_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sende
                 if let Some(act) = map_button_index_to_action(number, btn_map_ref) {
                     emit(act);
                 }
+            } else if value == 0 {
+                if let Some(act) = map_button_index_to_action(number, btn_map_ref) {
+                    if matches!(act, "up" | "down" | "left" | "right") {
+                        emit("dir_release");
+                    }
+                }
             }
         } else if ev_type == 0x02 {
             match number {
@@ -369,6 +375,8 @@ fn read_joystick_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sende
                             emit("left");
                         } else if dir == 1 {
                             emit("right");
+                        } else {
+                            emit("dir_release");
                         }
                     }
                 }
@@ -388,6 +396,8 @@ fn read_joystick_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sende
                             emit("up");
                         } else if dir == 1 {
                             emit("down");
+                        } else {
+                            emit("dir_release");
                         }
                     }
                 }
@@ -432,6 +442,8 @@ fn read_joystick_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sende
                             emit("left");
                         } else if dir == 1 {
                             emit("right");
+                        } else {
+                            emit("dir_release");
                         }
                     }
                 }
@@ -449,6 +461,8 @@ fn read_joystick_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sende
                             emit("up");
                         } else if dir == 1 {
                             emit("down");
+                        } else {
+                            emit("dir_release");
                         }
                     }
                 }
@@ -511,10 +525,16 @@ fn read_evdev_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sender<P
         let value = i32::from_ne_bytes([buf[20], buf[21], buf[22], buf[23]]);
 
         if ev_type == 0x01 {
-            // EV_KEY (value == 1 on button press)
+            // EV_KEY (value == 1 on button press, value == 0 on release)
             if value == 1 {
                 if let Some(act) = map_linux_keycode_to_action(code) {
                     emit(act);
+                }
+            } else if value == 0 {
+                if let Some(act) = map_linux_keycode_to_action(code) {
+                    if matches!(act, "up" | "down" | "left" | "right") {
+                        emit("dir_release");
+                    }
                 }
             }
         } else if ev_type == 0x03 {
@@ -538,6 +558,8 @@ fn read_evdev_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sender<P
                             emit("left");
                         } else if dir == 1 {
                             emit("right");
+                        } else {
+                            emit("dir_release");
                         }
                     }
                 }
@@ -559,6 +581,8 @@ fn read_evdev_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sender<P
                             emit("up");
                         } else if dir == 1 {
                             emit("down");
+                        } else {
+                            emit("dir_release");
                         }
                     }
                 }
@@ -609,6 +633,8 @@ fn read_evdev_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sender<P
                             emit("left");
                         } else if dir == 1 {
                             emit("right");
+                        } else {
+                            emit("dir_release");
                         }
                     }
                 }
@@ -627,6 +653,8 @@ fn read_evdev_loop(idx: usize, dev_path: &str, broadcast_tx: broadcast::Sender<P
                             emit("up");
                         } else if dir == 1 {
                             emit("down");
+                        } else {
+                            emit("dir_release");
                         }
                     }
                 }
@@ -885,6 +913,13 @@ fn read_steam_deck_hidraw_loop(
                 if now_pressed && !was_pressed {
                     let _ = broadcast_tx.send(PlaybackEvent::GamepadInput {
                         action: action.to_string(),
+                    });
+                } else if !now_pressed
+                    && was_pressed
+                    && matches!(action, "up" | "down" | "left" | "right")
+                {
+                    let _ = broadcast_tx.send(PlaybackEvent::GamepadInput {
+                        action: "dir_release".to_string(),
                     });
                 }
             }

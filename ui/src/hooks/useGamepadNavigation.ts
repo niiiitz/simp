@@ -175,6 +175,13 @@ export function useGamepadNavigation({
           })
         );
       }
+      if (el.closest('[data-settings-col="main"]')) {
+        window.dispatchEvent(
+          new CustomEvent('simp-settings-folders-focus', {
+            detail: { open: el.dataset.settingsFoldersTrigger === 'true' },
+          })
+        );
+      }
     }
   }, []);
 
@@ -944,14 +951,27 @@ export function useGamepadNavigation({
             playerActionsClose.click();
             break;
           }
-          // Hierarchical walk-back inside the Top-Left Settings Drawer (`SettingsModal`):
-          // If a nested section is expanded (`[data-settings-walk-back="true"]`), collapse it first!
+          // Hierarchical walk-back inside the Top-Right Settings Drawer (`SettingsModal`):
+          // 1. If a nested section (`iaAuthOpen`, `appleAuthOpen`, `scAuthOpen`, `addPathOpen`, `confirmHardReset`, `brightnessScrubActive`) is open, collapse it first.
           const settingsWalkBack = document.querySelector<HTMLElement>(
             '[data-settings-walk-back="true"]:not([disabled])'
           );
           if (settingsWalkBack) {
             settingsWalkBack.click();
             break;
+          }
+          // 2. If focus is inside the `Folders & Accounts` left shelf (`data-settings-col="sub"`), pressing `B` returns focus to the `Folders & Accounts` trigger in `main`.
+          if (
+            activeModalEl?.closest<HTMLElement>('[data-settings-col]')?.dataset.settingsCol ===
+            'sub'
+          ) {
+            const foldersTrigger = document.querySelector<HTMLElement>(
+              '[data-settings-col="main"] [data-settings-folders-trigger="true"]:not([disabled])'
+            );
+            if (foldersTrigger) {
+              applyFocusMarker(foldersTrigger);
+              break;
+            }
           }
           const hybridPickerClose = document.querySelector<HTMLElement>(
             '[data-hybrid-picker-close="true"]'
@@ -1347,10 +1367,20 @@ export function useGamepadNavigation({
     };
 
     // Native Linux `/dev/input/js*`, `/dev/input/event*` & Steam Deck `/dev/hidraw*` daemon gamepad fallback
-    // for standalone KDE / SteamVR windows
+    // for standalone KDE / SteamVR windows (with 380ms initial hold delay + 115ms auto-repeat for D-Pad/Stick)
+    let daemonHeldDir: {
+      dir: 'up' | 'down' | 'left' | 'right';
+      startedAt: number;
+      lastRepeatAt: number;
+    } | null = null;
+
     const onDaemonGamepad = (e: any) => {
       const action = e?.detail?.action;
       if (!action) return;
+      if (action === 'dir_release') {
+        daemonHeldDir = null;
+        return;
+      }
       if (window.parent !== window) return;
       // Only ignore if the browser tab is hidden in the background; in SteamVR Desktop overlay mode,
       // visible windows (`visibilityState === 'visible'`) often have `document.hasFocus() === false` when using Gamepad mode!
@@ -1359,8 +1389,31 @@ export function useGamepadNavigation({
       if (now - lastBridgeMsgTsRef.current < 220) {
         return;
       }
+      if (action === 'up' || action === 'down' || action === 'left' || action === 'right') {
+        daemonHeldDir = { dir: action, startedAt: now, lastRepeatAt: now };
+      } else {
+        daemonHeldDir = null;
+      }
       handleGamepadAction(action, 'daemon');
     };
+
+    const daemonRepeatTimer = window.setInterval(() => {
+      if (!daemonHeldDir) return;
+      if (document.visibilityState === 'hidden') {
+        daemonHeldDir = null;
+        return;
+      }
+      const now = performance.now();
+      // Safety cap: stop repeating after 8s if a release event was missed
+      if (now - daemonHeldDir.startedAt > 8000) {
+        daemonHeldDir = null;
+        return;
+      }
+      if (now - daemonHeldDir.startedAt >= 380 && now - daemonHeldDir.lastRepeatAt >= 115) {
+        daemonHeldDir.lastRepeatAt = now;
+        handleGamepadAction(daemonHeldDir.dir, 'daemon');
+      }
+    }, 45);
 
     window.addEventListener('keydown', onKeyDown, true);
     window.addEventListener('keyup', onKeyUp, true);
@@ -1369,6 +1422,7 @@ export function useGamepadNavigation({
     window.addEventListener('vgp_ondirection', onVgpEvent as EventListener, true);
     window.addEventListener('simp-daemon-gamepad', onDaemonGamepad as EventListener);
     return () => {
+      window.clearInterval(daemonRepeatTimer);
       window.removeEventListener('keydown', onKeyDown, true);
       window.removeEventListener('keyup', onKeyUp, true);
       window.removeEventListener('message', onMessage);
@@ -1410,8 +1464,10 @@ export function useGamepadNavigation({
   // querying the OS HID subsystem at 20Hz when no controller is plugged in or when the window is minimized.
   useEffect(() => {
     const prevButtonsByPad = new Map<number, boolean[]>();
-    const prevAxisDirByPad = new Map<number, string | null>();
-    const prevHatDirByPad = new Map<number, string | null>();
+    const heldDirByPad = new Map<
+      number,
+      { dir: 'up' | 'down' | 'left' | 'right'; startedAt: number; lastRepeatAt: number }
+    >();
 
     const checkHasPad = () => {
       if (!navigator.getGamepads) return false;
@@ -1487,41 +1543,51 @@ export function useGamepadNavigation({
           if (pressed(7)) fireWebPad(pad.mapping === 'standard' ? 'r2' : 'power'); // R2 or raw Linux Start
           if (pressed(8)) fireWebPad('sources'); // Select
           if (pressed(9)) fireWebPad('power'); // Start
-          if (pressed(12)) fireWebPad('up'); // D-Up
-          if (pressed(13)) fireWebPad('down'); // D-Down
-          if (pressed(14)) fireWebPad('left'); // D-Left
-          if (pressed(15)) fireWebPad('right'); // D-Right
+        }
 
-          // Linux raw `joydev` D-Pad Hat Axes (`ABS_HAT0X` = axes[6], `ABS_HAT0Y` = axes[7])
-          const hx = pad.axes[6] ?? 0;
-          const hy = pad.axes[7] ?? 0;
-          let hatDir: 'up' | 'down' | 'left' | 'right' | null = null;
-          if (hy < -0.5) hatDir = 'up';
-          else if (hy > 0.5) hatDir = 'down';
-          else if (hx < -0.5) hatDir = 'left';
-          else if (hx > 0.5) hatDir = 'right';
+        // Unified Directional Input (D-Pad Buttons + Linux Hat Axes + Left Stick)
+        // Fires immediately on initial press, then repeats every ~115ms after a 380ms hold buffer
+        let activeDir: 'up' | 'down' | 'left' | 'right' | null = null;
+        if (!bridgeActive) {
+          if (pad.buttons[12]?.pressed) activeDir = 'up';
+          else if (pad.buttons[13]?.pressed) activeDir = 'down';
+          else if (pad.buttons[14]?.pressed) activeDir = 'left';
+          else if (pad.buttons[15]?.pressed) activeDir = 'right';
 
-          const prevHat = prevHatDirByPad.get(pad.index) || null;
-          if (hatDir && hatDir !== prevHat) {
-            fireWebPad(hatDir);
+          if (!activeDir) {
+            const hx = pad.axes[6] ?? 0;
+            const hy = pad.axes[7] ?? 0;
+            if (hy < -0.5) activeDir = 'up';
+            else if (hy > 0.5) activeDir = 'down';
+            else if (hx < -0.5) activeDir = 'left';
+            else if (hx > 0.5) activeDir = 'right';
           }
-          prevHatDirByPad.set(pad.index, hatDir);
+        }
+        if (!activeDir) {
+          const lx = pad.axes[0] ?? 0;
+          const ly = pad.axes[1] ?? 0;
+          if (ly < -0.55) activeDir = 'up';
+          else if (ly > 0.55) activeDir = 'down';
+          else if (lx < -0.55) activeDir = 'left';
+          else if (lx > 0.55) activeDir = 'right';
         }
 
-        // Left Stick 2D Spatial Navigation (with edge-trigger debounce)
-        const lx = pad.axes[0] ?? 0;
-        const ly = pad.axes[1] ?? 0;
-        let stickDir: 'up' | 'down' | 'left' | 'right' | null = null;
-        if (ly < -0.55) stickDir = 'up';
-        else if (ly > 0.55) stickDir = 'down';
-        else if (lx < -0.55) stickDir = 'left';
-        else if (lx > 0.55) stickDir = 'right';
-
-        const prevDir = prevAxisDirByPad.get(pad.index) || null;
-        if (stickDir && stickDir !== prevDir) {
-          fireWebPad(stickDir);
+        const prevHeld = heldDirByPad.get(pad.index);
+        if (activeDir) {
+          if (!prevHeld || prevHeld.dir !== activeDir) {
+            fireWebPad(activeDir);
+            heldDirByPad.set(pad.index, {
+              dir: activeDir,
+              startedAt: now,
+              lastRepeatAt: now,
+            });
+          } else if (now - prevHeld.startedAt >= 380 && now - prevHeld.lastRepeatAt >= 115) {
+            prevHeld.lastRepeatAt = now;
+            fireWebPad(activeDir);
+          }
+        } else if (prevHeld) {
+          heldDirByPad.delete(pad.index);
         }
-        prevAxisDirByPad.set(pad.index, stickDir);
 
         // Right Stick Y-Axis Volume Adjustment
         const ry = (pad.mapping === 'standard' ? pad.axes[3] : pad.axes[4] ?? pad.axes[3]) ?? 0;
