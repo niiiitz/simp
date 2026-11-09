@@ -453,7 +453,12 @@ export function useGamepadNavigation({
               : Math.min(Math.abs(cx - r.left), Math.abs(cx - r.right));
           const centerTieBreak =
             (dir === 'left' || dir === 'right' ? Math.abs(ty - cy) : Math.abs(tx - cx)) * 0.08;
-          const score = primary + (boxCross + centerTieBreak) * 2.2;
+          // For Up/Down inside Settings/Folders & Accounts, weight vertical distance (`primary`) heavily
+          // so pressing Down/Up never skips over an expanded sub-row whose buttons sit slightly to the left or right.
+          const score =
+            dir === 'left' || dir === 'right'
+              ? primary + (boxCross + centerTieBreak) * 2.2
+              : primary * 2.6 + boxCross * 0.4 + centerTieBreak;
           if (score < bestSettingsScore) {
             bestSettingsScore = score;
             bestInSettingsCol = candidate;

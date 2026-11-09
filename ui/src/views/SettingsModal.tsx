@@ -507,7 +507,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     borderTop: '1px solid #281820',
                   }}
                 >
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                     {!snap?.apple_authenticated ? (
                       <button
                         type="button"
@@ -629,6 +629,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   style={{
                     display: 'flex',
                     flexWrap: 'wrap',
+                    justifyContent: 'flex-end',
                     gap: 6,
                     paddingTop: 6,
                     borderTop: '1px solid #281c14',
