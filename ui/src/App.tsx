@@ -417,7 +417,7 @@ const ConsoleMainApp: React.FC = () => {
     }, 2600);
   }, []);
 
-  const [updateStatus, setUpdateStatus] = useState<SimpUpdateStatus>({});
+  const [updateStatus, setUpdateStatus] = useState<SimpUpdateStatus>({ channel: 'stable' });
 
   useEffect(() => {
     if (snap?.daemon_version) {
@@ -481,7 +481,7 @@ const ConsoleMainApp: React.FC = () => {
             latest_tag: data.latest_tag,
             update_available: Boolean(data.update_available),
             target_arch: data.target_arch,
-            channel: data.channel || 'alpha',
+            channel: data.channel || 'stable',
             checking: false,
           });
           return;
@@ -490,7 +490,7 @@ const ConsoleMainApp: React.FC = () => {
             ...prev,
             current_version: data.current_version || prev.current_version,
             target_arch: data.target_arch || prev.target_arch,
-            channel: data.channel || prev.channel || 'alpha',
+            channel: data.channel || prev.channel || 'stable',
             checking: false,
             error: data.error,
           }));
@@ -702,7 +702,7 @@ const ConsoleMainApp: React.FC = () => {
         })
         .catch(() => {});
     }
-    if (!powerModalOpen) {
+    if (!sourceModalOpen && !powerModalOpen) {
       setConfirmHardReset(false);
     } else {
       checkSimpUpdates(true);

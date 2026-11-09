@@ -206,10 +206,10 @@ pub fn check_for_updates() -> Result<UpdateStatus> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let target_arch = std::env::consts::ARCH.to_string();
     let prov = load_provisioning_settings();
-    let channel = if prov.update_channel.trim().eq_ignore_ascii_case("stable") {
-        "stable".to_string()
-    } else {
+    let channel = if prov.update_channel.trim().eq_ignore_ascii_case("alpha") {
         "alpha".to_string()
+    } else {
+        "stable".to_string()
     };
     let api_url = if prov.github_releases_api_url.trim().is_empty() {
         "https://api.github.com/repos/niiiitz/simp/releases?per_page=10"

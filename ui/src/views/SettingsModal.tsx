@@ -178,6 +178,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }, [snap?.internet_archive_authenticated]);
 
   useEffect(() => {
+    if (!updateStatus.latest_version && !updateStatus.checking) {
+      checkSimpUpdates(true);
+    }
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     const fetchPerf = async () => {
       try {
@@ -1332,7 +1338,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 disabled={Boolean(updateStatus.checking || updateStatus.applying)}
                 onClick={async () => {
                   const nextChannel =
-                    (updateStatus.channel || 'alpha').toLowerCase() === 'stable'
+                    (updateStatus.channel || 'stable').toLowerCase() === 'stable'
                       ? 'alpha'
                       : 'stable';
                   try {
@@ -1357,7 +1363,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   borderRadius: 12,
                   background: '#0d0d14',
                   border:
-                    (updateStatus.channel || 'alpha').toLowerCase() === 'stable'
+                    (updateStatus.channel || 'stable').toLowerCase() === 'stable'
                       ? '1px solid #6ee7b7'
                       : '1px solid #222230',
                   color: '#d4d4dc',
@@ -1374,13 +1380,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <span
                   style={{
                     color:
-                      (updateStatus.channel || 'alpha').toLowerCase() === 'stable'
+                      (updateStatus.channel || 'stable').toLowerCase() === 'stable'
                         ? '#6ee7b7'
                         : '#67e8f9',
                     fontFamily: 'monospace',
                   }}
                 >
-                  {(updateStatus.channel || 'alpha').toLowerCase() === 'stable'
+                  {(updateStatus.channel || 'stable').toLowerCase() === 'stable'
                     ? 'Stable'
                     : 'Alpha'}
                 </span>

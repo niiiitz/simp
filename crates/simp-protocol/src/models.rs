@@ -268,11 +268,7 @@ fn default_release_asset_template() -> String {
 }
 
 pub fn default_update_channel() -> String {
-    if env!("CARGO_PKG_VERSION").contains('-') {
-        "alpha".to_string()
-    } else {
-        "stable".to_string()
-    }
+    "stable".to_string()
 }
 
 impl Default for ProvisioningSettings {

@@ -364,42 +364,22 @@ async fn update_channel_handler(
     State(state): State<DaemonIpcState>,
     Json(payload): Json<UpdateChannelPayload>,
 ) -> impl IntoResponse {
-    let channel = if payload.channel.trim().eq_ignore_ascii_case("stable") {
-        "stable".to_string()
-    } else {
+    let channel = if payload.channel.trim().eq_ignore_ascii_case("alpha") {
         "alpha".to_string()
+    } else {
+        "stable".to_string()
     };
     {
         let mut cfg = state.settings.lock().unwrap();
         cfg.provisioning.update_channel = channel.clone();
         let _ = crate::config::save_settings(&cfg);
     }
-    let res = tokio::task::spawn_blocking(simp_core::updater::check_for_updates).await;
-    match res {
-        Ok(Ok(status)) => Json(serde_json::json!({
-            "ok": true,
-            "channel": status.channel,
-            "current_version": status.current_version,
-            "latest_version": status.latest_version,
-            "latest_tag": status.latest_tag,
-            "update_available": status.update_available,
-            "release_url": status.release_url,
-            "published_at": status.published_at,
-            "target_arch": status.target_arch,
-        })),
-        Ok(Err(e)) => Json(serde_json::json!({
-            "ok": true,
-            "channel": channel,
-            "current_version": env!("CARGO_PKG_VERSION"),
-            "target_arch": std::env::consts::ARCH,
-            "error": e.to_string(),
-        })),
-        Err(e) => Json(serde_json::json!({
-            "ok": false,
-            "channel": channel,
-            "error": e.to_string(),
-        })),
-    }
+    Json(serde_json::json!({
+        "ok": true,
+        "channel": channel,
+        "current_version": env!("CARGO_PKG_VERSION"),
+        "target_arch": std::env::consts::ARCH,
+    }))
 }
 
 #[derive(serde::Deserialize)]
