@@ -81,9 +81,9 @@ export interface LibraryBrowserViewProps {
   cdScanning: boolean;
   handleScanOpticalDisc: (forceRefresh?: boolean, silent?: boolean) => Promise<void>;
   handleEjectOpticalDisc: () => void;
-  appleSubTab: 'pinned' | 'cloud_playlists' | 'radio' | 'new';
+  appleSubTab: 'pinned' | 'for_you' | 'cloud_playlists' | 'new' | 'radio';
   setAppleSubTab: React.Dispatch<
-    React.SetStateAction<'pinned' | 'cloud_playlists' | 'radio' | 'new'>
+    React.SetStateAction<'pinned' | 'for_you' | 'cloud_playlists' | 'new' | 'radio'>
   >;
   soundCloudSubTab: 'pinned' | 'likes_sets' | 'stream_radio' | 'trending';
   setSoundCloudSubTab: React.Dispatch<
@@ -111,10 +111,21 @@ export interface LibraryBrowserViewProps {
   setCloudPlaylists: React.Dispatch<React.SetStateAction<AppleCloudPlaylistSummary[]>>;
   radioStations: AppleRadioStationSummary[];
   setRadioStations: React.Dispatch<React.SetStateAction<AppleRadioStationSummary[]>>;
+  personalRadioStations?: AppleRadioStationSummary[];
+  setPersonalRadioStations?: React.Dispatch<React.SetStateAction<AppleRadioStationSummary[]>>;
+  liveRadioStations?: AppleRadioStationSummary[];
+  setLiveRadioStations?: React.Dispatch<React.SetStateAction<AppleRadioStationSummary[]>>;
   forYouPlaylists: AppleCloudPlaylistSummary[];
   setForYouPlaylists: React.Dispatch<React.SetStateAction<AppleCloudPlaylistSummary[]>>;
   forYouAlbums: AppleCloudAlbumSummary[];
   setForYouAlbums: React.Dispatch<React.SetStateAction<AppleCloudAlbumSummary[]>>;
+  forYouNewReleases?: AppleCloudAlbumSummary[];
+  setForYouNewReleases?: React.Dispatch<React.SetStateAction<AppleCloudAlbumSummary[]>>;
+  setForYouShelves?: React.Dispatch<React.SetStateAction<AppleRecommendationShelf[]>>;
+  appleRecentlyPlayedTracks?: TrackMetadata[];
+  setAppleRecentlyPlayedTracks?: React.Dispatch<React.SetStateAction<TrackMetadata[]>>;
+  newFeedRecentReleases?: AppleCloudAlbumSummary[];
+  setNewFeedRecentReleases?: React.Dispatch<React.SetStateAction<AppleCloudAlbumSummary[]>>;
   newFeedAlbums: AppleCloudAlbumSummary[];
   setNewFeedAlbums: React.Dispatch<React.SetStateAction<AppleCloudAlbumSummary[]>>;
   newFeedPlaylists: AppleCloudPlaylistSummary[];
@@ -374,10 +385,21 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   setCloudPlaylists,
   radioStations,
   setRadioStations,
+  personalRadioStations = [],
+  setPersonalRadioStations,
+  liveRadioStations = [],
+  setLiveRadioStations,
   forYouPlaylists,
   setForYouPlaylists,
   forYouAlbums,
   setForYouAlbums,
+  forYouNewReleases = [],
+  setForYouNewReleases,
+  setForYouShelves,
+  appleRecentlyPlayedTracks = [],
+  setAppleRecentlyPlayedTracks,
+  newFeedRecentReleases = [],
+  setNewFeedRecentReleases,
   newFeedAlbums,
   setNewFeedAlbums,
   newFeedPlaylists,
@@ -553,10 +575,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   >('all');
   const [cloudPage, setCloudPage] = useState<number>(0);
   const [cloudAlpha, setCloudAlpha] = useState<AlphaBucket>('all');
-  const [radioFilter, setRadioFilter] = useState<
-    'all' | 'stations' | 'mixes' | 'albums' | 'recent_library'
+  const [forYouFilter, setForYouFilter] = useState<
+    'all' | 'stations' | 'new_releases' | 'recently_played' | 'mixes' | 'recent_library'
   >('all');
-  const [newFilter, setNewFilter] = useState<'all' | 'albums' | 'playlists' | 'songs'>('all');
+  const [newFilter, setNewFilter] = useState<
+    'all' | 'recent_releases' | 'albums' | 'playlists' | 'songs'
+  >('all');
   const [scLikesFilter, setScLikesFilter] = useState<'all' | 'likes' | 'sets' | 'following'>('all');
   const [scFollowings, setScFollowings] = useState<SoundCloudUserSummary[]>([]);
   const [scFollowingsLoaded, setScFollowingsLoaded] = useState<boolean>(false);
@@ -607,7 +631,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       !isSourceIncluded('apple_music')
     )
       return;
-    if (appleSubTab !== 'radio' && appleSubTab !== 'pinned') return;
+    if (appleSubTab !== 'for_you' && appleSubTab !== 'pinned') return;
     if (recentLoadedRef.current && recentlyAddedCloudAlbums.length > 0) return;
     recentLoadedRef.current = true;
     fetchAppleLibraryRecentlyAdded()
@@ -1430,7 +1454,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     rightPaneMode: 'browse' | 'tracks' | 'artist';
     browserTarget: BrowserTarget | null;
     browserTracks: TrackMetadata[];
-    appleSubTab: 'pinned' | 'cloud_playlists' | 'radio' | 'new';
+    appleSubTab: 'pinned' | 'for_you' | 'cloud_playlists' | 'new' | 'radio';
     soundCloudSubTab: 'pinned' | 'likes_sets' | 'stream_radio' | 'trending';
     iaSubTab: 'pinned' | 'trending' | 'films' | 'tv' | 'audio';
     activeMountRoot: string | null;
@@ -1968,12 +1992,14 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       : soundCloudSubTab === 'trending'
       ? 'SoundCloud Trending & Mixes'
       : 'SIMP Library (SoundCloud)'
+    : appleSubTab === 'for_you'
+    ? 'For You'
     : appleSubTab === 'cloud_playlists'
     ? 'Apple Playlists'
-    : appleSubTab === 'radio'
-    ? 'Radio & For You'
     : appleSubTab === 'new'
     ? 'New & Charts'
+    : appleSubTab === 'radio'
+    ? 'Radio'
     : browserSourceFilter === 'apple_music'
     ? 'SIMP Library (Apple)'
     : 'My SIMP Library';
@@ -4730,7 +4756,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         } else if (single === 'apple_music') {
                           setActiveMountRoot(null);
                           if (appleSubTab === 'pinned') {
-                            setAppleSubTab('cloud_playlists');
+                            setAppleSubTab('for_you');
                           }
                           setRightPaneMode('browse');
                         } else if (single === 'internet_archive') {
@@ -5065,6 +5091,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       label: `📌 SIMP Library (${filteredPlaylists.length + pinnedAppleAlbumCount})`,
                       isSimp: true,
                     },
+                    { id: 'for_you' as const, label: '✨ For You', isSimp: false },
                     {
                       id: 'cloud_playlists' as const,
                       label: `☁️ Apple Playlists${
@@ -5072,8 +5099,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       }`,
                       isSimp: false,
                     },
-                    { id: 'radio' as const, label: '📻 Radio & For You', isSimp: false },
-                    { id: 'new' as const, label: '✨ New & Charts', isSimp: false },
+                    { id: 'new' as const, label: '🔥 New & Charts', isSimp: false },
+                    { id: 'radio' as const, label: '📻 Radio', isSimp: false },
                   ]
                 : [
                     {
@@ -5164,7 +5191,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   pushCurrentNavState();
                   setActiveMountRoot(null);
                   setBrowserSourceFilter('apple_music');
-                  setAppleSubTab('cloud_playlists');
+                  setAppleSubTab('for_you');
                   setRightPaneMode('browse');
                   focusRightPaneFirstTile();
                 }}
@@ -6863,309 +6890,691 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 )}
 
                 {/* ---------------------------------------------------------
-                    4. 📻 RADIO & FOR YOU HUB (Sub-filter Pills + 4-Col-Max Artwork Tiles)
+                    4. ✨ FOR YOU HUB (Personal Radio, New Releases, Recently Played, Mixes & Shelves)
                    --------------------------------------------------------- */}
                 {browserSourceFilter !== 'soundcloud' &&
                   browserSourceFilter !== 'internet_archive' &&
-                  appleSubTab === 'radio' &&
+                  appleSubTab === 'for_you' &&
                   snap?.apple_authenticated && (
                   <>
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        paddingBottom: 10,
-                        borderBottom: '1px solid #16161c',
-                        flexWrap: 'wrap',
-                        gap: 8,
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                        <span
-                          style={{
-                            fontSize: 14,
-                            fontWeight: 800,
-                            color: '#fecdd3',
-                            marginRight: 6,
-                          }}
-                        >
-                          📻 Radio & For You
-                        </span>
-                        {(
-                          [
-                            { id: 'all', label: 'All' },
-                            { id: 'stations', label: `📻 Stations (${radioStations.length})` },
-                            { id: 'mixes', label: `✨ For You Mixes (${forYouPlaylists.length})` },
-                            { id: 'albums', label: `💿 Albums (${forYouAlbums.length})` },
-                            ...(recentlyAddedCloudAlbums.length > 0
-                              ? [
-                                  {
-                                    id: 'recent_library' as const,
-                                    label: `🕒 Recently Added (${recentlyAddedCloudAlbums.length})`,
-                                  },
-                                ]
-                              : []),
-                          ] as const
-                        ).map((f) => {
-                          const active = radioFilter === f.id;
-                          return (
-                            <button
-                              key={f.id}
-                              data-right-filter-pill="true"
-                              onClick={() => setRadioFilter(f.id)}
+                    {(() => {
+                      const recentShelves = forYouShelves.filter(
+                        (s) =>
+                          s.id === 'recently-played' ||
+                          s.title.toLowerCase().includes('recent')
+                      );
+                      const otherShelves = forYouShelves.filter(
+                        (s) =>
+                          s.id !== 'recently-played' &&
+                          !s.title.toLowerCase().includes('recent') &&
+                          !s.title.toLowerCase().includes('new release')
+                      );
+                      const recentShelfCount = recentShelves.reduce(
+                        (acc, s) =>
+                          acc + s.playlists.length + s.albums.length + s.stations.length,
+                        0
+                      );
+                      const totalRecentCount =
+                        recentShelfCount + appleRecentlyPlayedTracks.length;
+                      const effectiveNewReleases =
+                        forYouNewReleases.length > 0
+                          ? forYouNewReleases
+                          : newFeedRecentReleases;
+
+                      return (
+                        <>
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              paddingBottom: 10,
+                              borderBottom: '1px solid #16161c',
+                              flexWrap: 'wrap',
+                              gap: 8,
+                            }}
+                          >
+                            <div
                               style={{
-                                padding: '4px 10px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                flexWrap: 'wrap',
+                              }}
+                            >
+                              <span
+                                style={{
+                                  fontSize: 14,
+                                  fontWeight: 800,
+                                  color: '#fecdd3',
+                                  marginRight: 6,
+                                }}
+                              >
+                                ✨ For You
+                              </span>
+                              {(
+                                [
+                                  { id: 'all' as const, label: 'All' },
+                                  ...(personalRadioStations.length > 0
+                                    ? [
+                                        {
+                                          id: 'stations' as const,
+                                          label: `📻 Personal Radio (${personalRadioStations.length})`,
+                                        },
+                                      ]
+                                    : []),
+                                  ...(effectiveNewReleases.length > 0
+                                    ? [
+                                        {
+                                          id: 'new_releases' as const,
+                                          label: `🆕 New Releases (${effectiveNewReleases.length})`,
+                                        },
+                                      ]
+                                    : []),
+                                  ...(totalRecentCount > 0
+                                    ? [
+                                        {
+                                          id: 'recently_played' as const,
+                                          label: `🕒 Recently Played (${totalRecentCount})`,
+                                        },
+                                      ]
+                                    : []),
+                                  {
+                                    id: 'mixes' as const,
+                                    label: `✨ Mixes & Recommendations (${
+                                      forYouPlaylists.length + forYouAlbums.length
+                                    })`,
+                                  },
+                                  ...(recentlyAddedCloudAlbums.length > 0
+                                    ? [
+                                        {
+                                          id: 'recent_library' as const,
+                                          label: `☁️ Recently Added (${recentlyAddedCloudAlbums.length})`,
+                                        },
+                                      ]
+                                    : []),
+                                ] as const
+                              ).map((f) => {
+                                const active = forYouFilter === f.id;
+                                return (
+                                  <button
+                                    key={f.id}
+                                    data-right-filter-pill="true"
+                                    onClick={() => setForYouFilter(f.id)}
+                                    style={{
+                                      padding: '4px 10px',
+                                      borderRadius: 6,
+                                      background: active ? '#28111b' : '#101018',
+                                      border: active
+                                        ? '1px solid #fa243c'
+                                        : '1px solid #222230',
+                                      color: active ? '#fecdd3' : '#9ca3af',
+                                      fontSize: 11,
+                                      fontWeight: 800,
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    {f.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <button
+                              data-right-filter-pill="true"
+                              onClick={() => {
+                                setCloudLoading(true);
+                                Promise.all([
+                                  fetchAppleRadioAndForYou()
+                                    .then((res) => {
+                                      setRadioStations(res.stations);
+                                      setPersonalRadioStations?.(res.personal_stations ?? []);
+                                      setLiveRadioStations?.(res.live_stations ?? []);
+                                      setForYouNewReleases?.(res.new_releases ?? []);
+                                      setForYouPlaylists(res.playlists);
+                                      setForYouAlbums(res.albums);
+                                      setForYouShelves?.(res.shelves ?? []);
+                                      setAppleRecentlyPlayedTracks?.(res.recently_played ?? []);
+                                    })
+                                    .catch(() => {}),
+                                  fetchAppleLibraryRecentlyAdded()
+                                    .then((albs) => {
+                                      if (Array.isArray(albs))
+                                        setRecentlyAddedCloudAlbums(albs);
+                                    })
+                                    .catch(() => {}),
+                                ]).finally(() => setCloudLoading(false));
+                              }}
+                              style={{
+                                padding: '4px 9px',
                                 borderRadius: 6,
-                                background: active ? '#28111b' : '#101018',
-                                border: active ? '1px solid #fa243c' : '1px solid #222230',
-                                color: active ? '#fecdd3' : '#9ca3af',
+                                background: '#161620',
+                                border: '1px solid #2a2a38',
+                                color: '#fda4af',
                                 fontSize: 11,
-                                fontWeight: 800,
+                                fontWeight: 700,
                                 cursor: 'pointer',
                               }}
                             >
-                              {f.label}
+                              ↻ Refresh
                             </button>
-                          );
-                        })}
-                      </div>
-                      <button
-                        data-right-filter-pill="true"
-                        onClick={() => {
-                          setCloudLoading(true);
-                          Promise.all([
-                            fetchAppleRadioAndForYou()
-                              .then((res) => {
-                                setRadioStations(res.stations);
-                                setForYouPlaylists(res.playlists);
-                                setForYouAlbums(res.albums);
-                              })
-                              .catch(() => {}),
-                            fetchAppleLibraryRecentlyAdded()
-                              .then((albs) => {
-                                if (Array.isArray(albs)) setRecentlyAddedCloudAlbums(albs);
-                              })
-                              .catch(() => {}),
-                          ]).finally(() => setCloudLoading(false));
-                        }}
-                        style={{
-                          padding: '4px 9px',
-                          borderRadius: 6,
-                          background: '#161620',
-                          border: '1px solid #2a2a38',
-                          color: '#fda4af',
-                          fontSize: 11,
-                          fontWeight: 700,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        ↻ Refresh
-                      </button>
-                    </div>
+                          </div>
 
-                    {(radioFilter === 'all' || radioFilter === 'stations') &&
-                      radioStations.length > 0 && (
-                        <>
-                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                            📻 LIVE & PERSONAL RADIO STATIONS ({radioStations.length})
-                          </div>
-                          <div style={tileGridStyle}>
-                            {radioStations.map(renderStationCard)}
-                          </div>
+                          {(forYouFilter === 'all' || forYouFilter === 'stations') &&
+                            personalRadioStations.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  📻 PERSONAL RADIO STATIONS ({personalRadioStations.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {personalRadioStations.map(renderStationCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {(forYouFilter === 'all' || forYouFilter === 'new_releases') &&
+                            effectiveNewReleases.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  🆕 NEW & RECENT RELEASES FOR YOU ({effectiveNewReleases.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {effectiveNewReleases.map(renderCloudAlbumCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {(forYouFilter === 'all' || forYouFilter === 'recently_played') &&
+                            totalRecentCount > 0 && (
+                              <>
+                                {recentShelves.map((shelf) => {
+                                  const totalItems =
+                                    shelf.playlists.length +
+                                    shelf.albums.length +
+                                    shelf.stations.length;
+                                  if (totalItems === 0) return null;
+                                  return (
+                                    <React.Fragment key={shelf.id}>
+                                      <div
+                                        style={{
+                                          fontSize: 11,
+                                          fontFamily: 'monospace',
+                                          color: '#fda4af',
+                                        }}
+                                      >
+                                        🕒 {shelf.title.toUpperCase()} ({totalItems})
+                                      </div>
+                                      <div style={tileGridStyle}>
+                                        {shelf.stations.map(renderStationCard)}
+                                        {shelf.playlists.map(renderCloudPlaylistCard)}
+                                        {shelf.albums.map(renderCloudAlbumCard)}
+                                      </div>
+                                    </React.Fragment>
+                                  );
+                                })}
+
+                                {appleRecentlyPlayedTracks.length > 0 && (
+                                  <>
+                                    <div
+                                      style={{
+                                        fontSize: 11,
+                                        fontFamily: 'monospace',
+                                        color: '#fda4af',
+                                      }}
+                                    >
+                                      🎵 RECENTLY PLAYED TRACKS (
+                                      {appleRecentlyPlayedTracks.length})
+                                    </div>
+                                    <div
+                                      style={{
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: 6,
+                                      }}
+                                    >
+                                      {appleRecentlyPlayedTracks
+                                        .slice(
+                                          0,
+                                          forYouFilter === 'recently_played' ? 40 : 12
+                                        )
+                                        .map((s) =>
+                                          renderSingleSongRow(
+                                            s,
+                                            appleRecentlyPlayedTracks,
+                                            'for_you_recent'
+                                          )
+                                        )}
+                                    </div>
+                                  </>
+                                )}
+                              </>
+                            )}
+
+                          {(forYouFilter === 'all' || forYouFilter === 'recent_library') &&
+                            recentlyAddedCloudAlbums.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  ☁️ RECENTLY ADDED TO YOUR APPLE CLOUD LIBRARY (
+                                  {recentlyAddedCloudAlbums.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {recentlyAddedCloudAlbums.map(renderCloudAlbumCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {(forYouFilter === 'all' || forYouFilter === 'mixes') &&
+                            (otherShelves.length > 0 ? (
+                              <>
+                                {otherShelves.map((shelf) => {
+                                  const totalItems =
+                                    shelf.playlists.length +
+                                    shelf.albums.length +
+                                    shelf.stations.length;
+                                  if (totalItems === 0) return null;
+                                  return (
+                                    <React.Fragment key={shelf.id}>
+                                      <div
+                                        style={{
+                                          fontSize: 11,
+                                          fontFamily: 'monospace',
+                                          color: '#fda4af',
+                                        }}
+                                      >
+                                        ✨ {shelf.title.toUpperCase()} ({totalItems})
+                                      </div>
+                                      <div style={tileGridStyle}>
+                                        {shelf.stations.map(renderStationCard)}
+                                        {shelf.playlists.map(renderCloudPlaylistCard)}
+                                        {shelf.albums.map(renderCloudAlbumCard)}
+                                      </div>
+                                    </React.Fragment>
+                                  );
+                                })}
+                              </>
+                            ) : (
+                              <>
+                                {forYouPlaylists.length > 0 && (
+                                  <>
+                                    <div
+                                      style={{
+                                        fontSize: 11,
+                                        fontFamily: 'monospace',
+                                        color: '#fda4af',
+                                      }}
+                                    >
+                                      ✨ MADE FOR YOU & HEAVY ROTATION (
+                                      {forYouPlaylists.length})
+                                    </div>
+                                    <div style={tileGridStyle}>
+                                      {forYouPlaylists.map(renderCloudPlaylistCard)}
+                                    </div>
+                                  </>
+                                )}
+
+                                {forYouAlbums.length > 0 && (
+                                  <>
+                                    <div
+                                      style={{
+                                        fontSize: 11,
+                                        fontFamily: 'monospace',
+                                        color: '#fda4af',
+                                      }}
+                                    >
+                                      💿 RECOMMENDED FULL ALBUMS ({forYouAlbums.length})
+                                    </div>
+                                    <div style={tileGridStyle}>
+                                      {forYouAlbums.map(renderCloudAlbumCard)}
+                                    </div>
+                                  </>
+                                )}
+                              </>
+                            ))}
                         </>
-                      )}
-
-                    {(radioFilter === 'all' || radioFilter === 'recent_library') &&
-                      recentlyAddedCloudAlbums.length > 0 && (
-                        <>
-                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                            🕒 RECENTLY ADDED TO YOUR APPLE CLOUD LIBRARY (
-                            {recentlyAddedCloudAlbums.length})
-                          </div>
-                          <div style={tileGridStyle}>
-                            {recentlyAddedCloudAlbums.map(renderCloudAlbumCard)}
-                          </div>
-                        </>
-                      )}
-
-                    {radioFilter === 'all' && forYouShelves.length > 0 ? (
-                      <>
-                        {forYouShelves.map((shelf) => {
-                          const totalItems =
-                            shelf.playlists.length + shelf.albums.length + shelf.stations.length;
-                          if (totalItems === 0) return null;
-                          return (
-                            <React.Fragment key={shelf.id}>
-                              <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                                ✨ {shelf.title.toUpperCase()} ({totalItems})
-                              </div>
-                              <div style={tileGridStyle}>
-                                {shelf.stations.map(renderStationCard)}
-                                {shelf.playlists.map(renderCloudPlaylistCard)}
-                                {shelf.albums.map(renderCloudAlbumCard)}
-                              </div>
-                            </React.Fragment>
-                          );
-                        })}
-                      </>
-                    ) : (
-                      <>
-                        {(radioFilter === 'all' || radioFilter === 'mixes') &&
-                          forYouPlaylists.length > 0 && (
-                            <>
-                              <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                                ✨ MADE FOR YOU & HEAVY ROTATION ({forYouPlaylists.length})
-                              </div>
-                              <div style={tileGridStyle}>
-                                {forYouPlaylists.map(renderCloudPlaylistCard)}
-                              </div>
-                            </>
-                          )}
-
-                        {(radioFilter === 'all' || radioFilter === 'albums') &&
-                          forYouAlbums.length > 0 && (
-                            <>
-                              <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                                💿 RECOMMENDED FULL ALBUMS ({forYouAlbums.length})
-                              </div>
-                              <div style={tileGridStyle}>
-                                {forYouAlbums.map(renderCloudAlbumCard)}
-                              </div>
-                            </>
-                          )}
-                      </>
-                    )}
+                      );
+                    })()}
                   </>
                 )}
 
                 {/* ---------------------------------------------------------
-                    5. ✨ NEW RELEASES & TOP CHARTS HUB (4-Col-Max Tiles + Direct Singles)
+                    5. 🔥 NEW RELEASES & TOP CHARTS HUB (Recent Releases For You + Charts)
                    --------------------------------------------------------- */}
                 {browserSourceFilter !== 'soundcloud' &&
                   browserSourceFilter !== 'internet_archive' &&
                   appleSubTab === 'new' &&
                   snap?.apple_authenticated && (
                   <>
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        paddingBottom: 10,
-                        borderBottom: '1px solid #16161c',
-                        flexWrap: 'wrap',
-                        gap: 8,
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                        <span
-                          style={{
-                            fontSize: 14,
-                            fontWeight: 800,
-                            color: '#fecdd3',
-                            marginRight: 6,
-                          }}
-                        >
-                          ✨ New & Charts
-                        </span>
-                        {(
-                          [
-                            { id: 'all', label: 'All' },
-                            { id: 'albums', label: `💿 New Albums (${newFeedAlbums.length})` },
-                            {
-                              id: 'playlists',
-                              label: `🎶 Featured Playlists (${newFeedPlaylists.length})`,
-                            },
-                            { id: 'songs', label: `🎵 Top Singles (${newFeedSongs.length})` },
-                          ] as const
-                        ).map((f) => {
-                          const active = newFilter === f.id;
-                          return (
-                            <button
-                              key={f.id}
-                              data-right-filter-pill="true"
-                              onClick={() => setNewFilter(f.id)}
+                    {(() => {
+                      const recentReleasesForYou =
+                        newFeedRecentReleases.length > 0
+                          ? newFeedRecentReleases
+                          : forYouNewReleases;
+                      return (
+                        <>
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              paddingBottom: 10,
+                              borderBottom: '1px solid #16161c',
+                              flexWrap: 'wrap',
+                              gap: 8,
+                            }}
+                          >
+                            <div
                               style={{
-                                padding: '4px 10px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                flexWrap: 'wrap',
+                              }}
+                            >
+                              <span
+                                style={{
+                                  fontSize: 14,
+                                  fontWeight: 800,
+                                  color: '#fecdd3',
+                                  marginRight: 6,
+                                }}
+                              >
+                                🔥 New & Charts
+                              </span>
+                              {(
+                                [
+                                  { id: 'all' as const, label: 'All' },
+                                  ...(recentReleasesForYou.length > 0
+                                    ? [
+                                        {
+                                          id: 'recent_releases' as const,
+                                          label: `🆕 Recent Releases (${recentReleasesForYou.length})`,
+                                        },
+                                      ]
+                                    : []),
+                                  {
+                                    id: 'albums' as const,
+                                    label: `💿 New Albums (${newFeedAlbums.length})`,
+                                  },
+                                  {
+                                    id: 'playlists' as const,
+                                    label: `🎶 Featured Playlists (${newFeedPlaylists.length})`,
+                                  },
+                                  {
+                                    id: 'songs' as const,
+                                    label: `🎵 Top Singles (${newFeedSongs.length})`,
+                                  },
+                                ] as const
+                              ).map((f) => {
+                                const active = newFilter === f.id;
+                                return (
+                                  <button
+                                    key={f.id}
+                                    data-right-filter-pill="true"
+                                    onClick={() => setNewFilter(f.id)}
+                                    style={{
+                                      padding: '4px 10px',
+                                      borderRadius: 6,
+                                      background: active ? '#28111b' : '#101018',
+                                      border: active
+                                        ? '1px solid #fa243c'
+                                        : '1px solid #222230',
+                                      color: active ? '#fecdd3' : '#9ca3af',
+                                      fontSize: 11,
+                                      fontWeight: 800,
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    {f.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <button
+                                data-right-filter-pill="true"
+                                onClick={() => {
+                                  setCloudLoading(true);
+                                  fetchAppleNewFeed()
+                                    .then((res) => {
+                                      setNewFeedRecentReleases?.(res.recent_releases ?? []);
+                                      setNewFeedAlbums(res.albums);
+                                      setNewFeedPlaylists(res.playlists);
+                                      setNewFeedSongs(res.songs);
+                                    })
+                                    .catch(() => {})
+                                    .finally(() => setCloudLoading(false));
+                                }}
+                                style={{
+                                  padding: '4px 9px',
+                                  borderRadius: 6,
+                                  background: '#161620',
+                                  border: '1px solid #2a2a38',
+                                  color: '#fda4af',
+                                  fontSize: 11,
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                ↻ Refresh
+                              </button>
+                            </div>
+                          </div>
+
+                          {(newFilter === 'all' || newFilter === 'recent_releases') &&
+                            recentReleasesForYou.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  🆕 RECENT RELEASES FOR YOU ({recentReleasesForYou.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {recentReleasesForYou.map(renderCloudAlbumCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {(newFilter === 'all' || newFilter === 'albums') &&
+                            newFeedAlbums.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  💿 NEW & TOP ALBUMS ({newFeedAlbums.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {newFeedAlbums.map(renderCloudAlbumCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {(newFilter === 'all' || newFilter === 'playlists') &&
+                            newFeedPlaylists.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  🎶 NEW & FEATURED PLAYLISTS ({newFeedPlaylists.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {newFeedPlaylists.map(renderCloudPlaylistCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {(newFilter === 'all' || newFilter === 'songs') &&
+                            newFeedSongs.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  🎵 TOP NEW SONGS / SINGLES ({newFeedSongs.length})
+                                </div>
+                                <div
+                                  style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
+                                >
+                                  {newFeedSongs.map((s) =>
+                                    renderSingleSongRow(s, newFeedSongs, 'new')
+                                  )}
+                                </div>
+                              </>
+                            )}
+                        </>
+                      );
+                    })()}
+                  </>
+                )}
+
+                {/* ---------------------------------------------------------
+                    5B. 📻 RADIO HUB (Live Broadcast & Global Apple Music Radio Stations)
+                   --------------------------------------------------------- */}
+                {browserSourceFilter !== 'soundcloud' &&
+                  browserSourceFilter !== 'internet_archive' &&
+                  appleSubTab === 'radio' &&
+                  snap?.apple_authenticated && (
+                  <>
+                    {(() => {
+                      const stationsToDisplay =
+                        liveRadioStations.length > 0 ? liveRadioStations : radioStations;
+                      return (
+                        <>
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              paddingBottom: 10,
+                              borderBottom: '1px solid #16161c',
+                              flexWrap: 'wrap',
+                              gap: 8,
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 8,
+                                flexWrap: 'wrap',
+                              }}
+                            >
+                              <span
+                                style={{
+                                  fontSize: 14,
+                                  fontWeight: 800,
+                                  color: '#fecdd3',
+                                }}
+                              >
+                                📻 Live & Global Radio
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                  color: '#9ca3af',
+                                }}
+                              >
+                                {stationsToDisplay.length} broadcast & genre stations
+                              </span>
+                            </div>
+                            <button
+                              data-right-filter-pill="true"
+                              onClick={() => {
+                                setCloudLoading(true);
+                                fetchAppleRadioAndForYou()
+                                  .then((res) => {
+                                    setRadioStations(res.stations);
+                                    setPersonalRadioStations?.(res.personal_stations ?? []);
+                                    setLiveRadioStations?.(res.live_stations ?? []);
+                                    setForYouNewReleases?.(res.new_releases ?? []);
+                                    setForYouPlaylists(res.playlists);
+                                    setForYouAlbums(res.albums);
+                                    setForYouShelves?.(res.shelves ?? []);
+                                    setAppleRecentlyPlayedTracks?.(res.recently_played ?? []);
+                                  })
+                                  .catch(() => {})
+                                  .finally(() => setCloudLoading(false));
+                              }}
+                              style={{
+                                padding: '4px 9px',
                                 borderRadius: 6,
-                                background: active ? '#28111b' : '#101018',
-                                border: active ? '1px solid #fa243c' : '1px solid #222230',
-                                color: active ? '#fecdd3' : '#9ca3af',
+                                background: '#161620',
+                                border: '1px solid #2a2a38',
+                                color: '#fda4af',
                                 fontSize: 11,
-                                fontWeight: 800,
+                                fontWeight: 700,
                                 cursor: 'pointer',
                               }}
                             >
-                              {f.label}
+                              ↻ Refresh
                             </button>
-                          );
-                        })}
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <button
-                          data-right-filter-pill="true"
-                          onClick={() => {
-                            setCloudLoading(true);
-                            fetchAppleNewFeed()
-                              .then((res) => {
-                                setNewFeedAlbums(res.albums);
-                                setNewFeedPlaylists(res.playlists);
-                                setNewFeedSongs(res.songs);
-                              })
-                              .catch(() => {})
-                              .finally(() => setCloudLoading(false));
-                          }}
-                          style={{
-                            padding: '4px 9px',
-                            borderRadius: 6,
-                            background: '#161620',
-                            border: '1px solid #2a2a38',
-                            color: '#fda4af',
-                            fontSize: 11,
-                            fontWeight: 700,
-                            cursor: 'pointer',
-                          }}
-                        >
-                          ↻ Refresh
-                        </button>
-                      </div>
-                    </div>
+                          </div>
 
-                    {(newFilter === 'all' || newFilter === 'albums') &&
-                      newFeedAlbums.length > 0 && (
-                        <>
-                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                            💿 NEW & TOP ALBUMS ({newFeedAlbums.length})
-                          </div>
-                          <div style={tileGridStyle}>
-                            {newFeedAlbums.map(renderCloudAlbumCard)}
-                          </div>
+                          {stationsToDisplay.length > 0 ? (
+                            <>
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                  color: '#fda4af',
+                                }}
+                              >
+                                📻 APPLE MUSIC LIVE & GENRE RADIO STATIONS (
+                                {stationsToDisplay.length})
+                              </div>
+                              <div style={tileGridStyle}>
+                                {stationsToDisplay.map(renderStationCard)}
+                              </div>
+                            </>
+                          ) : (
+                            <div
+                              style={{
+                                padding: 28,
+                                textAlign: 'center',
+                                color: '#9ca3af',
+                                fontSize: 12,
+                              }}
+                            >
+                              {cloudLoading
+                                ? 'Loading Apple Music radio stations…'
+                                : 'No live radio stations returned right now. Click Refresh to retry.'}
+                            </div>
+                          )}
                         </>
-                      )}
-
-                    {(newFilter === 'all' || newFilter === 'playlists') &&
-                      newFeedPlaylists.length > 0 && (
-                        <>
-                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                            🎶 NEW & FEATURED PLAYLISTS ({newFeedPlaylists.length})
-                          </div>
-                          <div style={tileGridStyle}>
-                            {newFeedPlaylists.map(renderCloudPlaylistCard)}
-                          </div>
-                        </>
-                      )}
-
-                    {(newFilter === 'all' || newFilter === 'songs') && newFeedSongs.length > 0 && (
-                      <>
-                        <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                          🎵 TOP NEW SONGS / SINGLES ({newFeedSongs.length})
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                          {newFeedSongs.map((s) => renderSingleSongRow(s, newFeedSongs, 'new'))}
-                        </div>
-                      </>
-                    )}
+                      );
+                    })()}
                   </>
                 )}
 

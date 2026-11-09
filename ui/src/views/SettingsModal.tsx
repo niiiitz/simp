@@ -84,7 +84,7 @@ export interface SettingsModalProps {
     React.SetStateAction<'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive'>
   >;
   setAppleSubTab: React.Dispatch<
-    React.SetStateAction<'pinned' | 'cloud_playlists' | 'radio' | 'new'>
+    React.SetStateAction<'pinned' | 'for_you' | 'cloud_playlists' | 'new' | 'radio'>
   >;
   setSoundCloudSubTab: React.Dispatch<
     React.SetStateAction<'pinned' | 'likes_sets' | 'stream_radio' | 'trending'>

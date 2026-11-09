@@ -215,12 +215,19 @@ const ConsoleMainApp: React.FC = () => {
   }, [snap?.current_track?.uri, snap?.is_playing]);
 
   // Apple Music Cloud Hub state
-  const [appleSubTab, setAppleSubTab] = useState<'pinned' | 'cloud_playlists' | 'radio' | 'new'>('pinned');
+  const [appleSubTab, setAppleSubTab] = useState<
+    'pinned' | 'for_you' | 'cloud_playlists' | 'new' | 'radio'
+  >('pinned');
   const [cloudPlaylists, setCloudPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
   const [radioStations, setRadioStations] = useState<AppleRadioStationSummary[]>([]);
+  const [personalRadioStations, setPersonalRadioStations] = useState<AppleRadioStationSummary[]>([]);
+  const [liveRadioStations, setLiveRadioStations] = useState<AppleRadioStationSummary[]>([]);
   const [forYouPlaylists, setForYouPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
   const [forYouAlbums, setForYouAlbums] = useState<AppleCloudAlbumSummary[]>([]);
+  const [forYouNewReleases, setForYouNewReleases] = useState<AppleCloudAlbumSummary[]>([]);
   const [forYouShelves, setForYouShelves] = useState<AppleRecommendationShelf[]>([]);
+  const [appleRecentlyPlayedTracks, setAppleRecentlyPlayedTracks] = useState<TrackMetadata[]>([]);
+  const [newFeedRecentReleases, setNewFeedRecentReleases] = useState<AppleCloudAlbumSummary[]>([]);
   const [newFeedAlbums, setNewFeedAlbums] = useState<AppleCloudAlbumSummary[]>([]);
   const [newFeedPlaylists, setNewFeedPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
   const [newFeedSongs, setNewFeedSongs] = useState<TrackMetadata[]>([]);
@@ -883,7 +890,7 @@ const ConsoleMainApp: React.FC = () => {
         .catch((err: any) => showToast(err?.message || 'Failed to load Cloud Playlists'))
         .finally(() => setCloudLoading(false));
     } else if (
-      appleSubTab === 'radio' &&
+      (appleSubTab === 'for_you' || appleSubTab === 'radio') &&
       radioStations.length === 0 &&
       forYouPlaylists.length === 0 &&
       forYouAlbums.length === 0
@@ -892,11 +899,15 @@ const ConsoleMainApp: React.FC = () => {
       fetchAppleRadioAndForYou()
         .then((res) => {
           setRadioStations(res.stations);
+          setPersonalRadioStations(res.personal_stations || []);
+          setLiveRadioStations(res.live_stations || []);
           setForYouPlaylists(res.playlists);
           setForYouAlbums(res.albums);
+          setForYouNewReleases(res.new_releases || []);
           setForYouShelves(res.shelves || []);
+          setAppleRecentlyPlayedTracks(res.recently_played || []);
         })
-        .catch((err: any) => showToast(err?.message || 'Failed to load Radio & For You'))
+        .catch((err: any) => showToast(err?.message || 'Failed to load For You & Radio'))
         .finally(() => setCloudLoading(false));
     } else if (
       appleSubTab === 'new' &&
@@ -907,6 +918,7 @@ const ConsoleMainApp: React.FC = () => {
       setCloudLoading(true);
       fetchAppleNewFeed()
         .then((res) => {
+          setNewFeedRecentReleases(res.recent_releases || []);
           setNewFeedAlbums(res.albums);
           setNewFeedPlaylists(res.playlists);
           setNewFeedSongs(res.songs);
@@ -2365,11 +2377,22 @@ const ConsoleMainApp: React.FC = () => {
           setCloudPlaylists={setCloudPlaylists}
           radioStations={radioStations}
           setRadioStations={setRadioStations}
+          personalRadioStations={personalRadioStations}
+          setPersonalRadioStations={setPersonalRadioStations}
+          liveRadioStations={liveRadioStations}
+          setLiveRadioStations={setLiveRadioStations}
           forYouPlaylists={forYouPlaylists}
           setForYouPlaylists={setForYouPlaylists}
           forYouAlbums={forYouAlbums}
           setForYouAlbums={setForYouAlbums}
+          forYouNewReleases={forYouNewReleases}
+          setForYouNewReleases={setForYouNewReleases}
           forYouShelves={forYouShelves}
+          setForYouShelves={setForYouShelves}
+          appleRecentlyPlayedTracks={appleRecentlyPlayedTracks}
+          setAppleRecentlyPlayedTracks={setAppleRecentlyPlayedTracks}
+          newFeedRecentReleases={newFeedRecentReleases}
+          setNewFeedRecentReleases={setNewFeedRecentReleases}
           newFeedAlbums={newFeedAlbums}
           setNewFeedAlbums={setNewFeedAlbums}
           newFeedPlaylists={newFeedPlaylists}

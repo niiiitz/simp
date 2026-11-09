@@ -414,19 +414,25 @@ export async function pinAppleAlbumToSimp(
 }
 
 /**
- * Fetches the user's Apple Music Radio Stations, Personal Mixes, Named For You Shelves, and Recently Played via the Rust daemon.
+ * Fetches the user's Apple Music Radio Stations, Personal Mixes, Named For You Shelves, New Releases, and Recently Played via the Rust daemon.
  */
 export async function fetchAppleRadioAndForYou(): Promise<{
   stations: AppleRadioStationSummary[];
+  personal_stations?: AppleRadioStationSummary[];
+  live_stations?: AppleRadioStationSummary[];
   playlists: AppleCloudPlaylistSummary[];
   albums: AppleCloudAlbumSummary[];
+  new_releases?: AppleCloudAlbumSummary[];
   shelves?: AppleRecommendationShelf[];
   recently_played?: TrackMetadata[];
 }> {
   return fetchAppleDaemonJson<{
     stations: AppleRadioStationSummary[];
+    personal_stations?: AppleRadioStationSummary[];
+    live_stations?: AppleRadioStationSummary[];
     playlists: AppleCloudPlaylistSummary[];
     albums: AppleCloudAlbumSummary[];
+    new_releases?: AppleCloudAlbumSummary[];
     shelves?: AppleRecommendationShelf[];
     recently_played?: TrackMetadata[];
   }>('/api/apple/radio');
@@ -443,11 +449,13 @@ export async function fetchAppleLibraryRecentlyAdded(): Promise<AppleCloudAlbumS
  * Fetches Apple Music "New" / Top Charts & Hot New Releases via the Rust daemon.
  */
 export async function fetchAppleNewFeed(): Promise<{
+  recent_releases?: AppleCloudAlbumSummary[];
   albums: AppleCloudAlbumSummary[];
   playlists: AppleCloudPlaylistSummary[];
   songs: TrackMetadata[];
 }> {
   return fetchAppleDaemonJson<{
+    recent_releases?: AppleCloudAlbumSummary[];
     albums: AppleCloudAlbumSummary[];
     playlists: AppleCloudPlaylistSummary[];
     songs: TrackMetadata[];
