@@ -627,7 +627,7 @@ unsafe fn ensure_nspr4_loaded_for_cdm() {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 unsafe fn ensure_nspr4_loaded_for_cdm() {}
 
 #[cfg(unix)]

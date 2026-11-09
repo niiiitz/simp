@@ -3,7 +3,7 @@ use anyhow::Context;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "windows"))]
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 

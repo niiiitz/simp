@@ -141,6 +141,7 @@ fn collect_subdirs(base: &Path, out: &mut Vec<(PathBuf, String)>) {
 }
 
 /// Reads Linux `/sys/class/power_supply` (or `pmset -g batt` on macOS) to determine battery state.
+#[allow(unused_mut)]
 pub fn read_power_state() -> PowerState {
     let mut on_battery = false;
     let mut battery_pct = None;
