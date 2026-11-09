@@ -149,6 +149,9 @@ export function useGamepadNavigation({
       .querySelectorAll<HTMLElement>('[data-simp-active-focus="true"], .simp-gpfocus')
       .forEach((node) => {
         if (node !== el) {
+          if (node.dataset.brightnessScrubActive === 'true') {
+            window.dispatchEvent(new CustomEvent('simp-brightness-exit'));
+          }
           node.removeAttribute('data-simp-active-focus');
           node.classList.remove('simp-gpfocus');
         }
@@ -163,6 +166,13 @@ export function useGamepadNavigation({
       if (el.closest('[data-nav-col="left"]') && el.dataset.xmbPreview === 'true') {
         window.dispatchEvent(
           new CustomEvent('simp-xmb-left-focus', { detail: { element: el } })
+        );
+      }
+      if (el.dataset.selectCategory) {
+        window.dispatchEvent(
+          new CustomEvent('simp-select-category-focus', {
+            detail: { category: el.dataset.selectCategory },
+          })
         );
       }
     }

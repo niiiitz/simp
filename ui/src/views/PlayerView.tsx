@@ -249,12 +249,20 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     const onFullscreenChange = () => {
       setIsFullscreen(Boolean(document.fullscreenElement));
     };
+    const onSelectCategoryFocus = (ev: Event) => {
+      const cat = (ev as CustomEvent<{ category?: string }>).detail?.category;
+      if (cat === 'track_options' || cat === 'collection' || cat === 'interface') {
+        setSelectCategory(cat);
+      }
+    };
     window.addEventListener('simp-player-actions-toggle', onToggleActions);
     window.addEventListener('simp-player-fullscreen-toggle', onToggleFullscreen);
+    window.addEventListener('simp-select-category-focus', onSelectCategoryFocus);
     document.addEventListener('fullscreenchange', onFullscreenChange);
     return () => {
       window.removeEventListener('simp-player-actions-toggle', onToggleActions);
       window.removeEventListener('simp-player-fullscreen-toggle', onToggleFullscreen);
+      window.removeEventListener('simp-select-category-focus', onSelectCategoryFocus);
       document.removeEventListener('fullscreenchange', onFullscreenChange);
     };
   }, [togglePlayerFullscreen]);
@@ -570,22 +578,16 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     setPlayerActionsOpen(false);
   }, []);
 
-  // Focus first item in Left Column when Player Track Actions Overlay opens, and scroll current queue item into view
+  // Focus active item in Left Column when Player Track Actions Overlay opens
   useEffect(() => {
     if (!playerActionsOpen) return;
     const t = window.setTimeout(() => {
-      const currentQueueEl = document.querySelector<HTMLElement>(
-        '[data-player-actions-modal="true"] [data-queue-current="true"]'
-      );
-      if (currentQueueEl) {
-        currentQueueEl.scrollIntoView({ block: 'center', inline: 'nearest' });
-      }
       const firstBtn =
         document.querySelector<HTMLElement>(
-          '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-default-focus="true"]:not([disabled])'
+          '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-select-active="true"]:not([disabled])'
         ) ||
         document.querySelector<HTMLElement>(
-          '[data-player-actions-modal="true"] button[data-default-focus="true"]:not([disabled])'
+          '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-default-focus="true"]:not([disabled])'
         ) ||
         document.querySelector<HTMLElement>(
           '[data-player-actions-modal="true"] button:not([disabled])'
@@ -596,6 +598,20 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     }, 30);
     return () => window.clearTimeout(t);
   }, [playerActionsOpen, applyFocusMarker]);
+
+  // Scroll active queue item into view whenever the `collection` shelf is exposed
+  useEffect(() => {
+    if (!playerActionsOpen || selectCategory !== 'collection') return;
+    const t = window.setTimeout(() => {
+      const currentQueueEl = document.querySelector<HTMLElement>(
+        '[data-player-actions-modal="true"] [data-queue-current="true"]'
+      );
+      if (currentQueueEl) {
+        currentQueueEl.scrollIntoView({ block: 'center', inline: 'nearest' });
+      }
+    }, 25);
+    return () => window.clearTimeout(t);
+  }, [playerActionsOpen, selectCategory, rightColMode]);
 
   const cycleVisualizerMode = useCallback(() => {
     setVizMode((prev) => {
@@ -1994,6 +2010,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 <button
                   type="button"
                   data-default-focus="true"
+                  data-select-category="track_options"
                   data-select-active={selectCategory === 'track_options' ? 'true' : undefined}
                   onFocus={() => setSelectCategory('track_options')}
                   onMouseEnter={() => setSelectCategory('track_options')}
@@ -2036,6 +2053,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 
                 <button
                   type="button"
+                  data-select-category="collection"
                   data-select-active={selectCategory === 'collection' ? 'true' : undefined}
                   onFocus={() => setSelectCategory('collection')}
                   onMouseEnter={() => setSelectCategory('collection')}
@@ -2078,6 +2096,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 
                 <button
                   type="button"
+                  data-select-category="interface"
                   data-select-active={selectCategory === 'interface' ? 'true' : undefined}
                   onFocus={() => setSelectCategory('interface')}
                   onMouseEnter={() => setSelectCategory('interface')}
