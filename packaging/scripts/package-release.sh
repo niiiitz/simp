@@ -229,11 +229,9 @@ fi
 
 if [[ -f "${ENV_FILE}" ]]; then
   SC_ID="$(ENV_FILE="${ENV_FILE}" python3 -c 'import os; env=dict(l.strip().split("=",1) for l in open(os.environ["ENV_FILE"]) if l.strip() and not l.strip().startswith("#") and "=" in l); print(env.get("SOUNDCLOUD_CLIENT_ID","").strip().strip("\x27\x22"), end="")' 2>/dev/null || true)"
-  SC_SEC="$(ENV_FILE="${ENV_FILE}" python3 -c 'import os; env=dict(l.strip().split("=",1) for l in open(os.environ["ENV_FILE"]) if l.strip() and not l.strip().startswith("#") and "=" in l); print(env.get("SOUNDCLOUD_CLIENT_SECRET","").strip().strip("\x27\x22"), end="")' 2>/dev/null || true)"
-  if [[ -n "${SC_ID}" && -n "${SC_SEC}" ]]; then
+  if [[ -n "${SC_ID}" ]]; then
     export SIMP_EMBEDDED_SOUNDCLOUD_CLIENT_ID="${SC_ID}"
-    export SIMP_EMBEDDED_SOUNDCLOUD_CLIENT_SECRET="${SC_SEC}"
-    echo "   • Baked SoundCloud Client Credentials into binary (Public Discovery, OAuth PKCE Sign-In & 160kbps AAC streaming enabled out-of-the-box)"
+    echo "   • Baked public SoundCloud Client ID into binary (OAuth 2.1 token exchange proxied via simp-tap-67 Cloudflare Worker; zero client_secret in binary)"
   fi
 fi
 if [[ -z "${SIMP_EMBEDDED_APPLE_DEV_TOKEN:-}" ]]; then

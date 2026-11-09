@@ -17,6 +17,7 @@ import {
   enableSoundCloudPublicMode,
   startSoundCloudOAuthLogin,
 } from '../drivers/SoundCloudDriver';
+import { SoundCloudLogo } from '../components/SoundCloudLogo';
 import { OskTargetKind } from '../hooks/useGamepadNavigation';
 import { BrowserTarget } from './PlayerView';
 
@@ -129,6 +130,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   setSoundcloudBusy,
   setBrowserSourceFilter,
   setAppleSubTab,
+  setSoundCloudSubTab,
   sourceVisibility,
   setSourceVisibility,
   refreshLibraryData,
@@ -590,8 +592,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {/* + SoundCloud [Show/Hide, Sign In] */}
             <div style={nestedCardStyle}>
               <div style={nestedHeaderRowStyle}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: '#fdba74' }}>
-                  ☁️ SoundCloud
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 800,
+                    color: '#fdba74',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <SoundCloudLogo width={30} color="#ffffff" />
+                  <span>SoundCloud</span>
                 </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <button
@@ -601,26 +613,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   >
                     {sourceVisibility.soundcloud ? '👁 Shown' : '🚫 Hidden'}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setScAuthOpen((v) => !v)}
-                    style={pillToggleStyle(
-                      Boolean(
-                        snap?.soundcloud_authenticated ||
-                          soundcloudAuthCfg?.soundcloud_authenticated ||
-                          scAuthOpen
-                      ),
-                      '#fdba74'
-                    )}
-                  >
-                    {soundcloudAuthCfg?.username
-                      ? `@${soundcloudAuthCfg.username}`
-                      : snap?.soundcloud_authenticated ||
-                        soundcloudAuthCfg?.soundcloud_authenticated
-                      ? '🟢 Connected'
-                      : 'Sign In'}{' '}
-                    {scAuthOpen ? '▾' : '▸'}
-                  </button>
+                  {(() => {
+                    const isPersonalUser = Boolean(
+                      soundcloudAuthCfg?.auth_mode === 'user' &&
+                        soundcloudAuthCfg?.username &&
+                        soundcloudAuthCfg.username !== 'Public Discovery (Client Credentials)'
+                    );
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => setScAuthOpen((v) => !v)}
+                        style={pillToggleStyle(
+                          Boolean(isPersonalUser || scAuthOpen),
+                          '#fdba74'
+                        )}
+                      >
+                        {isPersonalUser
+                          ? `🟢 @${soundcloudAuthCfg?.username}`
+                          : '🌐 Public · Sign In'}{' '}
+                        {scAuthOpen ? '▾' : '▸'}
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -660,22 +674,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   >
                     {soundcloudBusy ? 'Working...' : 'OAuth Sign In'}
                   </button>
-                  {(snap?.soundcloud_authenticated ||
-                    soundcloudAuthCfg?.soundcloud_authenticated) && (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await disconnectSoundCloudCleanSlate(showToast);
-                        const updated = await defaultSimpClient
-                          .getSoundCloudAuthConfig()
-                          .catch(() => null);
-                        if (updated) setSoundcloudAuthCfg(updated);
-                      }}
-                      style={compactDangerBtnStyle}
-                    >
-                      Disconnect
-                    </button>
-                  )}
+                  {soundcloudAuthCfg?.auth_mode === 'user' &&
+                    Boolean(
+                      soundcloudAuthCfg?.username &&
+                        soundcloudAuthCfg.username !== 'Public Discovery (Client Credentials)'
+                    ) && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await disconnectSoundCloudCleanSlate(showToast);
+                          setSoundCloudSubTab('trending');
+                          const updated = await defaultSimpClient
+                            .getSoundCloudAuthConfig()
+                            .catch(() => null);
+                          if (updated) setSoundcloudAuthCfg(updated);
+                          refreshLibraryData();
+                        }}
+                        style={compactDangerBtnStyle}
+                      >
+                        Sign Out
+                      </button>
+                    )}
                 </div>
               )}
             </div>

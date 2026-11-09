@@ -23,6 +23,7 @@ import {
   SoundCloudMixChapter,
   toggleFollowSoundCloudUser,
 } from '../drivers/SoundCloudDriver';
+import { SoundCloudAttributionLink, SoundCloudLogo } from '../components/SoundCloudLogo';
 
 export interface BrowserTarget {
   kind:
@@ -159,6 +160,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const [scTrackBpm, setScTrackBpm] = useState<number | null>(null);
   const [scMixChapters, setScMixChapters] = useState<SoundCloudMixChapter[]>([]);
   const [scTrackUserId, setScTrackUserId] = useState<string | null>(null);
+  const [scTrackPermalink, setScTrackPermalink] = useState<string | null>(null);
   const [scCreatorFollowed, setScCreatorFollowed] = useState<boolean>(false);
   const [vizMode, setVizMode] = useState<VisualizerMode>(() => {
     try {
@@ -664,6 +666,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       setScTrackBpm(null);
       setScMixChapters([]);
       setScTrackUserId(null);
+      setScTrackPermalink(null);
       setScCreatorFollowed(false);
       setRightColMode('queue');
 
@@ -700,6 +703,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           const chapters = wf?.chapters || [];
           setScMixChapters(chapters);
           setScTrackUserId(wf?.user_id || null);
+          setScTrackPermalink(wf?.permalink_url || null);
           setScCreatorFollowed(false);
           setRightColMode(chapters.length > 0 ? 'chapters' : 'queue');
         }
@@ -1619,6 +1623,15 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 </>
               )}
               {track?.album ? ` • ${track.album}` : ''}
+              {track?.source === 'soundcloud' && (
+                <SoundCloudAttributionLink
+                  permalinkUrl={scTrackPermalink}
+                  kind="track"
+                  id={track.uri}
+                  width={30}
+                  style={{ marginLeft: 8, verticalAlign: 'middle' }}
+                />
+              )}
               {track?.source === 'soundcloud' && track?.album?.includes('• Preview') && (
                 <span
                   style={{

@@ -144,10 +144,7 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         loop {
             let cfg_snapshot = sc_bg_state.settings.lock().unwrap().clone();
             let creds = simp_core::sinks::soundcloud_api::resolve_soundcloud_credentials(&cfg_snapshot);
-            if cfg_snapshot.services.soundcloud_enabled
-                && !creds.client_id.is_empty()
-                && !creds.client_secret.is_empty()
-            {
+            if cfg_snapshot.services.soundcloud_enabled && !creds.client_id.is_empty() {
                 let _ = tokio::task::spawn_blocking(move || {
                     let _ = simp_core::sinks::soundcloud_api::ensure_valid_access_token(&cfg_snapshot);
                 })
@@ -200,6 +197,7 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/soundcloud/followings", get(soundcloud_followings_handler))
         .route("/api/soundcloud/user-tracks", get(soundcloud_user_tracks_handler))
         .route("/api/soundcloud/follow", post(soundcloud_follow_handler))
+        .route("/api/soundcloud/open", get(soundcloud_open_handler))
         .route("/api/local/artist", get(local_artist_handler))
         .route("/api/history", get(history_get_handler).post(history_post_handler))
         .route("/api/favorites", get(favorites_get_handler).post(favorites_post_handler))
@@ -1225,6 +1223,24 @@ async fn soundcloud_follow_handler(
     }
 }
 
+async fn soundcloud_open_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let kind = params
+        .get("kind")
+        .cloned()
+        .unwrap_or_else(|| "track".to_string());
+    let id = params.get("id").cloned().unwrap_or_default();
+    let target_url = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::soundcloud_api::resolve_soundcloud_permalink_url(&cfg, &kind, &id)
+    })
+    .await
+    .unwrap_or_else(|_| "https://soundcloud.com".to_string());
+    axum::response::Redirect::temporary(&target_url)
+}
+
 async fn dvd_stream_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
@@ -2078,7 +2094,7 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
         LibraryQuery::GetSoundCloudAuthConfig => {
             let cfg = state.settings.lock().unwrap().clone();
             let creds = simp_core::sinks::soundcloud_api::resolve_soundcloud_credentials(&cfg);
-            let configured = !creds.client_id.is_empty() && !creds.client_secret.is_empty();
+            let configured = !creds.client_id.is_empty();
             let has_token = !creds.access_token.is_empty();
             let soundcloud_authenticated = has_token || configured;
             let auth_mode = if !creds.auth_mode.is_empty() {
@@ -2097,10 +2113,7 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                 .unwrap_or_else(|| "http://steamdeck.local:18888/pair".to_string());
 
             let status_error = if !configured && !has_token {
-                Some(
-                    "Set SOUNDCLOUD_CLIENT_ID and SOUNDCLOUD_CLIENT_SECRET in .env or Sources (Select)"
-                        .to_string(),
-                )
+                Some("SoundCloud is not configured".to_string())
             } else {
                 None
             };
@@ -2111,11 +2124,11 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                 data: serde_json::json!({
                     "configured": configured,
                     "client_id": creds.client_id,
-                    "has_client_secret": !creds.client_secret.is_empty(),
+                    "has_client_secret": configured,
                     "soundcloud_authenticated": soundcloud_authenticated,
                     "auth_mode": auth_mode,
                     "username": creds.username,
-                    "api_v2": cfg.services.soundcloud_api_v2,
+                    "api_v2": false,
                     "redirect_uri": simp_core::sinks::soundcloud_api::SOUNDCLOUD_DEFAULT_REDIRECT_URI,
                     "lan_ip": lan_ip,
                     "lan_ips": lan_ips,

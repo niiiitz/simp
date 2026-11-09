@@ -12,6 +12,15 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const SOUNDCLOUD_DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:18888/api/soundcloud/callback";
+pub const SOUNDCLOUD_DEFAULT_TOKEN_PROXY_URL: &str = "https://simp-tap-67.niiiitz.workers.dev";
+pub const SOUNDCLOUD_DEFAULT_CLIENT_ID: &str = "WU0IbI5NwABTi60QuSLPgIeTZZmwNznQ";
+
+/// Hard-locked to `false` so `api-v2` code remains in the repository for future reactivation
+/// if SoundCloud support grants clearance, while being 100% unreachable at runtime.
+#[inline]
+const fn is_soundcloud_v2_enabled(_settings: &SimpSettings) -> bool {
+    false
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SoundCloudPlaylistSummary {
@@ -23,6 +32,8 @@ pub struct SoundCloudPlaylistSummary {
     pub track_count: usize,
     pub duration_ms: u32,
     pub kind: String, // "likes" | "user_set" | "liked_set" | "catalog_set"
+    #[serde(default)]
+    pub permalink_url: Option<String>,
     #[serde(default)]
     pub tracks: Vec<TrackMetadata>,
 }
@@ -65,6 +76,8 @@ pub struct SoundCloudUserSummary {
     pub track_count: usize,
     pub followers_count: u64,
     pub description: String,
+    #[serde(default)]
+    pub permalink_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +142,8 @@ pub struct SoundCloudWaveform {
     pub track_id: String,
     pub bars: Vec<f32>,
     pub waveform_url: Option<String>,
+    #[serde(default)]
+    pub permalink_url: Option<String>,
     #[serde(default)]
     pub bpm: Option<u32>,
     #[serde(default)]
@@ -230,6 +245,7 @@ struct PendingPkceFlow {
 struct TrackHintEntry {
     pub meta: TrackMetadata,
     pub waveform_url: Option<String>,
+    pub permalink_url: Option<String>,
     pub bpm: Option<u32>,
     pub favoritings_count: Option<u64>,
     pub playback_count: Option<u64>,
@@ -631,6 +647,18 @@ pub fn map_soundcloud_item_to_track(item: &Value) -> Option<TrackMetadata> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    let permalink_url = obj
+        .get("permalink_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+        .or_else(|| {
+            obj.pointer("/user/permalink_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+        });
+
     let description = obj
         .get("description")
         .and_then(|v| v.as_str())
@@ -664,6 +692,7 @@ pub fn map_soundcloud_item_to_track(item: &Value) -> Option<TrackMetadata> {
             TrackHintEntry {
                 meta: meta.clone(),
                 waveform_url,
+                permalink_url,
                 bpm,
                 favoritings_count,
                 playback_count,
@@ -771,6 +800,18 @@ pub fn map_soundcloud_item_to_playlist(item: &Value, default_kind: &str) -> Opti
         })
         .or_else(|| obj.pointer("/user/avatar_url").and_then(|v| v.as_str()));
 
+    let permalink_url = obj
+        .get("permalink_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+        .or_else(|| {
+            obj.pointer("/user/permalink_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+        });
+
     Some(SoundCloudPlaylistSummary {
         id: raw_id,
         name,
@@ -780,13 +821,14 @@ pub fn map_soundcloud_item_to_playlist(item: &Value, default_kind: &str) -> Opti
         track_count,
         duration_ms,
         kind: default_kind.to_string(),
+        permalink_url,
         tracks: embedded_tracks,
     })
 }
 
 /// Resolves SoundCloud credentials from `SimpSettings`, in-memory cache, environment variables,
 /// `.env` files (`./.env`, parent git repo `.env` if in a worktree, or `~/.config/simp/.env`),
-/// and compile-time embedded variables.
+/// and compile-time public `SIMP_EMBEDDED_SOUNDCLOUD_CLIENT_ID` (never embedding `client_secret`).
 pub fn resolve_soundcloud_credentials(settings: &SimpSettings) -> ResolvedSoundCloudCredentials {
     let dotenv_map = load_dotenv_candidates();
     let get_val = |setting_val: &str, env_key: &str| -> String {
@@ -817,18 +859,16 @@ pub fn resolve_soundcloud_credentials(settings: &SimpSettings) -> ResolvedSoundC
             }
         }
     }
+    if client_id.is_empty() {
+        client_id = SOUNDCLOUD_DEFAULT_CLIENT_ID.to_string();
+    }
 
-    let mut client_secret = get_val(
+    // Optional local BYO override only; distributed binaries never embed `client_secret`
+    // and route token exchanges through `SOUNDCLOUD_DEFAULT_TOKEN_PROXY_URL` (`https://simp-tap-67.niiiitz.workers.dev`).
+    let client_secret = get_val(
         &settings.services.soundcloud_client_secret,
         "SOUNDCLOUD_CLIENT_SECRET",
     );
-    if client_secret.is_empty() {
-        if let Some(embedded) = option_env!("SIMP_EMBEDDED_SOUNDCLOUD_CLIENT_SECRET") {
-            if !embedded.trim().is_empty() {
-                client_secret = embedded.trim().to_string();
-            }
-        }
-    }
 
     let mut access_token = settings.services.soundcloud_access_token.trim().to_string();
     let mut refresh_token = settings
@@ -1150,6 +1190,21 @@ fn now_unix_secs() -> i64 {
         .as_secs() as i64
 }
 
+fn resolve_token_proxy_url() -> String {
+    if let Ok(v) = std::env::var("SOUNDCLOUD_TOKEN_PROXY_URL") {
+        if !v.trim().is_empty() {
+            return v.trim().to_string();
+        }
+    }
+    let dotenv_map = load_dotenv_candidates();
+    if let Some(v) = dotenv_map.get("SOUNDCLOUD_TOKEN_PROXY_URL") {
+        if !v.trim().is_empty() {
+            return v.trim().to_string();
+        }
+    }
+    SOUNDCLOUD_DEFAULT_TOKEN_PROXY_URL.to_string()
+}
+
 /// Exchanges an OAuth 2.1 `code` + PKCE `code_verifier` for a SoundCloud user `access_token` and `refresh_token`.
 pub fn exchange_oauth_code(
     settings: &SimpSettings,
@@ -1158,10 +1213,8 @@ pub fn exchange_oauth_code(
     redirect_uri_override: Option<&str>,
 ) -> Result<SoundCloudTokenBundle> {
     let creds = resolve_soundcloud_credentials(settings);
-    if creds.client_id.is_empty() || creds.client_secret.is_empty() {
-        return Err(anyhow!(
-            "Missing SOUNDCLOUD_CLIENT_ID or SOUNDCLOUD_CLIENT_SECRET"
-        ));
+    if creds.client_id.is_empty() {
+        return Err(anyhow!("Missing SOUNDCLOUD_CLIENT_ID"));
     }
 
     let mut matched_flow: Option<PendingPkceFlow> = None;
@@ -1185,16 +1238,36 @@ pub fn exchange_oauth_code(
         .filter(|s| !s.is_empty())
         .unwrap_or(&flow.redirect_uri);
 
-    let form_body = format!(
-        "grant_type=authorization_code&client_id={}&client_secret={}&redirect_uri={}&code_verifier={}&code={}",
+    let proxy_body = format!(
+        "grant_type=authorization_code&client_id={}&redirect_uri={}&code_verifier={}&code={}",
         url_encode_component(&creds.client_id),
-        url_encode_component(&creds.client_secret),
         url_encode_component(redirect_uri),
         url_encode_component(&flow.code_verifier),
         url_encode_component(code.trim()),
     );
 
-    let mut bundle = post_oauth_token_request(&form_body, None, "user")?;
+    let mut bundle = if creds.client_secret.is_empty()
+        || creds.client_id == SOUNDCLOUD_DEFAULT_CLIENT_ID
+    {
+        post_oauth_token_request_via_proxy(&proxy_body, "user").or_else(|proxy_err| {
+            if !creds.client_secret.is_empty() {
+                let direct_body = format!(
+                    "{proxy_body}&client_secret={}",
+                    url_encode_component(&creds.client_secret)
+                );
+                post_oauth_token_request(&direct_body, None, "user")
+            } else {
+                Err(proxy_err)
+            }
+        })?
+    } else {
+        let direct_body = format!(
+            "{proxy_body}&client_secret={}",
+            url_encode_component(&creds.client_secret)
+        );
+        post_oauth_token_request(&direct_body, None, "user")?
+    };
+
     if let Ok(me) = soundcloud_get_json("/me", &bundle.access_token) {
         if let Some(uname) = me.get("username").and_then(|v| v.as_str()) {
             bundle.username = uname.trim().to_string();
@@ -1205,24 +1278,54 @@ pub fn exchange_oauth_code(
     Ok(bundle)
 }
 
-/// Obtains a server-to-server `client_credentials` token using `SOUNDCLOUD_CLIENT_ID` and `SOUNDCLOUD_CLIENT_SECRET`.
+/// Obtains a `client_credentials` token via the stateless Cloudflare Worker proxy
+/// (or directly using `SOUNDCLOUD_CLIENT_SECRET` if a custom BYO secret is configured locally).
 pub fn obtain_client_credentials_token(settings: &SimpSettings) -> Result<SoundCloudTokenBundle> {
     let creds = resolve_soundcloud_credentials(settings);
-    if creds.client_id.is_empty() || creds.client_secret.is_empty() {
+    if creds.client_id.is_empty() {
         return Err(anyhow!(
-            "Missing SOUNDCLOUD_CLIENT_ID or SOUNDCLOUD_CLIENT_SECRET in settings or .env"
+            "Missing SOUNDCLOUD_CLIENT_ID in settings or .env"
         ));
     }
 
-    let basic_b64 = BASE64_STD.encode(format!("{}:{}", creds.client_id, creds.client_secret));
-    let basic_header = format!("Basic {basic_b64}");
-    let form_body = format!(
-        "grant_type=client_credentials&client_id={}&client_secret={}",
+    let proxy_body = format!(
+        "grant_type=client_credentials&client_id={}",
         url_encode_component(&creds.client_id),
-        url_encode_component(&creds.client_secret),
     );
 
-    let mut bundle = post_oauth_token_request(&form_body, Some(&basic_header), "client_credentials")?;
+    let mut bundle = if creds.client_secret.is_empty()
+        || creds.client_id == SOUNDCLOUD_DEFAULT_CLIENT_ID
+    {
+        post_oauth_token_request_via_proxy(&proxy_body, "client_credentials").or_else(
+            |proxy_err| {
+                if !creds.client_secret.is_empty() {
+                    let basic_b64 =
+                        BASE64_STD.encode(format!("{}:{}", creds.client_id, creds.client_secret));
+                    let basic_header = format!("Basic {basic_b64}");
+                    let direct_body = format!(
+                        "{proxy_body}&client_secret={}",
+                        url_encode_component(&creds.client_secret),
+                    );
+                    post_oauth_token_request(
+                        &direct_body,
+                        Some(&basic_header),
+                        "client_credentials",
+                    )
+                } else {
+                    Err(proxy_err)
+                }
+            },
+        )?
+    } else {
+        let basic_b64 = BASE64_STD.encode(format!("{}:{}", creds.client_id, creds.client_secret));
+        let basic_header = format!("Basic {basic_b64}");
+        let direct_body = format!(
+            "{proxy_body}&client_secret={}",
+            url_encode_component(&creds.client_secret),
+        );
+        post_oauth_token_request(&direct_body, Some(&basic_header), "client_credentials")?
+    };
+
     bundle.username = "Public Discovery (Client Credentials)".to_string();
     update_cached_soundcloud_tokens(bundle.clone());
     persist_soundcloud_tokens_to_settings_vdf(&bundle);
@@ -1236,16 +1339,27 @@ pub fn refresh_user_oauth_token(
     refresh_token: &str,
     existing_username: &str,
 ) -> Result<SoundCloudTokenBundle> {
-    let basic_b64 = BASE64_STD.encode(format!("{client_id}:{client_secret}"));
-    let basic_header = format!("Basic {basic_b64}");
-    let form_body = format!(
-        "grant_type=refresh_token&client_id={}&client_secret={}&refresh_token={}",
+    let proxy_body = format!(
+        "grant_type=refresh_token&client_id={}&refresh_token={}",
         url_encode_component(client_id),
-        url_encode_component(client_secret),
         url_encode_component(refresh_token),
     );
-    let mut bundle = post_oauth_token_request(&form_body, None, "user")
-        .or_else(|_| post_oauth_token_request(&form_body, Some(&basic_header), "user"))?;
+
+    let mut bundle = if client_secret.trim().is_empty()
+        || client_id.trim() == SOUNDCLOUD_DEFAULT_CLIENT_ID
+    {
+        post_oauth_token_request_via_proxy(&proxy_body, "user")?
+    } else {
+        let basic_b64 = BASE64_STD.encode(format!("{client_id}:{client_secret}"));
+        let basic_header = format!("Basic {basic_b64}");
+        let direct_body = format!(
+            "{proxy_body}&client_secret={}",
+            url_encode_component(client_secret),
+        );
+        post_oauth_token_request(&direct_body, None, "user")
+            .or_else(|_| post_oauth_token_request(&direct_body, Some(&basic_header), "user"))?
+    };
+
     if bundle.refresh_token.is_empty() {
         bundle.refresh_token = refresh_token.trim().to_string();
     }
@@ -1264,6 +1378,20 @@ pub fn refresh_user_oauth_token(
     update_cached_soundcloud_tokens(bundle.clone());
     persist_soundcloud_tokens_to_settings_vdf(&bundle);
     Ok(bundle)
+}
+
+fn post_oauth_token_request_via_proxy(
+    form_body: &str,
+    auth_mode: &str,
+) -> Result<SoundCloudTokenBundle> {
+    let proxy_url = resolve_token_proxy_url();
+    let headers = [
+        ("Accept", "application/json; charset=utf-8"),
+        ("Content-Type", "application/x-www-form-urlencoded"),
+    ];
+    let bytes = crate::http_pool::http_post_bytes(&proxy_url, &headers, form_body.as_bytes(), 15)
+        .context("SoundCloud OAuth token proxy request failed")?;
+    parse_oauth_token_response_bytes(&bytes, auth_mode)
 }
 
 fn post_oauth_token_request(
@@ -1295,8 +1423,29 @@ fn post_oauth_token_request(
     })
     .context("SoundCloud OAuth token request failed")?;
 
+    parse_oauth_token_response_bytes(&bytes, auth_mode)
+}
+
+fn parse_oauth_token_response_bytes(
+    bytes: &[u8],
+    auth_mode: &str,
+) -> Result<SoundCloudTokenBundle> {
     let json: Value =
-        serde_json::from_slice(&bytes).context("Invalid JSON from SoundCloud OAuth endpoint")?;
+        serde_json::from_slice(bytes).context("Invalid JSON from SoundCloud OAuth endpoint")?;
+    if let Some(err_code) = json.get("error").and_then(|v| v.as_str()) {
+        let desc = json
+            .get("error_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        return Err(anyhow!(
+            "SoundCloud OAuth error: {err_code}{}",
+            if desc.is_empty() {
+                String::new()
+            } else {
+                format!(" ({desc})")
+            }
+        ));
+    }
     let access_token = json
         .get("access_token")
         .and_then(|v| v.as_str())
@@ -1401,10 +1550,7 @@ pub fn ensure_valid_access_token(settings: &SimpSettings) -> Result<String> {
         return Ok(creds.access_token);
     }
 
-    if !creds.refresh_token.is_empty()
-        && !creds.client_id.is_empty()
-        && !creds.client_secret.is_empty()
-    {
+    if !creds.refresh_token.is_empty() && !creds.client_id.is_empty() {
         match refresh_user_oauth_token(
             &creds.client_id,
             &creds.client_secret,
@@ -1430,7 +1576,7 @@ pub fn ensure_valid_access_token(settings: &SimpSettings) -> Result<String> {
         return Ok(creds.access_token);
     }
 
-    if !creds.client_id.is_empty() && !creds.client_secret.is_empty() {
+    if !creds.client_id.is_empty() {
         let bundle = obtain_client_credentials_token(settings)?;
         return Ok(bundle.access_token);
     }
@@ -1440,7 +1586,7 @@ pub fn ensure_valid_access_token(settings: &SimpSettings) -> Result<String> {
     }
 
     Err(anyhow!(
-        "SoundCloud is not authenticated — configure SOUNDCLOUD_CLIENT_ID & SOUNDCLOUD_CLIENT_SECRET or sign in via Sources (Select)"
+        "SoundCloud is not authenticated — sign in via Sources (Select)"
     ))
 }
 
@@ -1465,16 +1611,15 @@ pub fn disconnect_soundcloud_session(settings: &SimpSettings) {
     disk.services.soundcloud_access_token.clear();
     disk.services.soundcloud_refresh_token.clear();
     disk.services.soundcloud_token_expires_at = 0;
-    disk.services.soundcloud_auth_mode.clear();
+    disk.services.soundcloud_auth_mode = "client_credentials".to_string();
     disk.services.soundcloud_username.clear();
-    disk.services.soundcloud_enabled = false;
+    disk.services.soundcloud_enabled = true;
     let _ = crate::library::vdf::save_settings_raw(&disk);
 }
 
 pub fn is_soundcloud_ready(settings: &SimpSettings) -> bool {
     let creds = resolve_soundcloud_credentials(settings);
-    !creds.access_token.is_empty()
-        || (!creds.client_id.is_empty() && !creds.client_secret.is_empty())
+    !creds.access_token.is_empty() || !creds.client_id.is_empty()
 }
 
 /// Returns `true` when the user is signed in with a personal SoundCloud OAuth account (`auth_mode == "user"`),
@@ -1760,7 +1905,7 @@ pub fn resolve_track_metadata_by_uri(
         }
     }
     let encoded_id = url_encode_component(&track_id);
-    if settings.services.soundcloud_api_v2 {
+    if is_soundcloud_v2_enabled(settings) {
         if let Ok(v2_json) = soundcloud_v2_get_json(&format!("/tracks/{encoded_id}")) {
             if let Some(t) = map_soundcloud_item_to_track(&v2_json) {
                 return Some(t);
@@ -1771,6 +1916,7 @@ pub fn resolve_track_metadata_by_uri(
     map_soundcloud_item_to_track(&json)
 }
 
+#[allow(dead_code)]
 fn populate_v2_track_stream_urls(track_id: &str, urls: &mut SoundCloudStreamUrls) {
     let encoded_id = url_encode_component(track_id);
     let Ok(track_json) = soundcloud_v2_get_json(&format!("/tracks/{encoded_id}")) else {
@@ -1905,7 +2051,7 @@ pub fn fetch_track_streams(
         || urls.http_mp3_128_url.is_some()
         || urls.hls_aac_96_url.is_some();
 
-    if !has_full_v1_stream && settings.services.soundcloud_api_v2 {
+    if !has_full_v1_stream && is_soundcloud_v2_enabled(settings) {
         populate_v2_track_stream_urls(&track_id, &mut urls);
     }
 
@@ -1966,6 +2112,7 @@ pub fn fetch_user_playlists_and_likes(
         track_count: liked_tracks_preview.len(),
         duration_ms: likes_dur,
         kind: "likes".to_string(),
+        permalink_url: Some("https://soundcloud.com/you/likes".to_string()),
         tracks: liked_tracks_preview.clone(),
     });
 
@@ -2039,7 +2186,7 @@ pub fn fetch_playlist_tracks(
 
     // When API v2 mode is enabled, resolve the playlist and batch-hydrate its track stubs via `api-v2.soundcloud.com`
     // so monetized/distributor albums & sets return their full tracklists (`snipped: false`).
-    if settings.services.soundcloud_api_v2 {
+    if is_soundcloud_v2_enabled(settings) {
         if let Ok(v2_pl) = soundcloud_v2_get_json(&format!("/playlists/{encoded_id}?representation=full")) {
             if let Some(arr) = v2_pl.get("tracks").and_then(|v| v.as_array()) {
                 let mut ordered_ids: Vec<String> = Vec::with_capacity(arr.len());
@@ -2521,7 +2668,7 @@ pub fn search_catalog(settings: &SimpSettings, query: &str) -> Result<SoundCloud
             "/resolve?url={}",
             url_encode_component(&full_sc_url)
         );
-        let resolved_opt = if settings.services.soundcloud_api_v2 {
+        let resolved_opt = if is_soundcloud_v2_enabled(settings) {
             soundcloud_v2_get_json(&resolve_path)
                 .or_else(|_| soundcloud_authed_get(settings, &resolve_path))
                 .ok()
@@ -2541,7 +2688,7 @@ pub fn search_catalog(settings: &SimpSettings, query: &str) -> Result<SoundCloud
                 }
             } else if kind == "playlist" {
                 if let Some(mut pl) = map_soundcloud_item_to_playlist(&resolved, "catalog_set") {
-                    if settings.services.soundcloud_api_v2 && pl.tracks.len() < pl.track_count {
+                    if is_soundcloud_v2_enabled(settings) && pl.tracks.len() < pl.track_count {
                         if let Ok(hydrated) = fetch_playlist_tracks(settings, &pl.id) {
                             if !hydrated.is_empty() {
                                 pl.track_count = hydrated.len();
@@ -2624,7 +2771,7 @@ pub fn search_catalog(settings: &SimpSettings, query: &str) -> Result<SoundCloud
         }
     }
 
-    if settings.services.soundcloud_api_v2 {
+    if is_soundcloud_v2_enabled(settings) {
         if let Ok(v2_t_json) =
             soundcloud_v2_get_json(&format!("/search/tracks?q={encoded_q}&limit=30"))
         {
@@ -2782,25 +2929,33 @@ pub fn fetch_track_waveform(
         }
     }
 
-    let (mut wf_url, mut bpm, mut favoritings_count, mut playback_count, mut user_id, mut chapters) =
-        track_hints()
-            .lock()
-            .ok()
-            .and_then(|g| {
-                g.get(&track_id).map(|e| {
-                    (
-                        e.waveform_url.clone(),
-                        e.bpm,
-                        e.favoritings_count,
-                        e.playback_count,
-                        e.user_id.clone(),
-                        e.chapters.clone(),
-                    )
-                })
+    let (
+        mut wf_url,
+        mut permalink_url,
+        mut bpm,
+        mut favoritings_count,
+        mut playback_count,
+        mut user_id,
+        mut chapters,
+    ) = track_hints()
+        .lock()
+        .ok()
+        .and_then(|g| {
+            g.get(&track_id).map(|e| {
+                (
+                    e.waveform_url.clone(),
+                    e.permalink_url.clone(),
+                    e.bpm,
+                    e.favoritings_count,
+                    e.playback_count,
+                    e.user_id.clone(),
+                    e.chapters.clone(),
+                )
             })
-            .unwrap_or((None, None, None, None, None, Vec::new()));
+        })
+        .unwrap_or((None, None, None, None, None, None, Vec::new()));
 
-    if wf_url.is_none() || (chapters.is_empty() && user_id.is_none()) {
+    if wf_url.is_none() || permalink_url.is_none() || (chapters.is_empty() && user_id.is_none()) {
         if let Ok(json) = soundcloud_authed_get(
             settings,
             &format!("/tracks/{}", url_encode_component(&track_id)),
@@ -2809,6 +2964,7 @@ pub fn fetch_track_waveform(
             if let Ok(g) = track_hints().lock() {
                 if let Some(e) = g.get(&track_id) {
                     wf_url = e.waveform_url.clone();
+                    permalink_url = e.permalink_url.clone();
                     bpm = e.bpm;
                     favoritings_count = e.favoritings_count;
                     playback_count = e.playback_count;
@@ -2847,6 +3003,7 @@ pub fn fetch_track_waveform(
         track_id: track_id.clone(),
         bars,
         waveform_url: wf_url,
+        permalink_url,
         bpm,
         favoritings_count,
         playback_count,
@@ -3015,6 +3172,19 @@ pub fn map_soundcloud_item_to_user(item: &Value) -> Option<SoundCloudUserSummary
         raw_desc.lines().next().unwrap_or("").to_string()
     };
 
+    let permalink_url = obj
+        .get("permalink_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+        .or_else(|| {
+            obj.get("permalink")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|slug| format!("https://soundcloud.com/{slug}"))
+        });
+
     Some(SoundCloudUserSummary {
         id: raw_id,
         urn,
@@ -3023,7 +3193,89 @@ pub fn map_soundcloud_item_to_user(item: &Value) -> Option<SoundCloudUserSummary
         track_count,
         followers_count,
         description,
+        permalink_url,
     })
+}
+
+/// Resolves the canonical `https://soundcloud.com/...` `permalink_url` for a SoundCloud track,
+/// playlist/set, or user profile, checking `TRACK_HINTS` first before querying SoundCloud API v1.
+pub fn resolve_soundcloud_permalink_url(
+    settings: &SimpSettings,
+    kind: &str,
+    raw_id: &str,
+) -> String {
+    let cleaned = clean_soundcloud_id(raw_id)
+        .trim_start_matches("users:")
+        .to_string();
+    if cleaned.starts_with("https://soundcloud.com/") || cleaned.starts_with("http://soundcloud.com/") {
+        return cleaned;
+    }
+    if cleaned.is_empty() {
+        return "https://soundcloud.com".to_string();
+    }
+
+    let kind_norm = kind.trim().to_ascii_lowercase();
+    if kind_norm == "track" || kind_norm.is_empty() {
+        if let Ok(guard) = track_hints().lock() {
+            if let Some(entry) = guard.get(&cleaned) {
+                if let Some(ref url) = entry.permalink_url {
+                    if !url.is_empty() {
+                        return url.clone();
+                    }
+                }
+            }
+        }
+        if let Ok(json) = soundcloud_authed_get(
+            settings,
+            &format!("/tracks/{}", url_encode_component(&cleaned)),
+        ) {
+            let _ = map_soundcloud_item_to_track(&json);
+            if let Some(u) = json
+                .get("permalink_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| s.starts_with("http"))
+            {
+                return u.to_string();
+            }
+        }
+    } else if kind_norm == "playlist" || kind_norm == "set" {
+        if cleaned.eq_ignore_ascii_case("likes") {
+            return "https://soundcloud.com/you/likes".to_string();
+        }
+        if let Ok(json) = soundcloud_authed_get(
+            settings,
+            &format!("/playlists/{}", url_encode_component(&cleaned)),
+        ) {
+            if let Some(u) = json
+                .get("permalink_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| s.starts_with("http"))
+            {
+                return u.to_string();
+            }
+        }
+    } else if kind_norm == "user" || kind_norm == "artist" || kind_norm == "creator" {
+        if !cleaned.chars().all(|c| c.is_ascii_digit()) {
+            return format!("https://soundcloud.com/{}", url_encode_component(&cleaned));
+        }
+        if let Ok(json) = soundcloud_authed_get(
+            settings,
+            &format!("/users/{}", url_encode_component(&cleaned)),
+        ) {
+            if let Some(u) = json
+                .get("permalink_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| s.starts_with("http"))
+            {
+                return u.to_string();
+            }
+        }
+    }
+
+    "https://soundcloud.com".to_string()
 }
 
 /// Fetches the creators/DJs followed by the authenticated SoundCloud user (`GET /me/followings`).
@@ -3144,7 +3396,7 @@ pub fn fetch_user_profile_tracks(
 
     // When API v2 mode is enabled, also fetch the creator's full v2 tracks, albums, and sets so
     // distributor-monetized releases (`policy: MONETIZE` / `AD_SUPPORTED`) appear with full track counts.
-    if settings.services.soundcloud_api_v2 {
+    if is_soundcloud_v2_enabled(settings) {
         if let Ok(v2_tracks) = soundcloud_v2_get_json(&format!(
             "/users/{encoded_uid}/tracks?representation=full&limit=100"
         )) {

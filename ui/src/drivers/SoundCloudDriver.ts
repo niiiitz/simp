@@ -16,6 +16,7 @@ export interface SoundCloudPlaylistSummary {
   track_count: number;
   duration_ms: number;
   kind: 'likes' | 'user_set' | 'liked_set' | 'catalog_set' | string;
+  permalink_url?: string | null;
   tracks?: TrackMetadata[];
 }
 
@@ -51,6 +52,7 @@ export interface SoundCloudUserSummary {
   track_count: number;
   followers_count: number;
   description: string;
+  permalink_url?: string | null;
 }
 
 export interface SoundCloudUserProfileResponse {
@@ -97,6 +99,7 @@ export interface SoundCloudWaveform {
   track_id: string;
   bars: number[];
   waveform_url?: string | null;
+  permalink_url?: string | null;
   bpm?: number | null;
   favoritings_count?: number | null;
   playback_count?: number | null;
@@ -151,6 +154,32 @@ export function cleanSoundCloudTrackId(uriOrId: string): string {
     .replace(/^soundcloud:playlists?:/, '')
     .replace(/^soundcloud:/, '')
     .trim();
+}
+
+/**
+ * Opens the canonical `https://soundcloud.com/...` `permalink_url` for a SoundCloud track,
+ * playlist/set, or creator in the system browser per SoundCloud Attribution Guidelines.
+ */
+export function openSoundCloudPermalink(opts: {
+  permalinkUrl?: string | null;
+  kind?: 'track' | 'playlist' | 'user';
+  id?: string | null;
+}): void {
+  if (typeof window === 'undefined') return;
+  const direct = opts.permalinkUrl?.trim();
+  if (direct && (direct.startsWith('https://soundcloud.com') || direct.startsWith('http://soundcloud.com'))) {
+    window.open(direct, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  const cleanId = opts.id ? cleanSoundCloudTrackId(opts.id) : '';
+  if (cleanId) {
+    const base = resolveDaemonHttpBase();
+    const kind = opts.kind || 'track';
+    const redirectEndpoint = `${base}/api/soundcloud/open?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(cleanId)}`;
+    window.open(redirectEndpoint, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  window.open('https://soundcloud.com', '_blank', 'noopener,noreferrer');
 }
 
 /**
@@ -266,7 +295,7 @@ export async function disconnectSoundCloudCleanSlate(
   onToast?: (msg: string) => void
 ): Promise<void> {
   defaultSimpClient.disconnectSoundCloud();
-  onToast?.('Disconnected SoundCloud & cleared cached tokens');
+  onToast?.('Signed out of SoundCloud account (Public Discovery active)');
 }
 
 export const startSoundCloudOAuthLogin = authorizeSoundCloudOAuth;

@@ -942,11 +942,7 @@ const ConsoleMainApp: React.FC = () => {
 
   // 3c. SoundCloud Cloud Hub data loader
   useEffect(() => {
-    if (
-      view !== 'browser' ||
-      browserSourceFilter !== 'soundcloud' ||
-      (!snap?.soundcloud_authenticated && !soundcloudAuthCfg?.soundcloud_authenticated)
-    ) {
+    if (view !== 'browser' || browserSourceFilter !== 'soundcloud') {
       return;
     }
     if (
@@ -1048,10 +1044,7 @@ const ConsoleMainApp: React.FC = () => {
       } else {
         setCatalogSearchResults({ songs: [], albums: [], playlists: [], stations: [] });
       }
-      if (
-        isScIncluded &&
-        (snap?.soundcloud_authenticated || soundcloudAuthCfg?.soundcloud_authenticated)
-      ) {
+      if (isScIncluded) {
         promises.push(
           searchSoundCloudCatalog(term)
             .then((res) => setScCatalogSearchResults(res))
@@ -1585,8 +1578,6 @@ const ConsoleMainApp: React.FC = () => {
   useEffect(() => {
     if (!snap) return;
     if (browserSourceFilter === 'apple_music' && !snap.apple_authenticated) {
-      setBrowserSourceFilter('all');
-    } else if (browserSourceFilter === 'soundcloud' && !snap.soundcloud_authenticated) {
       setBrowserSourceFilter('all');
     } else if (
       browserSourceFilter === 'internet_archive' &&

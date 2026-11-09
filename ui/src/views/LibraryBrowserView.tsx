@@ -46,6 +46,7 @@ import {
   toggleFollowSoundCloudUser,
   unlikeSoundCloudTrack,
 } from '../drivers/SoundCloudDriver';
+import { SoundCloudAttributionLink, SoundCloudLogo } from '../components/SoundCloudLogo';
 import { OskTargetKind } from '../hooks/useGamepadNavigation';
 import { BrowserTarget, isUiVideoTrack } from './PlayerView';
 import { SourceVisibilityPrefs } from './SettingsModal';
@@ -4673,7 +4674,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   },
                 ]
               : []),
-            ...(sourceVisibility.soundcloud && snap?.soundcloud_authenticated
+            ...(sourceVisibility.soundcloud
               ? [
                   {
                     id: 'soundcloud' as const,
@@ -5217,8 +5218,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             )}
 
             {browserSourceFilter === 'all' &&
-              isSourceIncluded('soundcloud') &&
-              snap?.soundcloud_authenticated && (
+              isSourceIncluded('soundcloud') && (
               <button
                 data-xmb-drill-right="true"
                 onClick={() => {
@@ -5245,7 +5245,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                   alignItems: 'center',
                 }}
               >
-                <span>☁️ SoundCloud</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <SoundCloudLogo width={30} color="#ffffff" />
+                  <span>SoundCloud</span>
+                </span>
                 <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#fdba74' }}>▸</span>
               </button>
             )}
@@ -8575,6 +8578,20 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     </>
                   ) : null;
                 })()}
+                {activeArtistProfile.source === 'soundcloud' && (
+                  <SoundCloudAttributionLink
+                    permalinkUrl={activeArtistProfile.scData?.user?.permalink_url}
+                    kind="user"
+                    id={
+                      activeArtistProfile.scData?.user?.id ||
+                      activeArtistProfile.idOrName ||
+                      activeArtistProfile.displayName
+                    }
+                    label="SoundCloud"
+                    width={30}
+                    style={{ minHeight: 38, padding: '0 12px', borderRadius: 10 }}
+                  />
+                )}
                 {activeArtistProfile.source === 'soundcloud' && activeArtistProfile.scData?.user && (
                   <button
                     onClick={async () => {
@@ -8960,6 +8977,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     </>
                   )}
 
+                  {browserTarget.kind === 'soundcloud_playlist' && (
+                    <SoundCloudAttributionLink
+                      kind="playlist"
+                      id={browserTarget.id}
+                      label="SoundCloud"
+                      width={30}
+                      style={{ minHeight: 40, padding: '0 12px', borderRadius: 10 }}
+                    />
+                  )}
                   <button
                     data-right-play-all="true"
                     onClick={() => {
@@ -9448,54 +9474,57 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                    <span
-                      style={{
-                        fontSize: 10,
-                        fontFamily: 'monospace',
-                        padding: '2px 6px',
-                        borderRadius: 6,
-                        background:
-                          t.source === 'apple_music'
-                            ? '#251018'
-                            : t.source === 'soundcloud'
-                            ? '#2c140a'
-                            : t.source === 'internet_archive' ||
-                              t.source === 'ia_video' ||
-                              t.source === 'cdda'
-                            ? '#261a0d'
-                            : '#101822',
-                        color:
-                          t.source === 'apple_music'
-                            ? '#fda4af'
-                            : t.source === 'soundcloud'
-                            ? '#fdba74'
-                            : t.source === 'internet_archive' ||
-                              t.source === 'ia_video' ||
-                              t.source === 'cdda'
-                            ? '#fcd34d'
-                            : '#67e8f9',
-                      }}
-                    >
-                      {(() => {
-                        const fmt = extractAudioFormat(t.uri);
-                        const fmtSuffix = fmt ? ` • ${fmt}` : '';
-                        return t.source === 'apple_music'
-                          ? '🍎 Apple'
-                          : t.source === 'soundcloud'
-                          ? '☁️ SC'
-                          : t.source === 'ia_video'
-                          ? '🎬 Archive'
-                          : t.source === 'internet_archive'
-                          ? '🏛️ Archive'
-                          : t.source === 'local_video' || t.uri.startsWith('video://local/')
-                          ? '🎬 Video'
-                          : t.source === 'steam_ost'
-                          ? `🎮 OST${fmtSuffix}`
-                          : t.source === 'cdda'
-                          ? '💿 CD'
-                          : `💾 Local${fmtSuffix}`;
-                      })()}
-                    </span>
+                    {t.source === 'soundcloud' ? (
+                      <SoundCloudAttributionLink
+                        kind="track"
+                        id={t.uri}
+                        width={30}
+                        style={{ padding: '2px 6px' }}
+                      />
+                    ) : (
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontFamily: 'monospace',
+                          padding: '2px 6px',
+                          borderRadius: 6,
+                          background:
+                            t.source === 'apple_music'
+                              ? '#251018'
+                              : t.source === 'internet_archive' ||
+                                t.source === 'ia_video' ||
+                                t.source === 'cdda'
+                              ? '#261a0d'
+                              : '#101822',
+                          color:
+                            t.source === 'apple_music'
+                              ? '#fda4af'
+                              : t.source === 'internet_archive' ||
+                                t.source === 'ia_video' ||
+                                t.source === 'cdda'
+                              ? '#fcd34d'
+                              : '#67e8f9',
+                        }}
+                      >
+                        {(() => {
+                          const fmt = extractAudioFormat(t.uri);
+                          const fmtSuffix = fmt ? ` • ${fmt}` : '';
+                          return t.source === 'apple_music'
+                            ? '🍎 Apple'
+                            : t.source === 'ia_video'
+                            ? '🎬 Archive'
+                            : t.source === 'internet_archive'
+                            ? '🏛️ Archive'
+                            : t.source === 'local_video' || t.uri.startsWith('video://local/')
+                            ? '🎬 Video'
+                            : t.source === 'steam_ost'
+                            ? `🎮 OST${fmtSuffix}`
+                            : t.source === 'cdda'
+                            ? '💿 CD'
+                            : `💾 Local${fmtSuffix}`;
+                        })()}
+                      </span>
+                    )}
                     <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
                       {Math.floor(t.duration_ms / 60000)}:
                       {String(Math.floor((t.duration_ms / 1000) % 60)).padStart(2, '0')}
