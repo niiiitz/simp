@@ -192,6 +192,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     };
   }, []);
 
+  const [brightnessScrubActive, setBrightnessScrubActive] = useState(false);
+
+  useEffect(() => {
+    const onBrightnessStep = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ delta?: number }>).detail;
+      const delta = typeof detail?.delta === 'number' ? detail.delta : 0;
+      if (delta !== 0) {
+        setBrightnessPct((b) => Math.max(25, Math.min(100, b + delta)));
+      }
+    };
+    const onBrightnessExit = () => {
+      setBrightnessScrubActive(false);
+    };
+    window.addEventListener('simp-brightness-step', onBrightnessStep);
+    window.addEventListener('simp-brightness-exit', onBrightnessExit);
+    return () => {
+      window.removeEventListener('simp-brightness-step', onBrightnessStep);
+      window.removeEventListener('simp-brightness-exit', onBrightnessExit);
+    };
+  }, [setBrightnessPct]);
+
   const toggleSourceVisible = (key: keyof SourceVisibilityPrefs) => {
     setSourceVisibility((prev) => {
       const nextVal = !prev[key];
@@ -242,6 +263,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   // Determine if a sub-level or slide-out column is open so `B` / `ESC` walks back cleanly
   const hasNestedChildOpen =
+    brightnessScrubActive ||
     confirmHardReset ||
     addPathOpen ||
     iaAuthOpen ||
@@ -250,7 +272,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     foldersAccountsOpen;
 
   const handleWalkBackNested = () => {
-    if (confirmHardReset) {
+    if (brightnessScrubActive) {
+      setBrightnessScrubActive(false);
+    } else if (confirmHardReset) {
       setConfirmHardReset(false);
     } else if (addPathOpen) {
       setAddPathOpen(false);
@@ -367,7 +391,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('internet_archive')}
                     style={pillToggleStyle(sourceVisibility.internet_archive, '#34d399')}
                   >
-                    {sourceVisibility.internet_archive ? '🚫 Hide' : '👁 Show'}
+                    {sourceVisibility.internet_archive ? '👁 Shown' : '🚫 Hidden'}
                   </button>
                   <button
                     type="button"
@@ -442,22 +466,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       Save
                     </button>
                   </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <input
-                      type="text"
-                      placeholder="Optional IAS3 Access Key"
-                      value={iaAccessKey}
-                      onChange={(e) => setIaAccessKey(e.target.value)}
-                      style={compactInputStyle}
-                    />
-                    <input
-                      type="password"
-                      placeholder="Optional IAS3 Secret Key"
-                      value={iaSecretKey}
-                      onChange={(e) => setIaSecretKey(e.target.value)}
-                      style={compactInputStyle}
-                    />
-                  </div>
                 </div>
               )}
             </div>
@@ -474,7 +482,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('apple_music')}
                     style={pillToggleStyle(sourceVisibility.apple_music, '#f43f5e')}
                   >
-                    {sourceVisibility.apple_music ? '🚫 Hide' : '👁 Show'}
+                    {sourceVisibility.apple_music ? '👁 Shown' : '🚫 Hidden'}
                   </button>
                   <button
                     type="button"
@@ -524,37 +532,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         {appleBusy ? 'Working...' : 'Authorize Apple ID'}
                       </button>
                     ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setBrowserSourceFilter('apple_music');
-                            setAppleSubTab('cloud_playlists');
-                            setView('browser');
-                            closeSettingsDrawer();
-                          }}
-                          style={compactPrimaryBtnStyle}
-                        >
-                          Open Cloud Hub
-                        </button>
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            await disconnectAppleMusicCleanSlate(showToast);
-                            const updated = await defaultSimpClient
-                              .getAppleMusicAuthConfig()
-                              .catch(() => null);
-                            if (updated) setAppleAuthCfg(updated);
-                          }}
-                          style={compactDangerBtnStyle}
-                        >
-                          Disconnect
-                        </button>
-                      </>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await disconnectAppleMusicCleanSlate(showToast);
+                          const updated = await defaultSimpClient
+                            .getAppleMusicAuthConfig()
+                            .catch(() => null);
+                          if (updated) setAppleAuthCfg(updated);
+                        }}
+                        style={compactDangerBtnStyle}
+                      >
+                        Disconnect
+                      </button>
                     )}
                   </div>
 
-                  {appleAuthCfg?.pair_url && (
+                  {!snap?.apple_authenticated && appleAuthCfg?.pair_url && (
                     <div
                       style={{
                         display: 'flex',
@@ -602,7 +596,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('soundcloud')}
                     style={pillToggleStyle(sourceVisibility.soundcloud, '#ea580c')}
                   >
-                    {sourceVisibility.soundcloud ? '🚫 Hide' : '👁 Show'}
+                    {sourceVisibility.soundcloud ? '👁 Shown' : '🚫 Hidden'}
                   </button>
                   <button
                     type="button"
@@ -620,7 +614,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       ? `@${soundcloudAuthCfg.username}`
                       : snap?.soundcloud_authenticated ||
                         soundcloudAuthCfg?.soundcloud_authenticated
-                      ? '🟢 Public'
+                      ? '🟢 Connected'
                       : 'Sign In'}{' '}
                     {scAuthOpen ? '▾' : '▸'}
                   </button>
@@ -662,26 +656,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   >
                     {soundcloudBusy ? 'Working...' : 'OAuth Sign In'}
                   </button>
-                  <button
-                    type="button"
-                    disabled={soundcloudBusy}
-                    onClick={async () => {
-                      setSoundcloudBusy(true);
-                      try {
-                        await enableSoundCloudPublicMode(showToast);
-                        const updated = await defaultSimpClient.getSoundCloudAuthConfig();
-                        setSoundcloudAuthCfg(updated);
-                        refreshLibraryData();
-                      } catch (err: any) {
-                        showToast(err?.message || 'Public Mode failed');
-                      } finally {
-                        setSoundcloudBusy(false);
-                      }
-                    }}
-                    style={compactPrimaryBtnStyle}
-                  >
-                    ⚡ Public Mode
-                  </button>
                   {(snap?.soundcloud_authenticated ||
                     soundcloudAuthCfg?.soundcloud_authenticated) && (
                     <button
@@ -714,7 +688,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('optical_drive')}
                     style={pillToggleStyle(sourceVisibility.optical_drive, '#f59e0b')}
                   >
-                    {sourceVisibility.optical_drive ? '🚫 Hide' : '👁 Show'}
+                    {sourceVisibility.optical_drive ? '👁 Shown' : '🚫 Hidden'}
                   </button>
                   {sourceVisibility.optical_drive && (
                     <>
@@ -1025,37 +999,55 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           {/* Row 1: [BRIGHTNESS SLIDER] [SLEEP SCREEN] */}
           <div style={{ display: 'grid', gridTemplateColumns: '1.35fr 1fr', gap: 8 }}>
-            <div
+            <button
+              type="button"
+              data-default-focus="true"
+              data-brightness-slider="true"
+              data-brightness-scrub-active={brightnessScrubActive ? 'true' : undefined}
+              onClick={() => setBrightnessScrubActive((v) => !v)}
+              onBlur={() => setBrightnessScrubActive(false)}
               style={{
                 padding: '8px 10px',
                 borderRadius: 12,
-                background: '#0e0e16',
-                border: '1px solid #222230',
+                background: brightnessScrubActive ? '#0f222a' : '#0e0e16',
+                border: brightnessScrubActive ? '2px solid #2aa3c4' : '1px solid #222230',
                 display: 'flex',
                 flexDirection: 'column',
                 justifyContent: 'space-between',
                 gap: 6,
+                textAlign: 'left',
+                cursor: 'pointer',
               }}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  width: '100%',
+                }}
+              >
                 <span style={{ fontSize: 11.5, fontWeight: 800, color: '#bfeaf5' }}>
                   🔅 Brightness
                 </span>
                 <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#67e8f9' }}>
-                  {brightnessPct}%
+                  {brightnessScrubActive ? `◄ ${brightnessPct}% ►` : `${brightnessPct}%`}
                 </span>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <button
-                  type="button"
-                  data-default-focus="true"
-                  onClick={() => setBrightnessPct((b) => Math.max(25, b - 10))}
-                  style={smallStepBtnStyle}
+              <div
+                style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <span
+                  role="button"
+                  onClick={() => setBrightnessPct((b) => Math.max(25, b - 5))}
+                  style={{ ...smallStepBtnStyle, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none' }}
                 >
                   −
-                </button>
+                </span>
                 <input
                   type="range"
+                  tabIndex={-1}
                   min={25}
                   max={100}
                   step={5}
@@ -1068,15 +1060,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     minWidth: 0,
                   }}
                 />
-                <button
-                  type="button"
-                  onClick={() => setBrightnessPct((b) => Math.min(100, b + 10))}
-                  style={smallStepBtnStyle}
+                <span
+                  role="button"
+                  onClick={() => setBrightnessPct((b) => Math.min(100, b + 5))}
+                  style={{ ...smallStepBtnStyle, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none' }}
                 >
                   +
-                </button>
+                </span>
               </div>
-            </div>
+            </button>
 
             <button
               type="button"

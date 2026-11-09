@@ -1012,7 +1012,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   const xmbPreviewTriggerRef = useRef<boolean>(false);
 
   // PS3 XMB Auto-Fill: When cursor lands on a non-drill-down row in the Left Column (`data-xmb-preview="true"`),
-  // automatically fill the Right Pane after a 75ms debounce while keeping focus in the Left Column!
+  // automatically fill the Right Pane after a 180ms debounce while keeping focus in the Left Column!
   useEffect(() => {
     let debounceTimer = 0;
     const onXmbLeftFocus = (e: Event) => {
@@ -1027,7 +1027,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         } finally {
           xmbPreviewTriggerRef.current = false;
         }
-      }, 75);
+      }, 180);
     };
     window.addEventListener('simp-xmb-left-focus', onXmbLeftFocus);
     return () => {
@@ -5801,6 +5801,43 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         }}
       >
         {renderContextLegendBar()}
+        {browserSearch.trim() && rightPaneMode !== 'tracks' && (
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 10,
+              padding: '8px 12px',
+              borderRadius: 10,
+              background: '#0f222a',
+              border: '1px solid #2aa3c4',
+              flexShrink: 0,
+            }}
+          >
+            <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
+              🔍 Filtering by “{browserSearch.trim()}”
+            </span>
+            <button
+              type="button"
+              data-right-filter-pill="true"
+              onClick={() => setBrowserSearch('')}
+              style={{
+                padding: '4px 10px',
+                borderRadius: 7,
+                background: '#16313c',
+                border: '1px solid #2aa3c4',
+                color: '#7dd3fc',
+                fontSize: 11.5,
+                fontFamily: 'monospace',
+                fontWeight: 800,
+                cursor: 'pointer',
+              }}
+            >
+              ✕ Clear
+            </button>
+          </div>
+        )}
         {/* =================================================================
             STATE A: ⊞ 4-COLUMN-MAX VISUAL TILE GRID (My SIMP Library, Apple Playlists, Radio, New, Search)
            ================================================================= */}

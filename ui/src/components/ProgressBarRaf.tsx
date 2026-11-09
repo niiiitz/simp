@@ -334,7 +334,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
 
   return (
     <div style={{ userSelect: 'none', touchAction: 'none', padding: '0 14px', boxSizing: 'border-box' }}>
-      {/* 54px Tall Fat-Finger Touch Hit Zone */}
+      {/* 60px Tall Fat-Finger Touch Hit Zone (Waveform expands downward) */}
       <div
         ref={trackContainerRef}
         onPointerDown={handlePointerDown}
@@ -342,9 +342,12 @@ export const ProgressBarRaf: React.FC<Props> = ({
         onPointerUp={handlePointerUpOrCancel}
         onPointerCancel={handlePointerUpOrCancel}
         style={{
-          height: 54,
+          height: 60,
+          paddingTop: 14,
+          paddingBottom: 6,
+          boxSizing: 'border-box',
           display: 'flex',
-          alignItems: 'center',
+          alignItems: 'flex-end',
           cursor: 'pointer',
           position: 'relative',
         }}
@@ -353,19 +356,19 @@ export const ProgressBarRaf: React.FC<Props> = ({
           ref={railRef}
           style={{
             width: '100%',
-            height: 22,
+            height: 34,
             position: 'relative',
             display: 'flex',
             alignItems: 'center',
           }}
         >
-          {/* 22px Tall Visual Pill Track */}
+          {/* 34px Tall Visual Pill Track (~50% taller expanding downward) */}
           <div
             style={{
               width: '100%',
-              height: 22,
+              height: 34,
               background: '#0b0c12',
-              borderRadius: 999,
+              borderRadius: 17,
               overflow: 'hidden',
               border: '1px solid #2b2d3c',
               boxShadow:
@@ -378,11 +381,11 @@ export const ProgressBarRaf: React.FC<Props> = ({
               <canvas
                 ref={waveformCanvasRef}
                 width={540}
-                height={40}
+                height={64}
                 style={{
                   position: 'absolute',
-                  inset: '1px 8px',
-                  width: 'calc(100% - 16px)',
+                  inset: '1px 10px',
+                  width: 'calc(100% - 20px)',
                   height: 'calc(100% - 2px)',
                   pointerEvents: 'none',
                   zIndex: 3,
@@ -445,8 +448,8 @@ export const ProgressBarRaf: React.FC<Props> = ({
               position: 'absolute',
               left: '0%',
               top: '50%',
-              width: 26,
-              height: 26,
+              width: 34,
+              height: 34,
               borderRadius: 999,
               background: '#c8c8d2',
               border: isSoundCloudTrack ? '3px solid #fb923c' : '3px solid #2aa3c4',

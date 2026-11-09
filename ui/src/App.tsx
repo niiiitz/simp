@@ -1724,6 +1724,18 @@ const ConsoleMainApp: React.FC = () => {
 
   return (
     <div
+      onDoubleClick={(e) => {
+        const target = e.target as HTMLElement | null;
+        if (!target) return;
+        if (
+          target.closest(
+            'button, input, select, textarea, a, [role="button"], [data-osk-root="true"], [data-modal-root="true"], [data-focusable="true"]'
+          )
+        ) {
+          return;
+        }
+        window.dispatchEvent(new CustomEvent('simp-player-fullscreen-toggle'));
+      }}
       style={{
         width: '100%',
         maxWidth: '100vw',

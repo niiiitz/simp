@@ -282,6 +282,11 @@ export function useGamepadNavigation({
         if (dir === 'up' || dir === 'down') {
           let bestInPlayerCol: HTMLElement | null = null;
           let bestScore = Infinity;
+          let wrapTopMost: HTMLElement | null = null;
+          let wrapTopMinY = Infinity;
+          let wrapBottomMost: HTMLElement | null = null;
+          let wrapBottomMaxY = -Infinity;
+
           for (const candidate of nodes) {
             if (candidate === active) continue;
             const candCol =
@@ -289,7 +294,16 @@ export function useGamepadNavigation({
                 .playerActionsCol || null;
             if (candCol !== curPlayerCol) continue;
             const r = candidate.getBoundingClientRect();
-            const dy = r.top + r.height / 2 - cy;
+            const ty = r.top + r.height / 2;
+            if (ty < wrapTopMinY) {
+              wrapTopMinY = ty;
+              wrapTopMost = candidate;
+            }
+            if (ty > wrapBottomMaxY) {
+              wrapBottomMaxY = ty;
+              wrapBottomMost = candidate;
+            }
+            const dy = ty - cy;
             if (dir === 'down' && dy <= 4) continue;
             if (dir === 'up' && dy >= -4) continue;
             if (Math.abs(dy) < bestScore) {
@@ -299,6 +313,11 @@ export function useGamepadNavigation({
           }
           if (bestInPlayerCol) {
             applyFocusMarker(bestInPlayerCol);
+          } else {
+            const wrapped = dir === 'up' ? wrapBottomMost : wrapTopMost;
+            if (wrapped) {
+              applyFocusMarker(wrapped);
+            }
           }
           return;
         }
@@ -318,6 +337,9 @@ export function useGamepadNavigation({
         if (curPlayerCol === 'right' && dir === 'left') {
           const leftSettingTarget =
             document.querySelector<HTMLElement>(
+              '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-select-active="true"]:not([disabled])'
+            ) ||
+            document.querySelector<HTMLElement>(
               '[data-player-actions-modal="true"] [data-player-actions-col="left"] button[data-default-focus="true"]:not([disabled])'
             ) ||
             document.querySelector<HTMLElement>(
@@ -336,6 +358,20 @@ export function useGamepadNavigation({
       const curSettingsCol =
         active.closest<HTMLElement>('[data-settings-col]')?.dataset.settingsCol || null;
       if (curSettingsCol && !oskTarget) {
+        if (active.dataset.brightnessScrubActive === 'true') {
+          if (dir === 'left' || dir === 'right') {
+            window.dispatchEvent(
+              new CustomEvent('simp-brightness-step', {
+                detail: { delta: dir === 'left' ? -5 : 5 },
+              })
+            );
+            return;
+          }
+          if (dir === 'up' || dir === 'down') {
+            window.dispatchEvent(new CustomEvent('simp-brightness-exit'));
+          }
+        }
+
         if (
           curSettingsCol === 'main' &&
           dir === 'left' &&
@@ -354,6 +390,11 @@ export function useGamepadNavigation({
 
         let bestInSettingsCol: HTMLElement | null = null;
         let bestSettingsScore = Infinity;
+        let wrapTopMost: HTMLElement | null = null;
+        let wrapTopMinY = Infinity;
+        let wrapBottomMost: HTMLElement | null = null;
+        let wrapBottomMaxY = -Infinity;
+
         for (const candidate of nodes) {
           if (candidate === active) continue;
           const candSettingsCol =
@@ -364,6 +405,15 @@ export function useGamepadNavigation({
           const ty = r.top + r.height / 2;
           const dx = tx - cx;
           const dy = ty - cy;
+
+          if (ty < wrapTopMinY - 4 || (Math.abs(ty - wrapTopMinY) <= 4 && r.left < (wrapTopMost?.getBoundingClientRect().left ?? Infinity))) {
+            wrapTopMinY = ty;
+            wrapTopMost = candidate;
+          }
+          if (ty > wrapBottomMaxY + 4 || (Math.abs(ty - wrapBottomMaxY) <= 4 && r.left < (wrapBottomMost?.getBoundingClientRect().left ?? Infinity))) {
+            wrapBottomMaxY = ty;
+            wrapBottomMost = candidate;
+          }
 
           if (dir === 'right' && dx <= 6) continue;
           if (dir === 'left' && dx >= -6) continue;
@@ -395,6 +445,14 @@ export function useGamepadNavigation({
 
         if (bestInSettingsCol) {
           applyFocusMarker(bestInSettingsCol);
+          return;
+        }
+
+        if (dir === 'up' || dir === 'down') {
+          const wrapped = dir === 'up' ? wrapBottomMost : wrapTopMost;
+          if (wrapped) {
+            applyFocusMarker(wrapped);
+          }
           return;
         }
 
