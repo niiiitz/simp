@@ -260,6 +260,24 @@ extern "C" fn create_popup_webview(
         popup_win.center();
         popup_win.setTitle_(ns_string("SIMP — Sign In"));
 
+        let dark_appearance: id = msg_send![
+            class!(NSAppearance),
+            appearanceNamed: ns_string("NSAppearanceNameDarkAqua")
+        ];
+        if dark_appearance != nil {
+            let _: () = msg_send![popup_win, setAppearance: dark_appearance];
+        }
+        let bg_color: id = msg_send![
+            class!(NSColor),
+            colorWithSRGBRed: 0.031_f64
+            green: 0.031_f64
+            blue: 0.047_f64
+            alpha: 1.0_f64
+        ];
+        if bg_color != nil {
+            popup_win.setBackgroundColor_(bg_color);
+        }
+
         let child_wv: id = msg_send![class!(WKWebView), alloc];
         let child_wv: id = msg_send![child_wv, initWithFrame: frame configuration: configuration];
         let this_id: id = this as *const Object as id;

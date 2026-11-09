@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const SOUNDCLOUD_DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:18888/api/soundcloud/callback";
 pub const SOUNDCLOUD_DEFAULT_TOKEN_PROXY_URL: &str = "https://simp-tap-67.niiiitz.workers.dev";
 pub const SOUNDCLOUD_DEFAULT_CLIENT_ID: &str = "WU0IbI5NwABTi60QuSLPgIeTZZmwNznQ";
+const REVOKED_SOUNDCLOUD_CLIENT_ID: &str = "8OHEYL2oWiDNXkoa3NG9GqMmcHjzuETj";
 
 /// Hard-locked to `false` so `api-v2` code remains in the repository for future reactivation
 /// if SoundCloud support grants clearance, while being 100% unreachable at runtime.
@@ -330,9 +331,13 @@ pub fn sync_latest_soundcloud_tokens_into_settings(settings: &mut SimpSettings) 
     }
 
     if let Some(cached) = get_cached_soundcloud_tokens() {
+        let cached_is_genuine_user = cached.auth_mode == "user"
+            && (!cached.refresh_token.trim().is_empty()
+                || (!cached.username.trim().is_empty()
+                    && cached.username != "Public Discovery (Client Credentials)"));
         let cached_is_newer_or_user = !cached.access_token.trim().is_empty()
             && (cached.expires_at >= settings.services.soundcloud_token_expires_at
-                || (cached.auth_mode == "user"
+                || (cached_is_genuine_user
                     && settings.services.soundcloud_auth_mode.trim() != "user")
                 || (!cached.refresh_token.trim().is_empty()
                     && settings.services.soundcloud_refresh_token.trim().is_empty()));
@@ -343,7 +348,11 @@ pub fn sync_latest_soundcloud_tokens_into_settings(settings: &mut SimpSettings) 
             }
             settings.services.soundcloud_token_expires_at = cached.expires_at;
             if !cached.auth_mode.trim().is_empty() {
-                settings.services.soundcloud_auth_mode = cached.auth_mode;
+                settings.services.soundcloud_auth_mode = if cached_is_genuine_user {
+                    "user".to_string()
+                } else {
+                    "client_credentials".to_string()
+                };
             }
             if !cached.username.trim().is_empty() {
                 settings.services.soundcloud_username = cached.username;
@@ -852,14 +861,18 @@ pub fn resolve_soundcloud_credentials(settings: &SimpSettings) -> ResolvedSoundC
         &settings.services.soundcloud_client_id,
         "SOUNDCLOUD_CLIENT_ID",
     );
+    if client_id == REVOKED_SOUNDCLOUD_CLIENT_ID {
+        client_id.clear();
+    }
     if client_id.is_empty() {
         if let Some(embedded) = option_env!("SIMP_EMBEDDED_SOUNDCLOUD_CLIENT_ID") {
-            if !embedded.trim().is_empty() {
-                client_id = embedded.trim().to_string();
+            let trimmed = embedded.trim();
+            if !trimmed.is_empty() && trimmed != REVOKED_SOUNDCLOUD_CLIENT_ID {
+                client_id = trimmed.to_string();
             }
         }
     }
-    if client_id.is_empty() {
+    if client_id.is_empty() || client_id == REVOKED_SOUNDCLOUD_CLIENT_ID {
         client_id = SOUNDCLOUD_DEFAULT_CLIENT_ID.to_string();
     }
 
@@ -906,10 +919,21 @@ pub fn resolve_soundcloud_credentials(settings: &SimpSettings) -> ResolvedSoundC
         refresh_token = disk_srv.soundcloud_refresh_token.trim().to_string();
     }
 
+    if auth_mode == "user"
+        && refresh_token.is_empty()
+        && (username.is_empty() || username == "Public Discovery (Client Credentials)")
+    {
+        auth_mode = "client_credentials".to_string();
+    }
+
     if let Some(cached) = get_cached_soundcloud_tokens() {
+        let cached_is_genuine_user = cached.auth_mode == "user"
+            && (!cached.refresh_token.is_empty()
+                || (!cached.username.is_empty()
+                    && cached.username != "Public Discovery (Client Credentials)"));
         // Prefer the in-memory token if settings hasn't been reloaded yet or if cached is newer
         let use_cached = access_token.is_empty()
-            || (cached.auth_mode == "user" && auth_mode != "user")
+            || (cached_is_genuine_user && auth_mode != "user")
             || (!cached.refresh_token.is_empty() && refresh_token.is_empty())
             || (cached.expires_at >= expires_at && cached.auth_mode == auth_mode);
         if use_cached {
@@ -918,7 +942,11 @@ pub fn resolve_soundcloud_credentials(settings: &SimpSettings) -> ResolvedSoundC
                 refresh_token = cached.refresh_token;
             }
             expires_at = cached.expires_at;
-            auth_mode = cached.auth_mode;
+            auth_mode = if cached_is_genuine_user {
+                "user".to_string()
+            } else {
+                "client_credentials".to_string()
+            };
             if !cached.username.is_empty() {
                 username = cached.username;
             }
@@ -1512,6 +1540,7 @@ fn clear_consumed_user_refresh_token(failed_refresh_token: &str) {
         if let Some(ref mut cached) = *guard {
             if failed_trimmed.is_empty() || cached.refresh_token.trim() == failed_trimmed {
                 cached.refresh_token.clear();
+                cached.auth_mode = "client_credentials".to_string();
             }
         }
     }
@@ -1561,7 +1590,11 @@ pub fn ensure_valid_access_token(settings: &SimpSettings) -> Result<String> {
             Err(refresh_err) => {
                 let msg = format!("{refresh_err:#}");
                 tracing::warn!("SoundCloud user OAuth refresh attempt failed: {msg}");
-                if msg.contains("invalid_grant") {
+                if msg.contains("invalid_grant")
+                    || msg.contains("invalid_client")
+                    || msg.contains("unauthorized_client")
+                    || msg.contains("revoked_client_id")
+                {
                     clear_consumed_user_refresh_token(&creds.refresh_token);
                 } else if !creds.access_token.is_empty() && now + 30 < creds.expires_at {
                     // Transient network failure during early (10m pre-expiry) refresh window:

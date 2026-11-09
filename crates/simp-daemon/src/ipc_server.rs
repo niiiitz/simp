@@ -2097,9 +2097,14 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
             let configured = !creds.client_id.is_empty();
             let has_token = !creds.access_token.is_empty();
             let soundcloud_authenticated = has_token || configured;
-            let auth_mode = if !creds.auth_mode.is_empty() {
+            let is_personal_user = creds.auth_mode == "user"
+                && !creds.username.is_empty()
+                && creds.username != "Public Discovery (Client Credentials)";
+            let auth_mode = if is_personal_user {
+                "user".to_string()
+            } else if !creds.auth_mode.is_empty() && creds.auth_mode != "user" {
                 creds.auth_mode.clone()
-            } else if configured {
+            } else if configured || has_token {
                 "client_credentials".to_string()
             } else {
                 String::new()

@@ -201,9 +201,21 @@ export async function authorizeSoundCloudOAuth(
   onToast?.('Opening SoundCloud OAuth 2.1 login...');
   const popup = window.open(
     startJson.authorize_url,
-    'simp_soundcloud_oauth',
+    `simp_soundcloud_oauth_${Date.now()}`,
     'width=540,height=700,menubar=no,toolbar=no,location=yes,status=no'
   );
+
+  const isGenuineUserSession = (cfg: {
+    soundcloud_authenticated?: boolean;
+    auth_mode?: string;
+    username?: string;
+  } | null) =>
+    Boolean(
+      cfg?.soundcloud_authenticated &&
+        cfg?.auth_mode === 'user' &&
+        cfg?.username &&
+        cfg.username !== 'Public Discovery (Client Credentials)'
+    );
 
   // Poll daemon auth config until callback completes or popup closes
   const startedAt = Date.now();
@@ -211,7 +223,7 @@ export async function authorizeSoundCloudOAuth(
     await new Promise((r) => setTimeout(r, 1200));
     try {
       const cfg = await defaultSimpClient.getSoundCloudAuthConfig();
-      if (cfg.soundcloud_authenticated && cfg.auth_mode === 'user') {
+      if (isGenuineUserSession(cfg)) {
         onToast?.(
           `☁️ SoundCloud connected${cfg.username ? ` as @${cfg.username}` : ''}!`
         );
@@ -226,9 +238,9 @@ export async function authorizeSoundCloudOAuth(
   }
 
   const finalCfg = await defaultSimpClient.getSoundCloudAuthConfig().catch(() => null);
-  if (finalCfg?.soundcloud_authenticated && finalCfg.auth_mode === 'user') {
+  if (isGenuineUserSession(finalCfg)) {
     onToast?.(
-      `☁️ SoundCloud connected${finalCfg.username ? ` as @${finalCfg.username}` : ''}!`
+      `☁️ SoundCloud connected${finalCfg?.username ? ` as @${finalCfg.username}` : ''}!`
     );
     return true;
   }
