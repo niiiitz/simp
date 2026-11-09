@@ -2082,8 +2082,29 @@ const ConsoleMainApp: React.FC = () => {
               alignItems: 'stretch',
               position: 'relative',
               fontFamily: 'monospace',
+              overflow: 'visible',
             }}
           >
+            {view === 'lock' && (
+              <span
+                className="simp-gp-badge"
+                title="D-Pad Down: Volume Down (-5%)"
+                onClick={() => applyVolume(currentVolume - 0.05)}
+                style={{
+                  padding: '0 8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  color: '#71717a',
+                  borderRight: '1px solid #1e1e28',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                }}
+              >
+                ▼
+              </span>
+            )}
             <button
               onClick={() => defaultSimpClient.togglePlayPause()}
               title={isPlaying ? 'Audio Active — Click to Pause (Silence)' : 'Paused (Silenced) — Click to Resume'}
@@ -2091,8 +2112,8 @@ const ConsoleMainApp: React.FC = () => {
                 padding: '0 10px',
                 border: 'none',
                 borderRight: '1px solid #1e1e28',
-                borderTopLeftRadius: 11,
-                borderBottomLeftRadius: 11,
+                borderTopLeftRadius: view === 'lock' ? 0 : 11,
+                borderBottomLeftRadius: view === 'lock' ? 0 : 11,
                 background: isPlaying ? 'rgba(42, 163, 196, 0.1)' : '#12121a',
                 color: isPlaying ? '#2aa3c4' : '#9ca3af',
                 fontSize: 14,
@@ -2118,8 +2139,8 @@ const ConsoleMainApp: React.FC = () => {
               style={{
                 padding: '0 10px',
                 border: 'none',
-                borderTopRightRadius: 11,
-                borderBottomRightRadius: 11,
+                borderTopRightRadius: view === 'lock' ? 0 : 11,
+                borderBottomRightRadius: view === 'lock' ? 0 : 11,
                 background: volumePopoverOpen ? '#0f222a' : 'transparent',
                 color: isPlaying ? '#c8c8d2' : '#8e8e99',
                 fontSize: 12,
@@ -2134,6 +2155,26 @@ const ConsoleMainApp: React.FC = () => {
               <span>{volPct}%</span>
               <span style={{ fontSize: 10, color: '#71717a' }}>▾</span>
             </button>
+            {view === 'lock' && (
+              <span
+                className="simp-gp-badge"
+                title="D-Pad Up: Volume Up (+5%)"
+                onClick={() => applyVolume(currentVolume + 0.05)}
+                style={{
+                  padding: '0 8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  color: '#71717a',
+                  borderLeft: '1px solid #1e1e28',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                }}
+              >
+                ▲
+              </span>
+            )}
 
             {volumePopoverOpen && (
               <div
