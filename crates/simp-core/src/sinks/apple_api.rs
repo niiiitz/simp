@@ -52,6 +52,8 @@ pub struct AppleRadioStationSummary {
     pub name: String,
     pub subtitle: String,
     pub art_url: Option<String>,
+    #[serde(default)]
+    pub genre: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +66,8 @@ pub struct AppleFullAlbumResponse {
 pub struct AppleRecommendationShelf {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub is_social: bool,
     #[serde(default)]
     pub playlists: Vec<AppleCloudPlaylistSummary>,
     #[serde(default)]
@@ -101,6 +105,12 @@ pub struct AppleRadioAndForYouResponse {
     pub personal_stations: Vec<AppleRadioStationSummary>,
     #[serde(default)]
     pub live_stations: Vec<AppleRadioStationSummary>,
+    #[serde(default)]
+    pub genre_stations: Vec<AppleRadioStationSummary>,
+    #[serde(default)]
+    pub artist_shows: Vec<AppleCloudPlaylistSummary>,
+    #[serde(default)]
+    pub club_mixes: Vec<AppleCloudPlaylistSummary>,
     pub playlists: Vec<AppleCloudPlaylistSummary>,
     pub albums: Vec<AppleCloudAlbumSummary>,
     #[serde(default)]
@@ -1140,6 +1150,7 @@ pub fn search_catalog(settings: &SimpSettings, term: &str) -> Result<AppleCatalo
                         attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
                         300,
                     ),
+                    genre: None,
                 });
             }
         }
@@ -1275,6 +1286,7 @@ pub fn fetch_radio_and_for_you(settings: &SimpSettings) -> Result<AppleRadioAndF
                 .to_string(),
             subtitle: attrs
                 .pointer("/editorialNotes/short")
+                .or_else(|| attrs.pointer("/editorialNotes/tagline"))
                 .and_then(|v| v.as_str())
                 .unwrap_or(fallback_sub)
                 .to_string(),
@@ -1282,6 +1294,7 @@ pub fn fetch_radio_and_for_you(settings: &SimpSettings) -> Result<AppleRadioAndF
                 attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
                 300,
             ),
+            genre: None,
         })
     }
 
@@ -1330,6 +1343,7 @@ pub fn fetch_radio_and_for_you(settings: &SimpSettings) -> Result<AppleRadioAndF
             let mut recent_shelf = AppleRecommendationShelf {
                 id: "recently-played-items".to_string(),
                 title: "Recently Played".to_string(),
+                is_social: false,
                 playlists: Vec::new(),
                 albums: Vec::new(),
                 stations: Vec::new(),
@@ -1380,6 +1394,7 @@ pub fn fetch_radio_and_for_you(settings: &SimpSettings) -> Result<AppleRadioAndF
             let mut heavy_shelf = AppleRecommendationShelf {
                 id: "heavy-rotation".to_string(),
                 title: "Heavy Rotation".to_string(),
+                is_social: false,
                 playlists: Vec::new(),
                 albums: Vec::new(),
                 stations: Vec::new(),
@@ -1453,10 +1468,17 @@ pub fn fetch_radio_and_for_you(settings: &SimpSettings) -> Result<AppleRadioAndF
                 let is_new_release_shelf = title_lower.contains("new release")
                     || title_lower.contains("recent release")
                     || title_lower == "new music";
+                let is_social = title_lower.contains("friend")
+                    || title_lower.contains("listening to")
+                    || rec
+                        .pointer("/attributes/isGroupRecommendation")
+                        .and_then(|v| v.as_bool())
+                        == Some(true);
 
                 let mut shelf = AppleRecommendationShelf {
                     id: rec_id,
                     title: title.to_string(),
+                    is_social,
                     playlists: Vec::new(),
                     albums: Vec::new(),
                     stations: Vec::new(),
@@ -1595,16 +1617,267 @@ pub fn fetch_radio_and_for_you(settings: &SimpSettings) -> Result<AppleRadioAndF
         }
     }
 
+    // Fetch Richer Radio Shelves in parallel:
+    // 1. Artist-Hosted Shows, Radio Hosts, Latest Episodes & Interviews
+    // 2. Club Mixes & DJ Sets (Apple Music Club / One Mix / Boiler Room)
+    // 3. Top Stations & Stations by Genre
+    let mut artist_shows: Vec<AppleCloudPlaylistSummary> = Vec::new();
+    let mut club_mixes: Vec<AppleCloudPlaylistSummary> = Vec::new();
+    let mut genre_stations: Vec<AppleRadioStationSummary> = Vec::new();
+
+    let (shows_res, mixes_res, genres_res) = std::thread::scope(|s| {
+        let d1 = &dev_token;
+        let u1 = &user_token;
+        let sf1 = &storefront;
+        let h_shows = s.spawn(move || {
+            apple_get_json(
+                &format!(
+                    "/v1/catalog/{sf1}/search?term=Apple+Music+1+Radio+Show+Interview&types=playlists,stations&limit=18"
+                ),
+                d1,
+                u1,
+            )
+        });
+
+        let d2 = &dev_token;
+        let u2 = &user_token;
+        let sf2 = &storefront;
+        let h_mixes = s.spawn(move || {
+            apple_get_json(
+                &format!(
+                    "/v1/catalog/{sf2}/search?term=Apple+Music+Club+DJ+Mix+One+Mix&types=playlists,stations&limit=18"
+                ),
+                d2,
+                u2,
+            )
+        });
+
+        let d3 = &dev_token;
+        let u3 = &user_token;
+        let sf3 = &storefront;
+        let h_genres = s.spawn(move || {
+            let mut out: Vec<(String, Value)> = Vec::new();
+            for genre_label in [
+                "Electronic",
+                "Hip-Hop",
+                "Alternative",
+                "Dance",
+                "Pop",
+                "R&B",
+                "Rock",
+                "Chill",
+                "Jazz",
+                "Classical",
+                "Hits",
+            ] {
+                if let Ok(gj) = apple_get_json(
+                    &format!(
+                        "/v1/catalog/{sf3}/search?term={}+Station&types=stations&limit=4",
+                        urlencode(genre_label)
+                    ),
+                    d3,
+                    u3,
+                ) {
+                    out.push((genre_label.to_string(), gj));
+                }
+            }
+            out
+        });
+
+        (
+            h_shows.join().ok().and_then(|r| r.ok()),
+            h_mixes.join().ok().and_then(|r| r.ok()),
+            h_genres.join().ok().unwrap_or_default(),
+        )
+    });
+
+    let mut seen_show_ids = HashSet::new();
+    if let Some(sj) = shows_res {
+        if let Some(arr) = sj
+            .pointer("/results/playlists/data")
+            .and_then(|v| v.as_array())
+        {
+            for pl in arr {
+                let Some(id) = pl.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !seen_show_ids.insert(id.to_string()) {
+                    continue;
+                }
+                let attrs = pl.get("attributes").unwrap_or(pl);
+                let name = attrs
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Radio Show")
+                    .to_string();
+                let curator = attrs
+                    .get("curatorName")
+                    .or_else(|| attrs.pointer("/editorialNotes/short"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Apple Music Radio Show")
+                    .to_string();
+                let art_url = format_apple_art_url(
+                    attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
+                    300,
+                );
+                artist_shows.push(AppleCloudPlaylistSummary {
+                    id: id.to_string(),
+                    name,
+                    description: curator,
+                    art_url,
+                    kind: "catalog".to_string(),
+                });
+            }
+        }
+        if let Some(st_arr) = sj
+            .pointer("/results/stations/data")
+            .and_then(|v| v.as_array())
+        {
+            for st in st_arr {
+                push_classified_station(st, "Radio Hosts & Shows");
+            }
+        }
+    }
+
+    let mut seen_mix_ids = HashSet::new();
+    if let Some(mj) = mixes_res {
+        if let Some(arr) = mj
+            .pointer("/results/playlists/data")
+            .and_then(|v| v.as_array())
+        {
+            for pl in arr {
+                let Some(id) = pl.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !seen_mix_ids.insert(id.to_string()) {
+                    continue;
+                }
+                let attrs = pl.get("attributes").unwrap_or(pl);
+                let name = attrs
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("DJ Mix")
+                    .to_string();
+                let curator = attrs
+                    .get("curatorName")
+                    .or_else(|| attrs.pointer("/editorialNotes/short"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Club & DJ Mix")
+                    .to_string();
+                let art_url = format_apple_art_url(
+                    attrs.pointer("/artwork/url").and_then(|v| v.as_str()),
+                    300,
+                );
+                club_mixes.push(AppleCloudPlaylistSummary {
+                    id: id.to_string(),
+                    name,
+                    description: curator,
+                    art_url,
+                    kind: "catalog".to_string(),
+                });
+            }
+        }
+    }
+
+    let mut seen_genre_st_ids = HashSet::new();
+    for (genre_label, gj) in genres_res {
+        if let Some(st_arr) = gj
+            .pointer("/results/stations/data")
+            .and_then(|v| v.as_array())
+        {
+            for st in st_arr {
+                if let Some(mut summary) =
+                    build_station_summary(st, &format!("{genre_label} Radio"))
+                {
+                    if is_live_broadcast_station(st, &genre_label) {
+                        if seen_live_stations.insert(summary.id.clone()) {
+                            live_stations.push(summary);
+                        }
+                    } else if seen_genre_st_ids.insert(summary.id.clone()) {
+                        summary.genre = Some(genre_label.clone());
+                        genre_stations.push(summary);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(AppleRadioAndForYouResponse {
         stations,
         personal_stations,
         live_stations,
+        genre_stations,
+        artist_shows,
+        club_mixes,
         playlists,
         albums,
         new_releases,
         shelves,
         recently_played,
     })
+}
+
+/// Resolves the canonical `https://music.apple.com/{storefront}/...` web URL for an Apple Music
+/// song, album, playlist, artist, or station per Apple Music Identity & Attribution Guidelines.
+pub fn resolve_apple_canonical_url(settings: &SimpSettings, kind: &str, raw_id: &str) -> String {
+    let sf = storefront_cache()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .or_else(|| {
+            resolve_tokens(settings)
+                .ok()
+                .map(|(d, u)| get_storefront(&d, &u))
+        })
+        .unwrap_or_else(|| "us".to_string());
+
+    let clean_id = raw_id
+        .trim()
+        .strip_prefix("applemusic:song:")
+        .or_else(|| raw_id.trim().strip_prefix("applemusic:track:"))
+        .or_else(|| raw_id.trim().strip_prefix("applemusic:album:"))
+        .or_else(|| raw_id.trim().strip_prefix("applemusic:playlist:"))
+        .or_else(|| raw_id.trim().strip_prefix("applemusic:artist:"))
+        .or_else(|| raw_id.trim().strip_prefix("applemusic:station:"))
+        .or_else(|| raw_id.trim().strip_prefix("applemusic:"))
+        .unwrap_or(raw_id.trim());
+
+    if clean_id.is_empty() {
+        return format!("https://music.apple.com/{sf}/new");
+    }
+
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "album" | "albums" | "cloud_album" => {
+            if clean_id.starts_with("l.") {
+                "https://music.apple.com/library/albums".to_string()
+            } else {
+                format!("https://music.apple.com/{sf}/album/{}", urlencode(clean_id))
+            }
+        }
+        "playlist" | "playlists" | "cloud_playlist" => {
+            if clean_id.starts_with("p.") {
+                format!("https://music.apple.com/library/playlist/{}", urlencode(clean_id))
+            } else {
+                format!(
+                    "https://music.apple.com/{sf}/playlist/{}",
+                    urlencode(clean_id)
+                )
+            }
+        }
+        "artist" | "artists" => {
+            format!("https://music.apple.com/{sf}/artist/{}", urlencode(clean_id))
+        }
+        "station" | "stations" => {
+            format!("https://music.apple.com/{sf}/station/{}", urlencode(clean_id))
+        }
+        _ => {
+            if clean_id.starts_with("i.") {
+                "https://music.apple.com/library/songs".to_string()
+            } else {
+                format!("https://music.apple.com/{sf}/song/{}", urlencode(clean_id))
+            }
+        }
+    }
 }
 
 /// Sets or clears a user's Apple Music Favorite/Love rating (`PUT` or `DELETE` `/v1/me/ratings/{kind}/{id}`).

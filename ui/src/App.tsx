@@ -47,6 +47,7 @@ import { OskTargetKind, useGamepadNavigation } from './hooks/useGamepadNavigatio
 import { BrowserTarget, isUiVideoTrack, PlayerView } from './views/PlayerView';
 import { LibraryBrowserView } from './views/LibraryBrowserView';
 import { SettingsModal, SimpUpdateStatus, SourceVisibilityPrefs } from './views/SettingsModal';
+import { QuickHelpModal } from './components/QuickHelpModal';
 
 const isCompanionPairRoute =
   typeof window !== 'undefined' &&
@@ -80,6 +81,14 @@ const ConsoleMainApp: React.FC = () => {
   const [view, setView] = useState<'lock' | 'browser'>('lock');
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [powerModalOpen, setPowerModalOpen] = useState(false);
+  const [initialOpenFoldersAccounts, setInitialOpenFoldersAccounts] = useState(false);
+  const [quickHelpOpen, setQuickHelpOpen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('simp_oobe_help_seen_v1') !== '1';
+    } catch {
+      return false;
+    }
+  });
   const [isSleeping, setIsSleeping] = useState(false);
   const [confirmHardReset, setConfirmHardReset] = useState(false);
 
@@ -222,6 +231,9 @@ const ConsoleMainApp: React.FC = () => {
   const [radioStations, setRadioStations] = useState<AppleRadioStationSummary[]>([]);
   const [personalRadioStations, setPersonalRadioStations] = useState<AppleRadioStationSummary[]>([]);
   const [liveRadioStations, setLiveRadioStations] = useState<AppleRadioStationSummary[]>([]);
+  const [artistRadioShows, setArtistRadioShows] = useState<AppleCloudPlaylistSummary[]>([]);
+  const [clubMixes, setClubMixes] = useState<AppleCloudPlaylistSummary[]>([]);
+  const [genreRadioStations, setGenreRadioStations] = useState<AppleRadioStationSummary[]>([]);
   const [forYouPlaylists, setForYouPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
   const [forYouAlbums, setForYouAlbums] = useState<AppleCloudAlbumSummary[]>([]);
   const [forYouNewReleases, setForYouNewReleases] = useState<AppleCloudAlbumSummary[]>([]);
@@ -899,6 +911,9 @@ const ConsoleMainApp: React.FC = () => {
           setRadioStations(res.stations);
           setPersonalRadioStations(res.personal_stations || []);
           setLiveRadioStations(res.live_stations || []);
+          setArtistRadioShows(res.artist_shows || []);
+          setClubMixes(res.club_mixes || []);
+          setGenreRadioStations(res.genre_stations || []);
           setForYouPlaylists(res.playlists);
           setForYouAlbums(res.albums);
           setForYouNewReleases(res.new_releases || []);
@@ -2423,6 +2438,12 @@ const ConsoleMainApp: React.FC = () => {
           setPersonalRadioStations={setPersonalRadioStations}
           liveRadioStations={liveRadioStations}
           setLiveRadioStations={setLiveRadioStations}
+          artistRadioShows={artistRadioShows}
+          setArtistRadioShows={setArtistRadioShows}
+          clubMixes={clubMixes}
+          setClubMixes={setClubMixes}
+          genreRadioStations={genreRadioStations}
+          setGenreRadioStations={setGenreRadioStations}
           forYouPlaylists={forYouPlaylists}
           setForYouPlaylists={setForYouPlaylists}
           forYouAlbums={forYouAlbums}
@@ -2548,6 +2569,55 @@ const ConsoleMainApp: React.FC = () => {
           refreshLibraryData={refreshLibraryData}
           applyFocusMarker={applyFocusMarker}
           showToast={showToast}
+          initialOpenFoldersAccounts={initialOpenFoldersAccounts}
+          onOpenQuickHelp={() => {
+            setInitialOpenFoldersAccounts(false);
+            setQuickHelpOpen(true);
+            window.setTimeout(() => {
+              const btn = document.querySelector<HTMLElement>(
+                '[data-quick-help-modal="true"] button[data-default-focus="true"]'
+              );
+              if (btn) applyFocusMarker(btn);
+            }, 35);
+          }}
+        />
+      )}
+
+      {/* First-Time Run (OOBE) & START -> Help Overlay Modal */}
+      {quickHelpOpen && (
+        <QuickHelpModal
+          onClose={() => {
+            try {
+              window.localStorage.setItem('simp_oobe_help_seen_v1', '1');
+            } catch {}
+            setQuickHelpOpen(false);
+          }}
+          onOpenFoldersAccounts={() => {
+            try {
+              window.localStorage.setItem('simp_oobe_help_seen_v1', '1');
+            } catch {}
+            setQuickHelpOpen(false);
+            setInitialOpenFoldersAccounts(true);
+            setSourceModalOpen(true);
+          }}
+          sourceVisibility={sourceVisibility}
+          onToggleSourceVisibility={(key) => {
+            setSourceVisibility((prev) => {
+              const nextVal = !prev[key];
+              const next = { ...prev, [key]: nextVal };
+              try {
+                window.localStorage.setItem('simp_source_visibility_v2', JSON.stringify(next));
+              } catch {}
+              if (key === 'internet_archive') {
+                defaultSimpClient.configureInternetArchive({
+                  enabled: nextVal,
+                  username: '',
+                  safe_search: true,
+                });
+              }
+              return next;
+            });
+          }}
         />
       )}
 

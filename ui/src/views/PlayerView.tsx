@@ -24,6 +24,8 @@ import {
   toggleFollowSoundCloudUser,
 } from '../drivers/SoundCloudDriver';
 import { SoundCloudAttributionLink, SoundCloudLogo } from '../components/SoundCloudLogo';
+import { AppleMusicAttributionLink } from '../components/AppleMusicLogo';
+import { fetchTrackLyrics, type TrackLyricsResponse } from '../drivers/appleApi';
 
 export interface BrowserTarget {
   kind:
@@ -169,6 +171,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         saved === 'glyph' ||
         saved === 'avs' ||
         saved === 'demoscene' ||
+        saved === 'vertigo' ||
+        saved === 'trapper' ||
         saved === 'cycle' ||
         saved === 'off'
       ) {
@@ -177,6 +181,19 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     } catch {}
     return 'cycle';
   });
+  const [lyricsEnabled, setLyricsEnabled] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('simp_lyrics_enabled') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const [lyricsData, setLyricsData] = useState<TrackLyricsResponse | null>(null);
+  const [activeLyricIdx, setActiveLyricIdx] = useState<number>(-1);
+  const activeLyricIdxRef = useRef<number>(-1);
+  activeLyricIdxRef.current = activeLyricIdx;
+  const lyricsDataRef = useRef<TrackLyricsResponse | null>(null);
+  lyricsDataRef.current = lyricsData;
   const [rightColMode, setRightColMode] = useState<'queue' | 'chapters'>('queue');
   const [selectCategory, setSelectCategory] = useState<
     'track_options' | 'collection' | 'interface'
@@ -627,6 +644,17 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     });
   }, [showToast]);
 
+  const toggleLyrics = useCallback(() => {
+    setLyricsEnabled((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('simp_lyrics_enabled', next ? '1' : '0');
+      } catch {}
+      showToast?.(next ? '🎤 Synced Lyrics overlay ON' : '🎤 Synced Lyrics overlay OFF');
+      return next;
+    });
+  }, [showToast]);
+
   const toggleScComments = useCallback(() => {
     setScCommentsEnabled((prev) => {
       const next = !prev;
@@ -642,6 +670,33 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       return next;
     });
   }, [showToast]);
+
+  // Fetch synced lyrics from LRCLIB (v1 + v2 beta) or local .lrc sidecar on track change
+  useEffect(() => {
+    setLyricsData(null);
+    setActiveLyricIdx(-1);
+    activeLyricIdxRef.current = -1;
+    if (!track?.uri || !track?.title || isVideoTrack) {
+      return;
+    }
+    let cancelled = false;
+    fetchTrackLyrics({
+      uri: track.uri,
+      title: track.title,
+      artist: track.artists?.[0] || '',
+      album: track.album || '',
+      duration_ms: track.duration_ms || 0,
+    })
+      .then((res) => {
+        if (!cancelled && res && res.source !== 'none') {
+          setLyricsData(res);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [track?.uri, track?.title, isVideoTrack]);
 
   useEffect(() => {
     shownCommentIdsRef.current.clear();
@@ -738,6 +793,29 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 
   const handlePlayheadTick = useCallback(
     (currentMs: number) => {
+      // 1. Update active synced lyric line via fast binary search
+      const lrcLines = lyricsDataRef.current?.synced_lines;
+      if (lrcLines && lrcLines.length > 0) {
+        const targetMs = currentMs + 180;
+        let lo = 0;
+        let hi = lrcLines.length - 1;
+        let foundIdx = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >>> 1;
+          if (lrcLines[mid].timestamp_ms <= targetMs) {
+            foundIdx = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        if (foundIdx !== activeLyricIdxRef.current) {
+          activeLyricIdxRef.current = foundIdx;
+          setActiveLyricIdx(foundIdx);
+        }
+      }
+
+      // 2. Update SoundCloud timed comment bubbles
       if (!isSoundCloudTrack || !scCommentsEnabled || scComments.length === 0) return;
 
       // Reset shown IDs if user seeked backward or track looped
@@ -1068,6 +1146,17 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           activeChapterLabel={
             chapterModalItems.find((c) => c.isCurrent)?.title || null
           }
+          activeLyricLine={
+            activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx]
+              ? lyricsData.synced_lines[activeLyricIdx].text
+              : null
+          }
+          nextLyricLine={
+            activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx + 1]
+              ? lyricsData.synced_lines[activeLyricIdx + 1].text
+              : null
+          }
+          hidden={hidden}
         />
       )}
       <div
@@ -1075,7 +1164,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           display: 'grid',
           gridTemplateColumns: isVideoTrack ? '420px 1fr' : '260px 1fr',
           alignItems: 'center',
-          gap: 36,
+          columnGap: 36,
+          rowGap: 16,
           maxWidth: isVideoTrack ? 1140 : 1060,
           width: '100%',
           margin: '0 auto',
@@ -1097,9 +1187,12 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           }}
         >
           <div
+            title={!isVideoTrack && track ? 'Click to open collection in Library' : undefined}
             onClick={() => {
               if (isVideoTrack && !videoTheatreExpanded) {
                 setVideoTheatreExpanded(true);
+              } else if (!isVideoTrack && document.documentElement.dataset.simpInput !== 'gamepad') {
+                handleOpenCurrentCollection();
               }
             }}
             style={
@@ -1129,7 +1222,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     position: 'relative',
                     boxShadow:
                       '0 18px 44px rgba(0, 0, 0, 0.94), 0 4px 14px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
-                    cursor: isVideoTrack ? 'pointer' : 'default',
+                    cursor: 'pointer',
                   }
             }
           >
@@ -1510,6 +1603,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             <TransportIconButton
               icon="🔀"
               badge="X"
+              title={snap?.shuffle ? 'Shuffle: On' : 'Shuffle: Off'}
               active={!!snap?.shuffle}
               onClick={() => defaultSimpClient.setShuffle(!snap?.shuffle)}
             />
@@ -1521,6 +1615,20 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                   : snap?.repeat_mode === 'queue'
                   ? 'Y•Q'
                   : 'Y'
+              }
+              overlayBadge={
+                snap?.repeat_mode === 'track'
+                  ? '1'
+                  : snap?.repeat_mode === 'queue'
+                  ? '∞'
+                  : null
+              }
+              title={
+                snap?.repeat_mode === 'track'
+                  ? 'Repeat Mode: Single Track (1)'
+                  : snap?.repeat_mode === 'queue'
+                  ? 'Repeat Mode: Loop Queue (∞)'
+                  : 'Repeat Mode: Off'
               }
               active={snap?.repeat_mode !== 'off'}
               onClick={() => defaultSimpClient.cycleRepeat()}
@@ -1629,6 +1737,13 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                   kind="track"
                   id={track.uri}
                   width={30}
+                  style={{ marginLeft: 8, verticalAlign: 'middle' }}
+                />
+              )}
+              {track?.source === 'apple_music' && (
+                <AppleMusicAttributionLink
+                  id={track.uri}
+                  kind="song"
                   style={{ marginLeft: 8, verticalAlign: 'middle' }}
                 />
               )}
@@ -1801,7 +1916,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               commentTimestampsMs={
                 isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
               }
-              onPlayheadTick={isSoundCloudTrack ? handlePlayheadTick : undefined}
+              onPlayheadTick={handlePlayheadTick}
+              hidden={hidden}
             />
           </div>
 
@@ -1914,6 +2030,128 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             </div>
           ) : null}
         </div>
+
+        {/* Centered Synced Lyrics Pill — Framed Beneath Art & Next Up (Zero Layout Shift, Text-Fitted, Borderless) */}
+        {!isVideoTrack && (() => {
+          const showLyricsBubble = Boolean(
+            lyricsEnabled &&
+              lyricsData &&
+              (lyricsData.synced_lines.length > 0 || lyricsData.instrumental)
+          );
+          return (
+            <div
+              style={{
+                gridColumn: '1 / -1',
+                width: '100%',
+                height: 54,
+                minHeight: 54,
+                maxHeight: 54,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxSizing: 'border-box',
+                pointerEvents: 'none',
+              }}
+            >
+              {showLyricsBubble && lyricsData && (
+                <div
+                  style={{
+                    width: 'fit-content',
+                    maxWidth: '100%',
+                    padding: '6px 18px',
+                    borderRadius: 12,
+                    background: 'rgba(8, 9, 14, 0.82)',
+                    boxShadow: '0 6px 20px rgba(0, 0, 0, 0.88)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 2,
+                    textAlign: 'center',
+                    boxSizing: 'border-box',
+                    pointerEvents: 'auto',
+                    transition: 'opacity 200ms ease',
+                  }}
+                >
+                  {lyricsData.instrumental ? (
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontFamily: 'monospace',
+                        color: '#67e8f9',
+                        fontWeight: 700,
+                        textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
+                      }}
+                    >
+                      🎵 Instrumental Track
+                    </div>
+                  ) : (
+                    <>
+                      {activeLyricIdx >= 0 && lyricsData.synced_lines[activeLyricIdx] ? (
+                        <div
+                          onClick={() => {
+                            const line = lyricsData.synced_lines[activeLyricIdx];
+                            if (line) defaultSimpClient.seek(line.timestamp_ms);
+                          }}
+                          title="Click to replay this lyric line"
+                          style={{
+                            maxWidth: '100%',
+                            fontSize: 15,
+                            fontWeight: 800,
+                            color: '#67e8f9',
+                            textShadow: '0 1px 6px rgba(0, 0, 0, 0.98)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          🎤 {lyricsData.synced_lines[activeLyricIdx].text}
+                        </div>
+                      ) : (
+                        <div
+                          style={{
+                            maxWidth: '100%',
+                            fontSize: 13.5,
+                            fontFamily: 'monospace',
+                            color: '#9ca3af',
+                            textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          🎤 {lyricsData.synced_lines[0]?.text || '♪ …'}
+                        </div>
+                      )}
+                      {lyricsData.synced_lines[activeLyricIdx + 1] && (
+                        <div
+                          onClick={() => {
+                            const nextLine = lyricsData.synced_lines[activeLyricIdx + 1];
+                            if (nextLine) defaultSimpClient.seek(nextLine.timestamp_ms);
+                          }}
+                          title="Click to jump to next lyric line"
+                          style={{
+                            maxWidth: '100%',
+                            fontSize: 12,
+                            color: '#8e8e99',
+                            textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {lyricsData.synced_lines[activeLyricIdx + 1].text}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
       </main>
 
@@ -2624,7 +2862,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                               'Glyph Matrix'}
                           </span>
                           <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
-                            Glyph Matrix • Winamp AVS • Demoscene 64K • Cycle • Off
+                            Glyph • AVS • 64K • Vertigo • Trapper • Cycle • Off
                           </span>
                         </div>
                         <span
@@ -2636,6 +2874,44 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                           }}
                         >
                           {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'}
+                        </span>
+                      </button>
+                    )}
+
+                    {/* 2b. Synced Lyrics Overlay (LRCLIB v1/v2 + Local .lrc) */}
+                    {!isVideoTrack && (
+                      <button
+                        type="button"
+                        onClick={toggleLyrics}
+                        style={{
+                          ...actionRowBtnStyle,
+                          minHeight: 46,
+                          padding: '8px 12px',
+                          background: lyricsEnabled ? '#0f222a' : '#101018',
+                          border: lyricsEnabled ? '1px solid #2aa3c4' : '1px solid #222230',
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 800, color: '#67e8f9' }}>
+                            🎤 Synced Lyrics (LRCLIB)
+                          </span>
+                          <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                            {lyricsData?.synced_lines?.length
+                              ? `${lyricsData.synced_lines.length} synced lines (${lyricsData.source})`
+                              : lyricsData?.instrumental
+                                ? 'Instrumental track detected'
+                                : 'Live teleprompter & visualizer reactivity'}
+                          </span>
+                        </div>
+                        <span
+                          style={{
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: lyricsEnabled ? '#67e8f9' : '#71717a',
+                          }}
+                        >
+                          {lyricsEnabled ? 'ON' : 'OFF'}
                         </span>
                       </button>
                     )}
@@ -2776,13 +3052,23 @@ const actionRowBtnStyle: React.CSSProperties = {
 interface TransportBtnProps {
   icon: string;
   badge: string;
+  overlayBadge?: string | null;
+  title?: string;
   active?: boolean;
   onClick: () => void;
 }
 
-const TransportIconButton: React.FC<TransportBtnProps> = ({ icon, badge, active, onClick }) => (
+const TransportIconButton: React.FC<TransportBtnProps> = ({
+  icon,
+  badge,
+  overlayBadge,
+  title,
+  active,
+  onClick,
+}) => (
   <button
     onClick={onClick}
+    title={title}
     style={{
       width: 76,
       height: 76,
@@ -2798,9 +3084,38 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({ icon, badge, active,
       justifyContent: 'center',
       gap: 6,
       cursor: 'pointer',
+      position: 'relative',
     }}
   >
-    <span style={{ fontSize: 24 }}>{icon}</span>
+    <span style={{ fontSize: 24, position: 'relative', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+      {icon}
+      {overlayBadge && (
+        <span
+          style={{
+            position: 'absolute',
+            right: -9,
+            bottom: -4,
+            minWidth: 17,
+            height: 17,
+            padding: '0 3px',
+            borderRadius: 99,
+            background: '#061820',
+            border: '1.5px solid #38bdf8',
+            color: '#7dd3fc',
+            fontSize: 10.5,
+            fontFamily: 'monospace',
+            fontWeight: 900,
+            lineHeight: '14px',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 2px 6px rgba(0, 0, 0, 0.92)',
+          }}
+        >
+          {overlayBadge}
+        </span>
+      )}
+    </span>
     <span
       className="simp-gp-badge"
       style={{

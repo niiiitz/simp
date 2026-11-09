@@ -95,6 +95,8 @@ export interface SettingsModalProps {
   refreshLibraryData: () => void;
   applyFocusMarker?: (el: HTMLElement | null) => void;
   showToast: (msg: string) => void;
+  onOpenQuickHelp?: () => void;
+  initialOpenFoldersAccounts?: boolean;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -136,9 +138,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   refreshLibraryData,
   applyFocusMarker,
   showToast,
+  onOpenQuickHelp,
+  initialOpenFoldersAccounts,
 }) => {
   // Slide-out Folders & Accounts secondary column state
-  const [foldersAccountsOpen, setFoldersAccountsOpen] = useState(false);
+  const [foldersAccountsOpen, setFoldersAccountsOpen] = useState(Boolean(initialOpenFoldersAccounts));
   const [iaAuthOpen, setIaAuthOpen] = useState(false);
   const [appleAuthOpen, setAppleAuthOpen] = useState(false);
   const [scAuthOpen, setScAuthOpen] = useState(false);
@@ -195,6 +199,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }, []);
 
   const [brightnessScrubActive, setBrightnessScrubActive] = useState(false);
+  const triggerHoverRef = React.useRef(false);
+  const subPanelHoverRef = React.useRef(false);
+  const dismissTimerRef = React.useRef<number | null>(null);
+
+  const clearFoldersDismissTimer = () => {
+    if (dismissTimerRef.current !== null) {
+      window.clearTimeout(dismissTimerRef.current);
+      dismissTimerRef.current = null;
+    }
+  };
+
+  const scheduleFoldersAutoDismiss = () => {
+    clearFoldersDismissTimer();
+    dismissTimerRef.current = window.setTimeout(() => {
+      if (triggerHoverRef.current || subPanelHoverRef.current) {
+        return;
+      }
+      const subEl = document.querySelector<HTMLElement>('[data-settings-col="sub"]');
+      const trigEl = document.querySelector<HTMLElement>('[data-settings-folders-trigger="true"]');
+      const gpFocused = document.querySelector<HTMLElement>('[data-gp-focused="true"]');
+      const activeEl = document.activeElement as HTMLElement | null;
+      const gpInside =
+        (gpFocused && ((subEl && subEl.contains(gpFocused)) || (trigEl && trigEl.contains(gpFocused)))) ||
+        (activeEl &&
+          activeEl.tagName === 'INPUT' &&
+          subEl &&
+          subEl.contains(activeEl));
+      if (!gpInside) {
+        setFoldersAccountsOpen(false);
+      }
+    }, 480);
+  };
 
   useEffect(() => {
     const onBrightnessStep = (ev: Event) => {
@@ -209,12 +245,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     };
     const onFoldersFocus = (ev: Event) => {
       const open = Boolean((ev as CustomEvent<{ open?: boolean }>).detail?.open);
-      setFoldersAccountsOpen(open);
+      if (open) {
+        clearFoldersDismissTimer();
+        setFoldersAccountsOpen(true);
+      } else {
+        scheduleFoldersAutoDismiss();
+      }
     };
     window.addEventListener('simp-brightness-step', onBrightnessStep);
     window.addEventListener('simp-brightness-exit', onBrightnessExit);
     window.addEventListener('simp-settings-folders-focus', onFoldersFocus);
     return () => {
+      clearFoldersDismissTimer();
       window.removeEventListener('simp-brightness-step', onBrightnessStep);
       window.removeEventListener('simp-brightness-exit', onBrightnessExit);
       window.removeEventListener('simp-settings-folders-focus', onFoldersFocus);
@@ -334,6 +376,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {foldersAccountsOpen && (
           <div
             data-settings-col="sub"
+            onMouseEnter={() => {
+              subPanelHoverRef.current = true;
+              clearFoldersDismissTimer();
+            }}
+            onMouseLeave={() => {
+              subPanelHoverRef.current = false;
+              scheduleFoldersAutoDismiss();
+            }}
             style={{
               width: 'min(480px, calc(100vw - 440px))',
               minWidth: 340,
@@ -364,23 +414,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <strong style={{ fontSize: 13.5, color: '#bfeaf5' }}>
                 📁 Folders & Accounts
               </strong>
-              <button
-                type="button"
-                onClick={closeFoldersAccountsPanel}
-                style={{
-                  minHeight: 32,
-                  padding: '0 10px',
-                  borderRadius: 8,
-                  background: '#16161f',
-                  border: '1px solid #2e2e3a',
-                  color: '#d4d4dc',
-                  fontFamily: 'monospace',
-                  fontSize: 11.5,
-                  cursor: 'pointer',
-                }}
-              >
-                Shut ▸
-              </button>
+              <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#67e8f9' }}>
+                <span className="simp-gp-badge">D-Pad ▸ / B</span>
+              </span>
             </div>
 
             {/* + Internet Archive [Show/Hide, Safe Search, Sign In] */}
@@ -400,6 +436,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </button>
                   <button
                     type="button"
+                    title="Safer Search (at least we tried)"
                     onClick={() => {
                       const nextSafe = !iaSafeSearch;
                       setIaSafeSearch(nextSafe);
@@ -410,14 +447,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       });
                       showToast(
                         nextSafe
-                          ? '🛡️ Archive Safe Search enabled'
-                          : '🛡️ Archive Safe Search disabled'
+                          ? '🛡️ Archive Safer Search enabled (at least we tried)'
+                          : '🛡️ Archive Safer Search disabled'
                       );
                       refreshLibraryData();
                     }}
                     style={pillToggleStyle(iaSafeSearch, '#38bdf8')}
                   >
-                    🛡️ Safe: {iaSafeSearch ? 'On' : 'Off'}
+                    🛡️ Safer Search: {iaSafeSearch ? 'On' : 'Off'}
                   </button>
                   <button
                     type="button"
@@ -929,6 +966,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       try {
                         window.localStorage.removeItem('simp_source_visibility_v2');
                         window.localStorage.removeItem('simp_brightness_pct_v2');
+                        window.localStorage.removeItem('simp_oobe_help_seen_v1');
                         window.localStorage.setItem('simp.visualizer_mode', 'cycle');
                       } catch {}
                       setBrightnessPct(80);
@@ -1010,112 +1048,68 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               alignItems: 'center',
               paddingBottom: 8,
               borderBottom: '1px solid #1e1e2a',
+              gap: 8,
             }}
           >
             <strong style={{ fontSize: 14, color: '#bfeaf5' }}>
               ☰ Settings<span className="simp-gp-badge"> (START)</span>
             </strong>
-            <button
-              type="button"
-              onClick={closeSettingsDrawer}
-              style={{
-                minHeight: 34,
-                padding: '0 12px',
-                borderRadius: 8,
-                background: '#16161f',
-                border: '1px solid #2e2e3a',
-                color: '#d4d4dc',
-                fontFamily: 'monospace',
-                fontSize: 12,
-                cursor: 'pointer',
-              }}
-            >
-              ✕<span className="simp-gp-badge"> B</span>
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {onOpenQuickHelp && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeSettingsDrawer();
+                    onOpenQuickHelp();
+                  }}
+                  title="Quick Start & Controls Guide"
+                  style={{
+                    minHeight: 34,
+                    padding: '0 10px',
+                    borderRadius: 8,
+                    background: '#101d24',
+                    border: '1px solid #2aa3c4',
+                    color: '#67e8f9',
+                    fontSize: 11.5,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ❓ Help
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={closeSettingsDrawer}
+                style={{
+                  minHeight: 34,
+                  padding: '0 12px',
+                  borderRadius: 8,
+                  background: '#16161f',
+                  border: '1px solid #2e2e3a',
+                  color: '#d4d4dc',
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+              >
+                ✕<span className="simp-gp-badge"> B</span>
+              </button>
+            </div>
           </div>
 
-          {/* Row 1: [BRIGHTNESS SLIDER] [SLEEP SCREEN] */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1.35fr 1fr', gap: 8 }}>
+          {/* Row 1: [Sleep Screen] [Power_BTN_icon] */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 56px', gap: 8 }}>
             <button
               type="button"
               data-default-focus="true"
-              data-brightness-slider="true"
-              data-brightness-scrub-active={brightnessScrubActive ? 'true' : undefined}
-              onClick={() => setBrightnessScrubActive((v) => !v)}
-              onBlur={() => setBrightnessScrubActive(false)}
-              style={{
-                padding: '8px 10px',
-                borderRadius: 12,
-                background: brightnessScrubActive ? '#0f222a' : '#0e0e16',
-                border: brightnessScrubActive ? '2px solid #2aa3c4' : '1px solid #222230',
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'space-between',
-                gap: 6,
-                textAlign: 'left',
-                cursor: 'pointer',
-              }}
-            >
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  width: '100%',
-                }}
-              >
-                <span style={{ fontSize: 11.5, fontWeight: 800, color: '#bfeaf5' }}>
-                  🔅 Brightness
-                </span>
-                <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#67e8f9' }}>
-                  {brightnessScrubActive ? `◄ ${brightnessPct}% ►` : `${brightnessPct}%`}
-                </span>
-              </div>
-              <div
-                style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <span
-                  role="button"
-                  onClick={() => setBrightnessPct((b) => Math.max(25, b - 5))}
-                  style={{ ...smallStepBtnStyle, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none' }}
-                >
-                  −
-                </span>
-                <input
-                  type="range"
-                  tabIndex={-1}
-                  min={25}
-                  max={100}
-                  step={5}
-                  value={brightnessPct}
-                  onChange={(e) => setBrightnessPct(Number(e.target.value))}
-                  style={{
-                    flex: 1,
-                    accentColor: '#2aa3c4',
-                    cursor: 'pointer',
-                    minWidth: 0,
-                  }}
-                />
-                <span
-                  role="button"
-                  onClick={() => setBrightnessPct((b) => Math.min(100, b + 5))}
-                  style={{ ...smallStepBtnStyle, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', userSelect: 'none' }}
-                >
-                  +
-                </span>
-              </div>
-            </button>
-
-            <button
-              type="button"
               onClick={() => {
                 closeSettingsDrawer();
                 setIsSleeping(true);
               }}
               style={{
                 minHeight: 46,
-                padding: '8px 12px',
+                padding: '8px 14px',
                 borderRadius: 12,
                 background: '#0d1b22',
                 border: '1px solid #2aa3c4',
@@ -1123,74 +1117,155 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 textAlign: 'left',
                 display: 'flex',
                 alignItems: 'center',
+                justifyContent: 'space-between',
                 cursor: 'pointer',
               }}
             >
-              <span style={{ fontSize: 12.5, fontWeight: 800 }}>🌙 Sleep Screen</span>
+              <span style={{ fontSize: 13, fontWeight: 800 }}>🌙 Sleep Screen</span>
+              <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#67e8f9' }}>OLED 0%</span>
             </button>
-          </div>
 
-          {/* Row 2: [SHUTDOWN] [RESET SERVICE] */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
             <button
               type="button"
-              onClick={() => {
+              title="Shutdown SIMP (Hold Shift to Restart Service)"
+              aria-label="Shutdown SIMP"
+              onClick={(e) => {
+                if (e.shiftKey) {
+                  defaultSimpClient.pause();
+                  defaultSimpClient.restartDaemon();
+                  showToast('Restarting SIMP background service...');
+                  closeSettingsDrawer();
+                  if (window.parent && window.parent !== window) {
+                    window.setTimeout(() => dismissConsole(), 300);
+                  } else {
+                    window.setTimeout(() => window.location.reload(), 900);
+                  }
+                  return;
+                }
                 defaultSimpClient.shutdownDaemon();
                 closeSettingsDrawer();
                 window.setTimeout(() => dismissConsole(), 250);
               }}
               style={{
-                minHeight: 44,
-                padding: '8px 12px',
+                minHeight: 46,
+                width: 56,
                 borderRadius: 12,
                 background: '#221014',
                 border: '1px solid #7f1d1d',
                 color: '#fca5a5',
-                textAlign: 'left',
                 display: 'flex',
                 alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 19,
+                fontWeight: 900,
                 cursor: 'pointer',
               }}
             >
-              <span style={{ fontSize: 12.5, fontWeight: 800 }}>⏻ Shutdown</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                defaultSimpClient.pause();
-                defaultSimpClient.restartDaemon();
-                showToast('Restarting SIMP background service...');
-                closeSettingsDrawer();
-                if (window.parent && window.parent !== window) {
-                  window.setTimeout(() => dismissConsole(), 300);
-                } else {
-                  window.setTimeout(() => window.location.reload(), 900);
-                }
-              }}
-              style={{
-                minHeight: 44,
-                padding: '8px 12px',
-                borderRadius: 12,
-                background: '#151320',
-                border: '1px solid #3b3354',
-                color: '#ddd6fe',
-                textAlign: 'left',
-                display: 'flex',
-                alignItems: 'center',
-                cursor: 'pointer',
-              }}
-            >
-              <span style={{ fontSize: 12.5, fontWeight: 800 }}>🔄 Reset Service</span>
+              ⏻
             </button>
           </div>
 
-          {/* Row 3: [Folders & Accounts] XMB Auto-Expanding Shelf Trigger */}
+          {/* Row 2: [Brightness] */}
+          <button
+            type="button"
+            data-brightness-slider="true"
+            data-brightness-scrub-active={brightnessScrubActive ? 'true' : undefined}
+            onClick={() => setBrightnessScrubActive((v) => !v)}
+            onBlur={() => setBrightnessScrubActive(false)}
+            style={{
+              width: '100%',
+              padding: '9px 12px',
+              borderRadius: 12,
+              background: brightnessScrubActive ? '#0f222a' : '#0e0e16',
+              border: brightnessScrubActive ? '2px solid #2aa3c4' : '1px solid #222230',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
+              gap: 6,
+              textAlign: 'left',
+              cursor: 'pointer',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                width: '100%',
+              }}
+            >
+              <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
+                🔆 Brightness
+              </span>
+              <span style={{ fontSize: 11.5, fontFamily: 'monospace', color: '#67e8f9' }}>
+                {brightnessScrubActive ? `◄ ${brightnessPct}% ►` : `${brightnessPct}%`}
+              </span>
+            </div>
+            <div
+              style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <span
+                role="button"
+                onClick={() => setBrightnessPct((b) => Math.max(25, b - 5))}
+                style={{
+                  ...smallStepBtnStyle,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  userSelect: 'none',
+                }}
+              >
+                −
+              </span>
+              <input
+                type="range"
+                tabIndex={-1}
+                min={25}
+                max={100}
+                step={5}
+                value={brightnessPct}
+                onChange={(e) => setBrightnessPct(Number(e.target.value))}
+                style={{
+                  flex: 1,
+                  accentColor: '#2aa3c4',
+                  cursor: 'pointer',
+                  minWidth: 0,
+                }}
+              />
+              <span
+                role="button"
+                onClick={() => setBrightnessPct((b) => Math.min(100, b + 5))}
+                style={{
+                  ...smallStepBtnStyle,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  userSelect: 'none',
+                }}
+              >
+                +
+              </span>
+            </div>
+          </button>
+
+          {/* Row 3: [Folders & Accounts <] */}
           <button
             type="button"
             data-settings-folders-trigger="true"
-            onMouseEnter={() => setFoldersAccountsOpen(true)}
-            onFocus={() => setFoldersAccountsOpen(true)}
+            onMouseEnter={() => {
+              triggerHoverRef.current = true;
+              clearFoldersDismissTimer();
+              setFoldersAccountsOpen(true);
+            }}
+            onMouseLeave={() => {
+              triggerHoverRef.current = false;
+              scheduleFoldersAutoDismiss();
+            }}
+            onFocus={() => {
+              clearFoldersDismissTimer();
+              setFoldersAccountsOpen(true);
+            }}
             onClick={() => openFoldersAccountsPanel()}
             style={{
               width: '100%',
@@ -1214,7 +1289,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </span>
           </button>
 
-          {/* Row 4: Perf Metrics (Always Visible Inline — Not Hidden Behind Dropdown) */}
+          {/* Row 4: [System Load] */}
           <div
             style={{
               padding: '10px 12px',
@@ -1249,45 +1324,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          {/* Row 5: Updates */}
-          <div
-            style={{
-              padding: '10px 12px',
-              borderRadius: 14,
-              background: '#0d0d14',
-              border: updateStatus.update_available ? '1px solid #2aa3c4' : '1px solid #222230',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 8,
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 12.5, fontWeight: 800, color: '#bfeaf5' }}>
-                ⬆️ Updates{' '}
-                {updateStatus.current_version ? (
-                  <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#8e8e99' }}>
-                    (v{updateStatus.current_version})
-                  </span>
-                ) : null}
-              </span>
-              <span style={{ fontSize: 11, color: updateStatus.update_available ? '#6ee7b7' : '#9ca3af' }}>
-                {updateStatus.applying
-                  ? 'Installing...'
-                  : updateStatus.checking
-                  ? 'Checking...'
-                  : updateStatus.error
-                  ? '⚠️ Error'
-                  : updateStatus.update_available
-                  ? `🟢 ${updateStatus.latest_tag} Ready`
-                  : updateStatus.latest_tag
-                  ? 'Up to date'
-                  : ''}
-              </span>
-            </div>
-            {updateStatus.error && (
-              <div style={{ fontSize: 10.5, color: '#fca5a5' }}>{updateStatus.error}</div>
-            )}
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {/* Row 5: [Update Channel: $channelName][Update] */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1.25fr 1fr', gap: 8 }}>
               <button
                 type="button"
                 disabled={Boolean(updateStatus.checking || updateStatus.applying)}
@@ -1312,40 +1351,83 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     showToast('Failed to switch update channel');
                   }
                 }}
-                style={pillToggleStyle(
-                  (updateStatus.channel || 'alpha').toLowerCase() === 'stable',
-                  '#6ee7b7'
-                )}
+                style={{
+                  minHeight: 42,
+                  padding: '0 12px',
+                  borderRadius: 12,
+                  background: '#0d0d14',
+                  border:
+                    (updateStatus.channel || 'alpha').toLowerCase() === 'stable'
+                      ? '1px solid #6ee7b7'
+                      : '1px solid #222230',
+                  color: '#d4d4dc',
+                  fontSize: 11.5,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 6,
+                }}
               >
-                {(updateStatus.channel || 'alpha').toLowerCase() === 'stable'
-                  ? '🛡️ Stable'
-                  : '🧪 Alpha'}
-              </button>
-              {updateStatus.update_available ? (
-                <button
-                  type="button"
-                  disabled={Boolean(updateStatus.applying)}
-                  onClick={applySimpUpdate}
+                <span>Update Channel:</span>
+                <span
                   style={{
-                    ...compactPrimaryBtnStyle,
-                    background: '#0f2936',
+                    color:
+                      (updateStatus.channel || 'alpha').toLowerCase() === 'stable'
+                        ? '#6ee7b7'
+                        : '#67e8f9',
+                    fontFamily: 'monospace',
                   }}
                 >
-                  {updateStatus.applying
-                    ? '⏳ Updating...'
-                    : `⬆️ Install ${updateStatus.latest_tag}`}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={Boolean(updateStatus.checking || updateStatus.applying)}
-                  onClick={() => checkSimpUpdates(false)}
-                  style={compactPrimaryBtnStyle}
-                >
-                  {updateStatus.checking ? 'Checking...' : '🔍 Check Now'}
-                </button>
-              )}
+                  {(updateStatus.channel || 'alpha').toLowerCase() === 'stable'
+                    ? 'Stable'
+                    : 'Alpha'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={Boolean(updateStatus.checking || updateStatus.applying)}
+                onClick={() => {
+                  if (updateStatus.update_available) {
+                    applySimpUpdate();
+                  } else {
+                    checkSimpUpdates(false);
+                  }
+                }}
+                style={{
+                  minHeight: 42,
+                  padding: '0 12px',
+                  borderRadius: 12,
+                  background: updateStatus.update_available ? '#0f2936' : '#0f222a',
+                  border: updateStatus.update_available
+                    ? '1px solid #6ee7b7'
+                    : '1px solid #2aa3c4',
+                  color: updateStatus.update_available ? '#6ee7b7' : '#bfeaf5',
+                  fontSize: 11.5,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 6,
+                }}
+              >
+                {updateStatus.applying
+                  ? '⏳ Updating...'
+                  : updateStatus.checking
+                    ? 'Checking...'
+                    : updateStatus.update_available
+                      ? `⬆️ Update (${updateStatus.latest_tag})`
+                      : `Update${updateStatus.current_version ? ` (v${updateStatus.current_version})` : ''}`}
+              </button>
             </div>
+            {updateStatus.error && (
+              <div style={{ fontSize: 10.5, color: '#fca5a5', paddingLeft: 4 }}>
+                {updateStatus.error}
+              </div>
+            )}
           </div>
         </div>
       </div>

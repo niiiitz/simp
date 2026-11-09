@@ -47,9 +47,38 @@ import {
   unlikeSoundCloudTrack,
 } from '../drivers/SoundCloudDriver';
 import { SoundCloudAttributionLink, SoundCloudLogo } from '../components/SoundCloudLogo';
+import { AppleMusicAttributionLink } from '../components/AppleMusicLogo';
+import { LibraryMiniPlayerBar } from './library/LibraryMiniPlayerBar';
+import { LibraryContextMenuModal } from './library/LibraryContextMenuModal';
+import { LibraryArtistProfilePane } from './library/LibraryArtistProfilePane';
 import { OskTargetKind } from '../hooks/useGamepadNavigation';
 import { BrowserTarget, isUiVideoTrack } from './PlayerView';
 import { SourceVisibilityPrefs } from './SettingsModal';
+
+export type LibraryContextTarget =
+  | {
+      type: 'track';
+      track: TrackMetadata;
+      peerList: TrackMetadata[];
+      isViewingLocalPlaylist?: boolean;
+    }
+  | {
+      type: 'collection';
+      kind:
+        | 'simp_playlist'
+        | 'simp_album'
+        | 'cloud_playlist'
+        | 'cloud_album'
+        | 'sc_playlist'
+        | 'ia_item';
+      id: string;
+      title: string;
+      subtitle?: string;
+      art_url?: string | null;
+      artistName?: string;
+      source: 'local' | 'apple_music' | 'soundcloud' | 'internet_archive';
+      rawItem: any;
+    };
 
 const iaItemCountCache = new Map<string, number>();
 const iaItemCountPending = new Set<string>();
@@ -116,6 +145,12 @@ export interface LibraryBrowserViewProps {
   setPersonalRadioStations?: React.Dispatch<React.SetStateAction<AppleRadioStationSummary[]>>;
   liveRadioStations?: AppleRadioStationSummary[];
   setLiveRadioStations?: React.Dispatch<React.SetStateAction<AppleRadioStationSummary[]>>;
+  artistRadioShows?: AppleCloudPlaylistSummary[];
+  setArtistRadioShows?: React.Dispatch<React.SetStateAction<AppleCloudPlaylistSummary[]>>;
+  clubMixes?: AppleCloudPlaylistSummary[];
+  setClubMixes?: React.Dispatch<React.SetStateAction<AppleCloudPlaylistSummary[]>>;
+  genreRadioStations?: AppleRadioStationSummary[];
+  setGenreRadioStations?: React.Dispatch<React.SetStateAction<AppleRadioStationSummary[]>>;
   forYouPlaylists: AppleCloudPlaylistSummary[];
   setForYouPlaylists: React.Dispatch<React.SetStateAction<AppleCloudPlaylistSummary[]>>;
   forYouAlbums: AppleCloudAlbumSummary[];
@@ -390,6 +425,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   setPersonalRadioStations,
   liveRadioStations = [],
   setLiveRadioStations,
+  artistRadioShows = [],
+  setArtistRadioShows,
+  clubMixes = [],
+  setClubMixes,
+  genreRadioStations = [],
+  setGenreRadioStations,
   forYouPlaylists,
   setForYouPlaylists,
   forYouAlbums,
@@ -577,8 +618,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   const [cloudPage, setCloudPage] = useState<number>(0);
   const [cloudAlpha, setCloudAlpha] = useState<AlphaBucket>('all');
   const [forYouFilter, setForYouFilter] = useState<
-    'all' | 'stations' | 'new_releases' | 'recently_played' | 'mixes' | 'recent_library'
+    'all' | 'stations' | 'new_releases' | 'recently_played' | 'mixes' | 'social' | 'recent_library'
   >('all');
+  const [appleRadioFilter, setAppleRadioFilter] = useState<
+    'all' | 'live' | 'shows' | 'mixes' | 'genre'
+  >('all');
+  const [appleRadioGenre, setAppleRadioGenre] = useState<string>('');
+  const [libraryContextTarget, setLibraryContextTarget] = useState<LibraryContextTarget | null>(
+    null
+  );
   const [newFilter, setNewFilter] = useState<
     'all' | 'recent_releases' | 'albums' | 'playlists' | 'songs'
   >('all');
@@ -2177,7 +2225,98 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     [handleAddTracksToPlaylist, setCloudLoading]
   );
 
-  // Listen for `SELECT` (Add to Hybrid) and `Y` (Pin/Unpin to SIMP) gamepad/keyboard actions
+  const openLibraryContextMenu = useCallback(
+    (target: LibraryContextTarget) => {
+      setLibraryContextTarget(target);
+      window.setTimeout(() => {
+        const firstBtn = document.querySelector<HTMLElement>(
+          '[data-library-context-modal="true"] button[data-default-focus="true"], [data-library-context-modal="true"] button:not([disabled])'
+        );
+        if (firstBtn) applyFocusMarker(firstBtn);
+      }, 30);
+    },
+    [applyFocusMarker]
+  );
+
+  // Inserts one or more tracks into the active playback queue immediately after the current track
+  // (`snap.queue_index + 1`) without wiping or restarting the rest of the playing album/playlist.
+  const handlePlayTracksNext = useCallback(
+    (tracksToInsert: TrackMetadata[], label: string) => {
+      if (tracksToInsert.length === 0) return;
+      const currentQueue = snap?.queue || [];
+      if (currentQueue.length === 0 || !track) {
+        defaultSimpClient.loadQueue(
+          tracksToInsert.map((t) => t.uri),
+          0,
+          tracksToInsert
+        );
+        showToast(`Playing ${label}`);
+        return;
+      }
+      const curIdx = Math.max(
+        0,
+        Math.min(currentQueue.length - 1, snap?.queue_index ?? 0)
+      );
+      const nextQueue = [
+        ...currentQueue.slice(0, curIdx + 1),
+        ...tracksToInsert,
+        ...currentQueue.slice(curIdx + 1),
+      ];
+      defaultSimpClient.loadQueue(
+        nextQueue.map((t) => t.uri),
+        curIdx,
+        nextQueue
+      );
+      showToast(`⏭ Queued ${label} to play next`);
+    },
+    [snap?.queue, snap?.queue_index, track, showToast]
+  );
+
+  const resolveCollectionTracks = useCallback(
+    async (
+      target: Extract<LibraryContextTarget, { type: 'collection' }>
+    ): Promise<TrackMetadata[]> => {
+      if (target.kind === 'simp_playlist') {
+        return defaultSimpClient.query<TrackMetadata[]>('get_playlist_items', {
+          playlist_id: target.id,
+          limit: 2000,
+          offset: 0,
+        });
+      }
+      if (target.kind === 'simp_album') {
+        return defaultSimpClient.query<TrackMetadata[]>('get_album_tracks', {
+          album_id: target.id,
+        });
+      }
+      if (target.kind === 'cloud_playlist') {
+        const pl = target.rawItem as AppleCloudPlaylistSummary;
+        return fetchApplePlaylistTracks(pl.id, pl.kind);
+      }
+      if (target.kind === 'cloud_album') {
+        const alb = target.rawItem as AppleCloudAlbumSummary;
+        const { tracks } = await fetchFullAppleAlbum({ albumId: alb.id });
+        return tracks;
+      }
+      if (target.kind === 'sc_playlist') {
+        const pl = target.rawItem as SoundCloudPlaylistSummary;
+        const items = await fetchSoundCloudPlaylistTracks(pl.id).catch(() => []);
+        return items.length > 0 ? items : pl.tracks || [];
+      }
+      if (target.kind === 'ia_item') {
+        const item = target.rawItem as ArchiveItemSummary;
+        const resp = await fetch(
+          resolveDaemonUrl(`/api/ia/item?id=${encodeURIComponent(item.identifier)}`)
+        );
+        const d = await resp.json();
+        const detail: ArchiveItemDetail | undefined = d?.detail || d?.data;
+        return detail?.tracks || [];
+      }
+      return [];
+    },
+    [resolveDaemonUrl]
+  );
+
+  // Listen for `SELECT` (Contextual Action Menu) and `Y` (Pin/Unpin to SIMP) gamepad/keyboard actions
   useEffect(() => {
     if (hidden) return;
     const handler = (ev: Event) => {
@@ -2186,23 +2325,35 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       const focused = document.querySelector<HTMLElement>('[data-simp-active-focus="true"]');
 
       if (detail.op === 'select') {
-        // 1. Focused on (or inside) a single track row -> click its `[data-track-select="true"]` action (`+` or `−`)
+        if (libraryContextTarget) {
+          setLibraryContextTarget(null);
+          return;
+        }
+        // 1. Focused on (or inside) a single track row -> open its `[data-context-select="true"]` menu (or fallback to `[data-track-select="true"]`)
         const trackRow = focused?.closest<HTMLElement>(
           '[data-right-track="true"], [data-single-song-row="true"]'
         );
-        const trackSelectBtn =
+        const trackCtxBtn =
+          focused?.querySelector<HTMLElement>('[data-context-select="true"]') ||
+          trackRow?.querySelector<HTMLElement>('[data-context-select="true"]') ||
           focused?.querySelector<HTMLElement>('[data-track-select="true"]') ||
           trackRow?.querySelector<HTMLElement>('[data-track-select="true"]');
-        if (trackSelectBtn) {
-          trackSelectBtn.click();
+        if (trackCtxBtn) {
+          trackCtxBtn.click();
           return;
         }
 
-        // 2. Focused on a Right-Pane Collection Tile -> click its `[data-tile-select="true"]` action (`+`)
-        if (focused?.dataset.rightTile === 'true') {
-          const tileSelectBtn = focused.querySelector<HTMLElement>('[data-tile-select="true"]');
-          if (tileSelectBtn) {
-            tileSelectBtn.click();
+        // 2. Focused on a Right-Pane Collection Tile -> open its `[data-context-select="true"]` menu (or fallback to `[data-tile-select="true"]`)
+        const tileEl =
+          focused?.dataset.rightTile === 'true'
+            ? focused
+            : focused?.closest<HTMLElement>('[data-right-tile="true"]');
+        if (tileEl) {
+          const tileCtxBtn =
+            tileEl.querySelector<HTMLElement>('[data-context-select="true"]') ||
+            tileEl.querySelector<HTMLElement>('[data-tile-select="true"]');
+          if (tileCtxBtn) {
+            tileCtxBtn.click();
             return;
           }
         }
@@ -2268,6 +2419,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     cycleTargetHybridPlaylist,
     rightPaneMode,
     handleDeletePlaylist,
+    libraryContextTarget,
   ]);
 
   // Context Legend & Collection Action Bar (Target pill retired; SELECT/Y badges hidden in mouse mode)
@@ -2718,6 +2870,25 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       <button
         key={pl.id}
         data-right-tile="true"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          openLibraryContextMenu({
+            type: 'collection',
+            kind: 'simp_playlist',
+            id: pl.id,
+            title: cleanTitle,
+            subtitle: `${pl.track_count} tracks`,
+            art_url: pl.cover_art_url,
+            source: pl.origin === 'apple_remote'
+              ? 'apple_music'
+              : pl.origin === 'soundcloud_remote'
+              ? 'soundcloud'
+              : pl.origin === 'archive_remote'
+              ? 'internet_archive'
+              : 'local',
+            rawItem: pl,
+          });
+        }}
         onClick={() => {
           if (isLocal) {
             setActivePlaylistId(pl.id);
@@ -2838,6 +3009,43 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               <span
                 role="button"
                 data-tile-aux="true"
+                data-context-select="true"
+                title="Collection Options (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openLibraryContextMenu({
+                    type: 'collection',
+                    kind: 'simp_playlist',
+                    id: pl.id,
+                    title: cleanTitle,
+                    subtitle: `${pl.track_count} tracks`,
+                    art_url: pl.cover_art_url,
+                    source: pl.origin === 'apple_remote'
+                      ? 'apple_music'
+                      : pl.origin === 'soundcloud_remote'
+                      ? 'soundcloud'
+                      : pl.origin === 'archive_remote'
+                      ? 'internet_archive'
+                      : 'local',
+                    rawItem: pl,
+                  });
+                }}
+                style={{
+                  padding: '2px 5px',
+                  borderRadius: 6,
+                  background: '#14141e',
+                  border: '1px solid #282838',
+                  color: '#c8c8d4',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                •••
+              </span>
+              <span
+                role="button"
+                data-tile-aux="true"
                 data-tile-y="true"
                 title={isLocal ? 'Delete SIMP Playlist (Y)' : 'Unpin Playlist from SIMP (Y)'}
                 onClick={(e) => {
@@ -2910,6 +3118,20 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       <button
         key={alb.id}
         data-right-tile="true"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          openLibraryContextMenu({
+            type: 'collection',
+            kind: 'simp_album',
+            id: alb.id,
+            title: cleanTitle,
+            subtitle: `${alb.album_artist} • ${alb.track_count} tracks`,
+            art_url: alb.art_url,
+            artistName: alb.album_artist.replace(/\s*•\s*(FLAC(?:\s*\+\s*MP3)?|MP3|WAV|OGG|OPUS|M4A|AAC|ALAC|AIFF)$/i, '').trim(),
+            source: isAppleAlbum ? 'apple_music' : 'local',
+            rawItem: alb,
+          });
+        }}
         onClick={() => selectLocalCollection({ kind: 'album', id: alb.id })}
         style={{
           minWidth: 0,
@@ -2978,8 +3200,40 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               <span
                 role="button"
                 data-tile-aux="true"
+                data-context-select="true"
+                title="Album Options (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openLibraryContextMenu({
+                    type: 'collection',
+                    kind: 'simp_album',
+                    id: alb.id,
+                    title: cleanTitle,
+                    subtitle: `${alb.album_artist} • ${alb.track_count} tracks`,
+                    art_url: alb.art_url,
+                    artistName: alb.album_artist.replace(/\s*•\s*(FLAC(?:\s*\+\s*MP3)?|MP3|WAV|OGG|OPUS|M4A|AAC|ALAC|AIFF)$/i, '').trim(),
+                    source: isAppleAlbum ? 'apple_music' : 'local',
+                    rawItem: alb,
+                  });
+                }}
+                style={{
+                  padding: '2px 5px',
+                  borderRadius: 6,
+                  background: '#14141e',
+                  border: '1px solid #282838',
+                  color: '#c8c8d4',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                •••
+              </span>
+              <span
+                role="button"
+                data-tile-aux="true"
                 data-tile-select="true"
-                title="Add album tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+                title="Add album tracks to active ★ SIMP Hybrid Playlist"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleAddSimpAlbumToHybrid(alb);
@@ -3097,6 +3351,19 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       <button
         key={pl.id}
         data-right-tile="true"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          openLibraryContextMenu({
+            type: 'collection',
+            kind: 'cloud_playlist',
+            id: pl.id,
+            title: pl.name,
+            subtitle: pl.description || 'Apple Music Playlist',
+            art_url: pl.art_url,
+            source: 'apple_music',
+            rawItem: pl,
+          });
+        }}
         onClick={() => selectCloudPlaylist(pl)}
         style={{
           minWidth: 0,
@@ -3190,8 +3457,39 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               <span
                 role="button"
                 data-tile-aux="true"
+                data-context-select="true"
+                title="Playlist Options (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openLibraryContextMenu({
+                    type: 'collection',
+                    kind: 'cloud_playlist',
+                    id: pl.id,
+                    title: pl.name,
+                    subtitle: pl.description || 'Apple Music Playlist',
+                    art_url: pl.art_url,
+                    source: 'apple_music',
+                    rawItem: pl,
+                  });
+                }}
+                style={{
+                  padding: '2px 5px',
+                  borderRadius: 6,
+                  background: '#14141e',
+                  border: '1px solid #282838',
+                  color: '#c8c8d4',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                •••
+              </span>
+              <span
+                role="button"
+                data-tile-aux="true"
                 data-tile-select="true"
-                title="Add playlist tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+                title="Add playlist tracks to active ★ SIMP Hybrid Playlist"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleAddCloudPlaylistToHybrid(pl);
@@ -3285,6 +3583,20 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       <button
         key={alb.id}
         data-right-tile="true"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          openLibraryContextMenu({
+            type: 'collection',
+            kind: 'cloud_album',
+            id: alb.id,
+            title: alb.title,
+            subtitle: `${alb.artist}${alb.release_year ? ` • ${alb.release_year}` : ''}`,
+            art_url: alb.art_url,
+            artistName: alb.artist,
+            source: 'apple_music',
+            rawItem: alb,
+          });
+        }}
         onClick={() =>
           selectCloudAlbum({
             albumId: alb.id,
@@ -3376,8 +3688,40 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               <span
                 role="button"
                 data-tile-aux="true"
+                data-context-select="true"
+                title="Album Options (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openLibraryContextMenu({
+                    type: 'collection',
+                    kind: 'cloud_album',
+                    id: alb.id,
+                    title: alb.title,
+                    subtitle: `${alb.artist}${alb.release_year ? ` • ${alb.release_year}` : ''}`,
+                    art_url: alb.art_url,
+                    artistName: alb.artist,
+                    source: 'apple_music',
+                    rawItem: alb,
+                  });
+                }}
+                style={{
+                  padding: '2px 5px',
+                  borderRadius: 6,
+                  background: '#14141e',
+                  border: '1px solid #282838',
+                  color: '#c8c8d4',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                •••
+              </span>
+              <span
+                role="button"
+                data-tile-aux="true"
                 data-tile-select="true"
-                title="Add album tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+                title="Add album tracks to active ★ SIMP Hybrid Playlist"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleAddCloudAlbumToHybrid(alb);
@@ -3598,6 +3942,19 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       <button
         key={pl.id}
         data-right-tile="true"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          openLibraryContextMenu({
+            type: 'collection',
+            kind: 'sc_playlist',
+            id: pl.id,
+            title: pl.name,
+            subtitle: `${pl.track_count ? `${pl.track_count} tracks • ` : ''}${pl.description || 'SoundCloud Set'}`,
+            art_url: pl.art_url,
+            source: 'soundcloud',
+            rawItem: pl,
+          });
+        }}
         onClick={() => selectSoundCloudPlaylist(pl)}
         style={{
           minWidth: 0,
@@ -3661,8 +4018,39 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               <span
                 role="button"
                 data-tile-aux="true"
+                data-context-select="true"
+                title="Set Options (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openLibraryContextMenu({
+                    type: 'collection',
+                    kind: 'sc_playlist',
+                    id: pl.id,
+                    title: pl.name,
+                    subtitle: `${pl.track_count ? `${pl.track_count} tracks • ` : ''}${pl.description || 'SoundCloud Set'}`,
+                    art_url: pl.art_url,
+                    source: 'soundcloud',
+                    rawItem: pl,
+                  });
+                }}
+                style={{
+                  padding: '2px 5px',
+                  borderRadius: 6,
+                  background: '#14141e',
+                  border: '1px solid #282838',
+                  color: '#c8c8d4',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                •••
+              </span>
+              <span
+                role="button"
+                data-tile-aux="true"
                 data-tile-select="true"
-                title="Add set tracks to active ★ SIMP Hybrid Playlist (SELECT)"
+                title="Add set tracks to active ★ SIMP Hybrid Playlist"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleAddSoundCloudPlaylistToHybrid(pl);
@@ -4081,6 +4469,20 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       <button
         key={item.identifier}
         data-right-tile="true"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          openLibraryContextMenu({
+            type: 'collection',
+            kind: 'ia_item',
+            id: item.identifier,
+            title: item.title,
+            subtitle: `${item.creator}${item.year ? ` • ${item.year}` : ''}`,
+            art_url: item.art_url,
+            artistName: item.creator,
+            source: 'internet_archive',
+            rawItem: item,
+          });
+        }}
         onClick={() => openIaItem(item, false)}
         style={{
           minWidth: 0,
@@ -4144,8 +4546,40 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               <span
                 role="button"
                 data-tile-aux="true"
+                data-context-select="true"
+                title="Item Options (SELECT)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openLibraryContextMenu({
+                    type: 'collection',
+                    kind: 'ia_item',
+                    id: item.identifier,
+                    title: item.title,
+                    subtitle: `${item.creator}${item.year ? ` • ${item.year}` : ''}`,
+                    art_url: item.art_url,
+                    artistName: item.creator,
+                    source: 'internet_archive',
+                    rawItem: item,
+                  });
+                }}
+                style={{
+                  padding: '2px 5px',
+                  borderRadius: 6,
+                  background: '#14141e',
+                  border: '1px solid #282838',
+                  color: '#c8c8d4',
+                  fontSize: 10,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                •••
+              </span>
+              <span
+                role="button"
+                data-tile-aux="true"
                 data-tile-select="true"
-                title="Add to active ★ SIMP Hybrid Playlist (SELECT)"
+                title="Add to active ★ SIMP Hybrid Playlist"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleAddArchiveItemToHybrid(item);
@@ -4249,6 +4683,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       <div
         key={s.uri}
         data-single-song-row="true"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          openLibraryContextMenu({
+            type: 'track',
+            track: s,
+            peerList,
+            isViewingLocalPlaylist: false,
+          });
+        }}
         style={{
           minHeight: 54,
           padding: '6px 10px',
@@ -4459,9 +4902,34 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             )}
           <button
             data-row-aux="true"
+            data-context-select="true"
+            onClick={() =>
+              openLibraryContextMenu({
+                type: 'track',
+                track: s,
+                peerList,
+                isViewingLocalPlaylist: false,
+              })
+            }
+            title="Track Options (SELECT)"
+            style={{
+              padding: '5px 7px',
+              borderRadius: 8,
+              background: '#14141e',
+              border: '1px solid #282838',
+              color: '#c8c8d4',
+              fontSize: 11,
+              fontWeight: 800,
+              cursor: 'pointer',
+            }}
+          >
+            •••
+          </button>
+          <button
+            data-row-aux="true"
             data-track-select="true"
             onClick={() => handleAddTracksToPlaylist([s.uri], `"${s.title}"`, [s])}
-            title="Add single to active SIMP Hybrid Playlist (SELECT)"
+            title="Add single to active SIMP Hybrid Playlist"
             style={{
               padding: '5px 9px',
               borderRadius: 8,
@@ -4495,6 +4963,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             </button>
           ) : s.source === 'apple_music' ? (
             <>
+              <AppleMusicAttributionLink
+                kind="song"
+                id={s.uri}
+                size={13}
+                style={{ padding: '4px 6px' }}
+              />
               {handleAddAppleToCloudLibrary && (
                 <button
                   data-row-aux="true"
@@ -4548,12 +5022,24 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         flex: 1,
         display: hidden ? 'none' : 'grid',
         gridTemplateColumns: 'minmax(250px, 32%) minmax(0, 68%)',
+        gridTemplateRows: track ? 'auto minmax(0, 1fr)' : 'minmax(0, 1fr)',
         overflow: 'hidden',
         boxSizing: 'border-box',
         width: '100%',
         minWidth: 0,
       }}
     >
+      {/* =====================================================================
+          TOP MINI-PLAYER BAR (Spans Full Width Above Left + Right Columns)
+         ===================================================================== */}
+      {track && (
+        <LibraryMiniPlayerBar
+          track={track}
+          snap={snap}
+          hidden={hidden}
+          onReturnToPlayer={() => setView("lock")}
+        />
+      )}
       {/* =====================================================================
           LEFT COLUMN (32%): Search + 2x2 Right-Pane Hub Selector + Collapsible Quick-Jump Library
          ===================================================================== */}
@@ -7025,6 +7511,16 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                                       forYouPlaylists.length + forYouAlbums.length
                                     })`,
                                   },
+                                  ...(otherShelves.some((s) => s.is_social)
+                                    ? [
+                                        {
+                                          id: 'social' as const,
+                                          label: `👥 Friends Listening (${
+                                            otherShelves.filter((s) => s.is_social).length
+                                          })`,
+                                        },
+                                      ]
+                                    : []),
                                   ...(recentlyAddedCloudAlbums.length > 0
                                     ? [
                                         {
@@ -7069,6 +7565,9 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                                       setRadioStations(res.stations);
                                       setPersonalRadioStations?.(res.personal_stations ?? []);
                                       setLiveRadioStations?.(res.live_stations ?? []);
+                                      setArtistRadioShows?.(res.artist_shows ?? []);
+                                      setClubMixes?.(res.club_mixes ?? []);
+                                      setGenreRadioStations?.(res.genre_stations ?? []);
                                       setForYouNewReleases?.(res.new_releases ?? []);
                                       setForYouPlaylists(res.playlists);
                                       setForYouAlbums(res.albums);
@@ -7220,34 +7719,60 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                               </>
                             )}
 
-                          {(forYouFilter === 'all' || forYouFilter === 'mixes') &&
+                          {(forYouFilter === 'all' ||
+                            forYouFilter === 'mixes' ||
+                            forYouFilter === 'social') &&
                             (otherShelves.length > 0 ? (
                               <>
-                                {otherShelves.map((shelf) => {
-                                  const totalItems =
-                                    shelf.playlists.length +
-                                    shelf.albums.length +
-                                    shelf.stations.length;
-                                  if (totalItems === 0) return null;
-                                  return (
-                                    <React.Fragment key={shelf.id}>
-                                      <div
-                                        style={{
-                                          fontSize: 11,
-                                          fontFamily: 'monospace',
-                                          color: '#fda4af',
-                                        }}
-                                      >
-                                        ✨ {shelf.title.toUpperCase()} ({totalItems})
-                                      </div>
-                                      <div style={tileGridStyle}>
-                                        {shelf.stations.map(renderStationCard)}
-                                        {shelf.playlists.map(renderCloudPlaylistCard)}
-                                        {shelf.albums.map(renderCloudAlbumCard)}
-                                      </div>
-                                    </React.Fragment>
-                                  );
-                                })}
+                                {otherShelves
+                                  .filter((s) => (forYouFilter === 'social' ? s.is_social : true))
+                                  .map((shelf) => {
+                                    const totalItems =
+                                      shelf.playlists.length +
+                                      shelf.albums.length +
+                                      shelf.stations.length;
+                                    if (totalItems === 0) return null;
+                                    return (
+                                      <React.Fragment key={shelf.id}>
+                                        <div
+                                          style={{
+                                            fontSize: 11,
+                                            fontFamily: 'monospace',
+                                            color: '#fda4af',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: 8,
+                                            flexWrap: 'wrap',
+                                          }}
+                                        >
+                                          <span>
+                                            {shelf.is_social ? '👥' : '✨'}{' '}
+                                            {shelf.title.toUpperCase()} ({totalItems})
+                                          </span>
+                                          {shelf.is_social && (
+                                            <span
+                                              style={{
+                                                padding: '2px 7px',
+                                                borderRadius: 999,
+                                                background: '#2a131c',
+                                                border: '1px solid #fa243c',
+                                                color: '#fecdd3',
+                                                fontSize: 9.5,
+                                                fontWeight: 800,
+                                              }}
+                                            >
+                                              👥 Friends Listening
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div style={tileGridStyle}>
+                                          {shelf.stations.map(renderStationCard)}
+                                          {shelf.playlists.map(renderCloudPlaylistCard)}
+                                          {shelf.albums.map(renderCloudAlbumCard)}
+                                        </div>
+                                      </React.Fragment>
+                                    );
+                                  })}
                               </>
                             ) : (
                               <>
@@ -7499,7 +8024,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 )}
 
                 {/* ---------------------------------------------------------
-                    5B. 📻 RADIO HUB (Live Broadcast & Global Apple Music Radio Stations)
+                    5B. 📻 RADIO HUB (Live Broadcast, Artist-Hosted Shows, Club Mixes & Stations by Genre)
                    --------------------------------------------------------- */}
                 {browserSourceFilter !== 'soundcloud' &&
                   browserSourceFilter !== 'internet_archive' &&
@@ -7509,109 +8034,311 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                     {(() => {
                       const stationsToDisplay =
                         liveRadioStations.length > 0 ? liveRadioStations : radioStations;
+                      const allGenreStations =
+                        genreRadioStations.length > 0 ? genreRadioStations : radioStations;
+                      const genreSet = new Set<string>();
+                      for (const st of allGenreStations) {
+                        if (st.genre) genreSet.add(st.genre);
+                      }
+                      const availableGenres = Array.from(genreSet).slice(0, 10);
+                      const filteredGenreStations = appleRadioGenre
+                        ? allGenreStations.filter(
+                            (st) =>
+                              (st.genre || '').toLowerCase() === appleRadioGenre.toLowerCase() ||
+                              st.name.toLowerCase().includes(appleRadioGenre.toLowerCase()) ||
+                              st.subtitle.toLowerCase().includes(appleRadioGenre.toLowerCase())
+                          )
+                        : allGenreStations;
+
                       return (
                         <>
                           <div
                             style={{
                               display: 'flex',
-                              justifyContent: 'space-between',
-                              alignItems: 'center',
+                              flexDirection: 'column',
+                              gap: 8,
                               paddingBottom: 10,
                               borderBottom: '1px solid #16161c',
-                              flexWrap: 'wrap',
-                              gap: 8,
                             }}
                           >
                             <div
                               style={{
                                 display: 'flex',
+                                justifyContent: 'space-between',
                                 alignItems: 'center',
-                                gap: 8,
                                 flexWrap: 'wrap',
+                                gap: 8,
                               }}
                             >
-                              <span
-                                style={{
-                                  fontSize: 14,
-                                  fontWeight: 800,
-                                  color: '#fecdd3',
-                                }}
-                              >
-                                📻 Live & Global Radio
-                              </span>
-                              <span
-                                style={{
-                                  fontSize: 11,
-                                  fontFamily: 'monospace',
-                                  color: '#9ca3af',
-                                }}
-                              >
-                                {stationsToDisplay.length} broadcast & genre stations
-                              </span>
-                            </div>
-                            <button
-                              data-right-filter-pill="true"
-                              onClick={() => {
-                                setCloudLoading(true);
-                                fetchAppleRadioAndForYou()
-                                  .then((res) => {
-                                    setRadioStations(res.stations);
-                                    setPersonalRadioStations?.(res.personal_stations ?? []);
-                                    setLiveRadioStations?.(res.live_stations ?? []);
-                                    setForYouNewReleases?.(res.new_releases ?? []);
-                                    setForYouPlaylists(res.playlists);
-                                    setForYouAlbums(res.albums);
-                                    setForYouShelves?.(res.shelves ?? []);
-                                    setAppleRecentlyPlayedTracks?.(res.recently_played ?? []);
-                                  })
-                                  .catch(() => {})
-                                  .finally(() => setCloudLoading(false));
-                              }}
-                              style={{
-                                padding: '4px 9px',
-                                borderRadius: 6,
-                                background: '#161620',
-                                border: '1px solid #2a2a38',
-                                color: '#fda4af',
-                                fontSize: 11,
-                                fontWeight: 700,
-                                cursor: 'pointer',
-                              }}
-                            >
-                              ↻ Refresh
-                            </button>
-                          </div>
-
-                          {stationsToDisplay.length > 0 ? (
-                            <>
                               <div
                                 style={{
-                                  fontSize: 11,
-                                  fontFamily: 'monospace',
-                                  color: '#fda4af',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 6,
+                                  flexWrap: 'wrap',
                                 }}
                               >
-                                📻 APPLE MUSIC LIVE & GENRE RADIO STATIONS (
-                                {stationsToDisplay.length})
+                                <span
+                                  style={{
+                                    fontSize: 14,
+                                    fontWeight: 800,
+                                    color: '#fecdd3',
+                                    marginRight: 4,
+                                  }}
+                                >
+                                  📻 Apple Music Radio
+                                </span>
+                                {(
+                                  [
+                                    { id: 'all' as const, label: 'All Radio' },
+                                    {
+                                      id: 'live' as const,
+                                      label: `📻 Live & Personal (${
+                                        stationsToDisplay.length + personalRadioStations.length
+                                      })`,
+                                    },
+                                    ...(artistRadioShows.length > 0
+                                      ? [
+                                          {
+                                            id: 'shows' as const,
+                                            label: `🎙️ Shows & Interviews (${artistRadioShows.length})`,
+                                          },
+                                        ]
+                                      : []),
+                                    ...(clubMixes.length > 0
+                                      ? [
+                                          {
+                                            id: 'mixes' as const,
+                                            label: `🎧 Club Mixes & DJ Sets (${clubMixes.length})`,
+                                          },
+                                        ]
+                                      : []),
+                                    {
+                                      id: 'genre' as const,
+                                      label: `📡 By Genre (${allGenreStations.length})`,
+                                    },
+                                  ] as const
+                                ).map((tab) => {
+                                  const active = appleRadioFilter === tab.id;
+                                  return (
+                                    <button
+                                      key={tab.id}
+                                      data-right-filter-pill="true"
+                                      onClick={() => setAppleRadioFilter(tab.id)}
+                                      style={{
+                                        padding: '4px 10px',
+                                        borderRadius: 6,
+                                        background: active ? '#28111b' : '#101018',
+                                        border: active
+                                          ? '1px solid #fa243c'
+                                          : '1px solid #222230',
+                                        color: active ? '#fecdd3' : '#9ca3af',
+                                        fontSize: 11,
+                                        fontWeight: 800,
+                                        cursor: 'pointer',
+                                      }}
+                                    >
+                                      {tab.label}
+                                    </button>
+                                  );
+                                })}
                               </div>
-                              <div style={tileGridStyle}>
-                                {stationsToDisplay.map(renderStationCard)}
-                              </div>
-                            </>
-                          ) : (
-                            <div
-                              style={{
-                                padding: 28,
-                                textAlign: 'center',
-                                color: '#9ca3af',
-                                fontSize: 12,
-                              }}
-                            >
-                              {cloudLoading
-                                ? 'Loading Apple Music radio stations…'
-                                : 'No live radio stations returned right now. Click Refresh to retry.'}
+                              <button
+                                data-right-filter-pill="true"
+                                onClick={() => {
+                                  setCloudLoading(true);
+                                  fetchAppleRadioAndForYou()
+                                    .then((res) => {
+                                      setRadioStations(res.stations);
+                                      setPersonalRadioStations?.(res.personal_stations ?? []);
+                                      setLiveRadioStations?.(res.live_stations ?? []);
+                                      setArtistRadioShows?.(res.artist_shows ?? []);
+                                      setClubMixes?.(res.club_mixes ?? []);
+                                      setGenreRadioStations?.(res.genre_stations ?? []);
+                                      setForYouNewReleases?.(res.new_releases ?? []);
+                                      setForYouPlaylists(res.playlists);
+                                      setForYouAlbums(res.albums);
+                                      setForYouShelves?.(res.shelves ?? []);
+                                      setAppleRecentlyPlayedTracks?.(res.recently_played ?? []);
+                                    })
+                                    .catch(() => {})
+                                    .finally(() => setCloudLoading(false));
+                                }}
+                                style={{
+                                  padding: '4px 9px',
+                                  borderRadius: 6,
+                                  background: '#161620',
+                                  border: '1px solid #2a2a38',
+                                  color: '#fda4af',
+                                  fontSize: 11,
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                ↻ Refresh
+                              </button>
                             </div>
-                          )}
+
+                            {availableGenres.length > 0 && (
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 5,
+                                  flexWrap: 'wrap',
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    fontSize: 10,
+                                    fontFamily: 'monospace',
+                                    color: '#9ca3af',
+                                  }}
+                                >
+                                  GENRE:
+                                </span>
+                                {[
+                                  { id: '', label: '🌐 All Genres' },
+                                  ...availableGenres.map((g) => ({ id: g, label: g })),
+                                ].map((g) => {
+                                  const active = appleRadioGenre === g.id;
+                                  return (
+                                    <button
+                                      key={g.id || 'all-genres'}
+                                      data-right-filter-pill="true"
+                                      onClick={() => setAppleRadioGenre(g.id)}
+                                      style={{
+                                        padding: '3px 8px',
+                                        borderRadius: 999,
+                                        background: active ? '#28111b' : '#12121a',
+                                        border: active
+                                          ? '1px solid #fa243c'
+                                          : '1px solid #232332',
+                                        color: active ? '#fecdd3' : '#a1a1aa',
+                                        fontSize: 10,
+                                        fontWeight: 700,
+                                        cursor: 'pointer',
+                                      }}
+                                    >
+                                      {g.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+
+                          {(appleRadioFilter === 'all' || appleRadioFilter === 'live') &&
+                            personalRadioStations.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  📻 PERSONAL & DISCOVERY STATIONS ({personalRadioStations.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {personalRadioStations.map(renderStationCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {(appleRadioFilter === 'all' || appleRadioFilter === 'live') &&
+                            stationsToDisplay.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  📡 LIVE GLOBAL BROADCAST STATIONS — APPLE MUSIC 1, HITS, COUNTRY & CLUB (
+                                  {stationsToDisplay.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {stationsToDisplay.map(renderStationCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {(appleRadioFilter === 'all' || appleRadioFilter === 'shows') &&
+                            artistRadioShows.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  🎙️ ARTIST-HOSTED SHOWS, RADIO HOSTS & INTERVIEWS (
+                                  {artistRadioShows.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {artistRadioShows.map(renderCloudPlaylistCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {(appleRadioFilter === 'all' || appleRadioFilter === 'mixes') &&
+                            clubMixes.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  🎧 CLUB MIXES & DJ SETS ({clubMixes.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {clubMixes.map(renderCloudPlaylistCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {(appleRadioFilter === 'all' || appleRadioFilter === 'genre') &&
+                            filteredGenreStations.length > 0 && (
+                              <>
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: '#fda4af',
+                                  }}
+                                >
+                                  🎶 STATIONS BY GENRE & TOP STATIONS
+                                  {appleRadioGenre ? ` — ${appleRadioGenre.toUpperCase()}` : ''} (
+                                  {filteredGenreStations.length})
+                                </div>
+                                <div style={tileGridStyle}>
+                                  {filteredGenreStations.map(renderStationCard)}
+                                </div>
+                              </>
+                            )}
+
+                          {stationsToDisplay.length === 0 &&
+                            artistRadioShows.length === 0 &&
+                            clubMixes.length === 0 &&
+                            filteredGenreStations.length === 0 && (
+                              <div
+                                style={{
+                                  padding: 28,
+                                  textAlign: 'center',
+                                  color: '#9ca3af',
+                                  fontSize: 12,
+                                }}
+                              >
+                                {cloudLoading
+                                  ? 'Loading Apple Music radio stations, shows & mixes…'
+                                  : 'No radio stations returned right now. Click Refresh to retry.'}
+                              </div>
+                            )}
                         </>
                       );
                     })()}
@@ -8409,403 +9136,24 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           /* =================================================================
              STATE A.5: 🎤 DEDICATED ARTIST PROFILE & RABBIT HOLE VIEW
              ================================================================= */
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0, width: '100%' }}>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                paddingBottom: 12,
-                borderBottom: '1px solid #16161c',
-                flexWrap: 'wrap',
-                gap: 10,
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
-                <button
-                  data-right-back-grid="true"
-                  onClick={handleWalkBack}
-                  style={{
-                    minHeight: 38,
-                    padding: '0 10px',
-                    borderRadius: 8,
-                    background: '#14141e',
-                    border: '1px solid #2a2a38',
-                    color: '#bfeaf5',
-                    fontSize: 11,
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                    flexShrink: 0,
-                  }}
-                >
-                  ← Back<span className="simp-gp-badge"> (B)</span>
-                </button>
-                {(activeArtistProfile.scData?.user?.avatar_url ||
-                  activeArtistProfile.appleData?.artist?.art_url ||
-                  activeArtistProfile.localData?.art_url) ? (
-                  <img
-                    src={
-                      activeArtistProfile.scData?.user?.avatar_url ||
-                      activeArtistProfile.appleData?.artist?.art_url ||
-                      activeArtistProfile.localData?.art_url ||
-                      ''
-                    }
-                    alt=""
-                    style={{
-                      width: 52,
-                      height: 52,
-                      borderRadius: '50%',
-                      objectFit: 'cover',
-                      border: '2px solid #2aa3c4',
-                      flexShrink: 0,
-                    }}
-                  />
-                ) : (
-                  <div
-                    style={{
-                      width: 52,
-                      height: 52,
-                      borderRadius: '50%',
-                      background: '#141622',
-                      border: '2px solid #2aa3c4',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: 22,
-                      flexShrink: 0,
-                    }}
-                  >
-                    🎤
-                  </div>
-                )}
-                <div style={{ minWidth: 0 }}>
-                  <div
-                    style={{
-                      fontSize: 18,
-                      fontWeight: 800,
-                      color: '#f8fafc',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {activeArtistProfile.scData?.user?.username ||
-                      activeArtistProfile.appleData?.artist?.name ||
-                      activeArtistProfile.localData?.name ||
-                      activeArtistProfile.displayName}
-                  </div>
-                  <div style={{ fontSize: 12, color: '#94a3b8' }}>
-                    {activeArtistProfile.source === 'soundcloud'
-                      ? `☁️ SoundCloud Creator${
-                          activeArtistProfile.scData?.user
-                            ? ` • ${activeArtistProfile.scData.user.followers_count.toLocaleString()} followers`
-                            : ''
-                        }`
-                      : activeArtistProfile.source === 'apple_music'
-                      ? `🍎 Apple Music Artist${
-                          activeArtistProfile.appleData?.artist?.genre
-                            ? ` • ${activeArtistProfile.appleData.artist.genre}`
-                            : ''
-                        }`
-                      : '💾 Local Library Artist'}
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                {(() => {
-                  const topTracks: TrackMetadata[] =
-                    activeArtistProfile.scData?.tracks ||
-                    activeArtistProfile.appleData?.top_tracks ||
-                    activeArtistProfile.localData?.tracks ||
-                    [];
-                  return topTracks.length > 0 ? (
-                    <>
-                      <button
-                        data-right-play-all="true"
-                        onClick={() => {
-                          setPlayingContextId(
-                            `artist:${activeArtistProfile.source}:${activeArtistProfile.displayName}`
-                          );
-                          defaultSimpClient.loadQueue(
-                            topTracks.map((t: TrackMetadata) => t.uri),
-                            0,
-                            topTracks
-                          );
-                          setView('lock');
-                        }}
-                        style={{
-                          minHeight: 38,
-                          padding: '0 14px',
-                          borderRadius: 10,
-                          background: '#0f222a',
-                          color: '#bfeaf5',
-                          border: '1px solid #2aa3c4',
-                          fontWeight: 800,
-                          fontSize: 12,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        ▶ Play Tracks<span className="simp-gp-badge"> (A)</span>
-                      </button>
-                      <button
-                        onClick={() => {
-                          setPlayingContextId(
-                            `artist:${activeArtistProfile.source}:${activeArtistProfile.displayName}`
-                          );
-                          defaultSimpClient.setShuffle(true);
-                          defaultSimpClient.loadQueue(
-                            topTracks.map((t: TrackMetadata) => t.uri),
-                            0,
-                            topTracks
-                          );
-                          setView('lock');
-                        }}
-                        style={{
-                          minHeight: 38,
-                          padding: '0 14px',
-                          borderRadius: 10,
-                          background: '#14141c',
-                          color: '#d4d4dc',
-                          border: '1px solid #2e2e3a',
-                          fontWeight: 700,
-                          fontSize: 12,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        🔀 Shuffle<span className="simp-gp-badge"> (X)</span>
-                      </button>
-                    </>
-                  ) : null;
-                })()}
-                {activeArtistProfile.source === 'soundcloud' && (
-                  <SoundCloudAttributionLink
-                    permalinkUrl={activeArtistProfile.scData?.user?.permalink_url}
-                    kind="user"
-                    id={
-                      activeArtistProfile.scData?.user?.id ||
-                      activeArtistProfile.idOrName ||
-                      activeArtistProfile.displayName
-                    }
-                    label="SoundCloud"
-                    width={30}
-                    style={{ minHeight: 38, padding: '0 12px', borderRadius: 10 }}
-                  />
-                )}
-                {activeArtistProfile.source === 'soundcloud' && activeArtistProfile.scData?.user && (
-                  <button
-                    onClick={async () => {
-                      const u = activeArtistProfile.scData?.user;
-                      if (!u) return;
-                      const isFollowing = scFollowings.some((f) => f.id === u.id);
-                      await toggleFollowSoundCloudUser(u.id, !isFollowing).catch(() => {});
-                      setScFollowings((prev) =>
-                        isFollowing ? prev.filter((f) => f.id !== u.id) : [u, ...prev]
-                      );
-                      showToast(isFollowing ? `Unfollowed ${u.username}` : `Following ${u.username}`);
-                    }}
-                    style={{
-                      minHeight: 38,
-                      padding: '0 14px',
-                      borderRadius: 10,
-                      background: '#221108',
-                      border: '1px solid #f97316',
-                      color: '#fdba74',
-                      fontWeight: 800,
-                      fontSize: 12,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {scFollowings.some((f) => f.id === activeArtistProfile.scData?.user?.id)
-                      ? '✓ Following'
-                      : '+ Follow Artist'}
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Sub-tab pills */}
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {(
-                [
-                  {
-                    id: 'tracks' as const,
-                    label:
-                      activeArtistProfile.source === 'soundcloud'
-                        ? `🎵 Tracks (${activeArtistProfile.scData?.tracks.length ?? 0}${
-                            activeArtistProfile.scData?.next_tracks_href ? '+' : ''
-                          })`
-                        : activeArtistProfile.source === 'apple_music'
-                        ? `🎵 Top Tracks (${activeArtistProfile.appleData?.top_tracks.length ?? 0})`
-                        : `🎵 Tracks (${activeArtistProfile.localData?.tracks.length ?? 0})`,
-                  },
-                  {
-                    id: 'albums' as const,
-                    label:
-                      activeArtistProfile.source === 'soundcloud'
-                        ? `🎶 Sets & Albums (${activeArtistProfile.scData?.playlists.length ?? 0})`
-                        : activeArtistProfile.source === 'apple_music'
-                        ? `💿 Albums (${activeArtistProfile.appleData?.albums.length ?? 0})`
-                        : `💿 Albums (${activeArtistProfile.localData?.albums.length ?? 0})`,
-                  },
-                  ...(activeArtistProfile.source === 'soundcloud'
-                    ? [
-                        {
-                          id: 'singles_or_likes' as const,
-                          label: `❤️ Likes (${activeArtistProfile.scData?.liked_tracks?.length ?? 0})`,
-                        },
-                        {
-                          id: 'related_or_following' as const,
-                          label: `👥 Following (${activeArtistProfile.scData?.followings?.length ?? 0})`,
-                        },
-                      ]
-                    : activeArtistProfile.source === 'apple_music'
-                    ? [
-                        {
-                          id: 'singles_or_likes' as const,
-                          label: `🎶 Singles & EPs (${activeArtistProfile.appleData?.singles.length ?? 0})`,
-                        },
-                        {
-                          id: 'related_or_following' as const,
-                          label: `👥 Related Artists (${activeArtistProfile.appleData?.related_artists.length ?? 0})`,
-                        },
-                      ]
-                    : []),
-                ]
-              ).map((tab) => {
-                const active = activeArtistProfile.subTab === tab.id;
-                return (
-                  <button
-                    key={tab.id}
-                    data-right-filter-pill="true"
-                    onClick={() =>
-                      setActiveArtistProfile((prev) => (prev ? { ...prev, subTab: tab.id } : prev))
-                    }
-                    style={{
-                      minHeight: 34,
-                      padding: '0 14px',
-                      borderRadius: 999,
-                      background: active ? '#122934' : '#121218',
-                      border: active ? '1px solid #2aa3c4' : '1px solid #242430',
-                      color: active ? '#e0f7fc' : '#a1a1aa',
-                      fontSize: 12,
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {tab.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {activeArtistProfile.loading ? (
-              <div style={{ padding: 24, color: '#94a3b8', fontSize: 13 }}>
-                ⏳ Loading artist catalog...
-              </div>
-            ) : (
-              <>
-                {activeArtistProfile.subTab === 'tracks' && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {(() => {
-                      const tracks: TrackMetadata[] =
-                        activeArtistProfile.scData?.tracks ||
-                        activeArtistProfile.appleData?.top_tracks ||
-                        activeArtistProfile.localData?.tracks ||
-                        [];
-                      return tracks.length > 0 ? (
-                        <>
-                          {tracks.map((s) =>
-                            renderSingleSongRow(
-                              s,
-                              tracks,
-                              `artist:${activeArtistProfile.source}:${activeArtistProfile.displayName}`
-                            )
-                          )}
-                          {activeArtistProfile.source === 'soundcloud' &&
-                            activeArtistProfile.scData?.next_tracks_href && (
-                              <div style={{ display: 'flex', justifyContent: 'center', marginTop: 12 }}>
-                                <button
-                                  data-focusable="true"
-                                  data-load-more="true"
-                                  onClick={loadMoreArtistTracks}
-                                  disabled={activeArtistProfile.loadingMore}
-                                  style={{
-                                    minHeight: 38,
-                                    padding: '0 20px',
-                                    borderRadius: 10,
-                                    background: '#1c1008',
-                                    border: '1px solid #ea580c',
-                                    color: '#fdba74',
-                                    fontSize: 12,
-                                    fontWeight: 800,
-                                    cursor: activeArtistProfile.loadingMore ? 'wait' : 'pointer',
-                                  }}
-                                >
-                                  {activeArtistProfile.loadingMore
-                                    ? '⏳ Loading More Tracks...'
-                                    : '⬇ Load More Artist Tracks'}
-                                </button>
-                              </div>
-                            )}
-                        </>
-                      ) : (
-                        <div style={{ padding: 16, color: '#8e8e99', fontSize: 12 }}>
-                          No streamable tracks found for this artist.
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
-
-                {activeArtistProfile.subTab === 'albums' && (
-                  <div style={tileGridStyle}>
-                    {activeArtistProfile.source === 'soundcloud'
-                      ? (activeArtistProfile.scData?.playlists || []).map((pl) =>
-                          renderSoundCloudPlaylistCard(pl)
-                        )
-                      : activeArtistProfile.source === 'apple_music'
-                      ? (activeArtistProfile.appleData?.albums || []).map(renderCloudAlbumCard)
-                      : (activeArtistProfile.localData?.albums || []).map(renderSimpAlbumCard)}
-                  </div>
-                )}
-
-                {activeArtistProfile.subTab === 'singles_or_likes' && (
-                  <>
-                    {activeArtistProfile.source === 'soundcloud' ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        {(activeArtistProfile.scData?.liked_tracks || []).map((s, _idx, arr) =>
-                          renderSingleSongRow(
-                            s,
-                            arr,
-                            `artist:sc:likes:${activeArtistProfile.displayName}`
-                          )
-                        )}
-                      </div>
-                    ) : (
-                      <div style={tileGridStyle}>
-                        {(activeArtistProfile.appleData?.singles || []).map(
-                          renderCloudAlbumCard
-                        )}
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {activeArtistProfile.subTab === 'related_or_following' && (
-                  <div style={tileGridStyle}>
-                    {activeArtistProfile.source === 'soundcloud'
-                      ? (activeArtistProfile.scData?.followings || []).map((u) =>
-                          renderSoundCloudUserCard(u)
-                        )
-                      : (activeArtistProfile.appleData?.related_artists || []).map(
-                          renderAppleArtistCard
-                        )}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
+          <LibraryArtistProfilePane
+            activeArtistProfile={activeArtistProfile}
+            setActiveArtistProfile={setActiveArtistProfile}
+            handleWalkBack={handleWalkBack}
+            setPlayingContextId={setPlayingContextId}
+            setView={setView}
+            scFollowings={scFollowings}
+            setScFollowings={setScFollowings}
+            showToast={showToast}
+            loadMoreArtistTracks={loadMoreArtistTracks}
+            tileGridStyle={tileGridStyle}
+            renderSingleSongRow={renderSingleSongRow}
+            renderSoundCloudPlaylistCard={renderSoundCloudPlaylistCard}
+            renderCloudAlbumCard={renderCloudAlbumCard}
+            renderSimpAlbumCard={renderSimpAlbumCard}
+            renderSoundCloudUserCard={renderSoundCloudUserCard}
+            renderAppleArtistCard={renderAppleArtistCard}
+          />
         ) : (
           /* =================================================================
              STATE B: 🎵 SELECTED COLLECTION TRACKLIST & MANAGEMENT VIEW
@@ -8979,10 +9327,20 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
 
                   {browserTarget.kind === 'soundcloud_playlist' && (
                     <SoundCloudAttributionLink
+                      permalinkUrl={activeScPlaylist?.permalink_url}
                       kind="playlist"
                       id={browserTarget.id}
                       label="SoundCloud"
                       width={30}
+                      style={{ minHeight: 40, padding: '0 12px', borderRadius: 10 }}
+                    />
+                  )}
+                  {(browserTarget.kind === 'cloud_album' ||
+                    browserTarget.kind === 'cloud_playlist') && (
+                    <AppleMusicAttributionLink
+                      kind={browserTarget.kind === 'cloud_album' ? 'album' : 'playlist'}
+                      id={browserTarget.id}
+                      label="Apple Music"
                       style={{ minHeight: 40, padding: '0 12px', borderRadius: 10 }}
                     />
                   )}
@@ -9087,6 +9445,81 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 </div>
               )}
             </div>
+
+            {/* SoundCloud Set Gated (MONETIZE / Go+) Content Notice Banner */}
+            {browserTarget?.kind === 'soundcloud_playlist' &&
+              (activeScPlaylist?.gated_track_count ?? 0) > 0 &&
+              (() => {
+                const gatedCount = activeScPlaylist?.gated_track_count ?? 0;
+                const permalinkUrl =
+                  activeScPlaylist?.permalink_url ||
+                  `https://soundcloud.com/sets/${encodeURIComponent(browserTarget.id)}`;
+                const isSteamGameMode =
+                  typeof window !== 'undefined' &&
+                  (window.parent !== window ||
+                    window.navigator.userAgent.includes('Valve Steam'));
+                return (
+                  <div
+                    style={{
+                      padding: '10px 14px',
+                      borderRadius: 12,
+                      background: 'linear-gradient(90deg, #221006 0%, #140c08 100%)',
+                      border: '1px solid #ea580c',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 12,
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 800, color: '#fed7aa' }}>
+                        ☁️ {gatedCount} additional track{gatedCount === 1 ? '' : 's'} in "{browserTarget.title}" require SoundCloud Go+ / Web playback
+                      </div>
+                      <div style={{ fontSize: 11, color: '#fdba74' }}>
+                        Available on SoundCloud: {permalinkUrl}
+                      </div>
+                    </div>
+                    {!isSteamGameMode && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                        <SoundCloudAttributionLink
+                          permalinkUrl={permalinkUrl}
+                          kind="playlist"
+                          id={browserTarget.id}
+                          label="Open Set on SoundCloud ↗"
+                          width={24}
+                          style={{
+                            minHeight: 32,
+                            padding: '0 10px',
+                            borderRadius: 8,
+                            background: '#3b1909',
+                            border: '1px solid #f97316',
+                          }}
+                        />
+                        <button
+                          onClick={() => {
+                            navigator.clipboard?.writeText(permalinkUrl).catch(() => {});
+                            showToast(`Copied ${permalinkUrl}`);
+                          }}
+                          style={{
+                            minHeight: 32,
+                            padding: '0 10px',
+                            borderRadius: 8,
+                            background: '#181210',
+                            border: '1px solid #432818',
+                            color: '#fed7aa',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          📋 Copy URL
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
             {/* Internet Archive Description Banner */}
             {browserTarget?.kind === 'ia_item' &&
@@ -9369,6 +9802,16 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       (e.currentTarget as HTMLElement).click();
                     }
                   }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    openLibraryContextMenu({
+                      type: 'track',
+                      track: t,
+                      peerList: browserTracks,
+                      isViewingLocalPlaylist,
+                    });
+                  }}
                   onClick={() => {
                     if (t.source === 'local_video' || t.uri.startsWith('video://local/')) {
                       openLocalVideoFile(t);
@@ -9481,6 +9924,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         width={30}
                         style={{ padding: '2px 6px' }}
                       />
+                    ) : t.source === 'apple_music' ? (
+                      <AppleMusicAttributionLink
+                        kind="song"
+                        id={t.uri}
+                        style={{ padding: '2px 6px' }}
+                      />
                     ) : (
                       <span
                         style={{
@@ -9489,19 +9938,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           padding: '2px 6px',
                           borderRadius: 6,
                           background:
-                            t.source === 'apple_music'
-                              ? '#251018'
-                              : t.source === 'internet_archive' ||
-                                t.source === 'ia_video' ||
-                                t.source === 'cdda'
+                            t.source === 'internet_archive' ||
+                            t.source === 'ia_video' ||
+                            t.source === 'cdda'
                               ? '#261a0d'
                               : '#101822',
                           color:
-                            t.source === 'apple_music'
-                              ? '#fda4af'
-                              : t.source === 'internet_archive' ||
-                                t.source === 'ia_video' ||
-                                t.source === 'cdda'
+                            t.source === 'internet_archive' ||
+                            t.source === 'ia_video' ||
+                            t.source === 'cdda'
                               ? '#fcd34d'
                               : '#67e8f9',
                         }}
@@ -9509,9 +9954,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         {(() => {
                           const fmt = extractAudioFormat(t.uri);
                           const fmtSuffix = fmt ? ` • ${fmt}` : '';
-                          return t.source === 'apple_music'
-                            ? '🍎 Apple'
-                            : t.source === 'ia_video'
+                          return t.source === 'ia_video'
                             ? '🎬 Archive'
                             : t.source === 'internet_archive'
                             ? '🏛️ Archive'
@@ -9704,6 +10147,32 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                         −
                       </button>
                     )}
+                    <button
+                      data-row-aux="true"
+                      data-context-select="true"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openLibraryContextMenu({
+                          type: 'track',
+                          track: t,
+                          peerList: browserTracks,
+                          isViewingLocalPlaylist,
+                        });
+                      }}
+                      title="Track Actions (SELECT)"
+                      style={{
+                        padding: '5px 8px',
+                        borderRadius: 8,
+                        background: '#14141e',
+                        border: '1px solid #2a2a38',
+                        color: '#cbd5e1',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      •••
+                    </button>
                   </div>
                 </div>
               );
@@ -9750,6 +10219,43 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           episodes={activeVideoModal.episodes}
           initialEpisodeIndex={activeVideoModal.initialEpisodeIndex ?? 0}
           onClose={() => setActiveVideoModal(null)}
+        />
+      )}
+
+      {/* Contextual SELECT Action Menu Modal */}
+      {libraryContextTarget && (
+        <LibraryContextMenuModal
+          target={libraryContextTarget}
+          onClose={() => setLibraryContextTarget(null)}
+          favoritedUris={favoritedUris}
+          writablePlaylists={writablePlaylists}
+          activePlaylistId={activePlaylistId}
+          cleanCollectionTitle={cleanCollectionTitle}
+          cycleTargetHybridPlaylist={cycleTargetHybridPlaylist}
+          handlePlayTracksNext={handlePlayTracksNext}
+          handleAddTracksToPlaylist={handleAddTracksToPlaylist}
+          handleFavoriteTrack={handleFavoriteTrack}
+          handleAddAppleToCloudLibrary={handleAddAppleToCloudLibrary}
+          albums={albums}
+          selectCloudAlbum={selectCloudAlbum}
+          selectLocalCollection={selectLocalCollection}
+          openArtistProfile={openArtistProfile}
+          handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
+          browserTarget={browserTarget}
+          handleRemoveTrackFromPlaylist={handleRemoveTrackFromPlaylist}
+          setPlayingContextId={setPlayingContextId}
+          setView={setView}
+          resolveCollectionTracks={resolveCollectionTracks}
+          showToast={showToast}
+          handleAddSimpPlaylistToHybrid={handleAddSimpPlaylistToHybrid}
+          handleAddSimpAlbumToHybrid={handleAddSimpAlbumToHybrid}
+          handleAddArchiveItemToHybrid={handleAddArchiveItemToHybrid}
+          handlePinCloudPlaylist={handlePinCloudPlaylist}
+          handlePinCloudAlbum={handlePinCloudAlbum}
+          handlePinSoundCloudPlaylist={handlePinSoundCloudPlaylist}
+          handlePinArchiveItem={handlePinArchiveItem}
+          handleDeletePlaylist={handleDeletePlaylist}
+          handleDeleteAlbum={handleDeleteAlbum}
         />
       )}
     </main>

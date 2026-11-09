@@ -1,6 +1,7 @@
 pub mod gamepad;
 pub mod http_pool;
 pub mod library;
+pub mod lyrics;
 pub mod mpris;
 pub mod orchestrator;
 pub mod sinks;
