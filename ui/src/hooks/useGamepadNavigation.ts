@@ -741,6 +741,9 @@ export function useGamepadNavigation({
       const isPlayerActionsModalOpen = Boolean(
         document.querySelector('[data-player-actions-modal="true"]')
       );
+      const isQuickHelpModalOpen = Boolean(
+        document.querySelector('[data-quick-help-modal="true"]')
+      );
 
       // In the `🎵 Player` (`lock`) view (when modals and OSK are closed), D-Pad maps directly
       // to the on-screen transport badges (`◄` Previous, `►` Next, `▲/▼` Volume, `A` Play/Pause)!
@@ -750,7 +753,8 @@ export function useGamepadNavigation({
         !powerModalOpen &&
         !oskTarget &&
         !isDvdModalOpen &&
-        !isPlayerActionsModalOpen;
+        !isPlayerActionsModalOpen &&
+        !isQuickHelpModalOpen;
 
       if (isDvdModalOpen) {
         window.dispatchEvent(
@@ -949,6 +953,13 @@ export function useGamepadNavigation({
               break;
             }
           }
+          const quickHelpClose = document.querySelector<HTMLElement>(
+            '[data-quick-help-close="true"]'
+          );
+          if (quickHelpClose) {
+            quickHelpClose.click();
+            break;
+          }
           const playerActionsClose = document.querySelector<HTMLElement>(
             '[data-player-actions-close="true"]'
           );
@@ -977,6 +988,13 @@ export function useGamepadNavigation({
               applyFocusMarker(foldersTrigger);
               break;
             }
+          }
+          const libraryContextClose = document.querySelector<HTMLElement>(
+            '[data-library-context-close="true"]'
+          );
+          if (libraryContextClose) {
+            libraryContextClose.click();
+            break;
           }
           const hybridPickerClose = document.querySelector<HTMLElement>(
             '[data-hybrid-picker-close="true"]'

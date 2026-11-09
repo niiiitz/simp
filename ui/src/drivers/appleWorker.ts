@@ -243,7 +243,26 @@ export function useAppleMusicWorker(): void {
                 await mk.seekToTime(cmd.position_ms / 1000).catch(() => {});
               }
               if (mk.playbackState !== States?.playing) {
-                await mk.play();
+                try {
+                  await mk.play();
+                } catch (playErr: any) {
+                  const errMsg = String(playErr?.message || playErr || '');
+                  if (
+                    playErr?.name === 'NotAllowedError' ||
+                    errMsg.includes("didn't interact") ||
+                    errMsg.includes('play() failed')
+                  ) {
+                    isLoadingRef.current = false;
+                    defaultSimpClient.reportAppleWorkerEvent(
+                      'paused',
+                      cmd.position_ms || 0,
+                      null,
+                      null
+                    );
+                    return;
+                  }
+                  throw playErr;
+                }
               }
             };
 
@@ -261,7 +280,22 @@ export function useAppleMusicWorker(): void {
                   await attemptQueueAndWait(replacementId);
                 }
               }
-            } catch (firstErr) {
+            } catch (firstErr: any) {
+              const firstMsg = String(firstErr?.message || firstErr || '');
+              if (
+                firstErr?.name === 'NotAllowedError' ||
+                firstMsg.includes("didn't interact") ||
+                firstMsg.includes('play() failed')
+              ) {
+                isLoadingRef.current = false;
+                defaultSimpClient.reportAppleWorkerEvent(
+                  'paused',
+                  cmd.position_ms || 0,
+                  null,
+                  null
+                );
+                break;
+              }
               console.warn('[SIMP AppleMusicDriver] First setQueue/play attempt failed, checking catalog fallback:', firstErr);
               if (mySeq !== loadSeqRef.current) return;
               const replacementId = await resolveReplacementCatalogSongId(rawId);
@@ -270,7 +304,21 @@ export function useAppleMusicWorker(): void {
               await mk.stop().catch(() => {});
               await mk.setQueue({ song: retryId, startPlaying: false });
               if (mySeq !== loadSeqRef.current) return;
-              await mk.play();
+              await mk.play().catch((e: any) => {
+                const msg = String(e?.message || e || '');
+                if (
+                  e?.name === 'NotAllowedError' ||
+                  msg.includes("didn't interact") ||
+                  msg.includes('play() failed')
+                ) {
+                  defaultSimpClient.reportAppleWorkerEvent(
+                    'paused',
+                    cmd.position_ms || 0,
+                    null,
+                    null
+                  );
+                }
+              });
             }
 
             const audioEl = document.getElementById('apple-music-player') as HTMLAudioElement | null;

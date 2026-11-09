@@ -180,6 +180,8 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/apple/resolve-track", get(apple_resolve_track_handler))
         .route("/api/apple/web-playback", get(apple_web_playback_handler))
         .route("/api/apple/native-probe", get(apple_native_probe_handler))
+        .route("/api/apple/open", get(apple_open_handler))
+        .route("/api/lyrics", get(lyrics_handler))
         .route("/api/soundcloud/auth/start", get(soundcloud_auth_start_handler))
         .route("/api/soundcloud/callback", get(soundcloud_callback_handler))
         .route("/api/soundcloud/client-auth", post(soundcloud_client_auth_handler))
@@ -1239,6 +1241,53 @@ async fn soundcloud_open_handler(
     .await
     .unwrap_or_else(|_| "https://soundcloud.com".to_string());
     axum::response::Redirect::temporary(&target_url)
+}
+
+async fn apple_open_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let kind = params
+        .get("kind")
+        .cloned()
+        .unwrap_or_else(|| "song".to_string());
+    let id = params.get("id").cloned().unwrap_or_default();
+    let target_url = tokio::task::spawn_blocking(move || {
+        simp_core::sinks::apple_api::resolve_apple_canonical_url(&cfg, &kind, &id)
+    })
+    .await
+    .unwrap_or_else(|_| "https://music.apple.com".to_string());
+    axum::response::Redirect::temporary(&target_url)
+}
+
+async fn lyrics_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let uri = params.get("uri").cloned();
+    let title = params.get("title").cloned().unwrap_or_default();
+    let artist = params.get("artist").cloned().unwrap_or_default();
+    let album = params.get("album").cloned();
+    let duration_ms = params
+        .get("duration_ms")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let res = tokio::task::spawn_blocking(move || {
+        simp_core::lyrics::fetch_track_lyrics(
+            uri.as_deref(),
+            &title,
+            &artist,
+            album.as_deref(),
+            duration_ms,
+        )
+    })
+    .await;
+
+    match res {
+        Ok(lyrics) => Json(serde_json::json!({ "ok": true, "data": lyrics })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
 }
 
 async fn dvd_stream_handler(

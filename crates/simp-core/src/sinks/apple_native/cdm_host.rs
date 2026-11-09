@@ -413,10 +413,10 @@ fn auto_provision_widevine_cdm(dest: &Path, prov: &simp_protocol::ProvisioningSe
         .unwrap_or_default()
         .as_secs();
     let prev_secs = LAST_PROVISION_ATTEMPT_SECS.load(std::sync::atomic::Ordering::SeqCst);
-    if prev_secs > 0 && now_secs.saturating_sub(prev_secs) < 15 {
+    if prev_secs > 0 {
         return dest.is_file() && is_compatible_cdm_binary(dest);
     }
-    LAST_PROVISION_ATTEMPT_SECS.store(now_secs, std::sync::atomic::Ordering::SeqCst);
+    LAST_PROVISION_ATTEMPT_SECS.store(now_secs.max(1), std::sync::atomic::Ordering::SeqCst);
 
     let default_aarch64_url = simp_protocol::default_widevine_url_aarch64_linux();
     let default_macos_arm64_url = simp_protocol::default_widevine_url_aarch64_macos();

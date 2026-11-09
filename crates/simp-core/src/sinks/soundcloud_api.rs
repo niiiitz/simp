@@ -37,6 +37,8 @@ pub struct SoundCloudPlaylistSummary {
     pub permalink_url: Option<String>,
     #[serde(default)]
     pub tracks: Vec<TrackMetadata>,
+    #[serde(default)]
+    pub gated_track_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +94,10 @@ pub struct SoundCloudUserProfileResponse {
     pub followings: Vec<SoundCloudUserSummary>,
     #[serde(default)]
     pub next_tracks_href: Option<String>,
+    #[serde(default)]
+    pub gated_track_count: usize,
+    #[serde(default)]
+    pub gated_playlist_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -793,6 +799,12 @@ pub fn map_soundcloud_item_to_playlist(item: &Value, default_kind: &str) -> Opti
         return None;
     }
 
+    let gated_track_count = if has_tracks_array {
+        reported_count.saturating_sub(track_count)
+    } else {
+        0
+    };
+
     let duration_ms = obj
         .get("duration")
         .and_then(|v| v.as_u64())
@@ -832,6 +844,7 @@ pub fn map_soundcloud_item_to_playlist(item: &Value, default_kind: &str) -> Opti
         kind: default_kind.to_string(),
         permalink_url,
         tracks: embedded_tracks,
+        gated_track_count,
     })
 }
 
@@ -1686,7 +1699,10 @@ fn should_keep_track_for_session(t: &TrackMetadata, signed_in: bool) -> bool {
 
 fn should_keep_playlist_for_session(pl: &mut SoundCloudPlaylistSummary, signed_in: bool) -> bool {
     if signed_in && !pl.tracks.is_empty() {
+        let before_len = pl.tracks.len();
         pl.tracks.retain(|t| !is_preview_track_meta(t));
+        let removed_previews = before_len.saturating_sub(pl.tracks.len());
+        pl.gated_track_count = pl.gated_track_count.saturating_add(removed_previews);
         if pl.tracks.is_empty() {
             return false;
         }
@@ -2147,6 +2163,7 @@ pub fn fetch_user_playlists_and_likes(
         kind: "likes".to_string(),
         permalink_url: Some("https://soundcloud.com/you/likes".to_string()),
         tracks: liked_tracks_preview.clone(),
+        gated_track_count: 0,
     });
 
     if let Ok(my_sets_json) = soundcloud_authed_get(
@@ -3385,6 +3402,8 @@ pub fn fetch_user_profile_tracks(
     // Fetch up to 2 pages of `/users/{id}/tracks` initially (up to 200 tracks instead of 20!) and retain `next_tracks_href`
     let mut tracks = Vec::new();
     let mut seen_track_uris = std::collections::HashSet::new();
+    let mut gated_track_count: usize = 0;
+    let mut gated_playlist_count: usize = 0;
     let mut next_tracks_href = Some(format!(
         "/users/{encoded_uid}/tracks?limit=100&access={access_q}&linked_partitioning=true"
     ));
@@ -3398,11 +3417,15 @@ pub fn fetch_user_profile_tracks(
         };
         for item in extract_collection_items(&t_json) {
             if let Some(t) = map_soundcloud_item_to_track(item) {
-                if should_keep_track_for_session(&t, signed_in)
-                    && seen_track_uris.insert(t.uri.clone())
-                {
-                    tracks.push(t);
+                if should_keep_track_for_session(&t, signed_in) {
+                    if seen_track_uris.insert(t.uri.clone()) {
+                        tracks.push(t);
+                    }
+                } else {
+                    gated_track_count = gated_track_count.saturating_add(1);
                 }
+            } else {
+                gated_track_count = gated_track_count.saturating_add(1);
             }
         }
         next_tracks_href = extract_next_href(&t_json);
@@ -3417,11 +3440,36 @@ pub fn fetch_user_profile_tracks(
         ),
     ) {
         for item in extract_collection_items(&p_json) {
+            let obj = item.get("playlist").or_else(|| item.get("origin")).unwrap_or(item);
+            let reported_pl_tracks = obj
+                .get("track_count")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+                .unwrap_or(0);
             if let Some(mut pl) = map_soundcloud_item_to_playlist(item, "catalog_set") {
-                if should_keep_playlist_for_session(&mut pl, signed_in)
-                    && seen_playlist_ids.insert(pl.id.clone())
-                {
-                    playlists.push(pl);
+                if should_keep_playlist_for_session(&mut pl, signed_in) {
+                    if seen_playlist_ids.insert(pl.id.clone()) {
+                        gated_track_count = gated_track_count.saturating_add(pl.gated_track_count);
+                        playlists.push(pl);
+                    }
+                } else {
+                    gated_playlist_count = gated_playlist_count.saturating_add(1);
+                    gated_track_count = gated_track_count.saturating_add(reported_pl_tracks.max(1));
+                }
+            } else if reported_pl_tracks > 0 {
+                gated_playlist_count = gated_playlist_count.saturating_add(1);
+                gated_track_count = gated_track_count.saturating_add(reported_pl_tracks);
+            }
+        }
+    }
+
+    // Also compare against `user.track_count` when all pages of `/users/{id}/tracks` were loaded
+    if next_tracks_href.is_none() {
+        if let Some(ref u) = user {
+            if u.track_count > tracks.len() {
+                let missing_from_profile = u.track_count.saturating_sub(tracks.len());
+                if missing_from_profile > gated_track_count {
+                    gated_track_count = missing_from_profile;
                 }
             }
         }
@@ -3505,6 +3553,8 @@ pub fn fetch_user_profile_tracks(
         liked_tracks,
         followings,
         next_tracks_href,
+        gated_track_count,
+        gated_playlist_count,
     })
 }
 

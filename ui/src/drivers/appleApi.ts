@@ -35,11 +35,13 @@ export interface AppleRadioStationSummary {
   name: string;
   subtitle: string;
   art_url: string | null;
+  genre?: string | null;
 }
 
 export interface AppleRecommendationShelf {
   id: string;
   title: string;
+  is_social?: boolean;
   playlists: AppleCloudPlaylistSummary[];
   albums: AppleCloudAlbumSummary[];
   stations: AppleRadioStationSummary[];
@@ -189,10 +191,28 @@ export async function ensureMusicKitConfigured(
   }
 
   const MK = window.MusicKit;
+  // Prevent MusicKit JS v3 from calling blocking `window.alert(...)` on browser autoplay policy rejections
+  if (typeof window !== 'undefined' && !(window as any).__simpAlertGuarded) {
+    (window as any).__simpAlertGuarded = true;
+    const origAlert = window.alert.bind(window);
+    window.alert = (msg?: any) => {
+      const text = String(msg ?? '');
+      if (
+        text.includes("didn't interact with the document") ||
+        text.includes('NotAllowedError') ||
+        text.includes('play() failed')
+      ) {
+        console.warn('[SIMP MusicKit] Suppressed blocking autoplay alert:', text);
+        return;
+      }
+      origAlert(msg);
+    };
+  }
   if (configuredToken !== developerToken) {
     await MK.configure({
       developerToken,
       ...(musicUserToken ? { musicUserToken } : {}),
+      suppressErrorDialog: true,
       app: {
         name: 'SIMP Media Player',
         build: '0.1.0-alpha',
@@ -420,6 +440,9 @@ export async function fetchAppleRadioAndForYou(): Promise<{
   stations: AppleRadioStationSummary[];
   personal_stations?: AppleRadioStationSummary[];
   live_stations?: AppleRadioStationSummary[];
+  genre_stations?: AppleRadioStationSummary[];
+  artist_shows?: AppleCloudPlaylistSummary[];
+  club_mixes?: AppleCloudPlaylistSummary[];
   playlists: AppleCloudPlaylistSummary[];
   albums: AppleCloudAlbumSummary[];
   new_releases?: AppleCloudAlbumSummary[];
@@ -430,12 +453,80 @@ export async function fetchAppleRadioAndForYou(): Promise<{
     stations: AppleRadioStationSummary[];
     personal_stations?: AppleRadioStationSummary[];
     live_stations?: AppleRadioStationSummary[];
+    genre_stations?: AppleRadioStationSummary[];
+    artist_shows?: AppleCloudPlaylistSummary[];
+    club_mixes?: AppleCloudPlaylistSummary[];
     playlists: AppleCloudPlaylistSummary[];
     albums: AppleCloudAlbumSummary[];
     new_releases?: AppleCloudAlbumSummary[];
     shelves?: AppleRecommendationShelf[];
     recently_played?: TrackMetadata[];
   }>('/api/apple/radio');
+}
+
+export interface SyncedLyricLine {
+  timestamp_ms: number;
+  text: string;
+}
+
+export interface TrackLyricsResponse {
+  found: boolean;
+  instrumental: boolean;
+  source: 'local_lrc' | 'lrclib_v2' | 'lrclib_v1' | 'none' | string;
+  track_name?: string | null;
+  artist_name?: string | null;
+  album_name?: string | null;
+  synced_lines: SyncedLyricLine[];
+  plain_lyrics?: string | null;
+  lrclib_id?: number | null;
+}
+
+export async function fetchTrackLyrics(params: {
+  uri?: string | null;
+  title: string;
+  artist: string;
+  album?: string | null;
+  duration_ms?: number | null;
+}): Promise<TrackLyricsResponse> {
+  const qs = new URLSearchParams();
+  if (params.uri) qs.set('uri', params.uri);
+  qs.set('title', params.title || '');
+  qs.set('artist', params.artist || '');
+  if (params.album) qs.set('album', params.album);
+  if (params.duration_ms && params.duration_ms > 0) {
+    qs.set('duration_ms', String(Math.round(params.duration_ms)));
+  }
+  const r = await fetch(`http://127.0.0.1:18888/api/lyrics?${qs.toString()}`);
+  const j = await r.json().catch(() => ({ ok: false }));
+  if (!r.ok || !j.ok || !j.data) {
+    return {
+      found: false,
+      instrumental: false,
+      source: 'none',
+      synced_lines: [],
+    };
+  }
+  return j.data as TrackLyricsResponse;
+}
+
+export function openAppleMusicPermalink(opts: {
+  kind?: 'song' | 'album' | 'playlist' | 'artist' | 'station';
+  id?: string | null;
+}): void {
+  if (typeof window === 'undefined') return;
+  // Do not pop external browser windows when running inside the SteamOS Game Mode Decky iframe
+  if (window.parent && window.parent !== window) return;
+  const cleanId = (opts.id || '').trim();
+  if (cleanId) {
+    const kind = opts.kind || 'song';
+    window.open(
+      `http://127.0.0.1:18888/api/apple/open?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(cleanId)}`,
+      '_blank',
+      'noopener,noreferrer'
+    );
+    return;
+  }
+  window.open('https://music.apple.com', '_blank', 'noopener,noreferrer');
 }
 
 /**

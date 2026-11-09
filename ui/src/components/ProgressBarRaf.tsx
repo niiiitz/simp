@@ -7,6 +7,10 @@ interface Props {
   waveformBars?: number[] | null;
   commentTimestampsMs?: number[];
   onPlayheadTick?: (currentMs: number) => void;
+  /** When true, pauses the 60fps rAF loop while the containing view is hidden */
+  hidden?: boolean;
+  /** Compact inline layout for the Library Mini-Player */
+  compact?: boolean;
 }
 
 /**
@@ -26,6 +30,8 @@ export const ProgressBarRaf: React.FC<Props> = ({
   waveformBars,
   commentTimestampsMs,
   onPlayheadTick,
+  hidden = false,
+  compact = false,
 }) => {
   const trackContainerRef = useRef<HTMLDivElement | null>(null);
   const railRef = useRef<HTMLDivElement | null>(null);
@@ -37,6 +43,9 @@ export const ProgressBarRaf: React.FC<Props> = ({
   waveformBarsRef.current = waveformBars;
   const onPlayheadTickRef = useRef(onPlayheadTick);
   onPlayheadTickRef.current = onPlayheadTick;
+  const hiddenRef = useRef(hidden);
+  hiddenRef.current = hidden;
+  const ensureLoopRef = useRef<() => void>(() => {});
 
   const isSoundCloudTrack = Boolean(trackUri && trackUri.startsWith('soundcloud:'));
   const isSoundCloudRef = useRef(isSoundCloudTrack);
@@ -201,6 +210,29 @@ export const ProgressBarRaf: React.FC<Props> = ({
       }
     };
 
+    const shouldRunLoop = () =>
+      !hiddenRef.current &&
+      document.visibilityState !== 'hidden' &&
+      (isPlayingRef.current || isDraggingRef.current);
+
+    const renderLoop = () => {
+      rafId = 0;
+      if (shouldRunLoop()) {
+        updateDom();
+        rafId = requestAnimationFrame(renderLoop);
+      }
+    };
+
+    const ensureLoop = () => {
+      if (shouldRunLoop() && rafId === 0) {
+        rafId = requestAnimationFrame(renderLoop);
+      } else if (!shouldRunLoop() && rafId !== 0) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+    };
+    ensureLoopRef.current = ensureLoop;
+
     const unsub = defaultSimpClient.subscribeProgress((rawPosMs, perfNow, playing, isTick) => {
       const posMs = durationMs > 0 ? Math.min(rawPosMs, durationMs) : rawPosMs;
       const wasPlaying = isPlayingRef.current;
@@ -222,6 +254,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
         anchorPerfRef.current = perfNow;
         lastRenderedMsRef.current = posMs;
         updateDom();
+        ensureLoop();
         return;
       }
 
@@ -235,6 +268,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
         anchorPerfRef.current = perfNow;
         lastRenderedMsRef.current = posMs;
         updateDom();
+        ensureLoop();
         return;
       }
       if (driftMs < -2200 || driftMs > 2200) {
@@ -243,6 +277,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
         anchorPerfRef.current = perfNow;
         lastRenderedMsRef.current = posMs;
         updateDom();
+        ensureLoop();
         return;
       }
 
@@ -256,29 +291,42 @@ export const ProgressBarRaf: React.FC<Props> = ({
       );
       anchorPosRef.current = nextAnchorMs;
       anchorPerfRef.current = perfNow;
+      ensureLoop();
     });
 
-    const renderLoop = () => {
-      if (document.visibilityState !== 'hidden' && (isPlayingRef.current || isDraggingRef.current)) {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'hidden' && !hiddenRef.current) {
         updateDom();
       }
-      rafId = requestAnimationFrame(renderLoop);
+      ensureLoop();
     };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    updateDom();
-    rafId = requestAnimationFrame(renderLoop);
+    if (!hiddenRef.current) {
+      updateDom();
+    }
+    ensureLoop();
     return () => {
-      cancelAnimationFrame(rafId);
+      if (rafId !== 0) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       unsub();
     };
   }, [durationMs, trackUri]);
 
   useEffect(() => {
-    if (waveformBars && waveformBars.length > 0) {
+    hiddenRef.current = hidden;
+    ensureLoopRef.current();
+  }, [hidden]);
+
+  useEffect(() => {
+    if (!hidden && waveformBars && waveformBars.length > 0) {
       const ratio = durationMs > 0 ? Math.max(0, Math.min(1, lastRenderedMsRef.current / durationMs)) : 0;
       drawWaveformCanvas(ratio);
     }
-  }, [waveformBars, durationMs, trackUri]);
+  }, [waveformBars, durationMs, trackUri, hidden]);
 
   const computeMsFromPointer = (clientX: number): number => {
     const el = railRef.current || trackContainerRef.current;
@@ -299,6 +347,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
     anchorPerfRef.current = performance.now();
     defaultSimpClient.seek(targetMs);
     lastDragSeekSentRef.current = performance.now();
+    ensureLoopRef.current();
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -330,7 +379,119 @@ export const ProgressBarRaf: React.FC<Props> = ({
       anchorPerfRef.current = performance.now();
       defaultSimpClient.seek(finalMs);
     }
+    ensureLoopRef.current();
   };
+
+  if (compact) {
+    return (
+      <div
+        style={{
+          userSelect: 'none',
+          touchAction: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          width: '100%',
+          boxSizing: 'border-box',
+        }}
+      >
+        <span
+          ref={timeTextRef}
+          style={{
+            fontSize: 11,
+            fontFamily: 'monospace',
+            fontWeight: 800,
+            color: '#d4d4e0',
+            minWidth: 38,
+            textAlign: 'right',
+          }}
+        >
+          00:00
+        </span>
+        <div
+          ref={trackContainerRef}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUpOrCancel}
+          onPointerCancel={handlePointerUpOrCancel}
+          style={{
+            flex: 1,
+            height: 24,
+            display: 'flex',
+            alignItems: 'center',
+            cursor: 'pointer',
+            position: 'relative',
+          }}
+        >
+          <div
+            ref={railRef}
+            style={{
+              width: '100%',
+              height: 10,
+              position: 'relative',
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            <div
+              style={{
+                width: '100%',
+                height: 10,
+                background: '#08090f',
+                borderRadius: 99,
+                overflow: 'hidden',
+                border: '1px solid #2b2d3c',
+                position: 'relative',
+              }}
+            >
+              <div
+                ref={barRef}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  background: isSoundCloudTrack
+                    ? 'linear-gradient(90deg, rgba(124, 45, 18, 0.85) 0%, rgba(234, 88, 12, 0.92) 100%)'
+                    : 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
+                  transformOrigin: 'left center',
+                  transform: 'scaleX(0)',
+                  position: 'relative',
+                  zIndex: 2,
+                }}
+              />
+            </div>
+            <div
+              ref={thumbRef}
+              style={{
+                position: 'absolute',
+                left: '0%',
+                top: '50%',
+                width: 14,
+                height: 14,
+                borderRadius: 999,
+                background: '#e2e8f0',
+                border: isSoundCloudTrack ? '2px solid #fb923c' : '2px solid #38bdf8',
+                transform: 'translate(-50%, -50%)',
+                boxShadow: '0 1px 4px rgba(0, 0, 0, 0.8)',
+                pointerEvents: 'none',
+                zIndex: 5,
+              }}
+            />
+          </div>
+        </div>
+        <span
+          style={{
+            fontSize: 11,
+            fontFamily: 'monospace',
+            fontWeight: 800,
+            color: '#9ca3af',
+            minWidth: 38,
+          }}
+        >
+          {formatTime(durationMs)}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div style={{ userSelect: 'none', touchAction: 'none', padding: '0 14px', boxSizing: 'border-box' }}>

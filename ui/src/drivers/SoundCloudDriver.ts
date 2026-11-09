@@ -18,6 +18,7 @@ export interface SoundCloudPlaylistSummary {
   kind: 'likes' | 'user_set' | 'liked_set' | 'catalog_set' | string;
   permalink_url?: string | null;
   tracks?: TrackMetadata[];
+  gated_track_count?: number;
 }
 
 export interface SoundCloudStationSummary {
@@ -62,6 +63,8 @@ export interface SoundCloudUserProfileResponse {
   liked_tracks?: TrackMetadata[];
   followings?: SoundCloudUserSummary[];
   next_tracks_href?: string | null;
+  gated_track_count?: number;
+  gated_playlist_count?: number;
 }
 
 export interface SoundCloudDiscoverResponse {

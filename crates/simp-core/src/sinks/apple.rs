@@ -17,10 +17,10 @@ fn worker_slot() -> &'static Mutex<Option<Child>> {
 }
 
 /// Returns true when Zero-Browser Native Rust Widevine CDM (`libwidevinecdm.so` FFI) mode is enabled.
-/// Enabled by default on Linux/Unix whenever `libwidevinecdm.so` is available (unless `SIMP_NATIVE_APPLE_CDM=0`
-/// or `disable-native-cdm` is set). On Windows, defaults to `false` because Windows `widevinecdm.dll`
-/// enforces Google VMP (`VerifyCdmHost_0` Authenticode + `.sig` verification) which requires the signed
-/// browser host (`brave.exe` / `msedge.exe` / `chrome.exe`).
+/// Enabled by default on Linux/SteamOS whenever `libwidevinecdm.so` is available (unless `SIMP_NATIVE_APPLE_CDM=0`
+/// or `disable-native-cdm` is set). On Windows and macOS, defaults to `false` because `widevinecdm.dll`
+/// and `libwidevinecdm.dylib` enforce Google VMP (`VerifyCdmHost_0` host signature + `.sig` verification)
+/// which requires the signed browser host or in-app WebKit/MusicKit EME worker.
 pub fn is_native_apple_cdm_preferred() -> bool {
     if let Ok(val) = std::env::var("SIMP_NATIVE_APPLE_CDM") {
         let v = val.trim().to_lowercase();
@@ -31,11 +31,11 @@ pub fn is_native_apple_cdm_preferred() -> bool {
             return true;
         }
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         return false;
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         if crate::sinks::apple_native::cdm_host::is_native_cdm_vmp_rejected() {
             return false;
@@ -493,10 +493,14 @@ impl crate::sinks::AudioSink for AppleMusicSink {
                     }
                 }
             } else {
-                tracing::warn!(
-                    "AppleMusicSink: no compatible native Widevine CDM library found for arch={}; falling back to browser MusicKit worker",
-                    std::env::consts::ARCH
-                );
+                static LOGGED_NO_NATIVE_CDM: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED_NO_NATIVE_CDM.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    tracing::warn!(
+                        "AppleMusicSink: no compatible native Widevine CDM library found for arch={}; falling back to browser MusicKit worker",
+                        std::env::consts::ARCH
+                    );
+                }
                 if let Ok(mut guard) = self.native_engine.lock() {
                     if let Some(ref mut eng) = *guard {
                         eng.release_pipewire_stream();
