@@ -314,8 +314,26 @@ pub fn execute_archive_search(
     sort: &str,
     rows: usize,
 ) -> Result<Vec<ArchiveItemSummary>> {
-    let url = build_advancedsearch_url(lucene_query, sort, rows.clamp(1, 80), 1);
+    let (items, _) = execute_archive_search_paged(creds, lucene_query, sort, rows, 1)?;
+    Ok(items)
+}
+
+pub fn execute_archive_search_paged(
+    creds: &InternetArchiveCredentials,
+    lucene_query: &str,
+    sort: &str,
+    rows: usize,
+    page: usize,
+) -> Result<(Vec<ArchiveItemSummary>, bool)> {
+    let safe_rows = rows.clamp(1, 80);
+    let safe_page = page.max(1);
+    let url = build_advancedsearch_url(lucene_query, sort, safe_rows, safe_page);
     let json = ia_http_get_json(creds, &url)?;
+    let num_found = json
+        .get("response")
+        .and_then(|r| r.get("numFound"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
     let docs = json
         .get("response")
         .and_then(|r| r.get("docs"))
@@ -344,7 +362,13 @@ pub fn execute_archive_search(
         }
     }
 
-    Ok(items)
+    let has_more = if num_found > 0 {
+        safe_page * safe_rows < num_found && !docs.is_empty()
+    } else {
+        docs.len() >= safe_rows
+    };
+
+    Ok((items, has_more))
 }
 
 /// Fetches curated discovery hubs for the PS3 XMB `Internet Archive` Places menu.
@@ -353,11 +377,25 @@ pub fn fetch_discover_hub(
     hub: &str,
     sub_filter: Option<&str>,
 ) -> Result<Vec<ArchiveItemSummary>> {
+    let (items, _) = fetch_discover_hub_paged(settings, hub, sub_filter, 1)?;
+    Ok(items)
+}
+
+pub fn fetch_discover_hub_paged(
+    settings: &SimpSettings,
+    hub: &str,
+    sub_filter: Option<&str>,
+    page: usize,
+) -> Result<(Vec<ArchiveItemSummary>, bool)> {
     let creds = resolve_internet_archive_credentials(settings);
     let sub = sub_filter.unwrap_or("all").trim().to_lowercase();
 
     if sub == "favorites" {
-        return fetch_user_favorites(&creds);
+        if page > 1 {
+            return Ok((Vec::new(), false));
+        }
+        let items = fetch_user_favorites(&creds)?;
+        return Ok((items, false));
     }
 
     let (base_query, sort) = match hub {
@@ -453,7 +491,7 @@ pub fn fetch_discover_hub(
         base_query.to_string()
     };
 
-    execute_archive_search(&creds, &query, sort, 40)
+    execute_archive_search_paged(&creds, &query, sort, 40, page)
 }
 
 /// Fetches a user's public/account Internet Archive Favorites (`fav-{username}`).
@@ -530,9 +568,19 @@ pub fn search_catalog(
     term: &str,
     media_filter: Option<&str>,
 ) -> Result<Vec<ArchiveItemSummary>> {
+    let (items, _) = search_catalog_paged(settings, term, media_filter, 1)?;
+    Ok(items)
+}
+
+pub fn search_catalog_paged(
+    settings: &SimpSettings,
+    term: &str,
+    media_filter: Option<&str>,
+    page: usize,
+) -> Result<(Vec<ArchiveItemSummary>, bool)> {
     let trimmed = term.trim();
     if trimmed.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     let creds = resolve_internet_archive_credentials(settings);
     let escaped = trimmed.replace('"', " ");
@@ -549,7 +597,7 @@ pub fn search_catalog(
     let query = format!(
         "({escaped}) AND {type_clause} AND -collection:inlibrary AND -collection:printdisabled{safe_clause}"
     );
-    execute_archive_search(&creds, &query, "downloads desc", 36)
+    execute_archive_search_paged(&creds, &query, "downloads desc", 36, page)
 }
 
 fn parse_duration_seconds_str(raw: &str) -> u32 {

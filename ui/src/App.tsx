@@ -11,11 +11,13 @@ import {
 } from '@simp/client';
 import { CompanionPairView } from './components/CompanionPairView';
 import {
+  addAppleItemToCloudLibrary,
   AppleCatalogSearchResults,
   AppleCloudAlbumSummary,
   AppleCloudPlaylistSummary,
   AppleMusicDriver,
   AppleRadioStationSummary,
+  AppleRecommendationShelf,
   fetchAppleCloudPlaylists,
   fetchAppleNewFeed,
   fetchApplePlaylistTracks,
@@ -24,18 +26,22 @@ import {
   pinAppleAlbumToSimp,
   pinApplePlaylistToSimp,
   searchAppleMusicCatalog,
+  setAppleItemFavorited,
 } from './drivers/AppleMusicDriver';
 import {
   fetchSoundCloudDiscover,
   fetchSoundCloudLikesAndPlaylists,
   fetchSoundCloudPlaylistTracks,
   fetchSoundCloudStreamAndRadio,
+  likeSoundCloudTrack,
   pinSoundCloudPlaylistToSimp,
   searchSoundCloudCatalog,
   setSoundCloudPlaylistLiked,
   SoundCloudCatalogSearchResults,
   SoundCloudPlaylistSummary,
+  SoundCloudUserSummary,
   startSoundCloudTrackRadio,
+  unlikeSoundCloudTrack,
 } from './drivers/SoundCloudDriver';
 import { OskTargetKind, useGamepadNavigation } from './hooks/useGamepadNavigation';
 import { BrowserTarget, isUiVideoTrack, PlayerView } from './views/PlayerView';
@@ -138,26 +144,67 @@ const ConsoleMainApp: React.FC = () => {
     }
   }, [sourceVisibility]);
 
-  // Recently Played history (`simp_recently_played_v1`, max 24 items)
+  // Recently Played history (`simp_recently_played_v1` + SQLite `/api/history`, max 40 items)
   const [recentlyPlayed, setRecentlyPlayed] = useState<TrackMetadata[]>(() => {
     try {
       const raw = window.localStorage.getItem('simp_recently_played_v1');
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed.slice(0, 24);
+        if (Array.isArray(parsed)) return parsed.slice(0, 40);
       }
     } catch {
       // Ignore storage access errors
     }
     return [];
   });
+  const [favoritedUris, setFavoritedUris] = useState<string[]>([]);
+
+  // Hydrate persistent SQLite `play_history` and `local_favorites` on mount
+  useEffect(() => {
+    fetch('http://127.0.0.1:18888/api/history?limit=40')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok && Array.isArray(d.data) && d.data.length > 0) {
+          setRecentlyPlayed((prev) => {
+            const seen = new Set<string>();
+            const merged: TrackMetadata[] = [];
+            for (const item of [...d.data, ...prev]) {
+              if (item?.uri && !seen.has(item.uri)) {
+                seen.add(item.uri);
+                merged.push(item);
+              }
+            }
+            const next = merged.slice(0, 40);
+            try {
+              window.localStorage.setItem('simp_recently_played_v1', JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+        }
+      })
+      .catch(() => {});
+
+    fetch('http://127.0.0.1:18888/api/favorites')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok && Array.isArray(d.uris)) {
+          setFavoritedUris(d.uris);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const cur = snap?.current_track;
     if (!cur?.uri || !snap?.is_playing) return;
+    fetch('http://127.0.0.1:18888/api/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cur),
+    }).catch(() => {});
     setRecentlyPlayed((prev) => {
       if (prev[0]?.uri === cur.uri) return prev;
-      const next = [cur, ...prev.filter((t) => t.uri !== cur.uri)].slice(0, 24);
+      const next = [cur, ...prev.filter((t) => t.uri !== cur.uri)].slice(0, 40);
       try {
         window.localStorage.setItem('simp_recently_played_v1', JSON.stringify(next));
       } catch {
@@ -173,6 +220,7 @@ const ConsoleMainApp: React.FC = () => {
   const [radioStations, setRadioStations] = useState<AppleRadioStationSummary[]>([]);
   const [forYouPlaylists, setForYouPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
   const [forYouAlbums, setForYouAlbums] = useState<AppleCloudAlbumSummary[]>([]);
+  const [forYouShelves, setForYouShelves] = useState<AppleRecommendationShelf[]>([]);
   const [newFeedAlbums, setNewFeedAlbums] = useState<AppleCloudAlbumSummary[]>([]);
   const [newFeedPlaylists, setNewFeedPlaylists] = useState<AppleCloudPlaylistSummary[]>([]);
   const [newFeedSongs, setNewFeedSongs] = useState<TrackMetadata[]>([]);
@@ -181,6 +229,7 @@ const ConsoleMainApp: React.FC = () => {
     albums: [],
     playlists: [],
     stations: [],
+    artists: [],
   });
   const [cloudLoading, setCloudLoading] = useState(false);
   const [activeCloudAlbum, setActiveCloudAlbum] = useState<AppleCloudAlbumSummary | null>(null);
@@ -197,11 +246,17 @@ const ConsoleMainApp: React.FC = () => {
   const [scTrendingTracks, setScTrendingTracks] = useState<TrackMetadata[]>([]);
   const [scTrendingMixes, setScTrendingMixes] = useState<TrackMetadata[]>([]);
   const [scTrendingPlaylists, setScTrendingPlaylists] = useState<SoundCloudPlaylistSummary[]>([]);
+  const [scMoreOfWhatYouLike, setScMoreOfWhatYouLike] = useState<TrackMetadata[]>([]);
+  const [scFreshUploads, setScFreshUploads] = useState<TrackMetadata[]>([]);
+  const [scRecommendedArtists, setScRecommendedArtists] = useState<SoundCloudUserSummary[]>([]);
+  const [scDiscoverNextHref, setScDiscoverNextHref] = useState<string | null>(null);
   const [scSelectedGenre, setScSelectedGenre] = useState<string>('');
   const [scCatalogSearchResults, setScCatalogSearchResults] =
     useState<SoundCloudCatalogSearchResults>({
       songs: [],
       playlists: [],
+      users: [],
+      next_tracks_href: null,
     });
   const [activeScPlaylist, setActiveScPlaylist] = useState<SoundCloudPlaylistSummary | null>(null);
 
@@ -839,6 +894,7 @@ const ConsoleMainApp: React.FC = () => {
           setRadioStations(res.stations);
           setForYouPlaylists(res.playlists);
           setForYouAlbums(res.albums);
+          setForYouShelves(res.shelves || []);
         })
         .catch((err: any) => showToast(err?.message || 'Failed to load Radio & For You'))
         .finally(() => setCloudLoading(false));
@@ -921,6 +977,10 @@ const ConsoleMainApp: React.FC = () => {
           setScTrendingTracks(res.tracks);
           setScTrendingMixes(res.mixes);
           setScTrendingPlaylists(res.playlists);
+          setScMoreOfWhatYouLike(res.more_of_what_you_like || []);
+          setScFreshUploads(res.fresh_uploads || []);
+          setScRecommendedArtists(res.recommended_artists || []);
+          setScDiscoverNextHref(res.next_tracks_href || null);
         })
         .catch((err: any) =>
           showToast(err?.message || 'Failed to load SoundCloud Trending & Mixes')
@@ -1395,44 +1455,120 @@ const ConsoleMainApp: React.FC = () => {
   };
 
   const handleFavoriteTrack = async (favTrack: TrackMetadata) => {
+    const isCurrentlyFav = favoritedUris.includes(favTrack.uri);
+    const nextFav = !isCurrentlyFav;
+    setFavoritedUris((prev) =>
+      nextFav
+        ? prev.includes(favTrack.uri)
+          ? prev
+          : [favTrack.uri, ...prev]
+        : prev.filter((u) => u !== favTrack.uri)
+    );
+    fetch(`http://127.0.0.1:18888/api/favorites?favorited=${nextFav ? '1' : '0'}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(favTrack),
+    }).catch(() => {});
+
+    if (favTrack.source === 'apple_music') {
+      setAppleItemFavorited(favTrack.uri, 'songs', nextFav, showToast).catch(() => {});
+    } else if (favTrack.source === 'soundcloud') {
+      if (nextFav) {
+        likeSoundCloudTrack(favTrack.uri, showToast).catch(() => {});
+        setScLikedTracks((prev) =>
+          prev.some((t) => t.uri === favTrack.uri) ? prev : [favTrack, ...prev]
+        );
+      } else {
+        unlikeSoundCloudTrack(favTrack.uri, showToast).catch(() => {});
+        setScLikedTracks((prev) => prev.filter((t) => t.uri !== favTrack.uri));
+      }
+    }
+
     const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
     const favPl = writablePlaylists.find(
       (p) =>
         p.name.toLowerCase().includes('favorite') ||
         p.name.toLowerCase().includes('liked')
     );
-    if (favPl) {
-      await commitAddTracksToPlaylist(
-        [favTrack.uri],
-        `"${favTrack.title}"`,
-        [favTrack],
-        favPl.id
-      );
-    } else {
-      await commitAddTracksToPlaylist(
-        [favTrack.uri],
-        `"${favTrack.title}"`,
-        [favTrack],
-        undefined,
-        '❤️ Favorites'
-      );
+    if (nextFav) {
+      if (favPl) {
+        await commitAddTracksToPlaylist(
+          [favTrack.uri],
+          `"${favTrack.title}"`,
+          [favTrack],
+          favPl.id
+        );
+      } else {
+        await commitAddTracksToPlaylist(
+          [favTrack.uri],
+          `"${favTrack.title}"`,
+          [favTrack],
+          undefined,
+          '❤️ Favorites'
+        );
+      }
+    } else if (favPl) {
+      await defaultSimpClient
+        .query('remove_track_from_playlist', {
+          playlist_id: favPl.id,
+          track_uri: favTrack.uri,
+        })
+        .catch(() => {});
+      refreshLibraryData();
+      if (favTrack.source !== 'apple_music' && favTrack.source !== 'soundcloud') {
+        showToast(`Removed "${favTrack.title}" from ❤️ Favorites`);
+      }
     }
   };
 
-  const handleMoreByArtist = (artistName: string, preferredSource?: string) => {
+  const handleAddAppleToCloudLibrary = useCallback(
+    async (
+      idOrUri: string,
+      kind: 'songs' | 'albums' | 'playlists' = 'songs',
+      label?: string
+    ) => {
+      try {
+        await addAppleItemToCloudLibrary(idOrUri, kind, (msg) => {
+          showToast(label ? `☁️ Added "${label}" to Apple Music Cloud Library!` : msg);
+        });
+      } catch (err: any) {
+        showToast(err?.message || 'Could not add to Apple Music Cloud Library');
+      }
+    },
+    [showToast]
+  );
+
+  const handleMoreByArtist = (
+    artistName: string,
+    preferredSource?: string,
+    artistId?: string
+  ) => {
     const cleaned = artistName.trim();
     if (!cleaned) return;
     const raw = (preferredSource || snap?.current_track?.source || '').toLowerCase();
-    let mapped: 'local' | 'apple_music' | 'soundcloud' | 'internet_archive' | null = null;
+    let mapped: 'local' | 'apple_music' | 'soundcloud' | 'internet_archive' = 'local';
     if (raw === 'apple_music') mapped = 'apple_music';
     else if (raw === 'soundcloud') mapped = 'soundcloud';
     else if (raw === 'internet_archive' || raw === 'ia_video') mapped = 'internet_archive';
-    else if (raw) mapped = 'local';
     setSearchPreferredSource(mapped);
-    setSelectedSources([]);
-    setBrowserSourceFilterState('all');
-    setBrowserSearch(cleaned);
     setView('browser');
+    if (mapped === 'internet_archive') {
+      setSelectedSources(['internet_archive']);
+      setBrowserSourceFilterState('internet_archive');
+      setBrowserSearch(cleaned);
+    } else {
+      window.setTimeout(() => {
+        window.dispatchEvent(
+          new CustomEvent('simp-open-artist-profile', {
+            detail: {
+              artistName: cleaned,
+              source: mapped,
+              artistId: artistId || null,
+            },
+          })
+        );
+      }, 20);
+    }
   };
 
   // Automatically reset `browserSourceFilter` to `'all'` if the user disconnects or is not signed into that service
@@ -2195,6 +2331,8 @@ const ConsoleMainApp: React.FC = () => {
         handleStartSoundCloudTrackRadio={handleStartSoundCloudTrackRadio}
         handleAddTracksToPlaylist={handleAddTracksToPlaylist}
         handleFavoriteTrack={handleFavoriteTrack}
+        handleAddAppleToCloudLibrary={handleAddAppleToCloudLibrary}
+        favoritedUris={favoritedUris}
         handleMoreByArtist={handleMoreByArtist}
         applyFocusMarker={applyFocusMarker}
         showToast={showToast}
@@ -2231,6 +2369,7 @@ const ConsoleMainApp: React.FC = () => {
           setForYouPlaylists={setForYouPlaylists}
           forYouAlbums={forYouAlbums}
           setForYouAlbums={setForYouAlbums}
+          forYouShelves={forYouShelves}
           newFeedAlbums={newFeedAlbums}
           setNewFeedAlbums={setNewFeedAlbums}
           newFeedPlaylists={newFeedPlaylists}
@@ -2258,9 +2397,15 @@ const ConsoleMainApp: React.FC = () => {
           setScTrendingMixes={setScTrendingMixes}
           scTrendingPlaylists={scTrendingPlaylists}
           setScTrendingPlaylists={setScTrendingPlaylists}
+          scMoreOfWhatYouLike={scMoreOfWhatYouLike}
+          scFreshUploads={scFreshUploads}
+          scRecommendedArtists={scRecommendedArtists}
+          scDiscoverNextHref={scDiscoverNextHref}
+          setScDiscoverNextHref={setScDiscoverNextHref}
           scSelectedGenre={scSelectedGenre}
           setScSelectedGenre={setScSelectedGenre}
           scCatalogSearchResults={scCatalogSearchResults}
+          setScCatalogSearchResults={setScCatalogSearchResults}
           activeScPlaylist={activeScPlaylist}
           creatingPlaylist={creatingPlaylist}
           setCreatingPlaylist={setCreatingPlaylist}
@@ -2276,6 +2421,9 @@ const ConsoleMainApp: React.FC = () => {
           applyFocusMarker={applyFocusMarker}
           handleCreatePlaylist={handleCreatePlaylist}
           handleAddTracksToPlaylist={handleAddTracksToPlaylist}
+          handleFavoriteTrack={handleFavoriteTrack}
+          handleAddAppleToCloudLibrary={handleAddAppleToCloudLibrary}
+          favoritedUris={favoritedUris}
           handleRemoveTrackFromPlaylist={handleRemoveTrackFromPlaylist}
           handleDeletePlaylist={handleDeletePlaylist}
           handleDeleteAlbum={handleDeleteAlbum}

@@ -65,7 +65,17 @@ export interface PlayerViewProps {
     trackMetadata?: TrackMetadata[]
   ) => Promise<void>;
   handleFavoriteTrack?: (track: TrackMetadata) => Promise<void>;
-  handleMoreByArtist?: (artistName: string, preferredSource?: string) => void;
+  handleAddAppleToCloudLibrary?: (
+    idOrUri: string,
+    kind?: 'songs' | 'albums' | 'playlists',
+    label?: string
+  ) => Promise<void>;
+  favoritedUris?: string[];
+  handleMoreByArtist?: (
+    artistName: string,
+    preferredSource?: string,
+    artistId?: string
+  ) => void;
   applyFocusMarker?: (el: HTMLElement | null) => void;
   showToast?: (msg: string) => void;
 }
@@ -127,12 +137,15 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   handleStartSoundCloudTrackRadio,
   handleAddTracksToPlaylist,
   handleFavoriteTrack,
+  handleAddAppleToCloudLibrary,
+  favoritedUris = [],
   handleMoreByArtist,
   applyFocusMarker,
   showToast,
 }) => {
   const isSoundCloudTrack = track?.source === 'soundcloud';
   const isVideoTrack = isUiVideoTrack(track);
+  const isCurrentTrackFavorited = Boolean(track?.uri && favoritedUris.includes(track.uri));
 
   const [scCommentsEnabled, setScCommentsEnabled] = useState<boolean>(() => {
     try {
@@ -1556,12 +1569,55 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 whiteSpace: 'nowrap',
               }}
             >
-              {track?.artists?.join(', ') || (
+              {track?.artists?.length ? (
+                <span
+                  onClick={() => {
+                    if (primaryArtist && handleMoreByArtist) {
+                      handleMoreByArtist(
+                        primaryArtist,
+                        track.source,
+                        scTrackUserId || undefined
+                      );
+                    }
+                  }}
+                  title={
+                    primaryArtist
+                      ? `Open ${primaryArtist} Artist Profile`
+                      : undefined
+                  }
+                  style={{
+                    cursor: primaryArtist && handleMoreByArtist ? 'pointer' : 'default',
+                    textDecoration: primaryArtist && handleMoreByArtist ? 'underline' : 'none',
+                    textDecorationColor: 'rgba(125, 211, 252, 0.45)',
+                    textUnderlineOffset: 3,
+                  }}
+                >
+                  {track.artists.join(', ')}
+                </span>
+              ) : (
                 <>
                   Select a track from Library & Queue<span className="simp-gp-badge"> (R1)</span>
                 </>
               )}
               {track?.album ? ` • ${track.album}` : ''}
+              {track?.source === 'soundcloud' && track?.album?.includes('• Preview') && (
+                <span
+                  style={{
+                    marginLeft: 8,
+                    padding: '2px 7px',
+                    borderRadius: 6,
+                    background: '#3b1506',
+                    border: '1px solid #f97316',
+                    color: '#fdba74',
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                    fontWeight: 800,
+                    verticalAlign: 'middle',
+                  }}
+                >
+                  30s PREVIEW • Sign in for full track
+                </span>
+              )}
               {(() => {
                 const uri = track?.uri;
                 if (!uri || (!uri.startsWith('file://') && !uri.startsWith('/'))) return null;
@@ -2024,32 +2080,63 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                   <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2aa3c4' }}>→</span>
                 </button>
 
-                {/* 2. Favorite / Like Track (Unified across SoundCloud + ❤️ Favorites SIMP Hybrid Playlist) */}
+                {/* 2. Favorite / Like Track (Unified across Apple Music Ratings, SoundCloud Likes & ★ Favorites) */}
                 {track && (
                   <button
                     type="button"
                     onClick={() => {
                       setPlayerActionsOpen(false);
-                      if (track.source === 'soundcloud') {
-                        likeSoundCloudTrack(track.uri, showToast);
-                      }
                       if (handleFavoriteTrack) {
                         handleFavoriteTrack(track);
+                      } else if (track.source === 'soundcloud') {
+                        likeSoundCloudTrack(track.uri, showToast);
                       }
+                    }}
+                    style={{
+                      ...actionRowBtnStyle,
+                      background: isCurrentTrackFavorited ? '#241016' : '#101018',
+                      border: isCurrentTrackFavorited ? '1px solid #f43f5e' : '1px solid #222230',
+                    }}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fda4af' }}>
+                        {isCurrentTrackFavorited
+                          ? `❤️ Favorited ${isVideoTrack ? 'Video / Episode' : 'Track'}`
+                          : `♡ Favorite ${isVideoTrack ? 'Video / Episode' : 'Track'}`}
+                      </span>
+                      <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                        {track.source === 'apple_music'
+                          ? 'Love on Apple Music & save to ★ Favorites playlist'
+                          : track.source === 'soundcloud'
+                            ? 'Like on SoundCloud & save to ★ Favorites playlist'
+                            : 'Save to your ★ Favorites SIMP Hybrid Playlist'}
+                      </span>
+                    </div>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#fda4af' }}>
+                      {isCurrentTrackFavorited ? '❤️ ON' : '+ ❤️'}
+                    </span>
+                  </button>
+                )}
+
+                {/* 2b. Add to Apple Music Cloud Library (Separate from ♥ Favorite per Item #4) */}
+                {track && track.source === 'apple_music' && handleAddAppleToCloudLibrary && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPlayerActionsOpen(false);
+                      handleAddAppleToCloudLibrary(track.uri, 'songs', track.title);
                     }}
                     style={actionRowBtnStyle}
                   >
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fda4af' }}>
-                        ❤️ Favorite {isVideoTrack ? 'Video / Episode' : 'Track'}
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#fca5a5' }}>
+                        ☁️ Add to Apple Cloud Library
                       </span>
                       <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        {track.source === 'soundcloud'
-                          ? 'Like on SoundCloud & save to ★ Favorites playlist'
-                          : 'Save to your ★ Favorites SIMP Hybrid Playlist'}
+                        Save track to your personal iCloud Music Library
                       </span>
                     </div>
-                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#fda4af' }}>+ ❤️</span>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#fca5a5' }}>+ ☁️</span>
                   </button>
                 )}
 
@@ -2084,7 +2171,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                       if (track.source === 'soundcloud' && handleStartSoundCloudTrackRadio) {
                         handleStartSoundCloudTrackRadio(track);
                       } else if (primaryArtist && handleMoreByArtist) {
-                        handleMoreByArtist(primaryArtist, track.source);
+                        handleMoreByArtist(
+                          primaryArtist,
+                          track.source,
+                          scTrackUserId || undefined
+                        );
                       }
                     }}
                     style={actionRowBtnStyle}
@@ -2110,7 +2201,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     onClick={() => {
                       setPlayerActionsOpen(false);
                       setVideoTheatreExpanded(false);
-                      handleMoreByArtist(primaryArtist, track?.source);
+                      handleMoreByArtist(
+                        primaryArtist,
+                        track?.source,
+                        scTrackUserId || undefined
+                      );
                     }}
                     style={actionRowBtnStyle}
                   >
@@ -2119,10 +2214,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         👤 More by {primaryArtist}
                       </span>
                       <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        Search across sources for {primaryArtist} (current source prioritized first)
+                        Open artist profile: tracks, albums, singles & related artists
                       </span>
                     </div>
-                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#9ca3af' }}>🔍</span>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#9ca3af' }}>→</span>
                   </button>
                 )}
 

@@ -1520,6 +1520,7 @@ impl AudioOrchestrator {
 
         update_mpris_metadata(&mut self.mpris_controls, &track);
         update_mpris_playback(&mut self.mpris_controls, true, 0);
+        let _ = self.db.record_play_history(&track);
 
         let _ = self.broadcast_tx.send(PlaybackEvent::TrackChanged {
             metadata: track,

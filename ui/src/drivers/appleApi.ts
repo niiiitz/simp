@@ -37,11 +37,42 @@ export interface AppleRadioStationSummary {
   art_url: string | null;
 }
 
+export interface AppleRecommendationShelf {
+  id: string;
+  title: string;
+  playlists: AppleCloudPlaylistSummary[];
+  albums: AppleCloudAlbumSummary[];
+  stations: AppleRadioStationSummary[];
+}
+
+export interface AppleArtistSummary {
+  id: string;
+  name: string;
+  genre: string;
+  art_url: string | null;
+}
+
+export interface AppleArtistProfileResponse {
+  artist: AppleArtistSummary;
+  top_tracks: TrackMetadata[];
+  albums: AppleCloudAlbumSummary[];
+  singles: AppleCloudAlbumSummary[];
+  related_artists: AppleArtistSummary[];
+}
+
+export interface LocalArtistProfileResponse {
+  name: string;
+  art_url: string | null;
+  tracks: TrackMetadata[];
+  albums: AlbumRecord[];
+}
+
 export interface AppleCatalogSearchResults {
   songs: TrackMetadata[];
   albums: AppleCloudAlbumSummary[];
   playlists: AppleCloudPlaylistSummary[];
   stations: AppleRadioStationSummary[];
+  artists?: AppleArtistSummary[];
 }
 
 let musicKitLoadPromise: Promise<any> | null = null;
@@ -383,17 +414,21 @@ export async function pinAppleAlbumToSimp(
 }
 
 /**
- * Fetches the user's Apple Music Radio Stations, Personal Mixes, and Heavy Rotation via the Rust daemon.
+ * Fetches the user's Apple Music Radio Stations, Personal Mixes, Named For You Shelves, and Recently Played via the Rust daemon.
  */
 export async function fetchAppleRadioAndForYou(): Promise<{
   stations: AppleRadioStationSummary[];
   playlists: AppleCloudPlaylistSummary[];
   albums: AppleCloudAlbumSummary[];
+  shelves?: AppleRecommendationShelf[];
+  recently_played?: TrackMetadata[];
 }> {
   return fetchAppleDaemonJson<{
     stations: AppleRadioStationSummary[];
     playlists: AppleCloudPlaylistSummary[];
     albums: AppleCloudAlbumSummary[];
+    shelves?: AppleRecommendationShelf[];
+    recently_played?: TrackMetadata[];
   }>('/api/apple/radio');
 }
 
@@ -420,18 +455,100 @@ export async function fetchAppleNewFeed(): Promise<{
 }
 
 /**
- * Live Apple Music Catalog Search (Songs, Full Albums, Playlists, and Radio Stations) via the Rust daemon.
+ * Live Apple Music Catalog Search (Songs, Full Albums, Playlists, Radio Stations, and Artists) via the Rust daemon.
  */
 export async function searchAppleMusicCatalog(
   term: string
 ): Promise<AppleCatalogSearchResults> {
   const cleaned = term.trim();
   if (!cleaned) {
-    return { songs: [], albums: [], playlists: [], stations: [] };
+    return { songs: [], albums: [], playlists: [], stations: [], artists: [] };
   }
   return fetchAppleDaemonJson<AppleCatalogSearchResults>(
     `/api/apple/search?term=${encodeURIComponent(cleaned)}`
   );
+}
+
+/**
+ * Fetches an Apple Music Artist Profile (`Top Tracks`, `Albums`, `Singles & EPs`, and `Related Artists`)
+ * by catalog artist ID or `name:<artistName>`.
+ */
+export async function fetchAppleArtistProfile(
+  idOrName: string
+): Promise<AppleArtistProfileResponse> {
+  return fetchAppleDaemonJson<AppleArtistProfileResponse>(
+    `/api/apple/artist?id=${encodeURIComponent(idOrName.trim())}`
+  );
+}
+
+/**
+ * Fetches a Local Library Artist Profile (`Albums` + `Tracks` from SQLite `library.db`).
+ */
+export async function fetchLocalArtistProfile(
+  artistName: string
+): Promise<LocalArtistProfileResponse> {
+  const r = await fetch(
+    `http://127.0.0.1:18888/api/local/artist?name=${encodeURIComponent(artistName.trim())}`
+  );
+  const j = await r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` }));
+  if (!r.ok || !j.ok) {
+    throw new Error(j.error || `Local artist lookup failed for ${artistName}`);
+  }
+  return j.data as LocalArtistProfileResponse;
+}
+
+/**
+ * Sets or clears an Apple Music Favorite/Love rating (`PUT` or `DELETE` `/v1/me/ratings/{kind}/{id}`).
+ * Kept strictly separate from `addAppleItemToCloudLibrary` per Item #4.
+ */
+export async function setAppleItemFavorited(
+  idOrUri: string,
+  kind: 'songs' | 'albums' | 'playlists',
+  favorited = true,
+  onToast?: (msg: string) => void
+): Promise<boolean> {
+  const qs = new URLSearchParams({
+    id: idOrUri.trim(),
+    kind,
+    favorited: favorited ? '1' : '0',
+  });
+  const r = await fetch(`http://127.0.0.1:18888/api/apple/rate?${qs.toString()}`, {
+    method: 'POST',
+  });
+  const j = await r.json().catch(() => ({ ok: false }));
+  if (!r.ok || !j.ok) {
+    throw new Error(j.error || 'Could not update Apple Music Favorite rating');
+  }
+  onToast?.(
+    favorited
+      ? '❤️ Favorited on Apple Music!'
+      : 'Removed Favorite rating on Apple Music'
+  );
+  return true;
+}
+
+/**
+ * Adds a catalog song, album, or playlist to the user's personal Apple Music Cloud Library
+ * (`POST /v1/me/library?ids[{kind}]={id}`). Kept strictly separate from `♥ Favorite` per Item #4.
+ */
+export async function addAppleItemToCloudLibrary(
+  idOrUri: string,
+  kind: 'songs' | 'albums' | 'playlists',
+  onToast?: (msg: string) => void
+): Promise<boolean> {
+  const qs = new URLSearchParams({
+    id: idOrUri.trim(),
+    kind,
+  });
+  const r = await fetch(`http://127.0.0.1:18888/api/apple/library-add?${qs.toString()}`, {
+    method: 'POST',
+  });
+  const j = await r.json().catch(() => ({ ok: false }));
+  if (!r.ok || !j.ok) {
+    throw new Error(j.error || 'Could not add item to Apple Music Cloud Library');
+  }
+  onToast?.('☁️ Added to your Apple Music Cloud Library!');
+  return true;
 }
 
 /**
