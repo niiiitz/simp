@@ -69,8 +69,8 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
 
 * **Chromium Open Source Project (`media/cdm/api/content_decryption_module.h`) & ISO/IEC 23001-7 (`CENC` / `cbcs`)**:
   * Reference for SIMP's in-process `ContentDecryptionModule_10` and `Host_10` C++ vtable FFI bridge (`crates/simp-core/src/sinks/apple_native/cdm_host.rs`) and ISO-BMFF fragmented MP4 (`moov`/`moof`/`mdat`, `sinf`/`schi`/`tenc`, and AES-128-CBC 1:9 pattern decryption in `mp4_cbcs.rs`).
-* **SoundCloud Developers API & IETF RFC 7636 (`PKCE`)**:
-  * Reference for OAuth 2.1 Authorization Code + PKCE (`S256`) authentication, HLS AAC/fMP4 stream transcodings, waveform peak envelopes, and timed track comments (`crates/simp-core/src/sinks/soundcloud_api.rs` and `soundcloud.rs`).
+* **SoundCloud Developers API ([Authentication Guide](https://developers.soundcloud.com/docs/api/guide#authentication), [API Terms of Use](https://developers.soundcloud.com/docs/api/terms-of-use#changes), and [Branding & Attribution Guidelines](https://developers.soundcloud.com/docs/api/buttons-logos#how-to-properly-attribute-in-your-app)) & IETF RFC 7636 (`PKCE`)**:
+  * Reference for OAuth 2.1 Authorization Code + PKCE (`S256`) authentication, volatile RAM-only HLS AAC/fMP4 stream transcodings, `POST /disconnect` session revocation, waveform peak envelopes, and timed track comments (`crates/simp-core/src/sinks/soundcloud_api.rs` and `soundcloud.rs`).
 * **Apple MusicKit & Web Playback API**:
   * Reference for ES256 (`P-256` ECDSA) developer token signing, storefront catalog resolution, cloud library pagination, and personal radio station seeding (`crates/simp-core/src/sinks/apple_api.rs`).
 * **Daniel Stenberg & the [`curl` / `libcurl`](https://curl.se/libcurl/) Project**:
