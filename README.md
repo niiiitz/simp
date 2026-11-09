@@ -35,16 +35,17 @@ Playing your own music, soundtracks, and video across a Steam Deck, desktop, liv
 | <a href="docs/screenshots/on_deck.jpg"><img src="docs/screenshots/on_deck.jpg" alt="SIMP on Steam Deck" width="100%" /></a> | <a href="docs/screenshots/spacial_computing_simp.jpg"><img src="docs/screenshots/spacial_computing_simp.jpg" alt="SIMP in SteamVR on Steam Frame" width="100%" /></a> |
 | :---: | :---: |
 | **Steam Deck & Handheld Mode**<br><sub>Spatial gamepad navigation with live controller button hints</sub> | **SteamVR Spatial Overlay (`aarch64` & `x86_64`)**<br><sub>Floating alongside your VR library in passthrough or 3D space</sub> |
-| <a href="docs/screenshots/library_queue.png"><img src="docs/screenshots/library_queue.png" alt="SIMP Unified Library and Hybrid Playlists" width="100%" /></a> | <a href="docs/screenshots/soundcloud_waveform.png"><img src="docs/screenshots/soundcloud_waveform.png" alt="SIMP SoundCloud Waveform and Timed Comments" width="100%" /></a> |
-| **Unified Library & Hybrid Playlists**<br><sub>Local media, Steam OSTs, Apple Music, SoundCloud, Internet Archive & Optical Discs</sub> | **Adaptive Desktop Mode & Waveform Comments**<br><sub>Controller glyphs auto-hide for mouse & keyboard; live timed SoundCloud comments</sub> |
-| <a href="docs/screenshots/video_theatre.png"><img src="docs/screenshots/video_theatre.png" alt="SIMP Video Theatre Mode" width="100%" /></a> | <a href="docs/screenshots/settings_sources.png"><img src="docs/screenshots/settings_sources.png" alt="SIMP Multi-Source Accounts and Settings" width="100%" /></a> |
-| **Card & Full-Viewport Video Theatre**<br><sub>Stream quality & subtitle switching with auto-hiding HUD</sub> | **Multi-Source Accounts & Native Telemetry**<br><sub>Manage folders, cloud accounts, release channels (`Alpha`/`Stable`), and resource usage</sub> |
+| <a href="docs/screenshots/library_queue.png"><img src="docs/screenshots/library_queue.png" alt="SIMP Unified Library and Hybrid Playlists" width="100%" /></a> | <a href="docs/screenshots/lyrics_viz.png"><img src="docs/screenshots/lyrics_viz.png" alt="SIMP Audio Visualizers and Live Synced Lyrics" width="100%" /></a> |
+| **Unified Library & Hybrid Playlists**<br><sub>Local media, Steam OSTs, Apple Music, SoundCloud, Internet Archive & Optical Discs</sub> | **Audio Visualizers & Synced Lyrics (`LRCLIB`)**<br><sub>5 built-in reactive visualizers (`Glyph`, `AVS`, `64K`, `Vertigo`, `Trapper`) with live synced lyrics</sub> |
+| <a href="docs/screenshots/video_theatre.png"><img src="docs/screenshots/video_theatre.png" alt="SIMP Video Theatre Mode" width="100%" /></a> | <a href="docs/screenshots/player_with_select_overlay.png"><img src="docs/screenshots/player_with_select_overlay.png" alt="SIMP SELECT Quick Menu and Track Actions" width="100%" /></a> |
+| **Card & Full-Viewport Video Theatre**<br><sub>Stream quality & subtitle switching with auto-hiding HUD</sub> | **`SELECT` Quick Menu & Track Actions**<br><sub>Queue next, route to Hybrid Playlists, jump to album/artist, and toggle visualizers & lyrics</sub> |
 
 ---
 
 ## High-Level Features
 
 * **One Queue for Audio & Video (`★ Hybrid Playlists`):** Mix local music & video files, **Steam Soundtracks**, **Apple Music**, **SoundCloud** tracks & DJ mixes, **Internet Archive** films & live concerts, and physical **Audio CDs / DVDs** inside a single playlist.
+* **Reactive Visualizers & Live Synced Lyrics (`LRCLIB`):** Cycle through 5 built-in real-time visualizers (**`Glyph`**, **`AVS`**, **`64K`**, **`Vertigo`**, and **`Trapper`**) paired with automatic time-synced lyrics and interactive waveform scrubbing.
 * **Card & Theatre Video Player:** Watch video inside the Now Playing card or expand into full-viewport **Theatre Mode** (`F`) with stream quality and subtitle selection. Flip back to your library (`L1`/`R1`) and audio continues seamlessly.
 * **Pin Only What You Want (`📌`):** Browse cloud catalogs and local folders on demand, and pin individual albums, movies, or playlists into your **SIMP Library** for instant access.
 * **Controller-First, Mouse & Keyboard Ready:** Inspired by the PlayStation 3 XrossMediaBar (XMB) for effortless D-Pad navigation, while automatically switching to a clean pointer & keyboard UI (`Space` Play/Pause, `/` search, media keys) when you move a mouse.
@@ -102,8 +103,9 @@ Open the top-right **Settings (`☰`)** drawer to switch between the **Alpha** a
 | **Volume & Mute** | `D-Pad Up / Down` *(in Player)* or `Right Stick Y` | `↑ / ↓` *(in Player)*, `Cmd/Ctrl + ↑ / ↓`, or `M` (Mute) |
 | **Switch Tabs (`Player` / `Library`)** | `L1` / `R1` Bumpers | `1` / `2` or `[` / `]` |
 | **Shuffle / Repeat** | `X` (Shuffle) / `Y` (Repeat in Player) | `S` or `X` (Shuffle) / `R` (Repeat) |
-| **Pin Item / Context Action** | `Y` *(in Library)* | Click `📌` or press `Y` |
-| **Fullscreen / Video Theatre** | `Select` → Theatre / `A` on `⛶` | `F` (`Esc` to exit) |
+| **Pin Item / Track Actions** | `Y` or `Select` *(in Library)* | Click `📌` / `⋯` or press `Y` |
+| **`SELECT` Menu (Visualizer / Lyrics / Track Options)** | `Select` / `View` *(in Player)* | Click top-left `⚙️` pill or press `Tab` |
+| **Fullscreen / Video Theatre** | `Select` → Full Screen / `A` on `⛶` | `F` or `F11` (`Esc` to exit) |
 | **Search Library & Sources** | Focus Search + `A` (On-Screen Keyboard) | `/` or `Cmd/Ctrl + F` |
 | **Settings Drawer (`☰`)** | `Start` / `Options` | `P` or `F1` |
 
