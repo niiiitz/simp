@@ -173,7 +173,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         return saved;
       }
     } catch {}
-    return 'glyph';
+    return 'cycle';
   });
   const [rightColMode, setRightColMode] = useState<'queue' | 'chapters'>('queue');
   const [selectCategory, setSelectCategory] = useState<

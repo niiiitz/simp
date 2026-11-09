@@ -115,14 +115,14 @@ const ConsoleMainApp: React.FC = () => {
   // Source Visibility preferences (Show / Hide Internet Archive, Apple Music, SoundCloud, Optical Drive)
   const [sourceVisibility, setSourceVisibility] = useState<SourceVisibilityPrefs>(() => {
     try {
-      const raw = window.localStorage.getItem('simp_source_visibility_v1');
+      const raw = window.localStorage.getItem('simp_source_visibility_v2');
       if (raw) {
         const parsed = JSON.parse(raw);
         return {
           internet_archive: parsed.internet_archive !== false,
           apple_music: parsed.apple_music !== false,
           soundcloud: parsed.soundcloud !== false,
-          optical_drive: parsed.optical_drive !== false,
+          optical_drive: parsed.optical_drive === true,
         };
       }
     } catch {
@@ -132,13 +132,13 @@ const ConsoleMainApp: React.FC = () => {
       internet_archive: true,
       apple_music: true,
       soundcloud: true,
-      optical_drive: true,
+      optical_drive: false,
     };
   });
 
   useEffect(() => {
     try {
-      window.localStorage.setItem('simp_source_visibility_v1', JSON.stringify(sourceVisibility));
+      window.localStorage.setItem('simp_source_visibility_v2', JSON.stringify(sourceVisibility));
     } catch {
       // Ignore storage access errors
     }
@@ -339,7 +339,7 @@ const ConsoleMainApp: React.FC = () => {
   const [isDimmed, setIsDimmed] = useState(false);
   const [brightnessPct, setBrightnessPct] = useState<number>(() => {
     try {
-      const saved = window.localStorage.getItem('simp_brightness_pct');
+      const saved = window.localStorage.getItem('simp_brightness_pct_v2');
       if (saved) {
         const parsed = Number(saved);
         if (Number.isFinite(parsed) && parsed >= 25 && parsed <= 100) {
@@ -349,7 +349,7 @@ const ConsoleMainApp: React.FC = () => {
     } catch {
       // Ignore storage access errors
     }
-    return 100;
+    return 80;
   });
   const brightnessHydratedRef = useRef(false);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
@@ -361,7 +361,7 @@ const ConsoleMainApp: React.FC = () => {
     if (!brightnessHydratedRef.current && snap?.brightness_pct && snap.brightness_pct >= 25) {
       brightnessHydratedRef.current = true;
       try {
-        if (!window.localStorage.getItem('simp_brightness_pct')) {
+        if (!window.localStorage.getItem('simp_brightness_pct_v2')) {
           setBrightnessPct(Math.max(25, Math.min(100, Math.round(snap.brightness_pct))));
         }
       } catch {
@@ -374,7 +374,7 @@ const ConsoleMainApp: React.FC = () => {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
-        window.localStorage.setItem('simp_brightness_pct', String(brightnessPct));
+        window.localStorage.setItem('simp_brightness_pct_v2', String(brightnessPct));
       } catch {
         // Ignore storage errors
       }
@@ -664,26 +664,24 @@ const ConsoleMainApp: React.FC = () => {
     if (view === 'browser' || sourceModalOpen || powerModalOpen) {
       refreshLibraryData();
     }
-    if (view === 'browser' || sourceModalOpen || powerModalOpen) {
-      defaultSimpClient
-        .getSoundCloudAuthConfig()
-        .then((cfg) => {
-          setSoundcloudAuthCfg(cfg);
-          // Auto-bootstrap Tier 1 Public Mode (client_credentials) if credentials exist and not yet authenticated
-          if (
-            cfg.configured &&
-            !cfg.soundcloud_authenticated &&
-            !scAutoClientAuthRef.current
-          ) {
-            scAutoClientAuthRef.current = true;
-            fetch('/api/soundcloud/client-auth', { method: 'POST' })
-              .then(() => defaultSimpClient.getSoundCloudAuthConfig())
-              .then((nextCfg) => setSoundcloudAuthCfg(nextCfg))
-              .catch(() => {});
-          }
-        })
-        .catch(() => {});
-    }
+    defaultSimpClient
+      .getSoundCloudAuthConfig()
+      .then((cfg) => {
+        setSoundcloudAuthCfg(cfg);
+        // Auto-bootstrap Tier 1 Public Mode (client_credentials) if credentials exist and not yet authenticated
+        if (
+          cfg.configured &&
+          !cfg.soundcloud_authenticated &&
+          !scAutoClientAuthRef.current
+        ) {
+          scAutoClientAuthRef.current = true;
+          fetch('/api/soundcloud/client-auth', { method: 'POST' })
+            .then(() => defaultSimpClient.getSoundCloudAuthConfig())
+            .then((nextCfg) => setSoundcloudAuthCfg(nextCfg))
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
     if (sourceModalOpen || powerModalOpen) {
       defaultSimpClient
         .getAppleMusicAuthConfig()

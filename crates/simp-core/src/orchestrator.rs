@@ -1049,20 +1049,29 @@ impl AudioOrchestrator {
                     volume: None,
                 });
                 AppleMusicSink::purge_worker_auth_storage();
-                {
+                crate::sinks::soundcloud_api::clear_cached_soundcloud_state();
+                let (default_vol, default_brightness, sc_ok, ia_ok) = {
                     let mut cfg = self.settings.lock().unwrap();
                     *cfg = SimpSettings::default();
                     let _ = crate::library::vdf::save_settings_raw(&cfg);
-                }
+                    let sc = crate::sinks::soundcloud_api::is_soundcloud_ready(&cfg);
+                    let ia = crate::sinks::internet_archive_api::is_internet_archive_ready(&cfg);
+                    (cfg.audio.master_volume, cfg.ui.brightness_pct, sc, ia)
+                };
+                self.local_engine.set_volume(default_vol);
+                self.apple_sink.set_volume(default_vol);
+                self.soundcloud_sink.set_volume(default_vol);
+                self.internet_archive_sink.set_volume(default_vol);
                 self.apple_sink.is_authenticated = false;
-                self.soundcloud_sink.is_authenticated = false;
-                self.internet_archive_sink.is_authenticated = false;
-                crate::sinks::soundcloud_api::clear_cached_soundcloud_state();
+                self.soundcloud_sink.is_authenticated = sc_ok;
+                self.internet_archive_sink.is_authenticated = ia_ok;
                 {
                     let mut st = self.state.lock().unwrap();
+                    st.volume = default_vol;
+                    st.brightness_pct = default_brightness;
                     st.apple_authenticated = false;
-                    st.soundcloud_authenticated = false;
-                    st.internet_archive_authenticated = false;
+                    st.soundcloud_authenticated = sc_ok;
+                    st.internet_archive_authenticated = ia_ok;
                     st.queue.clear();
                     st.queue_index = 0;
                     st.current_track = None;

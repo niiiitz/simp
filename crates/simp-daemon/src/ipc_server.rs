@@ -139,12 +139,12 @@ fn sync_soundcloud_tokens_into_daemon_state(state: &DaemonIpcState) {
 pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
     let sc_bg_state = ipc_state.clone();
     tokio::spawn(async move {
-        // Wait 5s after startup, then check every 10 minutes to proactively rotate SoundCloud OAuth tokens
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // Wait 2s after startup to bootstrap SoundCloud Public Mode (or rotate OAuth token), then check every 10 minutes
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         loop {
             let cfg_snapshot = sc_bg_state.settings.lock().unwrap().clone();
             let creds = simp_core::sinks::soundcloud_api::resolve_soundcloud_credentials(&cfg_snapshot);
-            if !creds.refresh_token.is_empty()
+            if cfg_snapshot.services.soundcloud_enabled
                 && !creds.client_id.is_empty()
                 && !creds.client_secret.is_empty()
             {

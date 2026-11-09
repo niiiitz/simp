@@ -328,7 +328,11 @@ pub struct AudioSettings {
 }
 
 fn default_brightness_pct() -> u8 {
-    100
+    80
+}
+
+fn default_soundcloud_auth_mode() -> String {
+    "client_credentials".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -377,7 +381,7 @@ pub struct ServiceSettings {
     pub apple_developer_token: String,
     #[serde(default)]
     pub apple_music_user_token: String,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub soundcloud_enabled: bool,
     #[serde(default)]
     pub soundcloud_client_id: String,
@@ -389,11 +393,11 @@ pub struct ServiceSettings {
     pub soundcloud_refresh_token: String,
     #[serde(default)]
     pub soundcloud_token_expires_at: i64,
-    #[serde(default)]
+    #[serde(default = "default_soundcloud_auth_mode")]
     pub soundcloud_auth_mode: String,
     #[serde(default)]
     pub soundcloud_username: String,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub internet_archive_enabled: bool,
     #[serde(default)]
     pub internet_archive_username: String,
@@ -401,7 +405,7 @@ pub struct ServiceSettings {
     pub internet_archive_access_key: String,
     #[serde(default)]
     pub internet_archive_secret_key: String,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub internet_archive_safe_search: bool,
 }
 
@@ -426,7 +430,7 @@ impl Default for SimpSettings {
                 battery_auto_dim: true,
                 battery_dim_timeout_sec: 30,
                 battery_dim_opacity: 0.15,
-                brightness_pct: 100,
+                brightness_pct: 80,
             },
             library: LibrarySettings {
                 scan_steam_osts: true,
@@ -442,19 +446,19 @@ impl Default for SimpSettings {
                 apple_private_key_path: String::new(),
                 apple_developer_token: String::new(),
                 apple_music_user_token: String::new(),
-                soundcloud_enabled: false,
+                soundcloud_enabled: true,
                 soundcloud_client_id: String::new(),
                 soundcloud_client_secret: String::new(),
                 soundcloud_access_token: String::new(),
                 soundcloud_refresh_token: String::new(),
                 soundcloud_token_expires_at: 0,
-                soundcloud_auth_mode: String::new(),
+                soundcloud_auth_mode: "client_credentials".to_string(),
                 soundcloud_username: String::new(),
-                internet_archive_enabled: false,
+                internet_archive_enabled: true,
                 internet_archive_username: String::new(),
                 internet_archive_access_key: String::new(),
                 internet_archive_secret_key: String::new(),
-                internet_archive_safe_search: false,
+                internet_archive_safe_search: true,
             },
             provisioning: ProvisioningSettings::default(),
         }

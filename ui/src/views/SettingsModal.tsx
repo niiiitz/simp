@@ -146,9 +146,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [iaAccessKey, setIaAccessKey] = useState('');
   const [iaSecretKey, setIaSecretKey] = useState('');
   const [iaEnabledLocal, setIaEnabledLocal] = useState(
-    !!snap?.internet_archive_authenticated
+    snap?.internet_archive_authenticated ?? true
   );
-  const [iaSafeSearch, setIaSafeSearch] = useState(false);
+  const [iaSafeSearch, setIaSafeSearch] = useState(true);
   const [perfSnap, setPerfSnap] = useState<DaemonPerfSnapshot | null>(null);
 
   const closeSettingsDrawer = () => {
@@ -158,14 +158,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   useEffect(() => {
-    setIaEnabledLocal(!!snap?.internet_archive_authenticated);
+    setIaEnabledLocal(snap?.internet_archive_authenticated ?? true);
     defaultSimpClient
       .getInternetArchiveConfig()
       .then((cfg) => {
         if (cfg) {
-          setIaEnabledLocal(!!cfg.enabled);
+          setIaEnabledLocal(cfg.enabled ?? true);
           setIaUsername(cfg.username || '');
-          setIaSafeSearch(!!cfg.safe_search);
+          setIaSafeSearch(cfg.safe_search ?? true);
         }
       })
       .catch(() => {});
@@ -224,7 +224,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       const nextVal = !prev[key];
       const next = { ...prev, [key]: nextVal };
       try {
-        window.localStorage.setItem('simp_source_visibility_v1', JSON.stringify(next));
+        window.localStorage.setItem('simp_source_visibility_v2', JSON.stringify(next));
       } catch {}
       if (key === 'internet_archive') {
         defaultSimpClient.configureInternetArchive({
@@ -906,6 +906,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     type="button"
                     onClick={() => {
                       defaultSimpClient.factoryReset();
+                      try {
+                        window.localStorage.removeItem('simp_source_visibility_v2');
+                        window.localStorage.removeItem('simp_brightness_pct_v2');
+                        window.localStorage.setItem('simp.visualizer_mode', 'cycle');
+                      } catch {}
+                      setBrightnessPct(80);
+                      setSourceVisibility({
+                        internet_archive: true,
+                        apple_music: true,
+                        soundcloud: true,
+                        optical_drive: false,
+                      });
+                      setIaEnabledLocal(true);
+                      setIaSafeSearch(true);
                       closeSettingsDrawer();
                       showToast('Factory reset complete');
                       window.setTimeout(() => refreshLibraryData(), 600);
