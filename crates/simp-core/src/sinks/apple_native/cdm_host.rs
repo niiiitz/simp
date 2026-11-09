@@ -2183,6 +2183,136 @@ pub fn negotiate_apple_license_for_epoch(
     Ok(())
 }
 
+static CACHED_SOUNDCLOUD_SERVER_CERT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+fn post_soundcloud_widevine_license_request(
+    license_auth_token: &str,
+    challenge: &[u8],
+) -> Result<Vec<u8>> {
+    let encoded_token =
+        crate::sinks::soundcloud_api::url_encode_component(license_auth_token.trim());
+    let url = format!(
+        "https://license.media-streaming.soundcloud.cloud/playback/widevine?license_token={encoded_token}"
+    );
+    let headers = [
+        ("Content-Type", "application/octet-stream"),
+        ("Origin", "https://soundcloud.com"),
+        ("Referer", "https://soundcloud.com/"),
+    ];
+    crate::http_pool::http_post_bytes(&url, &headers, challenge, 15)
+        .context("SoundCloud Widevine license exchange failed")
+}
+
+/// Negotiates (or reuses an already-prefetched) `WidevineCdmSession` for a SoundCloud `ctr-encrypted-hls`
+/// (`cenc`) track on `"simp-widevine-cdm"`, keyed by `song_key` (e.g. `"sc:2362387982"`).
+pub fn negotiate_soundcloud_license_for_epoch(
+    lib_path: &Path,
+    epoch: u64,
+    active_epoch: &std::sync::atomic::AtomicU64,
+    license_auth_token: &str,
+    song_key: &str,
+    pssh_bytes: &[u8],
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
+
+    if epoch != 0 && active_epoch.load(Ordering::SeqCst) != epoch {
+        return Err(anyhow!("Track superseded before SoundCloud Widevine session open"));
+    }
+
+    let lib_path_buf = lib_path.to_path_buf();
+    let pssh_vec = pssh_bytes.to_vec();
+    let key_owned = song_key.to_string();
+
+    let challenge_opt: Option<Vec<u8>> = run_on_cdm_worker(move |pool| {
+        if let Some(pos) = pool
+            .sessions
+            .iter()
+            .position(|e| e.song_id == key_owned && e.licensed)
+        {
+            if let Some(entry) = pool.sessions.remove(pos) {
+                pool.sessions.push_back(entry);
+            }
+            return Ok(None);
+        }
+
+        pool.sessions.retain(|e| e.song_id != key_owned);
+        while pool.sessions.len() >= 6 {
+            pool.sessions.pop_front();
+        }
+
+        let mut session = WidevineCdmSession::open(&lib_path_buf)?;
+        if let Some(cert) = CACHED_SOUNDCLOUD_SERVER_CERT.get() {
+            let _ = session.set_server_certificate(cert);
+        }
+        let challenge = session.generate_license_challenge(&pssh_vec)?;
+        pool.sessions.push_back(CdmSessionEntry {
+            song_id: key_owned,
+            session,
+            licensed: false,
+        });
+        Ok(Some(challenge))
+    })?;
+
+    let Some(first_challenge) = challenge_opt else {
+        return Ok(());
+    };
+    let was_service_cert_request = first_challenge.len() <= 8;
+
+    if epoch != 0 && active_epoch.load(Ordering::SeqCst) != epoch {
+        return Err(anyhow!("Track superseded before SoundCloud license request #1"));
+    }
+
+    let first_response = post_soundcloud_widevine_license_request(license_auth_token, &first_challenge)?;
+
+    if epoch != 0 && active_epoch.load(Ordering::SeqCst) != epoch {
+        return Err(anyhow!("Track superseded after SoundCloud license request #1"));
+    }
+
+    let first_resp_for_cert = first_response.clone();
+    let key_step3 = song_key.to_string();
+    let second_challenge = run_on_cdm_worker(move |pool| {
+        let entry = pool
+            .sessions
+            .iter_mut()
+            .rev()
+            .find(|e| e.song_id == key_step3)
+            .ok_or_else(|| anyhow!("Widevine CDM session missing for {key_step3}"))?;
+        entry.session.host.latest_challenge.clear();
+        entry.session.update_session_with_license(&first_response)?;
+        if entry.session.host.latest_challenge.is_empty() {
+            entry.licensed = true;
+        }
+        Ok(entry.session.host.latest_challenge.clone())
+    })?;
+
+    if !second_challenge.is_empty() {
+        if was_service_cert_request {
+            let _ = CACHED_SOUNDCLOUD_SERVER_CERT.set(first_resp_for_cert);
+        }
+        if epoch != 0 && active_epoch.load(Ordering::SeqCst) != epoch {
+            return Err(anyhow!("Track superseded before SoundCloud license request #2"));
+        }
+        let ckc_license = post_soundcloud_widevine_license_request(license_auth_token, &second_challenge)?;
+        if epoch != 0 && active_epoch.load(Ordering::SeqCst) != epoch {
+            return Err(anyhow!("Track superseded after SoundCloud license request #2"));
+        }
+        let key_step4 = song_key.to_string();
+        run_on_cdm_worker(move |pool| {
+            let entry = pool
+                .sessions
+                .iter_mut()
+                .rev()
+                .find(|e| e.song_id == key_step4)
+                .ok_or_else(|| anyhow!("Widevine CDM session missing for {key_step4}"))?;
+            entry.session.update_session_with_license(&ckc_license)?;
+            entry.licensed = true;
+            Ok(())
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Decrypts a batch of fMP4 media segments on `"simp-widevine-cdm"` using the active session for `song_id`.
 pub fn decrypt_segments_for_epoch(
     _epoch: u64,

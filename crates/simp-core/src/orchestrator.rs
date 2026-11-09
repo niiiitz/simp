@@ -719,6 +719,7 @@ impl AudioOrchestrator {
             AudioCommand::ConfigureSoundCloud {
                 client_id,
                 client_secret,
+                api_v2,
             } => {
                 let is_ready = {
                     let mut cfg = self.settings.lock().unwrap();
@@ -728,9 +729,25 @@ impl AudioOrchestrator {
                     if !client_secret.trim().is_empty() {
                         cfg.services.soundcloud_client_secret = client_secret.trim().to_string();
                     }
+                    if let Some(v2) = api_v2 {
+                        cfg.services.soundcloud_api_v2 = v2;
+                    }
                     cfg.services.soundcloud_enabled = true;
                     crate::sinks::soundcloud_api::is_soundcloud_ready(&cfg)
                 };
+                if let Some(v2) = api_v2 {
+                    crate::sinks::soundcloud_api::clear_soundcloud_track_hints();
+                    crate::sinks::soundcloud::clear_soundcloud_prefetch_cache();
+                    if v2 {
+                        if let Some(cdm) =
+                            crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library()
+                        {
+                            crate::sinks::apple_native::cdm_host::prewarm_standby_cdm_session(
+                                &cdm.library_path,
+                            );
+                        }
+                    }
+                }
                 self.soundcloud_sink.is_authenticated = is_ready;
                 self.state.lock().unwrap().soundcloud_authenticated = is_ready;
                 let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));

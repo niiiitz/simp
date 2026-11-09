@@ -133,6 +133,7 @@ export interface SoundCloudAuthConfig {
   soundcloud_authenticated: boolean;
   auth_mode: 'user' | 'client_credentials' | '';
   username: string;
+  api_v2?: boolean;
   redirect_uri: string;
   lan_ip?: string | null;
   lan_ips?: string[];

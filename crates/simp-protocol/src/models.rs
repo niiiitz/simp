@@ -397,6 +397,8 @@ pub struct ServiceSettings {
     pub soundcloud_auth_mode: String,
     #[serde(default)]
     pub soundcloud_username: String,
+    #[serde(default)]
+    pub soundcloud_api_v2: bool,
     #[serde(default = "default_true")]
     pub internet_archive_enabled: bool,
     #[serde(default)]
@@ -454,6 +456,7 @@ impl Default for SimpSettings {
                 soundcloud_token_expires_at: 0,
                 soundcloud_auth_mode: "client_credentials".to_string(),
                 soundcloud_username: String::new(),
+                soundcloud_api_v2: false,
                 internet_archive_enabled: true,
                 internet_archive_username: String::new(),
                 internet_archive_access_key: String::new(),

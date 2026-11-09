@@ -603,6 +603,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </button>
                   <button
                     type="button"
+                    title="Toggle between Strict API v1 (no previews/DRM) and API v2 (full catalog + Widevine DRM)"
+                    onClick={() => {
+                      const nextV2 = !soundcloudAuthCfg?.api_v2;
+                      defaultSimpClient.configureSoundCloud({ api_v2: nextV2 });
+                      setSoundcloudAuthCfg((prev) =>
+                        prev ? { ...prev, api_v2: nextV2 } : { api_v2: nextV2 } as any
+                      );
+                      showToast(
+                        nextV2
+                          ? '⚡ SoundCloud API v2 (Widevine DRM) enabled'
+                          : '☁️ SoundCloud Strict API v1 enabled'
+                      );
+                      window.setTimeout(() => refreshLibraryData(), 150);
+                    }}
+                    style={pillToggleStyle(Boolean(soundcloudAuthCfg?.api_v2), '#f97316')}
+                  >
+                    ⚡ v2: {soundcloudAuthCfg?.api_v2 ? 'On' : 'Off'}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setScAuthOpen((v) => !v)}
                     style={pillToggleStyle(
                       Boolean(

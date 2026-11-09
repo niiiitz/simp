@@ -2115,6 +2115,7 @@ fn execute_query(req_id: u64, query: LibraryQuery, state: &DaemonIpcState) -> Se
                     "soundcloud_authenticated": soundcloud_authenticated,
                     "auth_mode": auth_mode,
                     "username": creds.username,
+                    "api_v2": cfg.services.soundcloud_api_v2,
                     "redirect_uri": simp_core::sinks::soundcloud_api::SOUNDCLOUD_DEFAULT_REDIRECT_URI,
                     "lan_ip": lan_ip,
                     "lan_ips": lan_ips,

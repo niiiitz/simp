@@ -1,7 +1,15 @@
 use crate::sinks::apple_native::{
+    cdm_host::{
+        decrypt_segments_for_epoch, discover_widevine_cdm_library,
+        negotiate_soundcloud_license_for_epoch,
+    },
     hls::{
         extract_variant_from_master_m3u8, fetch_hls_bytes, parse_apple_media_m3u8,
         AppleHlsMediaPlaylist,
+    },
+    mp4_cbcs::{
+        find_widevine_pssh_in_mp4, parse_init_segment_tenc, rewrite_init_segment_enca_to_clear,
+        TrackEncryptionInfo,
     },
     source::{
         download_hls_segment_slice, DecryptedFmp4RodioSource, StreamCompletionGuard,
@@ -175,6 +183,15 @@ impl crate::sinks::AudioSink for SoundCloudSink {
 }
 
 #[derive(Clone)]
+struct SoundCloudDrmContext {
+    song_key: String,
+    tenc: TrackEncryptionInfo,
+    cdm_lib_path: std::path::PathBuf,
+    license_auth_token: String,
+    pssh_bytes: Vec<u8>,
+}
+
+#[derive(Clone)]
 struct PrefetchedSoundCloudTrack {
     track_id: String,
     playlist: Option<AppleHlsMediaPlaylist>,
@@ -183,6 +200,7 @@ struct PrefetchedSoundCloudTrack {
     initial_pcm: Vec<f32>,
     initial_segment_count: usize,
     is_complete: bool,
+    drm_ctx: Option<SoundCloudDrmContext>,
     fetched_at: Instant,
 }
 
@@ -191,6 +209,12 @@ static SC_PREFETCH_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new()
 
 fn sc_prefetch_cache() -> &'static Mutex<VecDeque<PrefetchedSoundCloudTrack>> {
     SC_PREFETCH_CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(6)))
+}
+
+pub fn clear_soundcloud_prefetch_cache() {
+    if let Ok(mut guard) = sc_prefetch_cache().lock() {
+        guard.clear();
+    }
 }
 
 fn sc_prefetch_in_flight() -> &'static Mutex<HashSet<String>> {
@@ -247,7 +271,10 @@ pub fn prefetch_soundcloud_track(settings: SimpSettings, track_uri: String) {
             let Ok(streams) = fetch_track_streams(&settings, &track_id) else {
                 return;
             };
-            if let Ok(prepared) = prepare_initial_soundcloud_stream(&streams, &token, 0) {
+            let dummy_epoch = AtomicU64::new(0);
+            if let Ok(prepared) =
+                prepare_initial_soundcloud_stream(&streams, &token, 0, 0, &dummy_epoch)
+            {
                 if let Ok(mut guard) = sc_prefetch_cache().lock() {
                     guard.retain(|e| {
                         e.track_id != track_id && e.fetched_at.elapsed() < Duration::from_secs(600)
@@ -263,6 +290,7 @@ pub fn prefetch_soundcloud_track(settings: SimpSettings, track_uri: String) {
                         initial_pcm: prepared.initial_pcm,
                         initial_segment_count: prepared.initial_segment_count,
                         is_complete: prepared.is_complete,
+                        drm_ctx: prepared.drm_ctx,
                         fetched_at: Instant::now(),
                     });
                 }
@@ -277,6 +305,7 @@ struct PreparedSoundCloudStream {
     initial_pcm: Vec<f32>,
     initial_segment_count: usize,
     is_complete: bool,
+    drm_ctx: Option<SoundCloudDrmContext>,
 }
 
 fn fetch_soundcloud_url_bytes(url: &str, access_token: &str) -> Result<Vec<u8>> {
@@ -445,6 +474,8 @@ fn prepare_initial_soundcloud_stream(
     streams: &SoundCloudStreamUrls,
     access_token: &str,
     start_pos_ms: u32,
+    epoch: u64,
+    active_epoch: &AtomicU64,
 ) -> Result<PreparedSoundCloudStream> {
     let candidates: Vec<(&str, bool, Option<&str>)> = [
         (
@@ -518,6 +549,7 @@ fn prepare_initial_soundcloud_stream(
                                 initial_pcm: pcm,
                                 initial_segment_count: initial_count,
                                 is_complete,
+                                drm_ctx: None,
                             });
                         }
                     }
@@ -543,6 +575,7 @@ fn prepare_initial_soundcloud_stream(
                                 initial_pcm: pcm,
                                 initial_segment_count: 1,
                                 is_complete: true,
+                                drm_ctx: None,
                             });
                         }
                         Err(e) => {
@@ -554,6 +587,90 @@ fn prepare_initial_soundcloud_stream(
                     last_err = e;
                 }
             }
+        }
+    }
+
+    // API v2 Widevine-encrypted `ctr-encrypted-hls` (`cenc` fMP4) path
+    if let (Some(ref drm_url), Some(ref lic_token)) =
+        (&streams.drm_hls_url, &streams.drm_license_auth_token)
+    {
+        if !drm_url.trim().is_empty() && !lic_token.trim().is_empty() {
+            let cdm = discover_widevine_cdm_library().ok_or_else(|| {
+                anyhow!(
+                    "SoundCloud API v2 encrypted track requires Widevine CDM (libwidevinecdm.so)"
+                )
+            })?;
+            let playlist = fetch_and_parse_soundcloud_hls(drm_url, access_token)?;
+            if playlist.segments.is_empty() {
+                return Err(anyhow!("Empty SoundCloud DRM HLS playlist at {drm_url}"));
+            }
+            let init_url = playlist
+                .init_segment_url
+                .as_ref()
+                .ok_or_else(|| anyhow!("Missing #EXT-X-MAP init.mp4 in SoundCloud DRM HLS"))?;
+            let raw_init_bytes = fetch_hls_bytes(init_url, playlist.init_byte_range)?;
+            let mut tenc = parse_init_segment_tenc(&raw_init_bytes).unwrap_or_default();
+            if &tenc.scheme_type != b"cenc" && &tenc.scheme_type != b"cbcs" {
+                tenc.scheme_type = *b"cenc";
+            }
+            let pssh_bytes = if !playlist.widevine_pssh_bytes.is_empty() {
+                Some(playlist.widevine_pssh_bytes.clone())
+            } else {
+                find_widevine_pssh_in_mp4(&raw_init_bytes)
+            }
+            .ok_or_else(|| anyhow!("Missing Widevine PSSH in SoundCloud DRM HLS stream"))?;
+            let clear_init_bytes = rewrite_init_segment_enca_to_clear(&raw_init_bytes);
+
+            let mut initial_count = 2usize.min(playlist.segments.len());
+            if start_pos_ms > 0 {
+                initial_count = playlist.segments.len();
+                let target_sec = (start_pos_ms as f64 / 1000.0) + 6.0;
+                let mut accum = 0.0;
+                for (i, seg) in playlist.segments.iter().enumerate() {
+                    accum += seg.duration_secs.max(4.0);
+                    if accum >= target_sec {
+                        initial_count = (i + 1).max(2).min(playlist.segments.len());
+                        break;
+                    }
+                }
+            }
+
+            let song_key = format!("sc:{}", streams.track_id);
+            negotiate_soundcloud_license_for_epoch(
+                &cdm.library_path,
+                epoch,
+                active_epoch,
+                lic_token,
+                &song_key,
+                &pssh_bytes,
+            )?;
+
+            let encrypted_initial = download_hls_segment_slice(&playlist.segments[..initial_count])?;
+            let decrypted_initial = decrypt_segments_for_epoch(
+                epoch,
+                &song_key,
+                encrypted_initial,
+                tenc.clone(),
+            )?;
+
+            let pcm = decode_soundcloud_segments(&clear_init_bytes, &decrypted_initial, Some("m4a"))
+                .or_else(|_| decode_soundcloud_segments(&clear_init_bytes, &decrypted_initial, None))?;
+            let is_complete = initial_count >= playlist.segments.len();
+            return Ok(PreparedSoundCloudStream {
+                playlist: Some(playlist),
+                init_bytes: clear_init_bytes,
+                initial_segments: decrypted_initial,
+                initial_pcm: pcm,
+                initial_segment_count: initial_count,
+                is_complete,
+                drm_ctx: Some(SoundCloudDrmContext {
+                    song_key,
+                    tenc,
+                    cdm_lib_path: cdm.library_path,
+                    license_auth_token: lic_token.clone(),
+                    pssh_bytes,
+                }),
+            });
         }
     }
 
@@ -647,6 +764,7 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                             pf.init_bytes,
                             pf.initial_segments,
                             pf.initial_segment_count,
+                            pf.drm_ctx,
                             epoch,
                             active_epoch.clone(),
                             state,
@@ -681,7 +799,13 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                 return;
             }
 
-            let prepared = match prepare_initial_soundcloud_stream(&streams, &token, start_pos_ms) {
+            let prepared = match prepare_initial_soundcloud_stream(
+                &streams,
+                &token,
+                start_pos_ms,
+                epoch,
+                &active_epoch,
+            ) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!("SoundCloud initial stream decode failed for {track_uri}: {e}");
@@ -730,6 +854,7 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                     prepared.init_bytes,
                     prepared.initial_segments,
                     prepared.initial_segment_count,
+                    prepared.drm_ctx,
                     epoch,
                     active_epoch,
                     state,
@@ -749,6 +874,7 @@ fn stream_remaining_sc_hls_segments(
     init_bytes: Vec<u8>,
     mut all_fmp4_segments: Vec<Vec<u8>>,
     start_idx: usize,
+    drm_ctx: Option<SoundCloudDrmContext>,
     epoch: u64,
     active_epoch: Arc<AtomicU64>,
     state: Arc<Mutex<StreamingPcmState>>,
@@ -811,7 +937,7 @@ fn stream_remaining_sc_hls_segments(
             }
         }
 
-        let batch_segs = match batch_segs_opt {
+        let raw_batch_segs = match batch_segs_opt {
             Some(s) => s,
             None => {
                 // Try downloading just the single next segment before giving up
@@ -826,7 +952,7 @@ fn stream_remaining_sc_hls_segments(
                 }
             }
         };
-        let actual_end_idx = idx + batch_segs.len();
+        let actual_end_idx = idx + raw_batch_segs.len();
 
         if active_epoch.load(Ordering::SeqCst) != epoch {
             if let Ok(mut g) = state.lock() {
@@ -835,6 +961,44 @@ fn stream_remaining_sc_hls_segments(
             }
             return;
         }
+
+        let batch_segs = if let Some(ref drm) = drm_ctx {
+            match decrypt_segments_for_epoch(
+                epoch,
+                &drm.song_key,
+                raw_batch_segs.clone(),
+                drm.tenc.clone(),
+            ) {
+                Ok(dec) => dec,
+                Err(_) => {
+                    let _ = negotiate_soundcloud_license_for_epoch(
+                        &drm.cdm_lib_path,
+                        epoch,
+                        &active_epoch,
+                        &drm.license_auth_token,
+                        &drm.song_key,
+                        &drm.pssh_bytes,
+                    );
+                    match decrypt_segments_for_epoch(
+                        epoch,
+                        &drm.song_key,
+                        raw_batch_segs,
+                        drm.tenc.clone(),
+                    ) {
+                        Ok(dec) => dec,
+                        Err(e) => {
+                            tracing::warn!(
+                                "SoundCloud Widevine segment batch decrypt failed for {}: {e}",
+                                drm.song_key
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            raw_batch_segs
+        };
 
         if has_fmp4_init {
             // Try O(1) batch decode first (`init_bytes + batch_segs`); fall back to full contiguous decode if needed
