@@ -591,7 +591,6 @@ mod win32_tray {
     const WM_TRAYICON: u32 = WM_USER + 1;
 
     const WM_LBUTTONUP: u32 = 0x0202;
-    const WM_LBUTTONDBLCLK: u32 = 0x0203;
     const WM_RBUTTONUP: u32 = 0x0205;
     const WM_MBUTTONUP: u32 = 0x0208;
     const WM_CONTEXTMENU: u32 = 0x007B;

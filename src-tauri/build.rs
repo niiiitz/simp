@@ -12,11 +12,36 @@ fn main() {
         let rc_path = win_dir.join("simp.rc");
         let prebuilt_res = win_dir.join("simp.res");
         let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| "/tmp".to_string()));
+        let out_coff = out_dir.join("simp_res.o");
         let out_res = out_dir.join("simp.res");
 
-        let mut compiled = false;
+        let mut linked_artifact: Option<PathBuf> = None;
+
+        // 1. Prefer `x86_64-w64-mingw32-windres -O coff` when building with GNU binutils / MinGW-w64
+        //    (e.g. on macOS `/usr/local/bin/x86_64-w64-mingw32-gcc`), since GNU `ld` requires a COFF
+        //    object file (`simp_res.o`) rather than a raw `.res` binary.
         if rc_path.is_file() {
-            // Try `zig rc` if available in ~/.cache/simp-toolchain
+            for windres_bin in [
+                "x86_64-w64-mingw32-windres",
+                "/usr/local/bin/x86_64-w64-mingw32-windres",
+                "/opt/homebrew/bin/x86_64-w64-mingw32-windres",
+            ] {
+                if Command::new(windres_bin)
+                    .current_dir(&win_dir)
+                    .args(["-i", "simp.rc", "-O", "coff", "-o"])
+                    .arg(&out_coff)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+                {
+                    linked_artifact = Some(out_coff.clone());
+                    break;
+                }
+            }
+        }
+
+        // 2. Fallback to `zig rc` when using `zig cc` as the MinGW linker (e.g. on Linux/WSL)
+        if linked_artifact.is_none() && rc_path.is_file() {
             if let Some(home) = std::env::var_os("HOME") {
                 for slug in [
                     "zig-linux-x86_64-0.13.0",
@@ -40,7 +65,7 @@ fn main() {
                             .map(|s| s.success())
                             .unwrap_or(false)
                         {
-                            compiled = true;
+                            linked_artifact = Some(out_res.clone());
                             break;
                         }
                     }
@@ -48,13 +73,15 @@ fn main() {
             }
         }
 
-        if !compiled && prebuilt_res.is_file() {
+        if linked_artifact.is_none() && prebuilt_res.is_file() {
             let _ = std::fs::copy(&prebuilt_res, &out_res);
-            compiled = out_res.is_file();
+            if out_res.is_file() {
+                linked_artifact = Some(out_res);
+            }
         }
 
-        if compiled {
-            println!("cargo:rustc-link-arg-bins={}", out_res.display());
+        if let Some(artifact) = linked_artifact {
+            println!("cargo:rustc-link-arg-bins={}", artifact.display());
         }
     }
 }
