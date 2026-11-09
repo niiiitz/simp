@@ -685,12 +685,14 @@ pub fn map_soundcloud_item_to_playlist(item: &Value, default_kind: &str) -> Opti
                 embedded_tracks.push(t);
             }
         }
-        // If `tracks` is explicitly populated with items, and 100% of them are `access: "blocked"`,
-        // skip this playlist so unstreamable region-locked sets do not appear as broken empty cards.
-        if !arr.is_empty() && non_blocked_in_array == 0 {
+        // If `tracks` is present as an array on the playlist object and has 0 non-blocked tracks
+        // (either `arr` is empty after SoundCloud's `access=playable,preview` server-side filter,
+        // or every item in `arr` is `access: "blocked"`), skip this playlist so unstreamable
+        // region-locked/blocked sets do not appear as cards that open to "0 tracks".
+        if non_blocked_in_array == 0 {
             return None;
         }
-        !arr.is_empty()
+        true
     } else {
         false
     };
@@ -1443,37 +1445,19 @@ pub fn is_soundcloud_user_signed_in(settings: &SimpSettings) -> bool {
             && creds.username != "Public Discovery (Client Credentials)")
 }
 
-fn access_param_for_session(settings: &SimpSettings) -> &'static str {
-    if is_soundcloud_user_signed_in(settings) {
-        "playable"
-    } else {
-        "playable,preview"
-    }
+fn access_param_for_session(_settings: &SimpSettings) -> &'static str {
+    // SoundCloud's v1 API marks all label/monetized (`policy: MONETIZE`) tracks as `access: "preview"`
+    // in track/playlist metadata even for signed-in users. Always include `playable,preview` so
+    // label albums/sets (e.g. `The Summer Fables`) are not stripped to 0 tracks.
+    "playable,preview"
 }
 
-fn is_preview_track_meta(t: &TrackMetadata) -> bool {
-    t.album.contains("• Preview") || t.album.ends_with("Preview")
-}
-
-fn should_keep_track_for_session(t: &TrackMetadata, signed_in: bool) -> bool {
-    if signed_in && is_preview_track_meta(t) {
-        return false;
-    }
+fn should_keep_track_for_session(_t: &TrackMetadata, _signed_in: bool) -> bool {
     true
 }
 
-fn should_keep_playlist_for_session(pl: &mut SoundCloudPlaylistSummary, signed_in: bool) -> bool {
-    if !signed_in {
-        return true;
-    }
-    if !pl.tracks.is_empty() {
-        pl.tracks.retain(|t| !is_preview_track_meta(t));
-        if pl.tracks.is_empty() {
-            return false;
-        }
-        pl.track_count = pl.tracks.len();
-    }
-    true
+fn should_keep_playlist_for_session(pl: &mut SoundCloudPlaylistSummary, _signed_in: bool) -> bool {
+    pl.track_count > 0 || !pl.tracks.is_empty()
 }
 
 fn extract_next_href(json: &Value) -> Option<String> {
@@ -1792,7 +1776,7 @@ pub fn fetch_playlist_tracks(
                     } else {
                         let obj = item.get("origin").unwrap_or(item);
                         let acc = obj.get("access").and_then(|v| v.as_str()).unwrap_or("playable");
-                        if acc == "blocked" || (signed_in && acc == "preview") {
+                        if acc == "blocked" {
                             continue;
                         }
                         let sid = obj
@@ -2945,6 +2929,47 @@ mod tests {
             "kind": "track"
         });
         assert!(map_soundcloud_item_to_track(&stub_item).is_none());
+
+        // Verify playlists whose `tracks` array was emptied by SoundCloud's `access=playable,preview`
+        // filter (meaning 100% of tracks are `access: "blocked"`) return `None` instead of reporting
+        // a phantom `track_count` that opens to "No streamable tracks available".
+        let empty_filtered_set = serde_json::json!({
+            "id": 1912676703u64,
+            "kind": "playlist",
+            "title": "Blocked Distributor Set",
+            "track_count": 5,
+            "tracks": []
+        });
+        assert!(map_soundcloud_item_to_playlist(&empty_filtered_set, "catalog_set").is_none());
+
+        // Verify sets containing `access: "preview"` tracks (e.g. label/monetized sets) retain their tracks
+        let preview_set = serde_json::json!({
+            "id": 2269108565u64,
+            "kind": "playlist",
+            "title": "Label Preview Set",
+            "track_count": 2,
+            "tracks": [
+                {
+                    "id": 1001,
+                    "kind": "track",
+                    "access": "preview",
+                    "title": "Track One",
+                    "duration": 149000
+                },
+                {
+                    "id": 1002,
+                    "kind": "track",
+                    "access": "preview",
+                    "title": "Track Two",
+                    "duration": 162000
+                }
+            ]
+        });
+        let mut mapped_set =
+            map_soundcloud_item_to_playlist(&preview_set, "catalog_set").expect("map preview set");
+        assert_eq!(mapped_set.track_count, 2);
+        assert_eq!(mapped_set.tracks.len(), 2);
+        assert!(should_keep_playlist_for_session(&mut mapped_set, true));
     }
 
     #[test]
