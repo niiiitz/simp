@@ -215,6 +215,56 @@ const ConsoleMainApp: React.FC = () => {
   const [customFolderPath, setCustomFolderPath] = useState('');
   const [oskTarget, setOskTarget] = useState<OskTargetKind>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [pendingHybridAdd, setPendingHybridAdd] = useState<{
+    uris: string[];
+    label: string;
+    trackMetadata?: TrackMetadata[];
+    creatingNew?: boolean;
+  } | null>(null);
+
+  // Automatically dismiss the On-Screen Keyboard whenever its target context closes or view switches to Player
+  useEffect(() => {
+    if (!oskTarget) return;
+    if (oskTarget === 'search' && view !== 'browser') {
+      setOskTarget(null);
+      return;
+    }
+    if (oskTarget === 'folder' && !sourceModalOpen && !powerModalOpen) {
+      setOskTarget(null);
+      return;
+    }
+    if (oskTarget === 'playlist' && !creatingPlaylist && !pendingHybridAdd) {
+      setOskTarget(null);
+      return;
+    }
+    if (view !== 'browser' && !sourceModalOpen && !powerModalOpen && !pendingHybridAdd) {
+      setOskTarget(null);
+    }
+  }, [oskTarget, view, sourceModalOpen, powerModalOpen, creatingPlaylist, pendingHybridAdd]);
+
+  // Dismiss the On-Screen Keyboard when clicking outside it (and outside its target input) or pressing Escape
+  useEffect(() => {
+    if (!oskTarget) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('[data-osk-root="true"]') || target.closest('[data-osk-input]')) {
+        return;
+      }
+      setOskTarget(null);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOskTarget(null);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [oskTarget]);
 
   // Apple Music & SoundCloud Auth Modal state
   const [appleAuthCfg, setAppleAuthCfg] = useState<AppleMusicAuthConfig | null>(null);
@@ -491,6 +541,23 @@ const ConsoleMainApp: React.FC = () => {
     });
     return unsub;
   }, []);
+
+  // 1b. Auto-reload open UI window when background daemon restarts on a new version (e.g. after CLI `simp update`)
+  const knownDaemonVersionRef = useRef<string | null>(null);
+  useEffect(() => {
+    const reported = (snap?.daemon_version || '').trim().replace(/^v/, '');
+    if (!reported) return;
+    if (!knownDaemonVersionRef.current) {
+      knownDaemonVersionRef.current = reported;
+      return;
+    }
+    if (knownDaemonVersionRef.current !== reported && !updateStatus.applying) {
+      knownDaemonVersionRef.current = reported;
+      window.location.replace(
+        `${window.location.pathname}?v=${encodeURIComponent(reported)}&t=${Date.now()}`
+      );
+    }
+  }, [snap?.daemon_version, updateStatus.applying]);
 
   // 2. Refresh Albums & Playlists helper
   const refreshLibraryData = useCallback(() => {
@@ -1195,13 +1262,6 @@ const ConsoleMainApp: React.FC = () => {
     }
   };
 
-  const [pendingHybridAdd, setPendingHybridAdd] = useState<{
-    uris: string[];
-    label: string;
-    trackMetadata?: TrackMetadata[];
-    creatingNew?: boolean;
-  } | null>(null);
-
   const commitAddTracksToPlaylist = async (
     uris: string[],
     label: string,
@@ -1686,13 +1746,16 @@ const ConsoleMainApp: React.FC = () => {
             setBrightnessPopoverOpen(false);
             setPowerModalOpen(false);
             setSourceModalOpen(false);
+            if (view !== 'lock') {
+              setView('lock');
+            }
             window.dispatchEvent(new CustomEvent('simp-player-actions-toggle'));
           }}
-          title="Current Track & Source (Click to open Track Actions & Queue)"
+          title="Track Options, Visualizer & Active Queue (SELECT)"
           style={{
             minHeight: 44,
-            maxWidth: 'clamp(170px, 28vw, 340px)',
-            padding: '0 12px 0 8px',
+            maxWidth: 'clamp(190px, 32vw, 380px)',
+            padding: '0 12px 0 10px',
             borderRadius: 12,
             background: '#0a0a0e',
             border: '1px solid #22222c',
@@ -1706,6 +1769,23 @@ const ConsoleMainApp: React.FC = () => {
             minWidth: 0,
           }}
         >
+          <span style={{ fontSize: 15, lineHeight: 1, color: '#9ca3af', flexShrink: 0 }}>⚙</span>
+          <span
+            className="simp-gp-badge"
+            style={{
+              padding: '2px 6px',
+              borderRadius: 6,
+              background: '#14141e',
+              border: '1px solid #2a2a38',
+              color: '#9ca3af',
+              fontSize: 10,
+              fontFamily: 'monospace',
+              fontWeight: 700,
+              flexShrink: 0,
+            }}
+          >
+            SELECT
+          </span>
           <img
             src="/favicon.png"
             alt="SIMP"
@@ -2518,7 +2598,8 @@ const ConsoleMainApp: React.FC = () => {
       )}
 
       {/* Controller-Navigable On-Screen Keyboard (OSK) Bar for Search, Playlist Name & Folder Path */}
-      {oskTarget && (
+      {oskTarget &&
+        (view === 'browser' || sourceModalOpen || powerModalOpen || Boolean(pendingHybridAdd)) && (
         <div
           data-osk-root="true"
           style={{

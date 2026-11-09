@@ -35,9 +35,13 @@ fn main() {
                         status.latest_tag, status.current_version
                     );
                 }
-                match simp_core::updater::apply_self_update(Some(&status.latest_tag), true, true) {
+                match simp_core::updater::apply_self_update(Some(&status.latest_tag), true, false) {
                     Ok(res) => {
                         println!("✅ {}", res.message);
+                        match simp_core::updater::restart_daemon_synchronously() {
+                            Ok(restart_msg) => println!("🔄 {restart_msg}"),
+                            Err(e) => eprintln!("⚠️  Could not auto-restart background daemon: {e}"),
+                        }
                     }
                     Err(e) => {
                         eprintln!("❌ Update failed: {e}");

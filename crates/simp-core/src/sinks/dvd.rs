@@ -1446,11 +1446,7 @@ pub fn scan_dvd_disc(device_path: &str, force_refresh: bool) -> Option<OpticalDi
     let ffmpeg_available = find_ffmpeg_binary().is_some();
     let dvd_titles: Vec<DvdTitleInfo> = parsed.titles.iter().map(|t| t.info.clone()).collect();
 
-    let css_lib_hint = if cfg!(target_os = "windows") {
-        "install VLC or place libdvdcss-2.dll in data\\lib\\"
-    } else {
-        "install VLC (Flatpak/system) or place libdvdcss.so.2 in ~/.local/share/simp/lib/"
-    };
+    let css_lib_hint = "please install VLC Media Player (videolan.org) to provide DVD playback libraries";
     let css_label = if css_dll_available {
         "CSS"
     } else {
@@ -1469,7 +1465,9 @@ pub fn scan_dvd_disc(device_path: &str, force_refresh: bool) -> Option<OpticalDi
             if dvd_titles.len() == 1 { "" } else { "s" },
             css_lib_hint
         ),
-        (_, false) => "DVD-Video detected — install ffmpeg to enable video transcoding".to_string(),
+        (_, false) => {
+            "DVD-Video detected — please install VLC Media Player (videolan.org) & ffmpeg to enable DVD playback".to_string()
+        }
     };
 
     Some(OpticalDiscStatus {

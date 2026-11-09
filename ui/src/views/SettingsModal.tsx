@@ -785,10 +785,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       placeholder="/path/to/music-or-videos"
                       value={customFolderPath}
                       onChange={(e) => setCustomFolderPath(e.target.value)}
-                      onClick={() => {
-                        setOskTarget('folder');
-                        if (window.parent && window.parent !== window) {
-                          window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                      onClick={(e) => {
+                        if (
+                          e.detail === 0 ||
+                          document.documentElement.dataset.simpInput === 'gamepad'
+                        ) {
+                          setOskTarget('folder');
+                          if (window.parent && window.parent !== window) {
+                            window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                          }
                         }
                       }}
                       onKeyDown={(e) => {
@@ -1080,7 +1085,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 setIsSleeping(true);
               }}
               style={{
-                minHeight: 56,
+                minHeight: 46,
                 padding: '8px 12px',
                 borderRadius: 12,
                 background: '#0d1b22',
@@ -1088,18 +1093,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 color: '#bfeaf5',
                 textAlign: 'left',
                 display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'center',
-                gap: 3,
+                alignItems: 'center',
                 cursor: 'pointer',
               }}
             >
               <span style={{ fontSize: 12.5, fontWeight: 800 }}>🌙 Sleep Screen</span>
-              <span style={{ fontSize: 10.5, color: '#8e8e99' }}>True-black OLED saver</span>
             </button>
           </div>
 
-          {/* Row 2: [POWER OFF] [RESET SERVICE] */}
+          {/* Row 2: [SHUTDOWN] [RESET SERVICE] */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
             <button
               type="button"
@@ -1109,7 +1111,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 window.setTimeout(() => dismissConsole(), 250);
               }}
               style={{
-                minHeight: 50,
+                minHeight: 44,
                 padding: '8px 12px',
                 borderRadius: 12,
                 background: '#221014',
@@ -1117,16 +1119,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 color: '#fca5a5',
                 textAlign: 'left',
                 display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'center',
-                gap: 2,
+                alignItems: 'center',
                 cursor: 'pointer',
               }}
             >
-              <span style={{ fontSize: 12.5, fontWeight: 800 }}>⏻ Power Off</span>
-              <span style={{ fontSize: 10.5, color: '#fca5a5', opacity: 0.8 }}>
-                Stop daemon & exit
-              </span>
+              <span style={{ fontSize: 12.5, fontWeight: 800 }}>⏻ Shutdown</span>
             </button>
 
             <button
@@ -1143,7 +1140,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 }
               }}
               style={{
-                minHeight: 50,
+                minHeight: 44,
                 padding: '8px 12px',
                 borderRadius: 12,
                 background: '#151320',
@@ -1151,14 +1148,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 color: '#ddd6fe',
                 textAlign: 'left',
                 display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'center',
-                gap: 2,
+                alignItems: 'center',
                 cursor: 'pointer',
               }}
             >
               <span style={{ fontSize: 12.5, fontWeight: 800 }}>🔄 Reset Service</span>
-              <span style={{ fontSize: 10.5, color: '#a1a1aa' }}>Restart audio daemon</span>
             </button>
           </div>
 
@@ -1175,7 +1169,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }}
             style={{
               width: '100%',
-              minHeight: 48,
+              minHeight: 44,
               padding: '10px 14px',
               borderRadius: 14,
               background: foldersAccountsOpen ? '#0f222a' : '#0d0d14',
@@ -1187,14 +1181,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               textAlign: 'left',
             }}
           >
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
-                📁 Folders & Accounts
-              </span>
-              <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
-                Internet Archive, Apple Music, SoundCloud, Optical & Local Paths
-              </span>
-            </div>
+            <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
+              📁 Folders & Accounts
+            </span>
             <span style={{ fontFamily: 'monospace', fontSize: 13, color: '#67e8f9', fontWeight: 900 }}>
               {foldersAccountsOpen ? '▸ Shut' : '◄ Open'}
             </span>
@@ -1214,7 +1203,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: 12, fontWeight: 800, color: '#d4d4dc' }}>
-                📊 Perf Metrics
+                📊 System Load
               </span>
               <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#8e8e99' }}>
                 {perfSnap?.audio_backend || 'PipeWire'} • {perfSnap?.platform || 'Linux'}
@@ -1225,14 +1214,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <strong style={{ color: '#6ee7b7' }}>
                 {perfSnap?.cpu_percent.toFixed(1) ?? '0.0'}%
               </strong>{' '}
-              • RAM (RSS):{' '}
+              • RAM:{' '}
               <strong style={{ color: '#67e8f9' }}>
                 {perfSnap?.rss_mb.toFixed(1) ?? '0.0'} MB
+                {typeof (perfSnap as any)?.ram_percent === 'number'
+                  ? ` (${((perfSnap as any).ram_percent as number).toFixed(1)}%)`
+                  : ''}
               </strong>
             </div>
           </div>
 
-          {/* Row 5: Upgrade Check (Always Visible Inline — Not Hidden Behind +) */}
+          {/* Row 5: Updates */}
           <div
             style={{
               padding: '10px 12px',
@@ -1246,7 +1238,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 12.5, fontWeight: 800, color: '#bfeaf5' }}>
-                ⬆️ Upgrade Check{' '}
+                ⬆️ Updates{' '}
                 {updateStatus.current_version ? (
                   <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#8e8e99' }}>
                     (v{updateStatus.current_version})
@@ -1263,7 +1255,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   : updateStatus.update_available
                   ? `🟢 ${updateStatus.latest_tag} Ready`
                   : updateStatus.latest_tag
-                  ? `Up to date`
+                  ? 'Up to date'
                   : ''}
               </span>
             </div>
@@ -1287,8 +1279,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     });
                     showToast(
                       nextChannel === 'stable'
-                        ? 'Update channel set to Stable (official releases only)'
-                        : 'Update channel set to Alpha (includes pre-releases)'
+                        ? 'Channel: Stable'
+                        : 'Channel: Alpha'
                     );
                     checkSimpUpdates(false);
                   } catch {
@@ -1301,32 +1293,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               >
                 {(updateStatus.channel || 'alpha').toLowerCase() === 'stable'
-                  ? '🛡️ Channel: Stable'
-                  : '🧪 Channel: Alpha'}
+                  ? '🛡️ Stable'
+                  : '🧪 Alpha'}
               </button>
-              <button
-                type="button"
-                disabled={Boolean(updateStatus.checking || updateStatus.applying)}
-                onClick={() => checkSimpUpdates(false)}
-                style={compactPrimaryBtnStyle}
-              >
-                {updateStatus.checking ? 'Checking...' : '🔍 Check for Updates'}
-              </button>
-              <button
-                type="button"
-                disabled={Boolean(updateStatus.applying)}
-                onClick={applySimpUpdate}
-                style={{
-                  ...compactPrimaryBtnStyle,
-                  background: updateStatus.update_available ? '#0f2936' : '#181824',
-                }}
-              >
-                {updateStatus.applying
-                  ? '⏳ Updating...'
-                  : updateStatus.update_available
-                  ? `⬆️ Install ${updateStatus.latest_tag}`
-                  : `🔄 Reinstall ${updateStatus.latest_tag || 'Latest'}`}
-              </button>
+              {updateStatus.update_available ? (
+                <button
+                  type="button"
+                  disabled={Boolean(updateStatus.applying)}
+                  onClick={applySimpUpdate}
+                  style={{
+                    ...compactPrimaryBtnStyle,
+                    background: '#0f2936',
+                  }}
+                >
+                  {updateStatus.applying
+                    ? '⏳ Updating...'
+                    : `⬆️ Install ${updateStatus.latest_tag}`}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={Boolean(updateStatus.checking || updateStatus.applying)}
+                  onClick={() => checkSimpUpdates(false)}
+                  style={compactPrimaryBtnStyle}
+                >
+                  {updateStatus.checking ? 'Checking...' : '🔍 Check Now'}
+                </button>
+              )}
             </div>
           </div>
         </div>

@@ -203,31 +203,53 @@ rm -rf "${UI_DEST:?}/"*
 cp -r "${UI_SRC}/"* "${UI_DEST}/"
 echo "✓ Installed Web UI:     ${UI_DEST}"
 
-# 5. Install FreeDesktop / KDE Plasma Icons & Desktop Launcher (.desktop)
-ICONS_DIR="${HOME}/.local/share/icons/hicolor/256x256/apps"
-mkdir -p "${ICONS_DIR}" "${HOME}/.local/share/icons"
-if [[ -f "${UI_DEST}/simp-icon-dark.png" ]]; then
-  cp "${UI_DEST}/simp-icon-dark.png" "${ICONS_DIR}/org.simp.player.png"
-  cp "${UI_DEST}/simp-icon-dark.png" "${HOME}/.local/share/icons/org.simp.player.png"
+# 5. Install FreeDesktop / KDE Plasma / Steam Frame Icons & Desktop Launcher (.desktop)
+mkdir -p "${HOME}/.local/share/icons" "${HOME}/.local/share/pixmaps"
+for sz in 16 32 48 64 128 256 512; do
+  SZ_DIR="${HOME}/.local/share/icons/hicolor/${sz}x${sz}/apps"
+  mkdir -p "${SZ_DIR}"
+  if [[ -f "${UI_DEST}/simp-icon-${sz}.png" ]]; then
+    cp "${UI_DEST}/simp-icon-${sz}.png" "${SZ_DIR}/org.simp.player.png"
+    cp "${UI_DEST}/simp-icon-${sz}.png" "${SZ_DIR}/simp-player-ui.png"
+    cp "${UI_DEST}/simp-icon-${sz}.png" "${SZ_DIR}/simp.png"
+  elif [[ -f "${UI_DEST}/simp-icon-dark.png" ]]; then
+    cp "${UI_DEST}/simp-icon-dark.png" "${SZ_DIR}/org.simp.player.png"
+    cp "${UI_DEST}/simp-icon-dark.png" "${SZ_DIR}/simp-player-ui.png"
+    cp "${UI_DEST}/simp-icon-dark.png" "${SZ_DIR}/simp.png"
+  fi
+done
+
+PRIMARY_ICON="${UI_DEST}/simp-icon-256.png"
+if [[ ! -f "${PRIMARY_ICON}" ]]; then
+  PRIMARY_ICON="${UI_DEST}/simp-icon-dark.png"
+fi
+if [[ -f "${PRIMARY_ICON}" ]]; then
+  cp "${PRIMARY_ICON}" "${HOME}/.local/share/icons/org.simp.player.png"
+  cp "${PRIMARY_ICON}" "${HOME}/.local/share/pixmaps/org.simp.player.png"
+  cp "${PRIMARY_ICON}" "${HOME}/.local/share/pixmaps/simp-player-ui.png"
+fi
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" >/dev/null 2>&1 || true
 fi
 
 DESKTOP_DEST="${APPLICATIONS_DIR}/org.simp.player.desktop"
 sed \
   -e "s|__SIMP_BIN__|${BIN_DEST}/simp|g" \
-  -e "s|__SIMP_ICON__|${UI_DEST}/simp-icon-dark.png|g" \
+  -e "s|__SIMP_ICON__|org.simp.player|g" \
   "${DESKTOP_SRC}" > "${DESKTOP_DEST}"
 chmod 0755 "${DESKTOP_DEST}"
 
-# Also create hidden Wayland/X11 app_id mappings so KWin & SteamVR Quick Launch Bar
-# always resolve Chromium `--app=http://127.0.0.1:18888` windows to the SIMP icon.
-for alias_id in "chrome-127.0.0.1__-Default" "chrome-http___127.0.0.1_18888_-Default" "127.0.0.1"; do
+# Also create hidden Wayland/X11 app_id mappings so KWin & SteamVR Quick Launch Bar / App Launch History
+# always resolve Chromium `--app=http://127.0.0.1:18888` and `--class=simp-player-ui` windows to the SIMP icon.
+for alias_id in "simp-player-ui" "simp" "chrome-127.0.0.1__-Default" "chrome-http___127.0.0.1_18888_-Default" "127.0.0.1"; do
   WAYLAND_ALIAS_DEST="${APPLICATIONS_DIR}/${alias_id}.desktop"
   cat > "${WAYLAND_ALIAS_DEST}" <<EOF
 [Desktop Entry]
 Type=Application
 Name=SIMP
 Exec=${BIN_DEST}/simp
-Icon=${UI_DEST}/simp-icon-dark.png
+Icon=org.simp.player
 NoDisplay=true
 StartupWMClass=${alias_id}
 EOF
@@ -242,13 +264,14 @@ echo "✓ Installed launcher:   ${DESKTOP_DEST}"
 # 5b. Install OpenVR / SteamVR Application Manifest (`org.simp.player.vrmanifest`) for Steam Frame & VR
 OPENVR_DEST_DIR="${INSTALL_ROOT}/openvr"
 mkdir -p "${OPENVR_DEST_DIR}"
-if [[ -f "${UI_DEST}/simp-icon-dark.png" ]]; then
-  cp "${UI_DEST}/simp-icon-dark.png" "${OPENVR_DEST_DIR}/simp-icon-dark.png"
+if [[ -f "${PRIMARY_ICON}" ]]; then
+  cp "${PRIMARY_ICON}" "${OPENVR_DEST_DIR}/simp-icon-256.png"
+  cp "${PRIMARY_ICON}" "${OPENVR_DEST_DIR}/simp-icon-dark.png"
 fi
 if [[ -f "${VRMANIFEST_SRC}" ]]; then
   sed \
     -e "s|__SIMP_BIN__|${BIN_DEST}/simp|g" \
-    -e "s|__SIMP_ICON__|${UI_DEST}/simp-icon-dark.png|g" \
+    -e "s|__SIMP_ICON__|${OPENVR_DEST_DIR}/simp-icon-256.png|g" \
     "${VRMANIFEST_SRC}" > "${OPENVR_DEST_DIR}/org.simp.player.vrmanifest"
   chmod 0644 "${OPENVR_DEST_DIR}/org.simp.player.vrmanifest"
   echo "✓ Installed OpenVR:     ${OPENVR_DEST_DIR}/org.simp.player.vrmanifest"

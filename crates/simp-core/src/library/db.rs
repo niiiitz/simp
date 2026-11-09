@@ -423,7 +423,8 @@ impl LibraryDatabase {
         let search_pattern = search.map(|s| format!("%{}%", s)).unwrap_or_else(|| "%".to_string());
         let mut stmt = conn.prepare(
             "SELECT a.id, a.title, a.album_artist, a.release_year, a.steam_app_id, a.art_cache_path,
-                    COUNT(t.uri) as track_count
+                    COUNT(t.uri) as track_count,
+                    GROUP_CONCAT(t.uri, '|') as uri_list
              FROM albums a
              JOIN tracks t ON t.album_id = a.id
              LEFT JOIN storage_mounts m ON t.mount_root = m.mount_root
@@ -441,10 +442,44 @@ impl LibraryDatabase {
         let rows = stmt.query_map(
             params![source, mount_root, search_pattern, limit as i64, offset as i64],
             |row| {
+                let mut album_artist: String = row.get(2)?;
+                let uri_list: Option<String> = row.get(7).ok();
+                if let Some(uris) = uri_list {
+                    let mut exts: Vec<&'static str> = Vec::new();
+                    for u in uris.split('|') {
+                        if u.starts_with("file://") || u.starts_with('/') {
+                            if let Some((_, ext_raw)) = u.rsplit_once('.') {
+                                let known = match ext_raw.to_ascii_uppercase().as_str() {
+                                    "FLAC" => Some("FLAC"),
+                                    "MP3" => Some("MP3"),
+                                    "WAV" => Some("WAV"),
+                                    "OGG" => Some("OGG"),
+                                    "OPUS" => Some("OPUS"),
+                                    "M4A" => Some("M4A"),
+                                    "AAC" => Some("AAC"),
+                                    "ALAC" => Some("ALAC"),
+                                    "AIFF" => Some("AIFF"),
+                                    _ => None,
+                                };
+                                if let Some(k) = known {
+                                    if !exts.contains(&k) {
+                                        exts.push(k);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !exts.is_empty() {
+                        let fmt_badge = exts.join(" + ");
+                        if !album_artist.contains(&fmt_badge) {
+                            album_artist = format!("{album_artist} • {fmt_badge}");
+                        }
+                    }
+                }
                 Ok(AlbumRecord {
                     id: row.get(0)?,
                     title: row.get(1)?,
-                    album_artist: row.get(2)?,
+                    album_artist,
                     release_year: row.get(3)?,
                     steam_app_id: row.get(4)?,
                     art_url: row.get(5)?,

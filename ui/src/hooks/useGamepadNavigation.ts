@@ -494,7 +494,7 @@ export function useGamepadNavigation({
           const dy = ty - cy;
 
           const overlapsY = r.bottom > cur.top + 6 && r.top < cur.bottom - 6;
-          if (!overlapsY && Math.abs(dy) > 36) continue;
+          if (!overlapsY) continue;
           if (dir === 'right' && dx <= 6) continue;
           if (dir === 'left' && dx >= -6) continue;
 
@@ -1172,7 +1172,12 @@ export function useGamepadNavigation({
         } else {
           applyVolume(preMuteVolumeRef.current > 0.05 ? preMuteVolumeRef.current : 0.85);
         }
-      } else if (e.key === 'f' || e.key === 'F') {
+      } else if (
+        e.key === 'f' ||
+        e.key === 'F' ||
+        e.key === 'F11' ||
+        (e.altKey && e.key === 'Enter')
+      ) {
         e.preventDefault();
         e.stopPropagation();
         if (view === 'lock') {

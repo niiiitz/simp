@@ -2,7 +2,9 @@
 use anyhow::Context;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +78,12 @@ pub fn is_newer_version(current: &str, candidate: &str) -> bool {
 }
 
 fn load_provisioning_settings() -> simp_protocol::ProvisioningSettings {
+    let portable_or_cfg = crate::simp_config_dir().join("settings.vdf");
+    if let Ok(text) = std::fs::read_to_string(&portable_or_cfg) {
+        if let Ok(parsed) = keyvalues_serde::from_str::<simp_protocol::SimpSettings>(&text) {
+            return parsed.provisioning;
+        }
+    }
     if let Some(cfg_dir) = dirs::config_dir() {
         let path = cfg_dir.join("simp").join("settings.vdf");
         if let Ok(text) = std::fs::read_to_string(&path) {
@@ -292,8 +300,24 @@ pub fn spawn_delayed_daemon_restart() {
     #[cfg(target_os = "windows")]
     {
         if let Ok(exe) = std::env::current_exe() {
-            let mut cmd = Command::new(exe);
-            cmd.arg("--daemon")
+            let pid = std::process::id();
+            let exe_dir = exe.parent().map(|p| p.to_path_buf());
+            let target_exe = exe_dir
+                .as_ref()
+                .map(|d| d.join("simp.exe"))
+                .filter(|p| p.is_file())
+                .unwrap_or(exe);
+            let old_exe = exe_dir
+                .as_ref()
+                .map(|d| d.join("simp.exe.old"))
+                .unwrap_or_else(|| target_exe.with_extension("exe.old"));
+            let target_str = target_exe.to_string_lossy().to_string();
+            let old_str = old_exe.to_string_lossy().to_string();
+            let cmd_line = format!(
+                "ping 127.0.0.1 -n 2 >nul 2>&1 & taskkill /F /PID {pid} >nul 2>&1 & ping 127.0.0.1 -n 2 >nul 2>&1 & del /F /Q \"{old_str}\" >nul 2>&1 & start \"\" \"{target_str}\" --daemon"
+            );
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/C", &cmd_line])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -324,28 +348,34 @@ pub fn spawn_delayed_daemon_restart() {
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let script = "sleep 0.45; \
-            export XDG_RUNTIME_DIR=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"; \
+        let self_pid = std::process::id();
+        let script = format!(
+            "sleep 0.45; \
+            export XDG_RUNTIME_DIR=\"${{XDG_RUNTIME_DIR:-/run/user/$(id -u)}}\"; \
+            export DBUS_SESSION_BUS_ADDRESS=\"${{DBUS_SESSION_BUS_ADDRESS:-unix:path=${{XDG_RUNTIME_DIR}}/bus}}\"; \
             pkill -f 'simp-widevine-worker' 2>/dev/null || true; \
             pkill -f '18888/?worker=apple' 2>/dev/null || true; \
             if command -v systemctl >/dev/null 2>&1 && [ -f \"$HOME/.config/systemd/user/simp.service\" ]; then \
               systemctl --user daemon-reload 2>/dev/null || true; \
               systemctl --user stop simp.service 2>/dev/null || true; \
             fi; \
+            kill -TERM {self_pid} 2>/dev/null || true; \
             pkill -TERM -f 'simp --daemon' 2>/dev/null || true; \
             sleep 0.25; \
+            kill -9 {self_pid} 2>/dev/null || true; \
             pkill -9 -f 'simp --daemon' 2>/dev/null || true; \
             if command -v systemctl >/dev/null 2>&1 && [ -f \"$HOME/.config/systemd/user/simp.service\" ]; then \
-              systemctl --user start simp.service 2>/dev/null || true; \
-              sleep 0.5; \
+              systemctl --user restart simp.service 2>/dev/null || systemctl --user start simp.service 2>/dev/null || true; \
+              sleep 0.6; \
             fi; \
             if ! curl -fsS --max-time 2 http://127.0.0.1:18888/health >/dev/null 2>&1; then \
               nohup \"$HOME/.local/share/simp/bin/simp\" --daemon >/dev/null 2>&1 & \
-            fi";
+            fi"
+        );
 
         // Detach into a new session via `setsid` so `systemctl --user stop simp.service` never kills the restart script
         let spawned = Command::new("setsid")
-            .args(["sh", "-c", script])
+            .args(["sh", "-c", &script])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -353,13 +383,213 @@ pub fn spawn_delayed_daemon_restart() {
 
         if spawned.is_err() {
             let _ = Command::new("sh")
-                .args(["-c", script])
+                .args(["-c", &script])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn();
         }
     }
+}
+
+/// Synchronously stops any existing background daemon (systemd user service or standalone `simp --daemon`),
+/// starts the newly installed binary, and waits until `http://127.0.0.1:18888/health` responds.
+/// Used by CLI `simp update` so the background service is guaranteed to be running the updated version
+/// before `simp update` returns to the shell prompt.
+pub fn restart_daemon_synchronously() -> Result<String> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    fn probe_health() -> Option<(String, Option<u32>)> {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 18888));
+        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(180)).ok()?;
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:18888\r\nConnection: close\r\n\r\n")
+            .ok()?;
+        let mut resp = String::new();
+        let _ = stream.read_to_string(&mut resp);
+        let body = resp.split("\r\n\r\n").nth(1)?;
+        let val: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+        let ver = val.get("version")?.as_str()?.to_string();
+        let pid = val.get("pid").and_then(|v| v.as_u64()).map(|n| n as u32);
+        Some((ver, pid))
+    }
+
+    let previous_pid = probe_health().and_then(|(_, pid)| pid);
+
+    #[cfg(target_os = "windows")]
+    {
+        crate::close_windows_headless_worker_windows();
+        if let Some(pid) = previous_pid {
+            let mut tk = Command::new("taskkill");
+            tk.args(["/F", "/PID", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::configure_background_command(&mut tk);
+            let _ = tk.status();
+        }
+        let mut tk_all = Command::new("taskkill");
+        tk_all
+            .args(["/F", "/IM", "simp.exe", "/FI", &format!("PID ne {}", std::process::id())])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::configure_background_command(&mut tk_all);
+        let _ = tk_all.status();
+        std::thread::sleep(Duration::from_millis(300));
+
+        if let Ok(exe) = std::env::current_exe() {
+            let target_exe = exe
+                .parent()
+                .map(|d| d.join("simp.exe"))
+                .filter(|p| p.is_file())
+                .unwrap_or(exe);
+            let _ = std::fs::remove_file(target_exe.with_extension("exe.old"));
+            let mut cmd = Command::new(&target_exe);
+            cmd.arg("--daemon")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::configure_background_command(&mut cmd);
+            let _ = cmd.spawn();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(pid) = previous_pid {
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let app_bin = resolve_macos_app_bundle_dest().join("Contents/MacOS/simp");
+        let bin = if app_bin.is_file() {
+            app_bin
+        } else {
+            std::env::current_exe().unwrap_or(app_bin)
+        };
+        let _ = Command::new(&bin)
+            .arg("--daemon")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let uid = unsafe { libc::getuid() };
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+            .unwrap_or_else(|_| format!("/run/user/{uid}"));
+        let dbus_addr = std::env::var("DBUS_SESSION_BUS_ADDRESS")
+            .unwrap_or_else(|_| format!("unix:path={runtime_dir}/bus"));
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        let service_file = home.join(".config/systemd/user/simp.service");
+        let installed_bin = home.join(".local/share/simp/bin/simp");
+
+        let _ = Command::new("pkill")
+            .args(["-f", "simp-widevine-worker"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("pkill")
+            .args(["-f", "18888/?worker=apple"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        if service_file.is_file() {
+            let _ = Command::new("systemctl")
+                .env("XDG_RUNTIME_DIR", &runtime_dir)
+                .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
+                .args(["--user", "daemon-reload"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = Command::new("systemctl")
+                .env("XDG_RUNTIME_DIR", &runtime_dir)
+                .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
+                .args(["--user", "stop", "simp.service"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+
+        if let Some(pid) = previous_pid {
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = Command::new("pkill")
+            .args(["-TERM", "-f", "simp --daemon"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        std::thread::sleep(Duration::from_millis(250));
+
+        if let Some(pid) = previous_pid {
+            let _ = Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = Command::new("pkill")
+            .args(["-9", "-f", "simp --daemon"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        if service_file.is_file() {
+            let _ = Command::new("systemctl")
+                .env("XDG_RUNTIME_DIR", &runtime_dir)
+                .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
+                .args(["--user", "start", "simp.service"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            std::thread::sleep(Duration::from_millis(450));
+        }
+
+        if probe_health().is_none() && installed_bin.is_file() {
+            let _ = Command::new(&installed_bin)
+                .arg("--daemon")
+                .env("XDG_RUNTIME_DIR", &runtime_dir)
+                .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        }
+    }
+
+    for _ in 0..25 {
+        if let Some((ver, pid)) = probe_health() {
+            return Ok(match pid {
+                Some(p) => format!("Background service restarted (v{ver}, PID {p})"),
+                None => format!("Background service restarted (v{ver})"),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(120));
+    }
+
+    Ok("Background service restart initiated".to_string())
 }
 
 /// Downloads the latest `simp-steamos-userland-{arch}.tar.gz` release bundle from GitHub,
@@ -387,7 +617,12 @@ pub fn apply_self_update(
         return apply_macos_self_update(&status, &tag, &target_ver, restart_daemon_after);
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        return apply_windows_self_update(&status, &tag, &target_ver, restart_daemon_after);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine HOME directory"))?;
     let install_root = home.join(".local/share/simp");
@@ -559,50 +794,20 @@ pub fn apply_self_update(
         let _ = std::fs::copy(&src_service, &dest_service);
     }
 
-    let src_desktop = extracted_root.join("desktop/org.simp.player.desktop");
-    if src_desktop.is_file() {
-        if let Ok(raw_desktop) = std::fs::read_to_string(&src_desktop) {
-            let apps_dir = home.join(".local/share/applications");
-            let _ = std::fs::create_dir_all(&apps_dir);
-            let rendered = raw_desktop
-                .replace("__SIMP_BIN__", &dest_bin.to_string_lossy())
-                .replace(
-                    "__SIMP_ICON__",
-                    &ui_dest_dir.join("simp-icon-dark.png").to_string_lossy(),
-                );
-            let dest_desktop = apps_dir.join("org.simp.player.desktop");
-            if std::fs::write(&dest_desktop, rendered).is_ok() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &dest_desktop,
-                        std::fs::Permissions::from_mode(0o755),
-                    );
-                }
-            }
-        }
-    }
-
-    // Ensure `~/.local/bin/simp` symlink points to `~/.local/share/simp/bin/simp`
-    #[cfg(unix)]
-    {
-        let symlink_path = local_bin_dir.join("simp");
-        let _ = std::fs::remove_file(&symlink_path);
-        let _ = std::os::unix::fs::symlink(&dest_bin, &symlink_path);
-
-        let usr_local_bin_link = PathBuf::from("/usr/local/bin/simp");
-        if usr_local_bin_link.exists() || Path::new("/usr/local/bin").exists() {
-            let _ = std::fs::remove_file(&usr_local_bin_link);
-            let _ = std::os::unix::fs::symlink(&dest_bin, &usr_local_bin_link);
-        }
-    }
-
     // 2. Replace `~/.local/share/simp/ui/`
     if src_ui.join("index.html").is_file() {
         let _ = std::fs::remove_dir_all(&ui_dest_dir);
         copy_dir_contents(&src_ui, &ui_dest_dir)?;
     }
+
+    // 2a. Install FreeDesktop `hicolor` icons (16x16..512x512 + pixmaps) & `.desktop` launcher + WMClass alias entries
+    let src_desktop = extracted_root.join("desktop/org.simp.player.desktop");
+    install_linux_icons_and_desktop_entries(
+        &home,
+        &dest_bin,
+        &ui_dest_dir,
+        src_desktop.is_file().then_some(src_desktop.as_path()),
+    );
 
     // 2b. Copy any bundled support libraries in `lib/` (e.g. `libnspr4.so` on aarch64)
     let src_lib = extracted_root.join("lib");
@@ -754,6 +959,311 @@ pub fn apply_self_update(
         message: msg,
     })
     }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn install_linux_icons_and_desktop_entries(
+    home: &Path,
+    dest_bin: &Path,
+    ui_dest_dir: &Path,
+    src_desktop: Option<&Path>,
+) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let local_bin_dir = home.join(".local/bin");
+        let _ = std::fs::create_dir_all(&local_bin_dir);
+        let symlink_path = local_bin_dir.join("simp");
+        let _ = std::fs::remove_file(&symlink_path);
+        let _ = std::os::unix::fs::symlink(dest_bin, &symlink_path);
+
+        let usr_local_bin_link = PathBuf::from("/usr/local/bin/simp");
+        if usr_local_bin_link.exists() || Path::new("/usr/local/bin").exists() {
+            let _ = std::fs::remove_file(&usr_local_bin_link);
+            let _ = std::os::unix::fs::symlink(dest_bin, &usr_local_bin_link);
+        }
+
+        // Install multi-resolution RGBA PNGs into `~/.local/share/icons/hicolor/<size>/apps/org.simp.player.png`
+        // and `~/.local/share/pixmaps/org.simp.player.png` so Steam Frame's program launcher, app launch history,
+        // and KDE Plasma always resolve `Icon=org.simp.player` at native resolution.
+        let hicolor_root = home.join(".local/share/icons/hicolor");
+        let fallback_icon = ui_dest_dir.join("simp-icon-256.png");
+        let fallback_icon = if fallback_icon.is_file() {
+            fallback_icon
+        } else {
+            ui_dest_dir.join("simp-icon-dark.png")
+        };
+
+        for (size_dir, file_name) in [
+            ("16x16", "simp-icon-16.png"),
+            ("32x32", "simp-icon-32.png"),
+            ("48x48", "simp-icon-48.png"),
+            ("64x64", "simp-icon-64.png"),
+            ("128x128", "simp-icon-128.png"),
+            ("256x256", "simp-icon-256.png"),
+            ("512x512", "simp-icon-512.png"),
+        ] {
+            let src_png = {
+                let candidate = ui_dest_dir.join(file_name);
+                if candidate.is_file() {
+                    candidate
+                } else {
+                    fallback_icon.clone()
+                }
+            };
+            if src_png.is_file() {
+                let apps_icon_dir = hicolor_root.join(size_dir).join("apps");
+                let _ = std::fs::create_dir_all(&apps_icon_dir);
+                let _ = std::fs::copy(&src_png, apps_icon_dir.join("org.simp.player.png"));
+                let _ = std::fs::copy(&src_png, apps_icon_dir.join("simp.png"));
+            }
+        }
+
+        if fallback_icon.is_file() {
+            let icons_base = home.join(".local/share/icons");
+            let pixmaps_dir = home.join(".local/share/pixmaps");
+            let _ = std::fs::create_dir_all(&icons_base);
+            let _ = std::fs::create_dir_all(&pixmaps_dir);
+            let _ = std::fs::copy(&fallback_icon, icons_base.join("org.simp.player.png"));
+            let _ = std::fs::copy(&fallback_icon, pixmaps_dir.join("org.simp.player.png"));
+            let _ = std::fs::copy(&fallback_icon, pixmaps_dir.join("simp.png"));
+        }
+
+        let apps_dir = home.join(".local/share/applications");
+        let _ = std::fs::create_dir_all(&apps_dir);
+        let bin_str = dest_bin.to_string_lossy();
+
+        if let Some(desktop_file) = src_desktop {
+            if let Ok(raw_desktop) = std::fs::read_to_string(desktop_file) {
+                let rendered = raw_desktop
+                    .replace("__SIMP_BIN__", &bin_str)
+                    .replace("__SIMP_ICON__", "org.simp.player");
+                let dest_desktop = apps_dir.join("org.simp.player.desktop");
+                if std::fs::write(&dest_desktop, rendered).is_ok() {
+                    let _ = std::fs::set_permissions(
+                        &dest_desktop,
+                        std::fs::Permissions::from_mode(0o755),
+                    );
+                }
+            }
+        }
+
+        // Hidden Wayland/X11/Steam Frame launcher matcher `.desktop` entries so app launch history
+        // and window managers map `simp`, `simp-player-ui`, and Chromium `--app=http://127.0.0.1:18888` to SIMP's icon.
+        for alias_id in [
+            "simp-player-ui",
+            "simp",
+            "chrome-127.0.0.1__-Default",
+            "chrome-http___127.0.0.1_18888_-Default",
+            "127.0.0.1",
+        ] {
+            let alias_path = apps_dir.join(format!("{alias_id}.desktop"));
+            let content = format!(
+                "[Desktop Entry]\nType=Application\nName=SIMP\nExec={bin_str}\nIcon=org.simp.player\nNoDisplay=true\nStartupWMClass={alias_id}\n"
+            );
+            if std::fs::write(&alias_path, content).is_ok() {
+                let _ = std::fs::set_permissions(&alias_path, std::fs::Permissions::from_mode(0o644));
+            }
+        }
+
+        let _ = Command::new("gtk-update-icon-cache")
+            .args(["-f", "-t"])
+            .arg(&hicolor_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("update-desktop-database")
+            .arg(&apps_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_self_update(
+    status: &UpdateStatus,
+    tag: &str,
+    target_ver: &str,
+    restart_after: bool,
+) -> Result<UpdateApplyResult> {
+    let current_exe = std::env::current_exe()
+        .context("Could not determine running simp.exe path")?;
+    let install_dir = current_exe
+        .parent()
+        .ok_or_else(|| anyhow!("Could not determine simp.exe install directory"))?
+        .to_path_buf();
+
+    let tmp_dir = std::env::temp_dir().join(format!("simp-windows-update-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir)?;
+
+    let arch = std::env::consts::ARCH;
+    let zip_name = format!("simp-windows-portable-{arch}.zip");
+    let zip_path = tmp_dir.join(&zip_name);
+    let download_url = status.asset_url.clone().unwrap_or_else(|| {
+        format!("https://github.com/niiiitz/simp/releases/download/{tag}/{zip_name}")
+    });
+
+    // 1. Download `simp-windows-portable-x86_64.zip` via in-process WinHTTP / system curl.exe
+    let mut dl_ok = false;
+    if let Ok(bytes) = crate::http_pool::http_get_bytes(
+        &download_url,
+        &[("User-Agent", "SIMP-Updater")],
+        None,
+        180,
+    ) {
+        if bytes.len() > 1024 && bytes.starts_with(b"PK\x03\x04") {
+            if std::fs::write(&zip_path, &bytes).is_ok() {
+                dl_ok = true;
+            }
+        }
+    }
+
+    if !dl_ok {
+        let curl_bin = if Path::new(r"C:\Windows\System32\curl.exe").is_file() {
+            r"C:\Windows\System32\curl.exe"
+        } else {
+            "curl"
+        };
+        let mut cmd = Command::new(curl_bin);
+        cmd.args([
+            "-4",
+            "--http1.1",
+            "--retry",
+            "2",
+            "-fsSL",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "180",
+            "-o",
+        ])
+        .arg(&zip_path)
+        .arg(&download_url);
+        crate::configure_background_command(&mut cmd);
+        dl_ok = cmd.status().map(|s| s.success()).unwrap_or(false);
+    }
+
+    if !dl_ok {
+        let ps_cmd = format!(
+            "$ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -Uri '{}' -OutFile '{}'",
+            download_url.replace('\'', "''"),
+            zip_path.to_string_lossy().replace('\'', "''")
+        );
+        let mut ps = Command::new("powershell");
+        ps.args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd]);
+        crate::configure_background_command(&mut ps);
+        dl_ok = ps.status().map(|s| s.success()).unwrap_or(false);
+    }
+
+    if !dl_ok || !zip_path.is_file() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(anyhow!(
+            "Failed to download Windows Portable release archive from {download_url}"
+        ));
+    }
+
+    // 2. Extract `.zip` using built-in Windows 10/11 `tar.exe -xf` (or PowerShell `Expand-Archive` fallback)
+    let extract_dir = tmp_dir.join("extracted");
+    std::fs::create_dir_all(&extract_dir)?;
+    let tar_bin = if Path::new(r"C:\Windows\System32\tar.exe").is_file() {
+        r"C:\Windows\System32\tar.exe"
+    } else {
+        "tar"
+    };
+    let mut tar_cmd = Command::new(tar_bin);
+    tar_cmd
+        .arg("-xf")
+        .arg(&zip_path)
+        .arg("-C")
+        .arg(&extract_dir);
+    crate::configure_background_command(&mut tar_cmd);
+    let mut extracted_ok = tar_cmd.status().map(|s| s.success()).unwrap_or(false);
+
+    if !extracted_ok {
+        let ps_extract = format!(
+            "$ProgressPreference = 'SilentlyContinue'; Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+            zip_path.to_string_lossy().replace('\'', "''"),
+            extract_dir.to_string_lossy().replace('\'', "''")
+        );
+        let mut ps = Command::new("powershell");
+        ps.args(["-NoProfile", "-NonInteractive", "-Command", &ps_extract]);
+        crate::configure_background_command(&mut ps);
+        extracted_ok = ps.status().map(|s| s.success()).unwrap_or(false);
+    }
+
+    if !extracted_ok {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(anyhow!("Failed to extract Windows release archive {download_url}"));
+    }
+
+    let nested_root = extract_dir.join("simp-windows-portable");
+    let bundle_root = if nested_root.join("simp.exe").is_file() {
+        nested_root
+    } else {
+        extract_dir.clone()
+    };
+    let src_exe = bundle_root.join("simp.exe");
+    let src_ui = bundle_root.join("ui");
+    if !src_exe.is_file() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(anyhow!(
+            "Downloaded Windows archive did not contain simp.exe"
+        ));
+    }
+
+    // 3. In-place atomic replacement of `simp.exe` in `install_dir`:
+    // Windows allows renaming a currently running `.exe` (`simp.exe` -> `simp.exe.old`) in the same folder
+    // without Administrator privileges, while keeping `data\` (`library.db`, `settings.vdf`, `art\`) untouched!
+    let dest_exe = install_dir.join("simp.exe");
+    let old_exe = install_dir.join("simp.exe.old");
+    let _ = std::fs::remove_file(&old_exe);
+    if dest_exe.is_file() {
+        std::fs::rename(&dest_exe, &old_exe).with_context(|| {
+            format!(
+                "Could not rename running {} to {} (check folder write permissions)",
+                dest_exe.display(),
+                old_exe.display()
+            )
+        })?;
+    }
+    if let Err(e) = std::fs::copy(&src_exe, &dest_exe) {
+        if old_exe.is_file() && !dest_exe.is_file() {
+            let _ = std::fs::rename(&old_exe, &dest_exe);
+        }
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(anyhow!(
+            "Failed to write updated {}: {e}",
+            dest_exe.display()
+        ));
+    }
+
+    // 4. Update `ui\` in-place (preserving `data\`)
+    if src_ui.join("index.html").is_file() {
+        let dest_ui = install_dir.join("ui");
+        let _ = std::fs::remove_dir_all(&dest_ui);
+        let _ = copy_dir_contents(&src_ui, &dest_ui);
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    if restart_after {
+        spawn_delayed_daemon_restart();
+    }
+
+    Ok(UpdateApplyResult {
+        ok: true,
+        previous_version: status.current_version.clone(),
+        updated_version: target_ver.to_string(),
+        decky_updated: false,
+        message: format!(
+            "Updated SIMP Portable ({}) to v{target_ver}",
+            install_dir.display()
+        ),
+    })
 }
 
 #[cfg(target_os = "macos")]

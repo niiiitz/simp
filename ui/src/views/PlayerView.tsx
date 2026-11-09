@@ -150,7 +150,13 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const [vizMode, setVizMode] = useState<VisualizerMode>(() => {
     try {
       const saved = window.localStorage.getItem('simp.visualizer_mode') as VisualizerMode | null;
-      if (saved === 'glyph' || saved === 'avs' || saved === 'demoscene' || saved === 'off') {
+      if (
+        saved === 'glyph' ||
+        saved === 'avs' ||
+        saved === 'demoscene' ||
+        saved === 'cycle' ||
+        saved === 'off'
+      ) {
         return saved;
       }
     } catch {}
@@ -169,6 +175,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   // Unified Video Modality State (`ia_video`, `local_video`, `dvd`)
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [videoTheatreExpanded, setVideoTheatreExpanded] = useState<boolean>(false);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(() =>
+    typeof document !== 'undefined' ? Boolean(document.fullscreenElement) : false
+  );
   const [hudVisible, setHudVisible] = useState<boolean>(true);
   const hudTimerRef = useRef<number | null>(null);
   const lastTimeReportMsRef = useRef<number>(0);
@@ -191,35 +200,48 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return () => window.removeEventListener('resize', onResize);
   }, [isVideoTrack]);
 
-  // Listen for `SELECT` button (`simp-player-actions-toggle`) and `F` key (`simp-player-fullscreen-toggle`) on Player screen
+  const togglePlayerFullscreen = useCallback(() => {
+    if (isVideoTrack) {
+      setVideoTheatreExpanded((prev) => {
+        const next = !prev;
+        if (next) {
+          if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen?.().catch(() => {});
+          }
+        } else if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        }
+        return next;
+      });
+    } else {
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      } else {
+        document.documentElement.requestFullscreen?.().catch(() => {});
+      }
+    }
+  }, [isVideoTrack]);
+
+  // Listen for `SELECT` button (`simp-player-actions-toggle`), `F`/`Alt+F`/`F11` (`simp-player-fullscreen-toggle`), and `fullscreenchange`
   useEffect(() => {
     const onToggleActions = () => {
       setPlayerActionsOpen((prev) => !prev);
     };
     const onToggleFullscreen = () => {
-      if (isVideoTrack) {
-        setVideoTheatreExpanded((prev) => {
-          const next = !prev;
-          if (!next && document.fullscreenElement) {
-            document.exitFullscreen().catch(() => {});
-          }
-          return next;
-        });
-      } else {
-        if (document.fullscreenElement) {
-          document.exitFullscreen().catch(() => {});
-        } else {
-          document.documentElement.requestFullscreen?.().catch(() => {});
-        }
-      }
+      togglePlayerFullscreen();
+    };
+    const onFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
     };
     window.addEventListener('simp-player-actions-toggle', onToggleActions);
     window.addEventListener('simp-player-fullscreen-toggle', onToggleFullscreen);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
     return () => {
       window.removeEventListener('simp-player-actions-toggle', onToggleActions);
       window.removeEventListener('simp-player-fullscreen-toggle', onToggleFullscreen);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
     };
-  }, [isVideoTrack]);
+  }, [togglePlayerFullscreen]);
 
   // 4-Second (`4000ms`) Floating Controls & Scrub Bar Auto-Hide Timer in Expanded Theatre Mode
   const wakeFloatingHud = useCallback(() => {
@@ -1418,12 +1440,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         badge="R2"
                         onClick={() => defaultSimpClient.seekRelative(10_000)}
                       />
-                      <TransportIconButton
-                        icon="🎛️"
-                        badge="SELECT"
-                        active={playerActionsOpen}
-                        onClick={() => setPlayerActionsOpen((v) => !v)}
-                      />
                     </div>
                   </div>
                 )}
@@ -1453,7 +1469,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             )}
           </div>
 
-          {/* Queue Mode & Track Actions Controls: Shuffle (X), Loop/Repeat (Y), Theatre Expand (if video), & Track Actions (SELECT) */}
+          {/* Queue Mode Controls: Shuffle (X) & Loop/Repeat (Y) */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <TransportIconButton
               icon="🔀"
@@ -1472,20 +1488,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               }
               active={snap?.repeat_mode !== 'off'}
               onClick={() => defaultSimpClient.cycleRepeat()}
-            />
-            {isVideoTrack && (
-              <TransportIconButton
-                icon="⛶"
-                badge="THEATRE"
-                active={videoTheatreExpanded}
-                onClick={() => setVideoTheatreExpanded((v) => !v)}
-              />
-            )}
-            <TransportIconButton
-              icon="🎛️"
-              badge="SELECT"
-              active={playerActionsOpen}
-              onClick={() => setPlayerActionsOpen((v) => !v)}
             />
           </div>
         </div>
@@ -1540,32 +1542,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               >
                 {track?.title || 'No Track Loaded'}
               </h1>
-              {!isVideoTrack && (
-                <button
-                  type="button"
-                  onClick={cycleVisualizerMode}
-                  title="Cycle Background Visualizer (GLYPH MATRIX • WINAMP AVS • DEMOSCENE 64K • OFF)"
-                  style={{
-                    padding: '5px 11px',
-                    borderRadius: 999,
-                    background: vizMode !== 'off' ? 'rgba(11, 24, 32, 0.94)' : 'rgba(14, 14, 22, 0.92)',
-                    border:
-                      vizMode !== 'off'
-                        ? '1px solid rgba(42, 163, 196, 0.78)'
-                        : '1px solid rgba(82, 82, 102, 0.65)',
-                    boxShadow: '0 6px 18px rgba(0, 0, 0, 0.92), 0 2px 6px rgba(0, 0, 0, 0.95)',
-                    color: vizMode !== 'off' ? '#7dd3fc' : '#a1a1b5',
-                    fontFamily: 'monospace',
-                    fontSize: 11,
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                    flexShrink: 0,
-                    letterSpacing: 0.4,
-                  }}
-                >
-                  ✨ VIZ: {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'}
-                </button>
-              )}
             </div>
             <p
               style={{
@@ -1586,6 +1562,17 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 </>
               )}
               {track?.album ? ` • ${track.album}` : ''}
+              {(() => {
+                const uri = track?.uri;
+                if (!uri || (!uri.startsWith('file://') && !uri.startsWith('/'))) return null;
+                const clean = uri.split('?')[0].split('#')[0];
+                const dot = clean.lastIndexOf('.');
+                if (dot < 0 || dot === clean.length - 1) return null;
+                const ext = clean.slice(dot + 1).toUpperCase();
+                return ['FLAC', 'MP3', 'WAV', 'OGG', 'OPUS', 'M4A', 'AAC', 'ALAC', 'AIFF'].includes(ext)
+                  ? ` • ${ext}`
+                  : null;
+              })()}
               {isVideoTrack && activeQuality ? ` • ${activeQuality.label}` : ''}
             </p>
           </div>
@@ -2264,11 +2251,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                   >
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                       <span style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
-                        ✨ Background Visualizer:{' '}
-                        {VISUALIZER_MODES.find((m) => m.id === vizMode)?.label || 'GLYPH MATRIX'}
+                        ✨ Visualizer:{' '}
+                        {VISUALIZER_MODES.find((m) => m.id === vizMode)?.label || 'Glyph Matrix'}
                       </span>
                       <span style={{ fontSize: 11, color: '#8e8e99' }}>
-                        Cycle between GLYPH MATRIX (3D ASCII), WINAMP AVS (Tunnel), DEMOSCENE 64K (DYCP Scroller) & OFF
+                        Glyph Matrix • Winamp AVS • Demoscene 64K • Cycle • Off
                       </span>
                     </div>
                     <span
@@ -2283,6 +2270,39 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     </span>
                   </button>
                 )}
+
+                {/* 8. Toggle Fullscreen */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlayerActionsOpen(false);
+                    togglePlayerFullscreen();
+                  }}
+                  style={{
+                    ...actionRowBtnStyle,
+                    background: isFullscreen ? '#0f222a' : '#101018',
+                    border: isFullscreen ? '1px solid #2aa3c4' : '1px solid #222230',
+                  }}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
+                      ⛶ {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen Player'}
+                    </span>
+                    <span style={{ fontSize: 11, color: '#8e8e99' }}>
+                      Shortcut: F / F11 / Alt+F
+                    </span>
+                  </div>
+                  <span
+                    style={{
+                      fontFamily: 'monospace',
+                      fontSize: 11,
+                      fontWeight: 800,
+                      color: isFullscreen ? '#67e8f9' : '#71717a',
+                    }}
+                  >
+                    {isFullscreen ? 'ON' : 'OFF'}
+                  </span>
+                </button>
               </div>
 
               {/* Right Column: Queue / Mix Chapters / Episodes / DVD Titles Browser (D-Pad Right jumps straight to current item) */}

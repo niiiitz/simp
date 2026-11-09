@@ -1072,8 +1072,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   );
 
   // Source-aware SIMP Playlist membership (`has_local`, `has_apple`, `has_soundcloud`, & `has_archive`)
-  // When searching (`searchLower`), user-created `★ SIMP Hybrid Playlists` (`origin === 'simp_local'`)
-  // are always included across all source pills if their title/description matches the search query.
+  // Left-column and My SIMP Library hub playlists remain visible regardless of `browserSearch`
+  // so users can always select or drop search results into a playlist without it disappearing.
   const filteredPlaylists = useMemo(
     () =>
       playlists.filter((pl) => {
@@ -1085,13 +1085,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
           if (!isVideoPl) return false;
         } else if (mediaTypeFilter === 'audio') {
           if (pl.name.startsWith('🎬')) return false;
-        }
-        if (searchLower) {
-          const matchesQuery =
-            pl.name.toLowerCase().includes(searchLower) ||
-            Boolean(pl.description && pl.description.toLowerCase().includes(searchLower));
-          if (!matchesQuery) return false;
-          if (pl.origin === 'simp_local') return true;
         }
         if (pl.origin === 'local_pinned') return isSourceIncluded('local');
         if (pl.origin === 'apple_remote') return isSourceIncluded('apple_music');
@@ -1108,8 +1101,58 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
         }
         return true;
       }),
+    [playlists, mediaTypeFilter, isSourceIncluded]
+  );
+
+  // Playlists matching the active search query (`searchLower`) for the right-pane Unified Search section.
+  const searchMatchedPlaylists = useMemo(
+    () =>
+      !searchLower
+        ? []
+        : playlists.filter((pl) => {
+            if (mediaTypeFilter === 'video') {
+              const isVideoPl =
+                pl.name.startsWith('🎬') ||
+                pl.origin === 'archive_remote' ||
+                (pl.origin === 'simp_local' && (pl.has_archive || pl.has_local));
+              if (!isVideoPl) return false;
+            } else if (mediaTypeFilter === 'audio') {
+              if (pl.name.startsWith('🎬')) return false;
+            }
+            const matchesQuery =
+              pl.name.toLowerCase().includes(searchLower) ||
+              Boolean(pl.description && pl.description.toLowerCase().includes(searchLower));
+            if (!matchesQuery) return false;
+            if (pl.origin === 'simp_local') return true;
+            if (pl.origin === 'local_pinned') return isSourceIncluded('local');
+            if (pl.origin === 'apple_remote') return isSourceIncluded('apple_music');
+            if (pl.origin === 'soundcloud_remote') return isSourceIncluded('soundcloud');
+            if (pl.origin === 'archive_remote') return isSourceIncluded('internet_archive');
+            return true;
+          }),
     [playlists, mediaTypeFilter, isSourceIncluded, searchLower]
   );
+
+  const extractAudioFormat = (uri?: string | null): string | null => {
+    if (!uri || !uri.startsWith('file://')) return null;
+    const m = uri.match(/\.([a-zA-Z0-9]{2,5})(?:$|[?#])/);
+    if (!m) return null;
+    const ext = m[1].toUpperCase();
+    if (
+      ext === 'FLAC' ||
+      ext === 'MP3' ||
+      ext === 'WAV' ||
+      ext === 'OGG' ||
+      ext === 'OPUS' ||
+      ext === 'M4A' ||
+      ext === 'AAC' ||
+      ext === 'ALAC' ||
+      ext === 'AIFF'
+    ) {
+      return ext;
+    }
+    return null;
+  };
 
   const cleanCollectionTitle = (raw: string): string =>
     raw.replace(/^[\s📌💾🍎☁️🏛️🎵💿]+/u, '').trim() || raw;
@@ -2609,7 +2652,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 whiteSpace: 'nowrap',
               }}
             >
-              {isAppleAlbum ? '🍎' : '💾'}
+              {isAppleAlbum
+                ? '🍎'
+                : (() => {
+                    const fmtMatch = alb.album_artist.match(/•\s*(FLAC(?:\s*\+\s*MP3)?|MP3|WAV|OGG|OPUS|M4A|AAC|ALAC|AIFF)$/i);
+                    return fmtMatch ? `💾 ${fmtMatch[1].toUpperCase()}` : '💾';
+                  })()}
             </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <span
@@ -3729,6 +3777,10 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             >
               {s.artists.join(', ')}
               {s.album ? ` • ${s.album}` : ''}
+              {(() => {
+                const fmt = extractAudioFormat(s.uri);
+                return fmt ? ` • ${fmt}` : '';
+              })()}
             </div>
           </div>
         </button>
@@ -3912,16 +3964,18 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             }
             value={browserSearch}
             onChange={(e) => setBrowserSearch(e.target.value)}
-            onClick={() => {
-              setOskTarget('search');
-              if (window.parent && window.parent !== window) {
-                window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+            onClick={(e) => {
+              if (e.detail === 0 || document.documentElement.dataset.simpInput === 'gamepad') {
+                setOskTarget('search');
+                if (window.parent && window.parent !== window) {
+                  window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                }
               }
             }}
             style={{
               width: '100%',
               minHeight: 36,
-              padding: browserSearch ? '0 32px 0 12px' : '0 12px',
+              padding: browserSearch ? '0 58px 0 12px' : '0 34px 0 12px',
               borderRadius: 8,
               background: '#08080c',
               border: browserSearch ? '1px solid #2aa3c4' : '1px solid #242430',
@@ -3930,6 +3984,31 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               boxSizing: 'border-box',
             }}
           />
+          <button
+            data-row-aux="true"
+            onClick={() => {
+              setOskTarget((prev) => (prev === 'search' ? null : 'search'));
+              if (window.parent && window.parent !== window) {
+                window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+              }
+            }}
+            title="Toggle On-Screen Keyboard"
+            style={{
+              position: 'absolute',
+              right: browserSearch ? 32 : 6,
+              width: 24,
+              height: 24,
+              borderRadius: 6,
+              background: '#12121a',
+              border: '1px solid #242432',
+              color: '#9ca3af',
+              fontSize: 11,
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            ⌨
+          </button>
           {browserSearch && (
             <button
               data-row-aux="true"
@@ -4909,10 +4988,12 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
               placeholder="New SIMP Playlist name..."
               value={newPlaylistName}
               onChange={(e) => setNewPlaylistName(e.target.value)}
-              onClick={() => {
-                setOskTarget('playlist');
-                if (window.parent && window.parent !== window) {
-                  window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+              onClick={(e) => {
+                if (e.detail === 0 || document.documentElement.dataset.simpInput === 'gamepad') {
+                  setOskTarget('playlist');
+                  if (window.parent && window.parent !== window) {
+                    window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                  }
                 }
               }}
               onKeyDown={(e) => {
@@ -5195,13 +5276,13 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 </div>
 
                 {/* 1A. Matching SIMP Hybrid & Pinned Playlists */}
-                {filteredPlaylists.length > 0 && (
+                {searchMatchedPlaylists.length > 0 && (
                   <>
                     <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                      📌 MATCHING SIMP & PINNED PLAYLISTS ({filteredPlaylists.length})
+                      📌 MATCHING SIMP & PINNED PLAYLISTS ({searchMatchedPlaylists.length})
                     </div>
                     <div style={tileGridStyle}>
-                      {filteredPlaylists.map(renderSimpPlaylistCard)}
+                      {searchMatchedPlaylists.map(renderSimpPlaylistCard)}
                     </div>
                   </>
                 )}
@@ -5721,10 +5802,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                           placeholder="Name your new SIMP Hybrid Playlist (Local + Apple + SoundCloud)..."
                           value={newPlaylistName}
                           onChange={(e) => setNewPlaylistName(e.target.value)}
-                          onClick={() => {
-                            setOskTarget('playlist');
-                            if (window.parent && window.parent !== window) {
-                              window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                          onClick={(e) => {
+                            if (
+                              e.detail === 0 ||
+                              document.documentElement.dataset.simpInput === 'gamepad'
+                            ) {
+                              setOskTarget('playlist');
+                              if (window.parent && window.parent !== window) {
+                                window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                              }
                             }
                           }}
                           onKeyDown={(e) => {
@@ -7252,6 +7338,26 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             {/* DVD-Video Title & Episode Browser */}
             {browserTarget?.kind === 'cdda' && opticalDisc?.is_dvd_video && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {(!opticalDisc.dvd_css_available || !opticalDisc.dvd_ffmpeg_available) && (
+                  <div
+                    style={{
+                      padding: '10px 14px',
+                      borderRadius: 10,
+                      background: '#261a0d',
+                      border: '1px solid #b45309',
+                      color: '#fcd34d',
+                      fontSize: 12,
+                      fontWeight: 700,
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    💿 DVD Playback Notice: Please install <strong>VLC Media Player</strong> (
+                    <span style={{ fontFamily: 'monospace' }}>videolan.org</span>) if DVD playback
+                    libraries (<span style={{ fontFamily: 'monospace' }}>libdvdcss</span> /{' '}
+                    <span style={{ fontFamily: 'monospace' }}>ffmpeg</span>) are missing on your
+                    system.
+                  </div>
+                )}
                 <div
                   style={{
                     padding: '10px 12px',
@@ -7280,12 +7386,8 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                       }}
                     >
                       {opticalDisc.dvd_css_available
-                        ? opticalDisc.device_path?.startsWith('\\\\')
-                          ? '🔓 DVD CSS Active (VLC / libdvdcss)'
-                          : '🔓 libdvdcss.so.2 Active'
-                        : opticalDisc.device_path?.startsWith('\\\\')
-                        ? '🔒 Unencrypted Only (install VLC or place libdvdcss-2.dll in data\\lib\\)'
-                        : '🔒 Unencrypted Only (place libdvdcss.so.2 in ~/.local/share/simp/lib/)'}
+                        ? '🔓 DVD CSS Active (VLC / libdvdcss)'
+                        : '🔒 Unencrypted Only — Install VLC Media Player (videolan.org) for encrypted DVDs'}
                     </span>
                     <span
                       style={{
@@ -7591,21 +7693,25 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                             : '#67e8f9',
                       }}
                     >
-                      {t.source === 'apple_music'
-                        ? '🍎 Apple'
-                        : t.source === 'soundcloud'
-                        ? '☁️ SC'
-                        : t.source === 'ia_video'
-                        ? '🎬 Archive'
-                        : t.source === 'internet_archive'
-                        ? '🏛️ Archive'
-                        : t.source === 'local_video' || t.uri.startsWith('video://local/')
-                        ? '🎬 Video'
-                        : t.source === 'steam_ost'
-                        ? '🎮 OST'
-                        : t.source === 'cdda'
-                        ? '💿 CD'
-                        : '💾 Local'}
+                      {(() => {
+                        const fmt = extractAudioFormat(t.uri);
+                        const fmtSuffix = fmt ? ` • ${fmt}` : '';
+                        return t.source === 'apple_music'
+                          ? '🍎 Apple'
+                          : t.source === 'soundcloud'
+                          ? '☁️ SC'
+                          : t.source === 'ia_video'
+                          ? '🎬 Archive'
+                          : t.source === 'internet_archive'
+                          ? '🏛️ Archive'
+                          : t.source === 'local_video' || t.uri.startsWith('video://local/')
+                          ? '🎬 Video'
+                          : t.source === 'steam_ost'
+                          ? `🎮 OST${fmtSuffix}`
+                          : t.source === 'cdda'
+                          ? '💿 CD'
+                          : `💾 Local${fmtSuffix}`;
+                      })()}
                     </span>
                     <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a' }}>
                       {Math.floor(t.duration_ms / 60000)}:
