@@ -27,15 +27,19 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
 * **Sony Interactive Entertainment — PlayStation 3 XrossMediaBar (XMB)**:
   * SIMP's two-column spatial controller navigation (`ui/src/hooks/useGamepadNavigation.ts` and `ui/src/views/LibraryBrowserView.tsx`) is an homage to the award-winning PlayStation 3 XMB interface: moving the cursor up and down the left category column automatically previews content in the right pane after a short debounce, pressing D-Pad Right steps directly onto the first playable item (bypassing auxiliary header filters), and pressing `B` walks back up the hierarchy.
 * **Cheng Lou ([@chenglou](https://github.com/chenglou)) — [Pretext Variable Typographic ASCII](https://chenglou.me/pretext/variable-typographic-ascii/)**:
-  * Directly inspired SIMP's `VIZ: GLYPH` mode (`ui/src/components/PlayerBackgroundVisualizer.tsx`): treating typographic character density, weight, and punctuation geometry as a real-time luminance and motion medium, backed by an offscreen pre-baked glyph atlas (`drawImage` blits with zero per-frame font layout or `measureText` overhead).
+  * Directly inspired SIMP's `VIZ: GLYPH` mode (`ui/src/components/PlayerBackgroundVisualizer.tsx`): treating typographic character density, weight, and punctuation geometry as a real-time luminance and motion medium, backed by a zero-allocation 8×8 bitmap glyph LUT (`Uint32Array` `ImageData` blitting with 4×4 Bayer ordered dithering and live synced-lyric character stamping).
 * **Andrei Fomin — [*Effulgence RPG*](https://andreifomin.itch.io/effulgencerpg)**:
   * Inspired the volumetric glowing CRT phosphor aesthetic, 3D relief shading sculpted from album artwork luminance, and deep shadow-to-highlight color grading in `VIZ: GLYPH`.
 * **Tetsuya Mizuguchi, United Game Artists & Enhance — *Rez* (2001) & *Tetris Effect* (2018)**:
   * Inspired SIMP's synesthetic audio-visual coupling — where sub-bass onsets, mid-range harmonics, and high-frequency transients drive geometric pulses, scanline datamosh bursts, wireframe horizon motion, and bespoke track-transition lock-on sequences.
+* **Drool (Marc Flury & Brian Gibson) — *Thumper* (2016) & Parallax Software — *Descent* (1995)**:
+  * Directly inspired `VIZ: VERTIGO` (*Vertigo Corridor*): banking 6-DOF octagonal tunnel architecture, forward-chasing *Thumper* chrome floor chevrons and neon rails, vanishing-point vector reticles, and floating 3D holographic lyric banners.
+* **Kai Krause & MetaCreations — *Bryce 3D* (1994) & 1990s Mead *Trapper Keeper* CGI Art**:
+  * Directly inspired `VIZ: TRAPPER` (*90s Bryce Trapper*): raytraced-style chrome spheres, orbiting wireframe pyramids, receding perspective checkerboard floors, Amiga copper horizon rasters, and a 2-of-3 geometric Rock-Paper-Scissors arena.
 * **Nullsoft (Justin Frankel, Christophe Thibault & Contributors) — Winamp Spectrum Analyzer & Advanced Visualization Studio (`AVS`)**:
-  * Directly inspired `VIZ: AVS`: parametric `SuperScope` waveform ribbons, 3D starfield warp interleaved with live timed SoundCloud comment pills, and a 16-band logarithmic spectrum analyzer with gravity peak-hold caps.
+  * Directly inspired `VIZ: AVS`: parametric `SuperScope` waveform ribbons, 3D starfield warp interleaved with live timed SoundCloud comment and synced lyric pills, and a 16-band logarithmic spectrum analyzer with gravity peak-hold caps.
 * **The 8-Bit & 16-Bit Demoscene Community & Artiom "Megus" Fedosov ([*"Creativity Through Limitation: 8-bit Demoscene"*](https://medium.com/@megus/creativity-through-limitation-8-bit-demoscene-68266b918e4a))**:
-  * Inspired `VIZ: 64K` and SIMP's broader engineering ethos of achieving rich visual expression within tight CPU/battery budgets: Amiga-style `Copperbars` (horizontal raster scanline gradient bars oscillating in sine/cosine phase), 3D perspective synth horizons, and classic `DYCP` (*Different Y Character Position*) sine-wave scrollers carrying track metadata and live SoundCloud community "greetz".
+  * Inspired `VIZ: 64K` and SIMP's broader engineering ethos of achieving rich visual expression within tight CPU/battery budgets: Amiga-style `Copperbars` (horizontal raster scanline gradient bars oscillating in sine/cosine phase), 3D perspective synth horizons, and classic `DYCP` (*Different Y Character Position*) sine-wave scrollers carrying track metadata, synced lyrics, and live SoundCloud community "greetz".
 * **[`Nannou`](https://github.com/nannou-org/nannou) ([*Why Nannou? Goals*](https://guide.nannou.cc/why_nannou.html#goals)) & [`Processing` / `p5.js`](https://github.com/processing/p5.js) (The Processing Foundation)**:
   * Studied when designing SIMP's hybrid Rust-DSP + Canvas2D visualizer architecture (`crates/simp-core/src/viz.rs` and `ui/src/components/PlayerBackgroundVisualizer.tsx`), including lock-free audio sample ring-buffer tapping (`AudioTapSource<S>`), 30 Hz `AudioSpectrumTick` feature extraction, and immediate-mode 2D generative math primitives.
 
@@ -54,10 +58,12 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
 
 ---
 
-## 4. Optical Media (`CD-DA` & `DVD-Video`) & Cover Art Resolution
+## 4. Optical Media (`CD-DA` & `DVD-Video`), Cover Art & Synced Lyrics Resolution
 
+* **Tran Xuan Thang ([@tranxuanthang](https://github.com/tranxuanthang)) & the [`LRCLIB`](https://lrclib.net) Project ([`tranxuanthang/lrclib`](https://github.com/tranxuanthang/lrclib))**:
+  * Thank you for building and operating the open, crowd-sourced synchronized lyrics database (`https://lrclib.net/docs`). Powers SIMP's native Rust time-synced LRC & plain lyrics resolver (`crates/simp-core/src/lyrics.rs`), pairing local `.lrc` sidecar discovery with duration-matched `/api/get` and `/api/search` lookups across Local, Steam OST, Apple Music, SoundCloud, and Internet Archive tracks.
 * **VideoLAN Project ([`libdvdcss`](https://code.videolan.org/videolan/libdvdcss), [`libdvdread`](https://code.videolan.org/videolan/libdvdread), [`libdvdnav`](https://code.videolan.org/videolan/libdvdnav), and [`VLC`](https://www.videolan.org/vlc/))**:
-  * Reference for SIMP's zero-bundled runtime `dlopen`/`LoadLibraryW` integration with user-supplied `libdvdcss` (`dvdcss_open`, `dvdcss_seek`, `dvdcss_read`), as well as the DVD-Video `VIDEO_TS.IFO` (`VMGI_MAT`, `TT_SRPT`) and `VTS_XX_0.IFO` (`VTSI_MAT`, `VTS_PGCIT`) binary table specifications, BCD frame timing, VOBU NAV pack alignment (`0x000001BF`), and MPEG-2 PES `private_stream_1` (`0xBD`) AC-3 / SPU subtitle sub-stream headers in `crates/simp-core/src/sinks/dvd.rs`.
+  * Reference for SIMP's zero-bundled runtime `dlopen`/`LoadLibraryW` integration with user-supplied `libdvdcss` (`dvdcss_open`, `dvdcss_seek`, `dvdcss_read` — including automatic discovery inside Linux VLC Flatpak runtimes), as well as the DVD-Video `VIDEO_TS.IFO` (`VMGI_MAT`, `TT_SRPT`) and `VTS_XX_0.IFO` (`VTSI_MAT`, `VTS_PGCIT`) binary table specifications, BCD frame timing, VOBU NAV pack alignment (`0x000001BF`), and MPEG-2 PES `private_stream_1` (`0xBD`) AC-3 / SPU subtitle sub-stream headers in `crates/simp-core/src/sinks/dvd.rs`.
 * **MetaBrainz Foundation ([`MusicBrainz`](https://musicbrainz.org) & [`Cover Art Archive`](https://coverartarchive.org))**:
   * Reference for Red Book Audio CD TOC SHA-1 DiscID calculation (`crates/simp-core/src/sinks/cdda.rs`) and polite rate-limited cover art resolution (`crates/simp-core/src/library/artwork.rs`).
 * **Linux Kernel `<linux/cdrom.h>` & Microsoft Win32 `ntddcdrm.h`**:
@@ -69,22 +75,24 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
 
 * **Chromium Open Source Project (`media/cdm/api/content_decryption_module.h`) & ISO/IEC 23001-7 (`CENC` / `cbcs`)**:
   * Reference for SIMP's in-process `ContentDecryptionModule_10` and `Host_10` C++ vtable FFI bridge (`crates/simp-core/src/sinks/apple_native/cdm_host.rs`) and ISO-BMFF fragmented MP4 (`moov`/`moof`/`mdat`, `sinf`/`schi`/`tenc`, and AES-128-CBC 1:9 pattern decryption in `mp4_cbcs.rs`).
-* **SoundCloud Developers API ([Authentication Guide](https://developers.soundcloud.com/docs/api/guide#authentication), [API Terms of Use](https://developers.soundcloud.com/docs/api/terms-of-use#changes), and [Branding & Attribution Guidelines](https://developers.soundcloud.com/docs/api/buttons-logos#how-to-properly-attribute-in-your-app)) & IETF RFC 7636 (`PKCE`)**:
-  * Reference for OAuth 2.1 Authorization Code + PKCE (`S256`) authentication, volatile RAM-only HLS AAC/fMP4 stream transcodings, `POST /disconnect` session revocation, waveform peak envelopes, and timed track comments (`crates/simp-core/src/sinks/soundcloud_api.rs` and `soundcloud.rs`).
+* **SoundCloud Developers API ([Authentication Guide](https://developers.soundcloud.com/docs/api/guide#authentication), [Credential Rotation](https://developers.soundcloud.com/docs/api/credential-rotation), [API Terms of Use](https://developers.soundcloud.com/docs/api/terms-of-use#changes), and [Branding & Attribution Guidelines](https://developers.soundcloud.com/docs/api/buttons-logos#how-to-properly-attribute-in-your-app)), IETF RFC 7636 (`PKCE`) & Cloudflare Workers**:
+  * Reference for OAuth 2.1 Authorization Code + PKCE (`S256`) and `client_credentials` authentication brokered through a zero-storage, stateless **Cloudflare Worker** token proxy (`packaging/cloudflare/simp-tap-67/worker.js`, keeping `client_secret` out of distributed binaries), official 7-bar Cloudmark attribution (`ui/src/components/SoundCloudLogo.tsx`), volatile RAM-only HLS AAC/fMP4 stream transcodings, `POST /disconnect` session revocation, waveform peak envelopes, and timed track comments (`crates/simp-core/src/sinks/soundcloud_api.rs` and `soundcloud.rs`).
 * **Apple MusicKit & Web Playback API**:
-  * Reference for ES256 (`P-256` ECDSA) developer token signing, storefront catalog resolution, cloud library pagination, and personal radio station seeding (`crates/simp-core/src/sinks/apple_api.rs`).
+  * Reference for ES256 (`P-256` ECDSA) developer token signing, storefront catalog resolution, artist profile & discography views, cloud library pagination, and personal/algorithmic radio station seeding (`crates/simp-core/src/sinks/apple_api.rs`).
 * **Daniel Stenberg & the [`curl` / `libcurl`](https://curl.se/libcurl/) Project**:
   * Reference for SIMP's in-process `libcurl.so.4` C FFI connection pool (`crates/simp-core/src/http_pool.rs`) enabling persistent TLS + HTTP/2 connection reuse without bloating the binary.
 
 ---
 
-## 6. SteamOS, Gamescope, OpenVR, macOS & Desktop Ecosystem
+## 6. SteamOS, Gamescope, OpenVR, macOS, Windows & Cross-Compilation Ecosystem
 
 * **Valve Corporation ([`SteamOS`](https://store.steampowered.com/steamos), [`Gamescope`](https://github.com/ValveSoftware/gamescope), and [`OpenVR`](https://github.com/ValveSoftware/openvr))**:
-  * Reference for Valve Data Format (`libraryfolders.vdf`, `appmanifest_*.acf`, and binary `shortcuts.vdf`) parsing and SIMP's zero-dependency `libopenvr_api.so` `IVROverlay` C ABI bridge (`crates/simp-core/src/vr_overlay.rs`) for SteamVR / Steam Frame dashboard overlays.
+  * Reference for Valve Data Format (`libraryfolders.vdf`, `appmanifest_*.acf`, and binary `shortcuts.vdf`) parsing, native Linux `/dev/hidraw*` Valve Steam Controller (`0x28de`) lizard-mode & gamepad packet decoding (`crates/simp-core/src/gamepad.rs`), and SIMP's zero-dependency `libopenvr_api.so` `IVROverlay` C ABI bridge (`crates/simp-core/src/vr_overlay.rs`) for SteamVR / Steam Frame dashboard overlays.
 * **[`SteamDeckHomebrew / Decky Loader`](https://github.com/SteamDeckHomebrew/decky-loader)**:
   * Reference and plugin host ecosystem for SIMP's optional Quick Access Menu (`decky-plugin`) companion drawer.
 * **freedesktop.org (`org.mpris.MediaPlayer2`) & KDE (`org.kde.StatusNotifierItem`)**:
   * D-Bus specifications powering SIMP's native media key arbitration and Linux desktop system tray integration.
 * **[`Souvlaki`](https://github.com/Sinono3/souvlaki), [`rust-objc`](https://github.com/SSheldon/rust-objc), [`core-foundation-rs`](https://github.com/servo/core-foundation-rs) & Apple macOS Frameworks (`AppKit`, `WebKit`, `MediaPlayer`, `IOKit`)**:
   * Powers SIMP's native macOS application bundle (`src-tauri/src/macos_app.rs`), `NSStatusItem` Menu Bar tray, `WKWebView` presentation layer, `MPNowPlayingInfoCenter` / `MPRemoteCommandCenter` Control Center & media key integration (`crates/simp-core/src/mpris.rs`), and `IOHIDManager` USB/Bluetooth gamepad input reader (`crates/simp-core/src/gamepad.rs`).
+* **Microsoft Win32 (`Shell_NotifyIconW`, `XInput`, `WebView2`), [`MinGW-w64`](https://www.mingw-w64.org/) & [`Zig` / `cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild)**:
+  * Powers SIMP's single-instance Windows system tray & headless background worker lifecycle (`src-tauri/src/main.rs`) and reproducible multi-architecture cross-compilation (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-gnu`, `aarch64-apple-darwin`, and `x86_64-apple-darwin`) from Linux or macOS hosts.
