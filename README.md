@@ -5,14 +5,14 @@
 
   **A lightweight, controller-first & desktop-native audio and video player for SteamOS, Linux, macOS, Windows, and SteamVR.**
 
-  [![Status: v0.2.1](https://img.shields.io/badge/status-v0.2.1-ff6a00?style=flat-square)](https://github.com/niiiitz/simp/releases)
+  [![Status: v0.2.2](https://img.shields.io/badge/status-v0.2.2-ff6a00?style=flat-square)](https://github.com/niiiitz/simp/releases)
   [![Platforms: SteamOS | Linux | macOS | Windows | SteamVR](https://img.shields.io/badge/platforms-SteamOS%20%7C%20Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20SteamVR-000000?style=flat-square)](#installation)
   [![Backend: 100% Native Rust](https://img.shields.io/badge/backend-Native%20Rust-dea584?style=flat-square)](#development--building-from-source)
 </div>
 
 ---
 
-## ⬇️ Download SIMP (`v0.2.1` Stable)
+## ⬇️ Download SIMP (`v0.2.2` Stable)
 
 Grab the ready-to-run installer or portable bundle for your platform directly below (or browse **[All Releases](https://github.com/niiiitz/simp/releases)**):
 
@@ -64,7 +64,7 @@ Playing your own music, soundtracks, and video across a Steam Deck, desktop, liv
 
 ## Installation
 
-Grab the package for your platform from the **[latest GitHub Release (`v0.2.1`)](https://github.com/niiiitz/simp/releases/latest)**:
+Grab the package for your platform from the **[latest GitHub Release (`v0.2.2`)](https://github.com/niiiitz/simp/releases/latest)**:
 
 ### SteamOS / Bazzite / Linux (`x86_64` & `aarch64`)
 
