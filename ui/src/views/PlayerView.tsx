@@ -2115,7 +2115,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         </div>
       </div>
 
-      {/* Bottom-Edge Synced Lyrics Pill — Anchored near bottom screen edge & centered to Scrub Bar / Play/Pause */}
+      {/* Bottom-Edge Synced Lyrics Pill — Anchored near bottom screen edge & centered to the page */}
       {!isVideoTrack && (() => {
         const showLyricsBubble = Boolean(
           lyricsEnabled &&
@@ -2132,129 +2132,108 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               right: 48,
               zIndex: 3,
               pointerEvents: 'none',
+              display: 'flex',
+              justifyContent: 'center',
               opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
               transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
             }}
           >
             <div
               style={{
-                display: 'grid',
-                gridTemplateColumns: '240px 1fr',
-                columnGap: 36,
-                maxWidth: 1080,
-                width: '100%',
-                margin: '0 auto',
+                width: 'fit-content',
+                maxWidth: '100%',
+                padding: '6px 18px',
+                borderRadius: 12,
+                background: 'rgba(8, 9, 14, 0.82)',
+                boxShadow: '0 6px 20px rgba(0, 0, 0, 0.88)',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 2,
+                textAlign: 'center',
+                boxSizing: 'border-box',
+                pointerEvents: 'auto',
+                transition: 'opacity 200ms ease',
                 transform:
                   !videoTheatreExpanded && playerScale > 1.02 ? `scale(${playerScale})` : undefined,
                 transformOrigin: 'bottom center',
               }}
             >
-              <div
-                style={{
-                  gridColumn: '2 / 3',
-                  width: '100%',
-                  minWidth: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  boxSizing: 'border-box',
-                }}
-              >
+              {lyricsData.instrumental ? (
                 <div
                   style={{
-                    width: 'fit-content',
-                    maxWidth: '100%',
-                    padding: '6px 18px',
-                    borderRadius: 12,
-                    background: 'rgba(8, 9, 14, 0.82)',
-                    boxShadow: '0 6px 20px rgba(0, 0, 0, 0.88)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 2,
-                    textAlign: 'center',
-                    boxSizing: 'border-box',
-                    pointerEvents: 'auto',
-                    transition: 'opacity 200ms ease',
+                    fontSize: 13,
+                    fontFamily: 'monospace',
+                    color: '#67e8f9',
+                    fontWeight: 700,
+                    textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
                   }}
                 >
-                  {lyricsData.instrumental ? (
+                  🎵 Instrumental Track
+                </div>
+              ) : (
+                <>
+                  {activeLyricIdx >= 0 && lyricsData.synced_lines[activeLyricIdx] ? (
                     <div
+                      onClick={() => {
+                        const line = lyricsData.synced_lines[activeLyricIdx];
+                        if (line) defaultSimpClient.seek(line.timestamp_ms);
+                      }}
+                      title="Click to replay this lyric line"
                       style={{
-                        fontSize: 13,
-                        fontFamily: 'monospace',
+                        maxWidth: '100%',
+                        fontSize: 15,
+                        fontWeight: 800,
                         color: '#67e8f9',
-                        fontWeight: 700,
-                        textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
+                        textShadow: '0 1px 6px rgba(0, 0, 0, 0.98)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        cursor: 'pointer',
                       }}
                     >
-                      🎵 Instrumental Track
+                      🎤 {lyricsData.synced_lines[activeLyricIdx].text}
                     </div>
                   ) : (
-                    <>
-                      {activeLyricIdx >= 0 && lyricsData.synced_lines[activeLyricIdx] ? (
-                        <div
-                          onClick={() => {
-                            const line = lyricsData.synced_lines[activeLyricIdx];
-                            if (line) defaultSimpClient.seek(line.timestamp_ms);
-                          }}
-                          title="Click to replay this lyric line"
-                          style={{
-                            maxWidth: '100%',
-                            fontSize: 15,
-                            fontWeight: 800,
-                            color: '#67e8f9',
-                            textShadow: '0 1px 6px rgba(0, 0, 0, 0.98)',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          🎤 {lyricsData.synced_lines[activeLyricIdx].text}
-                        </div>
-                      ) : (
-                        <div
-                          style={{
-                            maxWidth: '100%',
-                            fontSize: 13.5,
-                            fontFamily: 'monospace',
-                            color: '#9ca3af',
-                            textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          🎤 {lyricsData.synced_lines[0]?.text || '♪ …'}
-                        </div>
-                      )}
-                      {lyricsData.synced_lines[activeLyricIdx + 1] && (
-                        <div
-                          onClick={() => {
-                            const nextLine = lyricsData.synced_lines[activeLyricIdx + 1];
-                            if (nextLine) defaultSimpClient.seek(nextLine.timestamp_ms);
-                          }}
-                          title="Click to jump to next lyric line"
-                          style={{
-                            maxWidth: '100%',
-                            fontSize: 12,
-                            color: '#8e8e99',
-                            textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          {lyricsData.synced_lines[activeLyricIdx + 1].text}
-                        </div>
-                      )}
-                    </>
+                    <div
+                      style={{
+                        maxWidth: '100%',
+                        fontSize: 13.5,
+                        fontFamily: 'monospace',
+                        color: '#9ca3af',
+                        textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      🎤 {lyricsData.synced_lines[0]?.text || '♪ …'}
+                    </div>
                   )}
-                </div>
-              </div>
+                  {lyricsData.synced_lines[activeLyricIdx + 1] && (
+                    <div
+                      onClick={() => {
+                        const nextLine = lyricsData.synced_lines[activeLyricIdx + 1];
+                        if (nextLine) defaultSimpClient.seek(nextLine.timestamp_ms);
+                      }}
+                      title="Click to jump to next lyric line"
+                      style={{
+                        maxWidth: '100%',
+                        fontSize: 12,
+                        color: '#8e8e99',
+                        textShadow: '0 1px 4px rgba(0, 0, 0, 0.98)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {lyricsData.synced_lines[activeLyricIdx + 1].text}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
         );
