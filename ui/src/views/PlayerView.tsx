@@ -292,9 +292,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     const gapFromArtBorderPx = Math.round(28 * scale);
     const nextLeft = Math.max(48, Math.round(artRect.right - mainRect.left + gapFromArtBorderPx));
 
-    // Step 1: Scrub bar collision check with Artwork (using scaled visual top edge)
+    // Step 1: Scrub bar collision check with Artwork (scrubRowRef is inside the scaled wrapper, so scrubRect.top is already the scaled visual top edge)
     const scrubClearancePx = Math.round(14 * scale);
-    const scrubVisualTop = scrubRect.bottom - scrubRect.height * scale;
+    const scrubVisualTop = scrubRect.top;
     const scrubOverlapsVertically = artRect.bottom + scrubClearancePx > scrubVisualTop;
 
     if (scrubOverlapsVertically) {
@@ -1958,177 +1958,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         </div>
       </div>
 
-      {/* Adaptive Scrub Bar + Timed SoundCloud Comments — Anchored Above 7-Button Control Array */}
-      <div
-        ref={scrubRowRef}
-        style={{
-          position: 'absolute',
-          bottom: scrubBottomPx,
-          left: scrubOffsetLeftPx !== null ? scrubOffsetLeftPx : 48,
-          right: 48,
-          zIndex: 3,
-          display: scrubOffsetLeftPx !== null ? 'block' : 'flex',
-          justifyContent: scrubOffsetLeftPx !== null ? undefined : 'center',
-          pointerEvents: 'none',
-          opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
-          transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
-        }}
-      >
-        <div
-          style={{
-            position: 'relative',
-            width:
-              scrubOffsetLeftPx !== null
-                ? effectiveScale > 1.02
-                  ? `${100 / effectiveScale}%`
-                  : '100%'
-                : 'min(740px, 100%)',
-            pointerEvents: 'auto',
-            transform: effectiveScale > 1.02 ? `scale(${effectiveScale})` : undefined,
-            transformOrigin: scrubOffsetLeftPx !== null ? 'bottom left' : 'bottom center',
-          }}
-        >
-          {/* Ephemeral SoundCloud Timed Comment Speech Bubbles (Relative to Scrub Bar Position & Timescale) */}
-          {isSoundCloudTrack &&
-            scCommentsEnabled &&
-            activeBubbles.map((b) => {
-              const dur = track?.duration_ms || 0;
-              const pct =
-                dur > 0 && Number.isFinite(b.comment.timestamp_ms)
-                  ? Math.max(0, Math.min(46, (b.comment.timestamp_ms / dur) * 100))
-                  : 0;
-              const isBelow = b.placement === 'below';
-              return (
-                <div
-                  key={b.comment.id}
-                  style={{
-                    position: 'absolute',
-                    ...(isBelow
-                      ? { top: 62 }
-                      : { bottom: 'calc(100% - 14px)' }),
-                    left: 14,
-                    right: 14,
-                    display: 'flex',
-                    justifyContent: 'flex-start',
-                    pointerEvents: 'none',
-                    zIndex: 25,
-                  }}
-                >
-                  <div
-                    style={{
-                      marginLeft: `${pct}%`,
-                      maxWidth: '78%',
-                      minWidth: 240,
-                      padding: '8px 14px',
-                      borderRadius: 15,
-                      ...(isBelow
-                        ? { borderTopLeftRadius: 4 }
-                        : { borderBottomLeftRadius: 4 }),
-                      background: 'rgba(14, 12, 20, 0.96)',
-                      border: '1px solid rgba(251, 146, 60, 0.6)',
-                      boxShadow: '0 10px 26px rgba(0, 0, 0, 0.88)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 12,
-                    }}
-                  >
-                    {b.comment.avatar_url ? (
-                      <img
-                        src={b.comment.avatar_url}
-                        alt=""
-                        style={{
-                          width: 30,
-                          height: 30,
-                          borderRadius: 99,
-                          objectFit: 'cover',
-                          border: '1px solid #ea580c',
-                          flexShrink: 0,
-                        }}
-                      />
-                    ) : (
-                      <div
-                        style={{
-                          width: 30,
-                          height: 30,
-                          borderRadius: 99,
-                          background: '#27150c',
-                          border: '1px solid #ea580c',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          fontSize: 15,
-                          flexShrink: 0,
-                        }}
-                      >
-                        💬
-                      </div>
-                    )}
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 8,
-                          fontSize: 12.5,
-                          fontFamily: 'monospace',
-                          color: '#fdba74',
-                          fontWeight: 800,
-                        }}
-                      >
-                        <span
-                          style={{
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          @{b.comment.username}
-                        </span>
-                        <span
-                          style={{
-                            padding: '2px 7px',
-                            borderRadius: 6,
-                            background: '#27150c',
-                            border: '1px solid #7c2d12',
-                            color: '#fb923c',
-                            fontSize: 11.5,
-                            flexShrink: 0,
-                          }}
-                        >
-                          {formatCommentTs(b.comment.timestamp_ms)}
-                        </span>
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 14.5,
-                          color: '#f4f4f6',
-                          marginTop: 2,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        “{b.comment.body.slice(0, 120)}”
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-
-          <ProgressBarRaf
-            durationMs={track?.duration_ms ?? 0}
-            trackUri={track?.uri}
-            waveformBars={!isVideoTrack ? scWaveformBars : null}
-            commentTimestampsMs={
-              isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
-            }
-            onPlayheadTick={handlePlayheadTick}
-            hidden={hidden}
-          />
-        </div>
-      </div>
-
       {/* Adaptive 7-Button Player Control Array — Anchored Above Lyrics Zone (Steps to Match Scrub Bar Center on Art Collision) */}
       <div
         ref={buttonsRowRef}
@@ -2251,6 +2080,193 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             active={snap?.repeat_mode !== 'off'}
             onClick={() => defaultSimpClient.cycleRepeat()}
           />
+        </div>
+      </div>
+
+      {/* Adaptive Scrub Bar + Timed SoundCloud Comments — Anchored Above 7-Button Control Array */}
+      <div
+        style={{
+          position: 'absolute',
+          bottom: scrubBottomPx - Math.round(80 * effectiveScale),
+          left: scrubOffsetLeftPx !== null ? scrubOffsetLeftPx : 48,
+          right: 48,
+          zIndex: 8,
+          display: scrubOffsetLeftPx !== null ? 'block' : 'flex',
+          justifyContent: scrubOffsetLeftPx !== null ? undefined : 'center',
+          pointerEvents: 'none',
+        }}
+      >
+        <div
+          style={{
+            position: 'relative',
+            width:
+              scrubOffsetLeftPx !== null
+                ? effectiveScale > 1.02
+                  ? `${100 / effectiveScale}%`
+                  : '100%'
+                : 'min(740px, 100%)',
+            paddingTop: 72,
+            paddingBottom: 80,
+            boxSizing: 'border-box',
+            pointerEvents: 'none',
+            transform: effectiveScale > 1.02 ? `scale(${effectiveScale})` : undefined,
+            transformOrigin: scrubOffsetLeftPx !== null ? 'bottom left' : 'bottom center',
+          }}
+        >
+          <div
+            ref={scrubRowRef}
+            style={{
+              position: 'relative',
+              pointerEvents: 'auto',
+              opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
+              transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
+            }}
+          >
+            <ProgressBarRaf
+              durationMs={track?.duration_ms ?? 0}
+              trackUri={track?.uri}
+              waveformBars={!isVideoTrack ? scWaveformBars : null}
+              commentTimestampsMs={
+                isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
+              }
+              onPlayheadTick={handlePlayheadTick}
+              hidden={hidden}
+            />
+          </div>
+
+          {/* Ephemeral SoundCloud Timed Comment Speech Bubbles (100% inside the 237px padded layout box so GPU opacity layers never clip) */}
+          {isSoundCloudTrack &&
+            scCommentsEnabled &&
+            activeBubbles.map((b) => {
+              const dur = track?.duration_ms || 0;
+              const pct =
+                dur > 0 && Number.isFinite(b.comment.timestamp_ms)
+                  ? Math.max(0, Math.min(46, (b.comment.timestamp_ms / dur) * 100))
+                  : 0;
+              const isBelow = b.placement === 'below';
+              return (
+                <div
+                  key={b.comment.id}
+                  style={{
+                    position: 'absolute',
+                    ...(isBelow
+                      ? { top: 134 }
+                      : { bottom: 'calc(100% - 86px)' }),
+                    left: 14,
+                    right: 14,
+                    display: 'flex',
+                    justifyContent: 'flex-start',
+                    pointerEvents: 'none',
+                    zIndex: 25,
+                  }}
+                >
+                  <div
+                    style={{
+                      marginLeft: `${pct}%`,
+                      maxWidth: '78%',
+                      minWidth: 240,
+                      padding: '8px 14px',
+                      borderRadius: 15,
+                      ...(isBelow
+                        ? { borderTopLeftRadius: 4 }
+                        : { borderBottomLeftRadius: 4 }),
+                      background: 'rgba(14, 12, 20, 0.96)',
+                      border: '1px solid rgba(251, 146, 60, 0.6)',
+                      boxShadow: '0 10px 26px rgba(0, 0, 0, 0.88)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      opacity: isForegroundFaded
+                        ? Math.max(0, Math.min(0.95, idleOpacityPct / 100))
+                        : 1,
+                      transition: isForegroundFaded
+                        ? 'opacity 480ms ease'
+                        : 'opacity 60ms ease-out',
+                    }}
+                  >
+                    {b.comment.avatar_url ? (
+                      <img
+                        src={b.comment.avatar_url}
+                        alt=""
+                        style={{
+                          width: 30,
+                          height: 30,
+                          borderRadius: 99,
+                          objectFit: 'cover',
+                          border: '1px solid #ea580c',
+                          flexShrink: 0,
+                        }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: 30,
+                          height: 30,
+                          borderRadius: 99,
+                          background: '#27150c',
+                          border: '1px solid #ea580c',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: 15,
+                          flexShrink: 0,
+                        }}
+                      >
+                        💬
+                      </div>
+                    )}
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          fontSize: 12.5,
+                          fontFamily: 'monospace',
+                          color: '#fdba74',
+                          fontWeight: 800,
+                        }}
+                      >
+                        <span
+                          style={{
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          @{b.comment.username}
+                        </span>
+                        <span
+                          style={{
+                            padding: '2px 7px',
+                            borderRadius: 6,
+                            background: '#27150c',
+                            border: '1px solid #7c2d12',
+                            color: '#fb923c',
+                            fontSize: 11.5,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {formatCommentTs(b.comment.timestamp_ms)}
+                        </span>
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 14.5,
+                          color: '#f4f4f6',
+                          marginTop: 2,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        “{b.comment.body.slice(0, 120)}”
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
         </div>
       </div>
 
