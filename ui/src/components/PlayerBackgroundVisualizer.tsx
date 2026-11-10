@@ -1023,6 +1023,16 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           ? VISUALIZER_ENGINES[cycleIndexRef.current % VISUALIZER_ENGINES.length]
           : modeRef.current;
 
+      // Exact viewport crop calculation for `objectFit: 'cover'` on ultra-wide displays (21:9, 32:9, etc.)
+      const clientW = canvas.clientWidth || CANVAS_W;
+      const clientH = canvas.clientHeight || CANVAS_H;
+      const visibleCanvasH =
+        clientW > 0 && clientH > 0
+          ? Math.min(CANVAS_H, CANVAS_W * (clientH / clientW))
+          : CANVAS_H;
+      const cropTopY = Math.max(0, (CANVAS_H - visibleCanvasH) * 0.5);
+      const cropBottomY = CANVAS_H - cropTopY;
+
       // Shared Vertigo-Style Floating 3D Hologram Lyric Banner
       // Used by VERTIGO (for lyrics/comments) and by DEMOSCENE & TRAPPER when BOTH Lyrics and SC Comments exist
       const drawVertigoStyleHologram = (
@@ -1076,14 +1086,16 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           CANVAS_W * 0.5 +
           vertigoSmoothSpineXRef.current +
           Math.sin(timeSec * 1.1) * 7;
+        // Dynamically offset below `cropTopY` so 2-line lyrics are never cropped on ultra-wide (21:9 / 32:9) displays
+        const safeTopY = Math.max(28, cropTopY + 18);
+        const minCenterY = safeTopY + boxH * 0.5;
         const rawHoloY =
-          CANVAS_H * 0.142 +
+          minCenterY +
+          6 +
           vertigoSmoothSpineYRef.current +
           Math.cos(timeSec * 1.25) * 2.5 -
           (1 - reveal) * 5;
-        // Account for `objectFit: 'cover'` top crop (~18px) and upper corridor clearance
-        const minCenterY = 24 + boxH * 0.5;
-        const maxCenterY = Math.max(minCenterY, 75 - boxH * 0.5);
+        const maxCenterY = Math.max(minCenterY, minCenterY + 22);
         const holoY = Math.max(minCenterY, Math.min(maxCenterY, rawHoloY));
 
         ctx.save();
@@ -1424,20 +1436,92 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         }
         ctx.stroke();
 
-        // Live Synced Lyric Pulse Stamp in the AVS Feedback Tunnel
-        const lyricText = activeLyricRef.current;
-        if (lyricText && (beat > 0.25 || drop > 0.2)) {
-          ctx.font = 'bold 16px "JetBrains Mono", "Fira Code", monospace';
+        // Stable Synced Lyric Rendering for AVS:
+        // 1. Subtle low-alpha echo stamp at a steady Y position BEFORE feedback capture so the tunnel trails softly without strobing
+        // 2. Crisp, steady foreground lyric banner drawn AFTER feedback capture so it never flickers between beats or jitters with subBass
+        const lyricText = (activeLyricRef.current || '').trim();
+        let avsLines: string[] = [];
+        let avsFontPx = 15;
+        let avsLineH = 19;
+        let avsBoxW = 0;
+        let avsBoxH = 0;
+        let avsLyricY = 0;
+
+        if (lyricText.length > 0) {
+          vertigoLyricRevealRef.current = Math.min(1, vertigoLyricRevealRef.current + dt * 3.6);
+          const upperLyric = lyricText.toUpperCase();
+          if (upperLyric.length <= 36) {
+            avsLines.push(upperLyric);
+          } else {
+            const mid = Math.floor(upperLyric.length * 0.5);
+            let splitAt = upperLyric.lastIndexOf(' ', mid + 8);
+            if (splitAt <= 6) splitAt = upperLyric.indexOf(' ', mid);
+            if (splitAt > 0) {
+              avsLines.push(upperLyric.slice(0, splitAt).trim());
+              avsLines.push(upperLyric.slice(splitAt + 1).trim());
+            } else {
+              avsLines.push(upperLyric);
+            }
+          }
+          const maxLineChars = Math.max(...avsLines.map((l) => l.length), 1);
+          const maxFontPx = avsLines.length > 1 ? 14 : 16;
+          avsFontPx = Math.max(
+            11,
+            Math.min(maxFontPx, Math.floor((CANVAS_W * 0.82) / (maxLineChars * 0.62)))
+          );
+          avsLineH = avsFontPx + 4;
+          avsBoxW = Math.min(CANVAS_W - 28, Math.round(maxLineChars * avsFontPx * 0.62 + 26));
+          avsBoxH = avsLines.length * avsLineH + 10;
+
+          const safeTopY = Math.max(28, cropTopY + 18);
+          const minCenterY = safeTopY + avsBoxH * 0.5;
+          avsLyricY = Math.max(
+            minCenterY,
+            Math.min(cy - 64, minCenterY + 10) + Math.cos(timeSec * 1.1) * 2.0
+          );
+
+          // Soft tunnel-echo stamp into feedback buffer (steady position, gentle alpha)
+          ctx.font = `bold ${avsFontPx}px "JetBrains Mono", "Fira Code", monospace`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillStyle = rgbToCss(palette[7], Math.min(0.85, 0.35 + beat * 0.5));
-          ctx.fillText(lyricText.toUpperCase().slice(0, 42), cx, cy - baseRadius * 0.65);
+          ctx.fillStyle = rgbToCss(palette[5], 0.16 + beat * 0.14);
+          for (let li = 0; li < avsLines.length; li++) {
+            const ly = avsLyricY + (li - (avsLines.length - 1) * 0.5) * avsLineH;
+            ctx.fillText(avsLines[li], cx, ly);
+          }
         }
 
         if (fbCtx) {
           fbCtx.fillStyle = '#000000';
           fbCtx.fillRect(0, 0, CANVAS_W, CANVAS_H);
           fbCtx.drawImage(canvas, 0, 0);
+        }
+
+        // Crisp, flicker-free foreground AVS lyric overlay (drawn after feedback capture)
+        if (avsLines.length > 0) {
+          const reveal = vertigoLyricRevealRef.current;
+          ctx.save();
+          ctx.translate(cx + Math.sin(timeSec * 0.95) * 4, avsLyricY);
+          ctx.fillStyle = `rgba(6, 7, 12, ${(0.68 * reveal).toFixed(2)})`;
+          ctx.beginPath();
+          if (typeof ctx.roundRect === 'function') {
+            ctx.roundRect(-avsBoxW * 0.5, -avsBoxH * 0.5, avsBoxW, avsBoxH, 10);
+          } else {
+            ctx.rect(-avsBoxW * 0.5, -avsBoxH * 0.5, avsBoxW, avsBoxH);
+          }
+          ctx.fill();
+
+          ctx.font = `bold ${avsFontPx}px "JetBrains Mono", "Fira Code", monospace`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          for (let li = 0; li < avsLines.length; li++) {
+            const ly = (li - (avsLines.length - 1) * 0.5) * avsLineH;
+            ctx.fillStyle = rgbToCss(palette[4], 0.85 * reveal);
+            ctx.fillText(avsLines[li], 1.5, ly + 1.5);
+            ctx.fillStyle = rgbToCss(palette[7], (0.92 + beat * 0.08) * reveal);
+            ctx.fillText(avsLines[li], 0, ly);
+          }
+          ctx.restore();
         }
       }
 
@@ -1567,12 +1651,13 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           ctx.textBaseline = 'middle';
 
           const bounceAmp = 12 + subBass * 18 + beat * 8 + transWave * 34;
+          const baseScrollerY = Math.min(CANVAS_H - 48, cropBottomY - 36);
           for (let c = 0; c < visibleChars; c++) {
             const ch = scroller[(firstCharIdx + c) % scroller.length];
             if (ch === ' ') continue;
             const x = c * charW - pixelRem;
             const sineIdx = (Math.floor(timeSec * 85) + (firstCharIdx + c) * 11) & 255;
-            const y = CANVAS_H - 48 + SIN_F32[sineIdx] * bounceAmp;
+            const y = baseScrollerY + SIN_F32[sineIdx] * bounceAmp;
             const cPal = palette[4 + ((firstCharIdx + c) & 3)];
             ctx.fillStyle = rgbToCss(cPal, 0.92);
             ctx.fillText(ch, Math.round(x), Math.round(y));
@@ -2327,18 +2412,19 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
             Boolean(activeLyricRef.current && activeLyricRef.current.trim().length > 0);
           if (arena.challengerBannerCount <= 3 && !trpLyricActive) {
             const bannerAlpha = Math.sin(p * Math.PI);
+            const bannerTopY = Math.round(Math.max(22, cropTopY + 18));
             ctx.save();
             ctx.font = 'bold 13px "JetBrains Mono", "Fira Code", monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             const bannerText = `⚡ CHALLENGER APPROACHES: ${TRAPPER_SHAPE_NAMES[arena.incomingShape]} ⚡`;
             ctx.fillStyle = `rgba(0, 0, 0, ${(0.72 * bannerAlpha).toFixed(2)})`;
-            ctx.fillRect(CANVAS_W * 0.5 - 175, 22, 350, 24);
+            ctx.fillRect(CANVAS_W * 0.5 - 175, bannerTopY, 350, 24);
             ctx.strokeStyle = rgbToCss(palette[6], 0.85 * bannerAlpha);
             ctx.lineWidth = 1.4;
-            ctx.strokeRect(CANVAS_W * 0.5 - 175, 22, 350, 24);
+            ctx.strokeRect(CANVAS_W * 0.5 - 175, bannerTopY, 350, 24);
             ctx.fillStyle = rgbToCss(palette[7], 0.96 * bannerAlpha);
-            ctx.fillText(bannerText, CANVAS_W * 0.5, 34);
+            ctx.fillText(bannerText, CANVAS_W * 0.5, bannerTopY + 12);
             ctx.restore();
           }
         }
@@ -2390,13 +2476,14 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           ctx.textBaseline = 'middle';
 
           const waveAmp = 11 + subBass * 16 + beat * 8 + drop * 12 + transWave * 26;
+          const baseScrollerY = Math.min(CANVAS_H - 46, cropBottomY - 34);
           for (let c = 0; c < visibleChars; c++) {
             const ch = scroller[(firstCharIdx + c) % scroller.length];
             if (ch === ' ') continue;
             const x = c * charW - pixelRem;
             const sineIdx = (Math.floor(timeSec * 78) + (firstCharIdx + c) * 10) & 255;
             const zWave = COS_F32[sineIdx];
-            const y = CANVAS_H - 46 + SIN_F32[sineIdx] * waveAmp;
+            const y = baseScrollerY + SIN_F32[sineIdx] * waveAmp;
             const cPal = palette[4 + ((firstCharIdx + c) & 3)];
             ctx.fillStyle = rgbToCss(cPal, 0.72 + (zWave * 0.5 + 0.5) * 0.28);
             ctx.fillText(ch, Math.round(x), Math.round(y));
