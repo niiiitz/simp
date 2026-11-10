@@ -34,6 +34,8 @@ interface Props {
   activeChapterLabel?: string | null;
   activeLyricLine?: string | null;
   nextLyricLine?: string | null;
+  hasLyrics?: boolean;
+  lyricsMarqueeFallback?: string | null;
   hidden?: boolean;
 }
 
@@ -257,6 +259,8 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
   activeChapterLabel,
   activeLyricLine,
   nextLyricLine,
+  hasLyrics = false,
+  lyricsMarqueeFallback = null,
   hidden = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -274,6 +278,16 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
   activeLyricRef.current = activeLyricLine;
   const nextLyricRef = useRef<string | null | undefined>(nextLyricLine);
   nextLyricRef.current = nextLyricLine;
+  const hasScCommentsRef = useRef<boolean>(false);
+  hasScCommentsRef.current = Boolean((comments && comments.length > 0) || activeComment);
+  const hasLyricsRef = useRef<boolean>(false);
+  hasLyricsRef.current = Boolean(
+    hasLyrics ||
+      activeLyricLine ||
+      (lyricsMarqueeFallback && lyricsMarqueeFallback.trim().length > 0)
+  );
+  const lyricsMarqueeFallbackRef = useRef<string | null | undefined>(lyricsMarqueeFallback);
+  lyricsMarqueeFallbackRef.current = lyricsMarqueeFallback;
   const prevLyricLineRef = useRef<string | null | undefined>(null);
   const vertigoLyricRevealRef = useRef<number>(1);
 
@@ -495,7 +509,6 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
     const artistUpper = (track.artists?.join(', ') || 'UNKNOWN ARTIST').toUpperCase();
     const bpmTag = bpm && bpm > 0 ? ` // ${Math.round(bpm)} BPM` : '';
     const chTag = activeChapterLabel ? ` // ${activeChapterLabel.toUpperCase()}` : '';
-    const lyricTag = activeLyricLine ? ` ♪ ${activeLyricLine.toUpperCase()} ♪ ` : '';
     const activeCommentTag = activeComment
       ? ` ★ @${activeComment.username.toUpperCase()}: "${activeComment.body.toUpperCase()}" ★ `
       : '';
@@ -506,19 +519,55 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         ? `>> @${activeComment.username.toUpperCase()}: ${activeComment.body.toUpperCase()} <<      `
         : `// ${titleUpper} :: ${artistUpper}${bpmTag}${chTag} //      `;
 
-    let greetz = '';
-    if (comments && comments.length > 0) {
-      const sample = comments
-        .slice(0, 10)
-        .map((c) => `@${c.username.toUpperCase()}: "${c.body.toUpperCase()}"`)
-        .join('  ///  ');
-      greetz = `  ///  SHOUTOUTS: ${sample}`;
-    }
+    const hasScComments = Boolean((comments && comments.length > 0) || activeComment);
+    const hasTrackLyrics = Boolean(
+      hasLyrics ||
+        activeLyricLine ||
+        (lyricsMarqueeFallback && lyricsMarqueeFallback.trim().length > 0)
+    );
 
-    scrollerTextRef.current = activeLyricLine
-      ? `   ♪ ${activeLyricLine.toUpperCase()} ♪   //   ${titleUpper} — ${artistUpper}${activeCommentTag}   `
-      : `   *** ${titleUpper} — ${artistUpper}${bpmTag}${chTag}${lyricTag}${activeCommentTag}${greetz}   `;
-  }, [track, bpm, activeComment, comments, activeChapterLabel, activeLyricLine]);
+    const shoutoutsSample =
+      comments && comments.length > 0
+        ? comments
+            .slice(0, 15)
+            .map((c) => `@${c.username.toUpperCase()}: "${c.body.toUpperCase()}"`)
+            .join('   ///   ')
+        : '';
+
+    // DEMOSCENE & TRAPPER Marquee Priority Logic:
+    // 1. If Lyrics found AND SC comments found -> Marquee displays SC shoutouts (while Lyrics render in Vertigo-style hologram)
+    // 2. If Lyrics found AND NO SC comments -> Marquee displays Lyrics
+    // 3. If NO SC comments AND NO Lyrics found -> Marquee displays Track Title
+    // 4. If SC comments found AND NO Lyrics found -> Marquee displays SC shoutouts
+    if (hasScComments && hasTrackLyrics) {
+      scrollerTextRef.current = activeCommentTag
+        ? `   ${activeCommentTag.trim()}   ${shoutoutsSample ? `///   SHOUTOUTS: ${shoutoutsSample}   ` : ''}`
+        : `   SHOUTOUTS: ${shoutoutsSample}   `;
+    } else if (!hasScComments && hasTrackLyrics) {
+      const lyricMarqueeBody = activeLyricLine
+        ? nextLyricLine
+          ? `♪ ${activeLyricLine.toUpperCase()} ♪   //   ♪ ${nextLyricLine.toUpperCase()} ♪`
+          : `♪ ${activeLyricLine.toUpperCase()} ♪`
+        : `♪ ${(lyricsMarqueeFallback || titleUpper).toUpperCase()} ♪`;
+      scrollerTextRef.current = `   ${lyricMarqueeBody}   `;
+    } else if (!hasScComments && !hasTrackLyrics) {
+      scrollerTextRef.current = `   *** ${titleUpper} — ${artistUpper}${bpmTag}${chTag} ***   `;
+    } else {
+      scrollerTextRef.current = activeCommentTag
+        ? `   ${activeCommentTag.trim()}   ${shoutoutsSample ? `///   SHOUTOUTS: ${shoutoutsSample}   ` : ''}`
+        : `   SHOUTOUTS: ${shoutoutsSample}   ///   ${titleUpper} — ${artistUpper}   `;
+    }
+  }, [
+    track,
+    bpm,
+    activeComment,
+    comments,
+    activeChapterLabel,
+    activeLyricLine,
+    nextLyricLine,
+    hasLyrics,
+    lyricsMarqueeFallback,
+  ]);
 
   // Trigger bespoke Track Transition Choreography on URI change OR visualizer mode switch
   useEffect(() => {
@@ -973,6 +1022,99 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         modeRef.current === 'cycle'
           ? VISUALIZER_ENGINES[cycleIndexRef.current % VISUALIZER_ENGINES.length]
           : modeRef.current;
+
+      // Shared Vertigo-Style Floating 3D Hologram Lyric Banner
+      // Used by VERTIGO (for lyrics/comments) and by DEMOSCENE & TRAPPER when BOTH Lyrics and SC Comments exist
+      const drawVertigoStyleHologram = (
+        rawText: string,
+        targetAnchorX = 0,
+        targetAnchorY = 0
+      ) => {
+        const trimmed = rawText.trim();
+        if (trimmed.length === 0) return;
+
+        vertigoLyricRevealRef.current = Math.min(1, vertigoLyricRevealRef.current + dt * 3.6);
+        const reveal = vertigoLyricRevealRef.current;
+
+        vertigoSmoothSpineXRef.current +=
+          (targetAnchorX - vertigoSmoothSpineXRef.current) * Math.min(1, dt * 5.0);
+        vertigoSmoothSpineYRef.current +=
+          (targetAnchorY - vertigoSmoothSpineYRef.current) * Math.min(1, dt * 5.0);
+
+        const upperText = trimmed.toUpperCase();
+        // Word-wrap long lyric lines into 1 or 2 balanced lines so ZERO characters are ever cut off!
+        const lines: string[] = [];
+        if (upperText.length <= 36) {
+          lines.push(upperText);
+        } else {
+          const mid = Math.floor(upperText.length * 0.5);
+          let splitAt = upperText.lastIndexOf(' ', mid + 8);
+          if (splitAt <= 6) splitAt = upperText.indexOf(' ', mid);
+          if (splitAt > 0) {
+            lines.push(upperText.slice(0, splitAt).trim());
+            lines.push(upperText.slice(splitAt + 1).trim());
+          } else {
+            lines.push(upperText);
+          }
+        }
+
+        const maxLineChars = Math.max(...lines.map((l) => l.length), 1);
+        const maxFontPx = lines.length > 1 ? 14 : 16;
+        // Dynamically size font so the full line always fits inside 82% of canvas width
+        const fontPx = Math.max(
+          11,
+          Math.min(maxFontPx, Math.floor((CANVAS_W * 0.82) / (maxLineChars * 0.62)))
+        );
+        const lineH = fontPx + 4;
+        const boxW = Math.min(
+          CANVAS_W - 28,
+          Math.round(maxLineChars * fontPx * 0.62 + 26)
+        );
+        const boxH = lines.length * lineH + 10;
+
+        const holoX =
+          CANVAS_W * 0.5 +
+          vertigoSmoothSpineXRef.current +
+          Math.sin(timeSec * 1.1) * 7;
+        const rawHoloY =
+          CANVAS_H * 0.142 +
+          vertigoSmoothSpineYRef.current +
+          Math.cos(timeSec * 1.25) * 2.5 -
+          (1 - reveal) * 5;
+        // Account for `objectFit: 'cover'` top crop (~18px) and upper corridor clearance
+        const minCenterY = 24 + boxH * 0.5;
+        const maxCenterY = Math.max(minCenterY, 75 - boxH * 0.5);
+        const holoY = Math.max(minCenterY, Math.min(maxCenterY, rawHoloY));
+
+        ctx.save();
+        ctx.translate(holoX, holoY);
+        // Gentle, readable perspective float (never full camRoll spin!)
+        ctx.rotate(Math.sin(timeSec * 0.9) * 0.025);
+
+        // Translucent borderless backing pill (no hard border lines)
+        ctx.fillStyle = `rgba(6, 7, 12, ${(0.72 * reveal).toFixed(2)})`;
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(-boxW * 0.5, -boxH * 0.5, boxW, boxH, 10);
+        } else {
+          ctx.rect(-boxW * 0.5, -boxH * 0.5, boxW, boxH);
+        }
+        ctx.fill();
+
+        ctx.font = `bold ${fontPx}px "JetBrains Mono", "Fira Code", monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        for (let li = 0; li < lines.length; li++) {
+          const ly = (li - (lines.length - 1) * 0.5) * lineH;
+          // Subtle cyan/palette drop-shadow for crisp legibility over bright visualizer elements
+          ctx.fillStyle = rgbToCss(palette[4], 0.85 * reveal);
+          ctx.fillText(lines[li], 1.5, ly + 1.5);
+          ctx.fillStyle = rgbToCss(palette[7], 0.96 * reveal);
+          ctx.fillText(lines[li], 0, ly);
+        }
+        ctx.restore();
+      };
 
       // =======================================================================
       // MODE 1: GLYPH MATRIX (Single-Shot Uint32Array + Unstretched Panning Art
@@ -1436,6 +1578,18 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
             ctx.fillText(ch, Math.round(x), Math.round(y));
           }
         }
+
+        // 6. Vertigo-Style Floating 3D Hologram Lyrics when BOTH Lyrics AND SC Comments are present
+        if (hasScCommentsRef.current && hasLyricsRef.current) {
+          const demoLyricText = (activeLyricRef.current || '').trim();
+          if (demoLyricText.length > 0) {
+            drawVertigoStyleHologram(
+              demoLyricText,
+              SIN_F32[Math.floor(timeSec * 22) & 255] * 8,
+              0
+            );
+          }
+        }
       }
 
       // =======================================================================
@@ -1728,91 +1882,11 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         ).trim();
 
         if (rawOverlayText.length > 0) {
-          vertigoLyricRevealRef.current = Math.min(1, vertigoLyricRevealRef.current + dt * 3.6);
-          const reveal = vertigoLyricRevealRef.current;
-
-          // Smoothly track horizontal corridor sway while keeping vertical position in the clear
-          // upper-corridor band above the track title metadata and below the top navigation bar
-          const targetAnchorX = (ringCx[6] - CANVAS_W * 0.5) * 0.24;
-          const targetAnchorY = (ringCy[6] - CANVAS_H * 0.5) * 0.05;
-          vertigoSmoothSpineXRef.current +=
-            (targetAnchorX - vertigoSmoothSpineXRef.current) * Math.min(1, dt * 5.0);
-          vertigoSmoothSpineYRef.current +=
-            (targetAnchorY - vertigoSmoothSpineYRef.current) * Math.min(1, dt * 5.0);
-
-          const upperText = rawOverlayText.toUpperCase();
-          // Word-wrap long lyric lines into 1 or 2 balanced lines so ZERO characters are ever cut off!
-          const lines: string[] = [];
-          if (upperText.length <= 36) {
-            lines.push(upperText);
-          } else {
-            const mid = Math.floor(upperText.length * 0.5);
-            let splitAt = upperText.lastIndexOf(' ', mid + 8);
-            if (splitAt <= 6) splitAt = upperText.indexOf(' ', mid);
-            if (splitAt > 0) {
-              lines.push(upperText.slice(0, splitAt).trim());
-              lines.push(upperText.slice(splitAt + 1).trim());
-            } else {
-              lines.push(upperText);
-            }
-          }
-
-          const maxLineChars = Math.max(...lines.map((l) => l.length), 1);
-          const maxFontPx = lines.length > 1 ? 14 : 16;
-          // Dynamically size font so the full line always fits inside 84% of canvas width
-          const fontPx = Math.max(
-            11,
-            Math.min(maxFontPx, Math.floor((CANVAS_W * 0.82) / (maxLineChars * 0.62)))
+          drawVertigoStyleHologram(
+            rawOverlayText,
+            (ringCx[6] - CANVAS_W * 0.5) * 0.24,
+            (ringCy[6] - CANVAS_H * 0.5) * 0.05
           );
-          const lineH = fontPx + 4;
-          const boxW = Math.min(
-            CANVAS_W - 28,
-            Math.round(maxLineChars * fontPx * 0.62 + 26)
-          );
-          const boxH = lines.length * lineH + 10;
-
-          const holoX =
-            CANVAS_W * 0.5 +
-            vertigoSmoothSpineXRef.current +
-            Math.sin(timeSec * 1.1) * 7;
-          const rawHoloY =
-            CANVAS_H * 0.142 +
-            vertigoSmoothSpineYRef.current +
-            Math.cos(timeSec * 1.25) * 2.5 -
-            (1 - reveal) * 5;
-          // Account for `objectFit: 'cover'` top crop (~18px) and track title top (~78px)
-          const minCenterY = 24 + boxH * 0.5;
-          const maxCenterY = Math.max(minCenterY, 75 - boxH * 0.5);
-          const holoY = Math.max(minCenterY, Math.min(maxCenterY, rawHoloY));
-
-          ctx.save();
-          ctx.translate(holoX, holoY);
-          // Gentle, readable perspective float (never full camRoll spin!)
-          ctx.rotate(Math.sin(timeSec * 0.9) * 0.025);
-
-          // Translucent borderless backing pill (no hard border lines)
-          ctx.fillStyle = `rgba(6, 7, 12, ${(0.72 * reveal).toFixed(2)})`;
-          ctx.beginPath();
-          if (typeof ctx.roundRect === 'function') {
-            ctx.roundRect(-boxW * 0.5, -boxH * 0.5, boxW, boxH, 10);
-          } else {
-            ctx.rect(-boxW * 0.5, -boxH * 0.5, boxW, boxH);
-          }
-          ctx.fill();
-
-          ctx.font = `bold ${fontPx}px "JetBrains Mono", "Fira Code", monospace`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-
-          for (let li = 0; li < lines.length; li++) {
-            const ly = (li - (lines.length - 1) * 0.5) * lineH;
-            // Subtle cyan/palette drop-shadow for crisp legibility over bright tunnel rings
-            ctx.fillStyle = rgbToCss(palette[4], 0.85 * reveal);
-            ctx.fillText(lines[li], 1.5, ly + 1.5);
-            ctx.fillStyle = rgbToCss(palette[7], 0.96 * reveal);
-            ctx.fillText(lines[li], 0, ly);
-          }
-          ctx.restore();
         }
       }
 
@@ -2246,8 +2320,12 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           );
           ctx.stroke();
 
-          // Show the "CHALLENGER APPROACHES" text banner at most 3 times per track (though collisions continue)
-          if (arena.challengerBannerCount <= 3) {
+          // Show the "CHALLENGER APPROACHES" text banner at most 3 times per track (unless Vertigo-style lyric hologram is currently active)
+          const trpLyricActive =
+            hasScCommentsRef.current &&
+            hasLyricsRef.current &&
+            Boolean(activeLyricRef.current && activeLyricRef.current.trim().length > 0);
+          if (arena.challengerBannerCount <= 3 && !trpLyricActive) {
             const bannerAlpha = Math.sin(p * Math.PI);
             ctx.save();
             ctx.font = 'bold 13px "JetBrains Mono", "Fira Code", monospace';
@@ -2322,6 +2400,18 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
             const cPal = palette[4 + ((firstCharIdx + c) & 3)];
             ctx.fillStyle = rgbToCss(cPal, 0.72 + (zWave * 0.5 + 0.5) * 0.28);
             ctx.fillText(ch, Math.round(x), Math.round(y));
+          }
+        }
+
+        // 5. Vertigo-Style Floating 3D Hologram Lyrics when BOTH Lyrics AND SC Comments are present
+        if (hasScCommentsRef.current && hasLyricsRef.current) {
+          const trapperLyricText = (activeLyricRef.current || '').trim();
+          if (trapperLyricText.length > 0) {
+            drawVertigoStyleHologram(
+              trapperLyricText,
+              Math.sin(timeSec * 0.52) * 7,
+              0
+            );
           }
         }
       }

@@ -361,7 +361,7 @@ const ConsoleMainApp: React.FC = () => {
     } catch {
       // Ignore storage access errors
     }
-    return 80;
+    return 100;
   });
   const brightnessHydratedRef = useRef(false);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);

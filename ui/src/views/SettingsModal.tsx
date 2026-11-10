@@ -972,10 +972,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       try {
                         window.localStorage.removeItem('simp_source_visibility_v2');
                         window.localStorage.removeItem('simp_brightness_pct_v2');
+                        window.localStorage.removeItem('simp_idle_opacity_pct');
                         window.localStorage.removeItem('simp_oobe_help_seen_v1');
                         window.localStorage.setItem('simp.visualizer_mode', 'cycle');
                       } catch {}
-                      setBrightnessPct(80);
+                      setBrightnessPct(100);
                       setSourceVisibility({
                         internet_archive: true,
                         apple_music: true,

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ArchiveItemDetail,
   defaultSimpClient,
@@ -207,7 +207,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         }
       }
     } catch {}
-    return 60;
+    return 35;
   });
   const [lyricsData, setLyricsData] = useState<TrackLyricsResponse | null>(null);
   const [activeLyricIdx, setActiveLyricIdx] = useState<number>(-1);
@@ -224,6 +224,13 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const [playerScale, setPlayerScale] = useState<number>(() =>
     computePlayerViewportScale(isVideoTrack)
   );
+  const mainRef = useRef<HTMLElement | null>(null);
+  const artBoxRef = useRef<HTMLDivElement | null>(null);
+  const scrubRowRef = useRef<HTMLDivElement | null>(null);
+  const buttonsRowRef = useRef<HTMLDivElement | null>(null);
+  const [scrubOffsetLeftPx, setScrubOffsetLeftPx] = useState<number | null>(null);
+  const [buttonsOffsetLeftPx, setButtonsOffsetLeftPx] = useState<number | null>(null);
+  const [buttonsFitScale, setButtonsFitScale] = useState<number | null>(null);
   const shownCommentIdsRef = useRef<Set<string>>(new Set());
   const lastPlayheadMsRef = useRef<number>(0);
   const nextCommentPlacementRef = useRef<'above' | 'below'>('above');
@@ -255,6 +262,85 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, [isVideoTrack]);
+
+  // Adaptive Scrub Bar & 7-Button Control Array stepwise horizontal anchoring:
+  // - Step 1 (Scrub Bar): When Artwork vertically overlaps the Scrub Bar band (`artRect.bottom + 14 * scale > scrubRect.top`),
+  //   `scrubOffsetLeftPx` anchors the Scrub Bar's left edge relative to the Artwork's right border edge (`+ 28px`)
+  //   while its right edge stays anchored at `right: 48px` (matching `NEXT:`). Otherwise `scrubOffsetLeftPx` is `null` (centered).
+  // - Step 2 (7-Button Control Array): When Artwork continues down and vertically overlaps the 7-Button Control Array band
+  //   (`artRect.bottom + 12 * scale > buttonsRect.top`), `buttonsOffsetLeftPx` steps the 7-button array to the exact same
+  //   `[nextLeft, right: 48]` span so its horizontal center moves to match the center of the Scrub Bar.
+  const recomputeScrubHorizontalAnchor = useCallback(() => {
+    if (hidden || videoTheatreExpanded) {
+      setScrubOffsetLeftPx(null);
+      setButtonsOffsetLeftPx(null);
+      setButtonsFitScale(null);
+      return;
+    }
+    const mainEl = mainRef.current;
+    const artEl = artBoxRef.current;
+    const scrubEl = scrubRowRef.current;
+    const buttonsEl = buttonsRowRef.current;
+    if (!mainEl || !artEl || !scrubEl) return;
+
+    const mainRect = mainEl.getBoundingClientRect();
+    const artRect = artEl.getBoundingClientRect();
+    const scrubRect = scrubEl.getBoundingClientRect();
+    if (mainRect.width <= 0 || artRect.height <= 0 || scrubRect.height <= 0) return;
+
+    const scale = !videoTheatreExpanded && playerScale > 1.02 ? playerScale : 1;
+    const gapFromArtBorderPx = Math.round(28 * scale);
+    const nextLeft = Math.max(48, Math.round(artRect.right - mainRect.left + gapFromArtBorderPx));
+
+    // Step 1: Scrub bar collision check with Artwork (using scaled visual top edge)
+    const scrubClearancePx = Math.round(14 * scale);
+    const scrubVisualTop = scrubRect.bottom - scrubRect.height * scale;
+    const scrubOverlapsVertically = artRect.bottom + scrubClearancePx > scrubVisualTop;
+
+    if (scrubOverlapsVertically) {
+      setScrubOffsetLeftPx((prev) => (prev === nextLeft ? prev : nextLeft));
+    } else {
+      setScrubOffsetLeftPx((prev) => (prev === null ? prev : null));
+    }
+
+    // Step 2: 7-Button Player Control Array collision check with Artwork (using scaled visual top edge)
+    if (buttonsEl) {
+      const buttonsRect = buttonsEl.getBoundingClientRect();
+      const buttonsClearancePx = Math.round(12 * scale);
+      const buttonsVisualTop = buttonsRect.bottom - buttonsRect.height * scale;
+      const buttonsOverlapsVertically =
+        buttonsRect.height > 0 && artRect.bottom + buttonsClearancePx > buttonsVisualTop;
+
+      if (buttonsOverlapsVertically) {
+        setButtonsOffsetLeftPx((prev) => (prev === nextLeft ? prev : nextLeft));
+        const availableWidthPx = Math.max(260, mainRect.width - nextLeft - 48);
+        const naturalButtonsWidthPx = 540;
+        const maxFitScale = availableWidthPx / naturalButtonsWidthPx;
+        const clampedScale = maxFitScale < scale ? Math.max(0.62, maxFitScale) : null;
+        setButtonsFitScale((prev) => (prev === clampedScale ? prev : clampedScale));
+      } else {
+        setButtonsOffsetLeftPx((prev) => (prev === null ? prev : null));
+        setButtonsFitScale((prev) => (prev === null ? prev : null));
+      }
+    }
+  }, [hidden, videoTheatreExpanded, playerScale]);
+
+  useLayoutEffect(() => {
+    recomputeScrubHorizontalAnchor();
+    const mainEl = mainRef.current;
+    const artEl = artBoxRef.current;
+    const ro =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => recomputeScrubHorizontalAnchor())
+        : null;
+    if (ro && mainEl) ro.observe(mainEl);
+    if (ro && artEl) ro.observe(artEl);
+    window.addEventListener('resize', recomputeScrubHorizontalAnchor);
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', recomputeScrubHorizontalAnchor);
+    };
+  }, [recomputeScrubHorizontalAnchor, isVideoTrack, track?.uri]);
 
   const togglePlayerFullscreen = useCallback(() => {
     if (isVideoTrack) {
@@ -1167,16 +1253,22 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     isPlayerIdle && idleFadeEnabled && !playerActionsOpen && !videoTheatreExpanded
   );
 
+  const effectiveScale = !videoTheatreExpanded && playerScale > 1.02 ? playerScale : 1;
+  const hasUpNext = Boolean(snap?.up_next && snap.up_next.length > 0);
+  const buttonsBottomPx = Math.round(18 + 60 * effectiveScale);
+  const scrubBottomPx = Math.round(18 + (60 + 86 + 18) * effectiveScale);
+
   return (
     <>
       <main
+        ref={mainRef}
         style={{
           flex: 1,
           boxSizing: 'border-box',
           display: hidden ? 'none' : 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          padding: 'clamp(56px, 15vh, 175px) 48px 0',
+          padding: 0,
           width: '100%',
           overflow: 'hidden',
           position: 'relative',
@@ -1205,255 +1297,254 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               ? lyricsData.synced_lines[activeLyricIdx + 1].text
               : null
           }
+          hasLyrics={Boolean(
+            lyricsData &&
+              !lyricsData.instrumental &&
+              (lyricsData.synced_lines.length > 0 ||
+                (lyricsData.plain_lyrics && lyricsData.plain_lyrics.trim().length > 0))
+          )}
+          lyricsMarqueeFallback={
+            lyricsData && !lyricsData.instrumental
+              ? lyricsData.synced_lines.length > 0
+                ? lyricsData.synced_lines
+                    .map((l) => l.text.trim())
+                    .filter(Boolean)
+                    .slice(0, 12)
+                    .join('   ♪   ')
+                : lyricsData.plain_lyrics
+                  ? lyricsData.plain_lyrics
+                      .split(/\r?\n/)
+                      .map((l) => l.trim())
+                      .filter(Boolean)
+                      .slice(0, 12)
+                      .join('   ♪   ')
+                  : null
+              : null
+          }
           hidden={hidden}
         />
       )}
 
-      {/* Top-Right Up Next Readout Strip — Anchored just beneath the top Nav Bar & aligned to Scrub Bar */}
-      {snap?.up_next && snap.up_next.length > 0 ? (
+      {/* Top-Right Up Next Readout Strip — Right-aligned & anchored just beneath the top Nav Bar */}
+      {hasUpNext && snap?.up_next ? (
         <div
           style={{
             position: 'absolute',
             top: 14,
-            left: 48,
             right: 48,
             zIndex: 3,
+            maxWidth: 'calc((100vw - 120px) * 0.42)',
             pointerEvents: 'none',
             opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
             transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
+            transform: effectiveScale > 1.02 ? `scale(${effectiveScale})` : undefined,
+            transformOrigin: 'top right',
           }}
         >
           <div
             style={{
-              display: 'grid',
-              gridTemplateColumns: isVideoTrack ? '420px 1fr' : '240px 1fr',
-              columnGap: 36,
-              maxWidth: isVideoTrack ? 1160 : 1080,
-              width: '100%',
-              margin: '0 auto',
-              transform:
-                !videoTheatreExpanded && playerScale > 1.02 ? `scale(${playerScale})` : undefined,
-              transformOrigin: 'top center',
+              width: 'fit-content',
+              maxWidth: '100%',
+              minWidth: 0,
+              padding: '8px 14px',
+              borderRadius: 12,
+              background: 'rgba(8, 9, 14, 0.90)',
+              border: '1px solid #283044',
+              boxShadow:
+                '0 10px 26px rgba(0, 0, 0, 0.92), 0 2px 8px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.8)',
+              fontSize: 12,
+              color: '#c4c4d0',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              boxSizing: 'border-box',
+              pointerEvents: 'auto',
             }}
           >
-            <div
+            <span
               style={{
-                gridColumn: '2 / 3',
-                justifySelf: 'end',
-                width: 'fit-content',
-                maxWidth: 'calc(100% - 28px)',
-                marginRight: 14,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
                 minWidth: 0,
-                padding: '8px 14px',
-                borderRadius: 12,
-                background: 'rgba(8, 9, 14, 0.90)',
-                border: '1px solid #283044',
-                boxShadow:
-                  '0 10px 26px rgba(0, 0, 0, 0.92), 0 2px 8px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.8)',
-                fontSize: 12,
-                color: '#c4c4d0',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 12,
-                boxSizing: 'border-box',
-                pointerEvents: 'auto',
               }}
             >
-              <span
-                style={{
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  minWidth: 0,
-                }}
-              >
-                <strong style={{ fontFamily: 'monospace', color: '#2aa3c4', marginRight: 8 }}>
-                  NEXT:
-                </strong>
-                {snap.up_next[0].title} — {snap.up_next[0].artists.join(', ')}
-              </span>
-              <span
-                className="simp-gp-badge"
-                style={{
-                  fontFamily: 'monospace',
-                  color: '#71717a',
-                  fontSize: 11,
-                  flexShrink: 0,
-                }}
-              >
-                SELECT • Actions
-              </span>
-            </div>
+              <strong style={{ fontFamily: 'monospace', color: '#2aa3c4', marginRight: 8 }}>
+                NEXT:
+              </strong>
+              {snap.up_next[0].title} — {snap.up_next[0].artists.join(', ')}
+            </span>
+            <span
+              className="simp-gp-badge"
+              style={{
+                fontFamily: 'monospace',
+                color: '#71717a',
+                fontSize: 11,
+                flexShrink: 0,
+              }}
+            >
+              SELECT • Actions
+            </span>
           </div>
         </div>
       ) : null}
 
+      {/* Top-Left Anchor: Track Title/Metadata + Left-Aligned Artwork Directly Beneath It (Mirror to NEXT) */}
       <div
         style={{
-          display: 'grid',
-          gridTemplateColumns: isVideoTrack ? '420px 1fr' : '240px 1fr',
-          alignItems: 'end',
-          columnGap: 36,
-          rowGap: 14,
-          maxWidth: isVideoTrack ? 1160 : 1080,
-          width: '100%',
-          margin: '0 auto',
-          position: 'relative',
+          position: 'absolute',
+          top: 14,
+          left: 48,
           zIndex: 2,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-start',
+          gap: 12,
+          maxWidth: hasUpNext
+            ? `calc((100vw - 120px) * 0.54 / ${effectiveScale})`
+            : `calc((100vw - 96px) / ${effectiveScale})`,
+          minWidth: 0,
           opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
           transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
-          transform:
-            !videoTheatreExpanded && playerScale > 1.02 ? `scale(${playerScale})` : undefined,
-          transformOrigin: 'center 62%',
+          transform: effectiveScale > 1.02 ? `scale(${effectiveScale})` : undefined,
+          transformOrigin: 'top left',
         }}
       >
-        {/* Row 1 (Full-Width Header): Left-Aligned Track Title & Artist/Album/Source directly above Album Art */}
+        {/* Track Title & Artist / Collection / Source Header at Top-Left */}
         <div
           style={{
-            gridColumn: '1 / -1',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
             minWidth: 0,
-            width: '100%',
+            maxWidth: '100%',
+            position: 'relative',
+            padding: '6px 12px',
+            margin: '-6px -12px 0',
+            borderRadius: 16,
+            background:
+              !isVideoTrack && vizMode !== 'off'
+                ? 'radial-gradient(ellipse at 25% 50%, rgba(6, 7, 12, 0.72) 0%, rgba(6, 7, 12, 0.36) 65%, rgba(6, 7, 12, 0) 100%)'
+                : 'transparent',
           }}
         >
-          {/* Track Title & Artist / Collection / Source Header directly above Album Art */}
-          <div
+          <h1
             style={{
-              minWidth: 0,
-              maxWidth: '100%',
-              position: 'relative',
-              padding: '6px 12px',
-              margin: '-6px -12px 2px',
-              borderRadius: 16,
-              background:
-                !isVideoTrack && vizMode !== 'off'
-                  ? 'radial-gradient(ellipse at 25% 50%, rgba(6, 7, 12, 0.72) 0%, rgba(6, 7, 12, 0.36) 65%, rgba(6, 7, 12, 0) 100%)'
-                  : 'transparent',
+              margin: 0,
+              fontSize: 28,
+              fontWeight: 800,
+              letterSpacing: -0.5,
+              color: '#f4f4fa',
+              textShadow:
+                '0 2px 6px rgba(0, 0, 0, 0.98), 0 0 18px rgba(0, 0, 0, 0.96), 0 0 34px rgba(0, 0, 0, 0.9)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
             }}
           >
-            <h1
-              style={{
-                margin: 0,
-                fontSize: 28,
-                fontWeight: 800,
-                letterSpacing: -0.5,
-                color: '#f4f4fa',
-                textShadow:
-                  '0 2px 6px rgba(0, 0, 0, 0.98), 0 0 18px rgba(0, 0, 0, 0.96), 0 0 34px rgba(0, 0, 0, 0.9)',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {track?.title || 'No Track Loaded'}
-            </h1>
-            <p
-              style={{
-                margin: '4px 0 0',
-                fontSize: 15.5,
-                fontWeight: 600,
-                color: '#d4d4e2',
-                textShadow:
-                  '0 2px 5px rgba(0, 0, 0, 0.98), 0 0 14px rgba(0, 0, 0, 0.96), 0 0 26px rgba(0, 0, 0, 0.92)',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {track?.artists?.length ? (
-                <span
-                  onClick={() => {
-                    if (primaryArtist && handleMoreByArtist) {
-                      handleMoreByArtist(
-                        primaryArtist,
-                        track.source,
-                        scTrackUserId || undefined
-                      );
-                    }
-                  }}
-                  title={
-                    primaryArtist
-                      ? `Open ${primaryArtist} Artist Profile`
-                      : undefined
+            {track?.title || 'No Track Loaded'}
+          </h1>
+          <p
+            style={{
+              margin: '4px 0 0',
+              fontSize: 15.5,
+              fontWeight: 600,
+              color: '#d4d4e2',
+              textShadow:
+                '0 2px 5px rgba(0, 0, 0, 0.98), 0 0 14px rgba(0, 0, 0, 0.96), 0 0 26px rgba(0, 0, 0, 0.92)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {track?.artists?.length ? (
+              <span
+                onClick={() => {
+                  if (primaryArtist && handleMoreByArtist) {
+                    handleMoreByArtist(
+                      primaryArtist,
+                      track.source,
+                      scTrackUserId || undefined
+                    );
                   }
-                  style={{
-                    cursor: primaryArtist && handleMoreByArtist ? 'pointer' : 'default',
-                    textDecoration: primaryArtist && handleMoreByArtist ? 'underline' : 'none',
-                    textDecorationColor: 'rgba(125, 211, 252, 0.45)',
-                    textUnderlineOffset: 3,
-                  }}
-                >
-                  {track.artists.join(', ')}
-                </span>
-              ) : (
-                <>
-                  Select a track from Library & Queue<span className="simp-gp-badge"> (R1)</span>
-                </>
-              )}
-              {track?.album ? ` • ${track.album}` : ''}
-              {track?.source === 'soundcloud' && (
-                <SoundCloudAttributionLink
-                  permalinkUrl={scTrackPermalink}
-                  kind="track"
-                  id={track.uri}
-                  width={30}
-                  style={{ marginLeft: 8, verticalAlign: 'middle' }}
-                />
-              )}
-              {track?.source === 'apple_music' && (
-                <AppleMusicAttributionLink
-                  id={track.uri}
-                  kind="song"
-                  style={{ marginLeft: 8, verticalAlign: 'middle' }}
-                />
-              )}
-              {track?.source === 'soundcloud' && track?.album?.includes('• Preview') && (
-                <span
-                  style={{
-                    marginLeft: 8,
-                    padding: '2px 7px',
-                    borderRadius: 6,
-                    background: '#3b1506',
-                    border: '1px solid #f97316',
-                    color: '#fdba74',
-                    fontSize: 11,
-                    fontFamily: 'monospace',
-                    fontWeight: 800,
-                    verticalAlign: 'middle',
-                  }}
-                >
-                  30s PREVIEW • Sign in for full track
-                </span>
-              )}
-              {(() => {
-                const uri = track?.uri;
-                if (!uri || (!uri.startsWith('file://') && !uri.startsWith('/'))) return null;
-                const clean = uri.split('?')[0].split('#')[0];
-                const dot = clean.lastIndexOf('.');
-                if (dot < 0 || dot === clean.length - 1) return null;
-                const ext = clean.slice(dot + 1).toUpperCase();
-                return ['FLAC', 'MP3', 'WAV', 'OGG', 'OPUS', 'M4A', 'AAC', 'ALAC', 'AIFF'].includes(ext)
-                  ? ` • ${ext}`
-                  : null;
-              })()}
-              {isVideoTrack && activeQuality ? ` • ${activeQuality.label}` : ''}
-            </p>
-          </div>
+                }}
+                title={
+                  primaryArtist
+                    ? `Open ${primaryArtist} Artist Profile`
+                    : undefined
+                }
+                style={{
+                  cursor: primaryArtist && handleMoreByArtist ? 'pointer' : 'default',
+                  textDecoration: primaryArtist && handleMoreByArtist ? 'underline' : 'none',
+                  textDecorationColor: 'rgba(125, 211, 252, 0.45)',
+                  textUnderlineOffset: 3,
+                }}
+              >
+                {track.artists.join(', ')}
+              </span>
+            ) : (
+              <>
+                Select a track from Library & Queue<span className="simp-gp-badge"> (R1)</span>
+              </>
+            )}
+            {track?.album ? ` • ${track.album}` : ''}
+            {track?.source === 'soundcloud' && (
+              <SoundCloudAttributionLink
+                permalinkUrl={scTrackPermalink}
+                kind="track"
+                id={track.uri}
+                width={30}
+                style={{ marginLeft: 8, verticalAlign: 'middle' }}
+              />
+            )}
+            {track?.source === 'apple_music' && (
+              <AppleMusicAttributionLink
+                id={track.uri}
+                kind="song"
+                style={{ marginLeft: 8, verticalAlign: 'middle' }}
+              />
+            )}
+            {track?.source === 'soundcloud' && track?.album?.includes('• Preview') && (
+              <span
+                style={{
+                  marginLeft: 8,
+                  padding: '2px 7px',
+                  borderRadius: 6,
+                  background: '#3b1506',
+                  border: '1px solid #f97316',
+                  color: '#fdba74',
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  fontWeight: 800,
+                  verticalAlign: 'middle',
+                }}
+              >
+                30s PREVIEW • Sign in for full track
+              </span>
+            )}
+            {(() => {
+              const uri = track?.uri;
+              if (!uri || (!uri.startsWith('file://') && !uri.startsWith('/'))) return null;
+              const clean = uri.split('?')[0].split('#')[0];
+              const dot = clean.lastIndexOf('.');
+              if (dot < 0 || dot === clean.length - 1) return null;
+              const ext = clean.slice(dot + 1).toUpperCase();
+              return ['FLAC', 'MP3', 'WAV', 'OGG', 'OPUS', 'M4A', 'AAC', 'ALAC', 'AIFF'].includes(ext)
+                ? ` • ${ext}`
+                : null;
+            })()}
+            {isVideoTrack && activeQuality ? ` • ${activeQuality.label}` : ''}
+          </p>
         </div>
 
-        {/* Row 2 Left Column: Clean 240x240 Album Art OR 16:9 Live Video Stage */}
+        {/* Left-Aligned Artwork (240x240) OR 16:9 Live Video Stage Anchored Directly Beneath Title/Metadata */}
         <div
           style={{
             display: 'flex',
             flexDirection: 'column',
-            alignItems: 'center',
+            alignItems: 'flex-start',
             flexShrink: 0,
-            marginBottom: 29,
           }}
         >
           <div
+            ref={artBoxRef}
             title={!isVideoTrack && track ? 'Click to open collection in Library' : undefined}
             onClick={() => {
               if (isVideoTrack && !videoTheatreExpanded) {
@@ -1865,253 +1956,301 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             )}
           </div>
         </div>
+      </div>
 
-        {/* Row 2 Right Column: Unified 7-Button Transport Row Above + Waveform Scrub Bar Below (Aligned with Bottom of Art) */}
+      {/* Adaptive Scrub Bar + Timed SoundCloud Comments — Anchored Above 7-Button Control Array */}
+      <div
+        ref={scrubRowRef}
+        style={{
+          position: 'absolute',
+          bottom: scrubBottomPx,
+          left: scrubOffsetLeftPx !== null ? scrubOffsetLeftPx : 48,
+          right: 48,
+          zIndex: 3,
+          display: scrubOffsetLeftPx !== null ? 'block' : 'flex',
+          justifyContent: scrubOffsetLeftPx !== null ? undefined : 'center',
+          pointerEvents: 'none',
+          opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
+          transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
+        }}
+      >
         <div
           style={{
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'flex-end',
-            gap: 20,
-            minWidth: 0,
-            overflow: 'visible',
             position: 'relative',
+            width:
+              scrubOffsetLeftPx !== null
+                ? effectiveScale > 1.02
+                  ? `${100 / effectiveScale}%`
+                  : '100%'
+                : 'min(740px, 100%)',
+            pointerEvents: 'auto',
+            transform: effectiveScale > 1.02 ? `scale(${effectiveScale})` : undefined,
+            transformOrigin: scrubOffsetLeftPx !== null ? 'bottom left' : 'bottom center',
           }}
         >
-          {/* Symmetrical Centered 7-Button Transport Row: Shuffle (X) | Rewind (L2) | Prev (◄) | Play/Pause (A) | Next (►) | Fast-Forward (R2) | Repeat (Y) */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-            <TransportIconButton
-              icon="🔀"
-              badge="X"
-              title={snap?.shuffle ? 'Shuffle: On' : 'Shuffle: Off'}
-              active={!!snap?.shuffle}
-              onClick={() => defaultSimpClient.setShuffle(!snap?.shuffle)}
-            />
-            <TransportIconButton
-              icon="⏪"
-              badge="L2"
-              onClick={() => defaultSimpClient.seekRelative(-10_000)}
-            />
-            <TransportIconButton
-              icon="⏮"
-              badge="◄"
-              onClick={() => defaultSimpClient.previous()}
-            />
-            <button
-              data-default-focus="true"
-              onClick={() => defaultSimpClient.togglePlayPause()}
-              title={isPlaying ? 'Pause (Silence Audio)' : 'Resume Playback'}
-              style={{
-                width: 92,
-                height: 86,
-                borderRadius: 22,
-                background: isPlaying ? '#0f222a' : '#12121a',
-                color: isPlaying ? '#bfeaf5' : '#d4d4dc',
-                border: isPlaying ? '2px solid #2aa3c4' : '2px solid #3f3f4e',
-                boxShadow:
-                  '0 12px 32px rgba(0, 0, 0, 0.94), 0 3px 10px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 5,
-                cursor: 'pointer',
-                fontWeight: 900,
-              }}
-            >
-              <span style={{ fontSize: 28 }}>{isPlaying ? '⏸' : '▶'}</span>
-              <span
-                className="simp-gp-badge"
-                style={{
-                  padding: '2px 10px',
-                  borderRadius: 99,
-                  background: isPlaying ? '#16313c' : '#1f1f2b',
-                  color: isPlaying ? '#7dd3fc' : '#a1a1aa',
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                }}
-              >
-                {isPlaying ? 'A • 🔊' : 'A • 🔇'}
-              </span>
-            </button>
-            <TransportIconButton
-              icon="⏭"
-              badge="►"
-              onClick={() => defaultSimpClient.next()}
-            />
-            <TransportIconButton
-              icon="⏩"
-              badge="R2"
-              onClick={() => defaultSimpClient.seekRelative(10_000)}
-            />
-            <TransportIconButton
-              icon="🔁"
-              badge={
-                snap?.repeat_mode === 'track'
-                  ? 'Y•1'
-                  : snap?.repeat_mode === 'queue'
-                  ? 'Y•Q'
-                  : 'Y'
-              }
-              overlayBadge={
-                snap?.repeat_mode === 'track'
-                  ? '1'
-                  : snap?.repeat_mode === 'queue'
-                  ? '∞'
-                  : null
-              }
-              title={
-                snap?.repeat_mode === 'track'
-                  ? 'Repeat Mode: Single Track (1)'
-                  : snap?.repeat_mode === 'queue'
-                  ? 'Repeat Mode: Loop Queue (∞)'
-                  : 'Repeat Mode: Off'
-              }
-              active={snap?.repeat_mode !== 'off'}
-              onClick={() => defaultSimpClient.cycleRepeat()}
-            />
-          </div>
-
-          <div style={{ position: 'relative', width: '100%' }}>
-            {/* Ephemeral SoundCloud Timed Comment Speech Bubbles */}
-            {isSoundCloudTrack &&
-              scCommentsEnabled &&
-              activeBubbles.map((b) => {
-                const dur = track?.duration_ms || 0;
-                const pct =
-                  dur > 0 && Number.isFinite(b.comment.timestamp_ms)
-                    ? Math.max(0, Math.min(46, (b.comment.timestamp_ms / dur) * 100))
-                    : 0;
-                const isBelow = b.placement === 'below';
-                return (
+          {/* Ephemeral SoundCloud Timed Comment Speech Bubbles (Relative to Scrub Bar Position & Timescale) */}
+          {isSoundCloudTrack &&
+            scCommentsEnabled &&
+            activeBubbles.map((b) => {
+              const dur = track?.duration_ms || 0;
+              const pct =
+                dur > 0 && Number.isFinite(b.comment.timestamp_ms)
+                  ? Math.max(0, Math.min(46, (b.comment.timestamp_ms / dur) * 100))
+                  : 0;
+              const isBelow = b.placement === 'below';
+              return (
+                <div
+                  key={b.comment.id}
+                  style={{
+                    position: 'absolute',
+                    ...(isBelow
+                      ? { top: 62 }
+                      : { bottom: 'calc(100% - 14px)' }),
+                    left: 14,
+                    right: 14,
+                    display: 'flex',
+                    justifyContent: 'flex-start',
+                    pointerEvents: 'none',
+                    zIndex: 25,
+                  }}
+                >
                   <div
-                    key={b.comment.id}
                     style={{
-                      position: 'absolute',
+                      marginLeft: `${pct}%`,
+                      maxWidth: '78%',
+                      minWidth: 240,
+                      padding: '8px 14px',
+                      borderRadius: 15,
                       ...(isBelow
-                        ? { top: 62 }
-                        : { bottom: 'calc(100% - 14px)' }),
-                      left: 14,
-                      right: 14,
+                        ? { borderTopLeftRadius: 4 }
+                        : { borderBottomLeftRadius: 4 }),
+                      background: 'rgba(14, 12, 20, 0.96)',
+                      border: '1px solid rgba(251, 146, 60, 0.6)',
+                      boxShadow: '0 10px 26px rgba(0, 0, 0, 0.88)',
                       display: 'flex',
-                      justifyContent: 'flex-start',
-                      pointerEvents: 'none',
-                      zIndex: 25,
+                      alignItems: 'center',
+                      gap: 12,
                     }}
                   >
-                    <div
-                      style={{
-                        marginLeft: `${pct}%`,
-                        maxWidth: '78%',
-                        minWidth: 240,
-                        padding: '8px 14px',
-                        borderRadius: 15,
-                        ...(isBelow
-                          ? { borderTopLeftRadius: 4 }
-                          : { borderBottomLeftRadius: 4 }),
-                        background: 'rgba(14, 12, 20, 0.96)',
-                        border: '1px solid rgba(251, 146, 60, 0.6)',
-                        boxShadow: '0 10px 26px rgba(0, 0, 0, 0.88)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 12,
-                      }}
-                    >
-                      {b.comment.avatar_url ? (
-                        <img
-                          src={b.comment.avatar_url}
-                          alt=""
+                    {b.comment.avatar_url ? (
+                      <img
+                        src={b.comment.avatar_url}
+                        alt=""
+                        style={{
+                          width: 30,
+                          height: 30,
+                          borderRadius: 99,
+                          objectFit: 'cover',
+                          border: '1px solid #ea580c',
+                          flexShrink: 0,
+                        }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: 30,
+                          height: 30,
+                          borderRadius: 99,
+                          background: '#27150c',
+                          border: '1px solid #ea580c',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: 15,
+                          flexShrink: 0,
+                        }}
+                      >
+                        💬
+                      </div>
+                    )}
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          fontSize: 12.5,
+                          fontFamily: 'monospace',
+                          color: '#fdba74',
+                          fontWeight: 800,
+                        }}
+                      >
+                        <span
                           style={{
-                            width: 30,
-                            height: 30,
-                            borderRadius: 99,
-                            objectFit: 'cover',
-                            border: '1px solid #ea580c',
-                            flexShrink: 0,
-                          }}
-                        />
-                      ) : (
-                        <div
-                          style={{
-                            width: 30,
-                            height: 30,
-                            borderRadius: 99,
-                            background: '#27150c',
-                            border: '1px solid #ea580c',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: 15,
-                            flexShrink: 0,
-                          }}
-                        >
-                          💬
-                        </div>
-                      )}
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <div
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 8,
-                            fontSize: 12.5,
-                            fontFamily: 'monospace',
-                            color: '#fdba74',
-                            fontWeight: 800,
-                          }}
-                        >
-                          <span
-                            style={{
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            @{b.comment.username}
-                          </span>
-                          <span
-                            style={{
-                              padding: '2px 7px',
-                              borderRadius: 6,
-                              background: '#27150c',
-                              border: '1px solid #7c2d12',
-                              color: '#fb923c',
-                              fontSize: 11.5,
-                              flexShrink: 0,
-                            }}
-                          >
-                            {formatCommentTs(b.comment.timestamp_ms)}
-                          </span>
-                        </div>
-                        <div
-                          style={{
-                            fontSize: 14.5,
-                            color: '#f4f4f6',
-                            marginTop: 2,
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
                             whiteSpace: 'nowrap',
                           }}
                         >
-                          “{b.comment.body.slice(0, 120)}”
-                        </div>
+                          @{b.comment.username}
+                        </span>
+                        <span
+                          style={{
+                            padding: '2px 7px',
+                            borderRadius: 6,
+                            background: '#27150c',
+                            border: '1px solid #7c2d12',
+                            color: '#fb923c',
+                            fontSize: 11.5,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {formatCommentTs(b.comment.timestamp_ms)}
+                        </span>
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 14.5,
+                          color: '#f4f4f6',
+                          marginTop: 2,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        “{b.comment.body.slice(0, 120)}”
                       </div>
                     </div>
                   </div>
-                );
-              })}
+                </div>
+              );
+            })}
 
-            <ProgressBarRaf
-              durationMs={track?.duration_ms ?? 0}
-              trackUri={track?.uri}
-              waveformBars={!isVideoTrack ? scWaveformBars : null}
-              commentTimestampsMs={
-                isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
-              }
-              onPlayheadTick={handlePlayheadTick}
-              hidden={hidden}
-            />
-          </div>
+          <ProgressBarRaf
+            durationMs={track?.duration_ms ?? 0}
+            trackUri={track?.uri}
+            waveformBars={!isVideoTrack ? scWaveformBars : null}
+            commentTimestampsMs={
+              isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
+            }
+            onPlayheadTick={handlePlayheadTick}
+            hidden={hidden}
+          />
+        </div>
+      </div>
+
+      {/* Adaptive 7-Button Player Control Array — Anchored Above Lyrics Zone (Steps to Match Scrub Bar Center on Art Collision) */}
+      <div
+        ref={buttonsRowRef}
+        style={{
+          position: 'absolute',
+          bottom: buttonsBottomPx,
+          left: buttonsOffsetLeftPx !== null ? buttonsOffsetLeftPx : 48,
+          right: 48,
+          zIndex: 2,
+          display: 'flex',
+          justifyContent: 'center',
+          pointerEvents: 'none',
+          opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
+          transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 12,
+            pointerEvents: 'auto',
+            transform:
+              buttonsFitScale !== null
+                ? `scale(${buttonsFitScale})`
+                : effectiveScale > 1.02
+                ? `scale(${effectiveScale})`
+                : undefined,
+            transformOrigin: 'bottom center',
+          }}
+        >
+          <TransportIconButton
+            icon="🔀"
+            badge="X"
+            title={snap?.shuffle ? 'Shuffle: On' : 'Shuffle: Off'}
+            active={!!snap?.shuffle}
+            onClick={() => defaultSimpClient.setShuffle(!snap?.shuffle)}
+          />
+          <TransportIconButton
+            icon="⏪"
+            badge="L2"
+            onClick={() => defaultSimpClient.seekRelative(-10_000)}
+          />
+          <TransportIconButton
+            icon="⏮"
+            badge="◄"
+            onClick={() => defaultSimpClient.previous()}
+          />
+          <button
+            data-default-focus="true"
+            onClick={() => defaultSimpClient.togglePlayPause()}
+            title={isPlaying ? 'Pause (Silence Audio)' : 'Resume Playback'}
+            style={{
+              width: 92,
+              height: 86,
+              borderRadius: 22,
+              background: isPlaying ? '#0f222a' : '#12121a',
+              color: isPlaying ? '#bfeaf5' : '#d4d4dc',
+              border: isPlaying ? '2px solid #2aa3c4' : '2px solid #3f3f4e',
+              boxShadow:
+                '0 12px 32px rgba(0, 0, 0, 0.94), 0 3px 10px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 5,
+              cursor: 'pointer',
+              fontWeight: 900,
+            }}
+          >
+            <span style={{ fontSize: 28 }}>{isPlaying ? '⏸' : '▶'}</span>
+            <span
+              className="simp-gp-badge"
+              style={{
+                padding: '2px 10px',
+                borderRadius: 99,
+                background: isPlaying ? '#16313c' : '#1f1f2b',
+                color: isPlaying ? '#7dd3fc' : '#a1a1aa',
+                fontSize: 11,
+                fontFamily: 'monospace',
+              }}
+            >
+              {isPlaying ? 'A • 🔊' : 'A • 🔇'}
+            </span>
+          </button>
+          <TransportIconButton
+            icon="⏭"
+            badge="►"
+            onClick={() => defaultSimpClient.next()}
+          />
+          <TransportIconButton
+            icon="⏩"
+            badge="R2"
+            onClick={() => defaultSimpClient.seekRelative(10_000)}
+          />
+          <TransportIconButton
+            icon="🔁"
+            badge={
+              snap?.repeat_mode === 'track'
+                ? 'Y•1'
+                : snap?.repeat_mode === 'queue'
+                ? 'Y•Q'
+                : 'Y'
+            }
+            overlayBadge={
+              snap?.repeat_mode === 'track'
+                ? '1'
+                : snap?.repeat_mode === 'queue'
+                ? '∞'
+                : null
+            }
+            title={
+              snap?.repeat_mode === 'track'
+                ? 'Repeat Mode: Single Track (1)'
+                : snap?.repeat_mode === 'queue'
+                ? 'Repeat Mode: Loop Queue (∞)'
+                : 'Repeat Mode: Off'
+            }
+            active={snap?.repeat_mode !== 'off'}
+            onClick={() => defaultSimpClient.cycleRepeat()}
+          />
         </div>
       </div>
 
@@ -2193,7 +2332,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         cursor: 'pointer',
                       }}
                     >
-                      🎤 {lyricsData.synced_lines[activeLyricIdx].text}
+                      {lyricsData.synced_lines[activeLyricIdx].text}
                     </div>
                   ) : (
                     <div
@@ -2208,7 +2347,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         whiteSpace: 'nowrap',
                       }}
                     >
-                      🎤 {lyricsData.synced_lines[0]?.text || '♪ …'}
+                      {lyricsData.synced_lines[0]?.text || '♪ …'}
                     </div>
                   )}
                   {lyricsData.synced_lines[activeLyricIdx + 1] && (

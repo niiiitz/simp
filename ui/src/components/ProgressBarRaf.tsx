@@ -24,6 +24,96 @@ interface Props {
  *   stays cleanly inside the column bounds at `0%` and `100%` without clipping or overlapping adjacent art.
  * - Optionally renders a 96-bar SoundCloud beat-drop waveform silhouette and comment cluster micro-dots.
  */
+interface ScrubSourceTheme {
+  playedTop: string;
+  playedBot: string;
+  unplayedTop: string;
+  unplayedBot: string;
+  barGradient: string;
+  compactBarGradient: string;
+  thumbBorder: string;
+}
+
+function getScrubSourceTheme(trackUri?: string): ScrubSourceTheme {
+  const uri = trackUri || '';
+  if (uri.startsWith('soundcloud:')) {
+    // SoundCloud — Orange
+    return {
+      playedTop: '#fb923c',
+      playedBot: 'rgba(234, 88, 12, 0.50)',
+      unplayedTop: 'rgba(251, 146, 60, 0.34)',
+      unplayedBot: 'rgba(194, 65, 12, 0.18)',
+      barGradient:
+        'linear-gradient(90deg, rgba(124, 45, 18, 0.78) 0%, rgba(234, 88, 12, 0.86) 100%)',
+      compactBarGradient:
+        'linear-gradient(90deg, rgba(124, 45, 18, 0.85) 0%, rgba(234, 88, 12, 0.92) 100%)',
+      thumbBorder: '#fb923c',
+    };
+  }
+  if (uri.startsWith('applemusic:')) {
+    // Apple Music — Red / Rose
+    return {
+      playedTop: '#fb7185',
+      playedBot: 'rgba(244, 63, 94, 0.50)',
+      unplayedTop: 'rgba(251, 113, 133, 0.34)',
+      unplayedBot: 'rgba(190, 18, 60, 0.18)',
+      barGradient:
+        'linear-gradient(90deg, rgba(136, 19, 55, 0.82) 0%, rgba(244, 63, 94, 0.88) 100%)',
+      compactBarGradient:
+        'linear-gradient(90deg, rgba(136, 19, 55, 0.88) 0%, rgba(244, 63, 94, 0.94) 100%)',
+      thumbBorder: '#f43f5e',
+    };
+  }
+  if (
+    uri.startsWith('ia:audio:') ||
+    uri.startsWith('ia://audio/') ||
+    uri.startsWith('ia:video:') ||
+    uri.startsWith('ia://video/')
+  ) {
+    // Internet Archive — Yellow / Gold
+    return {
+      playedTop: '#facc15',
+      playedBot: 'rgba(234, 179, 8, 0.50)',
+      unplayedTop: 'rgba(250, 204, 21, 0.34)',
+      unplayedBot: 'rgba(161, 98, 7, 0.18)',
+      barGradient:
+        'linear-gradient(90deg, rgba(133, 77, 14, 0.82) 0%, rgba(234, 179, 8, 0.88) 100%)',
+      compactBarGradient:
+        'linear-gradient(90deg, rgba(133, 77, 14, 0.88) 0%, rgba(234, 179, 8, 0.94) 100%)',
+      thumbBorder: '#facc15',
+    };
+  }
+  if (
+    uri.startsWith('file://') ||
+    uri.startsWith('/') ||
+    uri.startsWith('video://local/') ||
+    /^[a-zA-Z]:[\\/]/.test(uri)
+  ) {
+    // Local Media — Green / Emerald
+    return {
+      playedTop: '#34d399',
+      playedBot: 'rgba(16, 185, 129, 0.50)',
+      unplayedTop: 'rgba(52, 211, 153, 0.34)',
+      unplayedBot: 'rgba(5, 150, 105, 0.18)',
+      barGradient:
+        'linear-gradient(90deg, rgba(6, 95, 70, 0.82) 0%, rgba(16, 185, 129, 0.88) 100%)',
+      compactBarGradient:
+        'linear-gradient(90deg, rgba(6, 95, 70, 0.88) 0%, rgba(16, 185, 129, 0.94) 100%)',
+      thumbBorder: '#34d399',
+    };
+  }
+  // Optical Disc / Default — Cyan
+  return {
+    playedTop: '#38bdf8',
+    playedBot: 'rgba(14, 165, 233, 0.46)',
+    unplayedTop: 'rgba(56, 189, 248, 0.32)',
+    unplayedBot: 'rgba(14, 116, 144, 0.18)',
+    barGradient: 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
+    compactBarGradient: 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
+    thumbBorder: '#2aa3c4',
+  };
+}
+
 export const ProgressBarRaf: React.FC<Props> = ({
   durationMs,
   trackUri,
@@ -47,9 +137,9 @@ export const ProgressBarRaf: React.FC<Props> = ({
   hiddenRef.current = hidden;
   const ensureLoopRef = useRef<() => void>(() => {});
 
-  const isSoundCloudTrack = Boolean(trackUri && trackUri.startsWith('soundcloud:'));
-  const isSoundCloudRef = useRef(isSoundCloudTrack);
-  isSoundCloudRef.current = isSoundCloudTrack;
+  const sourceTheme = getScrubSourceTheme(trackUri);
+  const sourceThemeRef = useRef<ScrubSourceTheme>(sourceTheme);
+  sourceThemeRef.current = sourceTheme;
 
   const drawWaveformCanvas = (progressRatio: number) => {
     const canvas = waveformCanvasRef.current;
@@ -69,12 +159,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
     const maxTop = midY - 2;
     const maxBottom = h - midY - 2;
     const splitIdx = Math.floor(Math.max(0, Math.min(1, progressRatio)) * n);
-    const isSc = isSoundCloudRef.current;
-
-    const playedTop = isSc ? '#fb923c' : '#38bdf8';
-    const playedBot = isSc ? 'rgba(234, 88, 12, 0.50)' : 'rgba(14, 165, 233, 0.46)';
-    const unplayedTop = isSc ? 'rgba(251, 146, 60, 0.34)' : 'rgba(56, 189, 248, 0.32)';
-    const unplayedBot = isSc ? 'rgba(194, 65, 12, 0.18)' : 'rgba(14, 116, 144, 0.18)';
+    const { playedTop, playedBot, unplayedTop, unplayedBot } = sourceThemeRef.current;
 
     // Pass 1: Played Top
     ctx.fillStyle = playedTop;
@@ -449,9 +534,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
                 style={{
                   width: '100%',
                   height: '100%',
-                  background: isSoundCloudTrack
-                    ? 'linear-gradient(90deg, rgba(124, 45, 18, 0.85) 0%, rgba(234, 88, 12, 0.92) 100%)'
-                    : 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
+                  background: sourceTheme.compactBarGradient,
                   transformOrigin: 'left center',
                   transform: 'scaleX(0)',
                   position: 'relative',
@@ -469,7 +552,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
                 height: 14,
                 borderRadius: 999,
                 background: '#e2e8f0',
-                border: isSoundCloudTrack ? '2px solid #fb923c' : '2px solid #38bdf8',
+                border: `2px solid ${sourceTheme.thumbBorder}`,
                 transform: 'translate(-50%, -50%)',
                 boxShadow: '0 1px 4px rgba(0, 0, 0, 0.8)',
                 pointerEvents: 'none',
@@ -559,9 +642,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
               style={{
                 width: '100%',
                 height: '100%',
-                background: isSoundCloudTrack
-                  ? 'linear-gradient(90deg, rgba(124, 45, 18, 0.78) 0%, rgba(234, 88, 12, 0.82) 100%)'
-                  : 'linear-gradient(90deg, #164e63 0%, #2aa3c4 100%)',
+                background: sourceTheme.barGradient,
                 opacity: waveformBars && waveformBars.length > 0 ? 0.34 : 1,
                 transformOrigin: 'left center',
                 transform: 'scaleX(0)',
@@ -631,7 +712,7 @@ export const ProgressBarRaf: React.FC<Props> = ({
               height: 34,
               borderRadius: 999,
               background: '#c8c8d2',
-              border: isSoundCloudTrack ? '3px solid #fb923c' : '3px solid #2aa3c4',
+              border: `3px solid ${sourceTheme.thumbBorder}`,
               transform: 'translate(-50%, -50%)',
               boxShadow: '0 1px 6px rgba(0, 0, 0, 0.7)',
               pointerEvents: 'none',

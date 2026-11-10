@@ -1,5 +1,7 @@
 import React from 'react';
 import { SourceVisibilityPrefs } from '../views/SettingsModal';
+import { AppleMusicLogo } from './AppleMusicLogo';
+import { SoundCloudLogo } from './SoundCloudLogo';
 
 export interface QuickHelpModalProps {
   onClose: () => void;
@@ -35,7 +37,7 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%',
-          maxWidth: 620,
+          maxWidth: 640,
           maxHeight: '88vh',
           overflowY: 'auto',
           background: '#09090f',
@@ -91,7 +93,64 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
           </button>
         </div>
 
-        {/* Tip Cards Grid */}
+        {/* Choose Sources Bar (Above Steps 1-4) */}
+        <div
+          style={{
+            padding: '10px 12px',
+            borderRadius: 12,
+            background: '#0e1018',
+            border: '1px solid #222638',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
+            Choose Sources:
+          </div>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+              gap: 8,
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => onToggleSourceVisibility('apple_music')}
+              style={sourceChipStyle(sourceVisibility.apple_music, '#f43f5e')}
+            >
+              {sourceVisibility.apple_music ? <AppleMusicLogo size={14} /> : <span>🚫</span>}
+              <span>Apple Music</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onToggleSourceVisibility('soundcloud')}
+              style={sourceChipStyle(sourceVisibility.soundcloud, '#ea580c')}
+            >
+              {sourceVisibility.soundcloud ? <SoundCloudLogo width={30} /> : <span>🚫</span>}
+              <span>SoundCloud</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onToggleSourceVisibility('internet_archive')}
+              style={sourceChipStyle(sourceVisibility.internet_archive, '#34d399')}
+            >
+              <span>{sourceVisibility.internet_archive ? '🏛️' : '🚫'}</span>
+              <span>Internet Archive</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onToggleSourceVisibility('optical_drive')}
+              style={sourceChipStyle(sourceVisibility.optical_drive, '#f59e0b')}
+            >
+              <span>{sourceVisibility.optical_drive ? '💿' : '🚫'}</span>
+              <span>Optical Disc</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Tip Cards Grid (Steps 1-4) */}
         <div
           style={{
             display: 'grid',
@@ -99,19 +158,18 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
             gap: 10,
           }}
         >
-          {/* Tip 1: START -> Folders & Accounts */}
+          {/* 1. START Menu */}
           <div style={tipCardStyle}>
             <div style={{ fontSize: 13, fontWeight: 800, color: '#67e8f9' }}>
-              1. ☰ START → 📁 Folders & Accounts
+              1. ☰ START Menu
             </div>
             <div style={tipBodyStyle}>
-              Press <strong>START</strong> (or click <strong>☰</strong> top-right) and open{' '}
-              <strong>Folders & Accounts</strong> to mount local music/video paths, sign in to{' '}
-              <strong>Apple Music</strong> (with QR companion pairing) or{' '}
-              <strong>SoundCloud</strong>, and show or hide sources.
+              <strong>&ldquo;START&rdquo;</strong> (<strong>☰</strong> from top-right) to configure
+              your connected accounts and local folders to scan for media.
             </div>
             <button
               type="button"
+              data-default-focus="true"
               onClick={() => {
                 onClose();
                 onOpenFoldersAccounts();
@@ -130,51 +188,36 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
                 alignSelf: 'flex-start',
               }}
             >
-              📁 Open Folders & Accounts ▸
+              Folders &amp; Accounts →
             </button>
           </div>
 
-          {/* Tip 2: SELECT -> Contextual Action Menu */}
+          {/* 2. [SELECT] Context Actions */}
           <div style={tipCardStyle}>
             <div style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
-              2. 🎛️ SELECT (•••) → Context Actions
+              2. ⚙ [SELECT] Context Actions
             </div>
             <div style={tipBodyStyle}>
-              Press <strong>SELECT</strong> on your controller (or click <strong>•••</strong> /
-              right-click) on any track, album, or playlist in the Library or Player to:
+              <strong>&ldquo;SELECT&rdquo; ⚙</strong> menu or right-click on library object for
+              contextual controls.
               <ul style={{ margin: '6px 0 0', paddingLeft: 18, lineHeight: 1.5 }}>
                 <li>
-                  <strong>⏭ Play Next</strong> (inserts right after the playing song)
-                </li>
-                <li>
-                  <strong>★ Add to SIMP Hybrid Playlist</strong> (mix Local + Cloud)
-                </li>
-                <li>
-                  <strong>🎤 Artist Profile</strong>, <strong>📻 Track Radio</strong>, or{' '}
-                  <strong>📌 Pin</strong>
+                  <strong>Player View:</strong> Interface Settings: Lyrics, Visualizer,{' '}
+                  <SoundCloudLogo
+                    width={30}
+                    style={{ margin: '0 2px', verticalAlign: 'middle' }}
+                  />{' '}
+                  Comments, Content Queue, <span style={{ color: '#f43f5e' }}>♥</span> Favorite
+                  &amp; Discover more, etc.
                 </li>
               </ul>
             </div>
           </div>
 
-          {/* Tip 3: Views, Visualizers & Synced Lyrics */}
-          <div style={tipCardStyle}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: '#a7f3d0' }}>
-              3. 🎨 Visualizers & 🎤 Synced Lyrics
-            </div>
-            <div style={tipBodyStyle}>
-              On the Player screen, cycle between 5 OLED-black visualizers (
-              <strong>Glyph Matrix</strong>, <strong>Winamp AVS</strong>,{' '}
-              <strong>Demoscene 64K</strong>, <strong>Vertigo Corridor</strong>,{' '}
-              <strong>90s Bryce Trapper</strong>) and toggle <strong>🎤 Lyrics</strong> for live
-              time-synced lyrics.
-            </div>
-          </div>
-
-          {/* Tip 4: Controller & Keyboard Quick Reference */}
+          {/* 3. Gamepad and Controls */}
           <div style={tipCardStyle}>
             <div style={{ fontSize: 13, fontWeight: 800, color: '#fda4af' }}>
-              4. 🎮 Controller & Quick Shortcuts
+              3. 🎮 Gamepad and Controls
             </div>
             <div
               style={{
@@ -193,94 +236,23 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
               <span>Play or Select / Walk Back</span>
               <span style={kbdBadgeStyle}>X / Y</span>
               <span>Shuffle Collection / Focus Search</span>
-              <span style={kbdBadgeStyle}>SELECT</span>
-              <span>Context Menu (Library) / Actions (Player)</span>
+              <span style={kbdBadgeStyle}>R2 / L2</span>
+              <span>Seek +10s / -10s (Fast-Forward / Rewind)</span>
             </div>
           </div>
-        </div>
 
-        {/* OOBE Source Visibility Quick-Toggles (including Internet Archive Safer Search note) */}
-        <div
-          style={{
-            padding: '10px 12px',
-            borderRadius: 12,
-            background: '#0e1018',
-            border: '1px solid #222638',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
-          }}
-        >
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-              gap: 6,
-            }}
-          >
-            <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
-              👁 Active Library Sources (Quick Toggle)
-            </span>
-            <span style={{ fontSize: 11, color: '#8e8e99' }}>
-              🏛️ Internet Archive includes{' '}
-              <strong style={{ color: '#38bdf8' }}>🛡️ Safer Search</strong>{' '}
-              <em>(at least we tried)</em> — hide anytime if you only want music sources
-            </span>
+          {/* 4. Library Management */}
+          <div style={tipCardStyle}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: '#a7f3d0' }}>
+              4. 📚 Library Management
+            </div>
+            <div style={tipBodyStyle}>
+              Search across combinations of the selected sources, as found in the{' '}
+              <strong>☰ START</strong> menu Folders &amp; Accounts. Create and Edit Hybrid
+              Playlists that may span across sources. Drill down into sources to discover and
+              browse content. Manage 📌 pinned collections.
+            </div>
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            <button
-              type="button"
-              onClick={() => onToggleSourceVisibility('apple_music')}
-              style={sourceChipStyle(sourceVisibility.apple_music, '#f43f5e')}
-            >
-              🍎 Apple Music: {sourceVisibility.apple_music ? 'Shown' : 'Hidden'}
-            </button>
-            <button
-              type="button"
-              onClick={() => onToggleSourceVisibility('soundcloud')}
-              style={sourceChipStyle(sourceVisibility.soundcloud, '#ea580c')}
-            >
-              ☁️ SoundCloud: {sourceVisibility.soundcloud ? 'Shown' : 'Hidden'}
-            </button>
-            <button
-              type="button"
-              onClick={() => onToggleSourceVisibility('internet_archive')}
-              style={sourceChipStyle(sourceVisibility.internet_archive, '#34d399')}
-            >
-              🏛️ Internet Archive: {sourceVisibility.internet_archive ? 'Shown' : 'Hidden'}
-            </button>
-            <button
-              type="button"
-              onClick={() => onToggleSourceVisibility('optical_drive')}
-              style={sourceChipStyle(sourceVisibility.optical_drive, '#f59e0b')}
-            >
-              💿 Optical CD/DVD: {sourceVisibility.optical_drive ? 'Shown' : 'Hidden'}
-            </button>
-          </div>
-        </div>
-
-        {/* Footer Action */}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-          <button
-            type="button"
-            data-default-focus="true"
-            onClick={onClose}
-            style={{
-              minHeight: 40,
-              padding: '0 20px',
-              borderRadius: 10,
-              background: '#0f222a',
-              border: '1px solid #2aa3c4',
-              color: '#bfeaf5',
-              fontSize: 13,
-              fontWeight: 900,
-              cursor: 'pointer',
-            }}
-          >
-            ✓ Got It<span className="simp-gp-badge"> (A)</span>
-          </button>
         </div>
       </div>
     </div>
@@ -317,15 +289,20 @@ const kbdBadgeStyle: React.CSSProperties = {
 
 function sourceChipStyle(active: boolean, accent: string): React.CSSProperties {
   return {
-    minHeight: 32,
-    padding: '0 11px',
+    minHeight: 34,
+    padding: '0 10px',
     borderRadius: 8,
-    background: active ? 'rgba(42, 163, 196, 0.14)' : '#14141e',
-    border: active ? `1px solid ${accent}` : '1px solid #262636',
-    color: active ? '#f8fafc' : '#8e8e99',
+    background: active ? 'rgba(42, 163, 196, 0.14)' : '#12121a',
+    border: active ? `1px solid ${accent}` : '1px solid transparent',
+    color: active ? '#f8fafc' : '#6b7280',
     fontSize: 11.5,
-    fontWeight: 800,
+    fontWeight: active ? 800 : 600,
     cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    whiteSpace: 'nowrap',
+    gap: 6,
   };
 }
 

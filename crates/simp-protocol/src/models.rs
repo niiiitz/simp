@@ -324,7 +324,7 @@ pub struct AudioSettings {
 }
 
 fn default_brightness_pct() -> u8 {
-    80
+    100
 }
 
 fn default_soundcloud_auth_mode() -> String {
@@ -428,7 +428,7 @@ impl Default for SimpSettings {
                 battery_auto_dim: true,
                 battery_dim_timeout_sec: 30,
                 battery_dim_opacity: 0.15,
-                brightness_pct: 80,
+                brightness_pct: 100,
             },
             library: LibrarySettings {
                 scan_steam_osts: true,
