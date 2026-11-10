@@ -47,6 +47,7 @@ export interface BrowserTarget {
 
 export interface PlayerViewProps {
   hidden?: boolean;
+  isPlayerIdle?: boolean;
   snap: SimpStateSnapshot | null;
   track: TrackMetadata | null | undefined;
   isPlaying: boolean;
@@ -118,15 +119,16 @@ function computePlayerViewportScale(isVideo = false): number {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   if (vw <= 1340 && vh <= 840) return 1;
-  const baseWidth = isVideo ? 1140 : 1060;
+  const baseWidth = isVideo ? 1160 : 1080;
   const scaleX = (vw - 192) / baseWidth;
-  const scaleY = (vh - 150) / 520;
-  const maxScale = isVideo ? 1.75 : 1.95;
+  const scaleY = (vh - 210) / 520;
+  const maxScale = isVideo ? 1.65 : 1.75;
   return Math.min(maxScale, Math.max(1, Math.min(scaleX, scaleY)));
 }
 
 export const PlayerView: React.FC<PlayerViewProps> = ({
   hidden = false,
+  isPlayerIdle = false,
   snap,
   track,
   isPlaying,
@@ -187,6 +189,25 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     } catch {
       return true;
     }
+  });
+  const [idleFadeEnabled, setIdleFadeEnabled] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('simp_idle_fade_enabled') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const [idleOpacityPct, setIdleOpacityPct] = useState<number>(() => {
+    try {
+      const saved = window.localStorage.getItem('simp_idle_opacity_pct');
+      if (saved !== null) {
+        const parsed = Number(saved);
+        if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 90) {
+          return Math.round(parsed);
+        }
+      }
+    } catch {}
+    return 60;
   });
   const [lyricsData, setLyricsData] = useState<TrackLyricsResponse | null>(null);
   const [activeLyricIdx, setActiveLyricIdx] = useState<number>(-1);
@@ -600,6 +621,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   // Focus active item in Left Column when Player Track Actions Overlay opens
   useEffect(() => {
     if (!playerActionsOpen) return;
+    window.dispatchEvent(new CustomEvent('simp-wake-idle'));
     const t = window.setTimeout(() => {
       const firstBtn =
         document.querySelector<HTMLElement>(
@@ -654,6 +676,29 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       return next;
     });
   }, [showToast]);
+
+  const toggleIdleFade = useCallback(() => {
+    setIdleFadeEnabled((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('simp_idle_fade_enabled', next ? '1' : '0');
+      } catch {}
+      showToast?.(
+        next
+          ? `✨ Idle Controls Auto-Fade ON (${idleOpacityPct}% opacity)`
+          : '✨ Idle Controls Auto-Fade OFF (100% opacity)'
+      );
+      return next;
+    });
+  }, [idleOpacityPct, showToast]);
+
+  const updateIdleOpacityPct = useCallback((nextPct: number) => {
+    const clamped = Math.max(0, Math.min(90, Math.round(nextPct / 5) * 5));
+    setIdleOpacityPct(clamped);
+    try {
+      window.localStorage.setItem('simp_idle_opacity_pct', String(clamped));
+    } catch {}
+  }, []);
 
   const toggleScComments = useCallback(() => {
     setScCommentsEnabled((prev) => {
@@ -1118,6 +1163,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return found >= 0 ? found : 0;
   }, [activeRightColItems]);
 
+  const isForegroundFaded = Boolean(
+    isPlayerIdle && idleFadeEnabled && !playerActionsOpen && !videoTheatreExpanded
+  );
+
   return (
     <>
       <main
@@ -1127,7 +1176,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           display: hidden ? 'none' : 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          padding: '0 48px',
+          padding: 'clamp(56px, 15vh, 175px) 48px 0',
           width: '100%',
           overflow: 'hidden',
           position: 'relative',
@@ -1159,31 +1208,249 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           hidden={hidden}
         />
       )}
+
+      {/* Top-Right Up Next Readout Strip — Anchored just beneath the top Nav Bar & aligned to Scrub Bar */}
+      {snap?.up_next && snap.up_next.length > 0 ? (
+        <div
+          style={{
+            position: 'absolute',
+            top: 14,
+            left: 48,
+            right: 48,
+            zIndex: 3,
+            pointerEvents: 'none',
+            opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
+            transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
+          }}
+        >
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: isVideoTrack ? '420px 1fr' : '240px 1fr',
+              columnGap: 36,
+              maxWidth: isVideoTrack ? 1160 : 1080,
+              width: '100%',
+              margin: '0 auto',
+              transform:
+                !videoTheatreExpanded && playerScale > 1.02 ? `scale(${playerScale})` : undefined,
+              transformOrigin: 'top center',
+            }}
+          >
+            <div
+              style={{
+                gridColumn: '2 / 3',
+                justifySelf: 'end',
+                width: 'fit-content',
+                maxWidth: 'calc(100% - 28px)',
+                marginRight: 14,
+                minWidth: 0,
+                padding: '8px 14px',
+                borderRadius: 12,
+                background: 'rgba(8, 9, 14, 0.90)',
+                border: '1px solid #283044',
+                boxShadow:
+                  '0 10px 26px rgba(0, 0, 0, 0.92), 0 2px 8px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.8)',
+                fontSize: 12,
+                color: '#c4c4d0',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                boxSizing: 'border-box',
+                pointerEvents: 'auto',
+              }}
+            >
+              <span
+                style={{
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  minWidth: 0,
+                }}
+              >
+                <strong style={{ fontFamily: 'monospace', color: '#2aa3c4', marginRight: 8 }}>
+                  NEXT:
+                </strong>
+                {snap.up_next[0].title} — {snap.up_next[0].artists.join(', ')}
+              </span>
+              <span
+                className="simp-gp-badge"
+                style={{
+                  fontFamily: 'monospace',
+                  color: '#71717a',
+                  fontSize: 11,
+                  flexShrink: 0,
+                }}
+              >
+                SELECT • Actions
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: isVideoTrack ? '420px 1fr' : '260px 1fr',
-          alignItems: 'center',
+          gridTemplateColumns: isVideoTrack ? '420px 1fr' : '240px 1fr',
+          alignItems: 'end',
           columnGap: 36,
-          rowGap: 16,
-          maxWidth: isVideoTrack ? 1140 : 1060,
+          rowGap: 14,
+          maxWidth: isVideoTrack ? 1160 : 1080,
           width: '100%',
           margin: '0 auto',
           position: 'relative',
           zIndex: 2,
+          opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
+          transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
           transform:
             !videoTheatreExpanded && playerScale > 1.02 ? `scale(${playerScale})` : undefined,
-          transformOrigin: 'center center',
+          transformOrigin: 'center 62%',
         }}
       >
-        {/* Left Column: Clean 240x240 Album Art OR 16:9 Live Video Stage + Transport/Mode Controls Below */}
+        {/* Row 1 (Full-Width Header): Left-Aligned Track Title & Artist/Album/Source directly above Album Art */}
+        <div
+          style={{
+            gridColumn: '1 / -1',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            minWidth: 0,
+            width: '100%',
+          }}
+        >
+          {/* Track Title & Artist / Collection / Source Header directly above Album Art */}
+          <div
+            style={{
+              minWidth: 0,
+              maxWidth: '100%',
+              position: 'relative',
+              padding: '6px 12px',
+              margin: '-6px -12px 2px',
+              borderRadius: 16,
+              background:
+                !isVideoTrack && vizMode !== 'off'
+                  ? 'radial-gradient(ellipse at 25% 50%, rgba(6, 7, 12, 0.72) 0%, rgba(6, 7, 12, 0.36) 65%, rgba(6, 7, 12, 0) 100%)'
+                  : 'transparent',
+            }}
+          >
+            <h1
+              style={{
+                margin: 0,
+                fontSize: 28,
+                fontWeight: 800,
+                letterSpacing: -0.5,
+                color: '#f4f4fa',
+                textShadow:
+                  '0 2px 6px rgba(0, 0, 0, 0.98), 0 0 18px rgba(0, 0, 0, 0.96), 0 0 34px rgba(0, 0, 0, 0.9)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {track?.title || 'No Track Loaded'}
+            </h1>
+            <p
+              style={{
+                margin: '4px 0 0',
+                fontSize: 15.5,
+                fontWeight: 600,
+                color: '#d4d4e2',
+                textShadow:
+                  '0 2px 5px rgba(0, 0, 0, 0.98), 0 0 14px rgba(0, 0, 0, 0.96), 0 0 26px rgba(0, 0, 0, 0.92)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {track?.artists?.length ? (
+                <span
+                  onClick={() => {
+                    if (primaryArtist && handleMoreByArtist) {
+                      handleMoreByArtist(
+                        primaryArtist,
+                        track.source,
+                        scTrackUserId || undefined
+                      );
+                    }
+                  }}
+                  title={
+                    primaryArtist
+                      ? `Open ${primaryArtist} Artist Profile`
+                      : undefined
+                  }
+                  style={{
+                    cursor: primaryArtist && handleMoreByArtist ? 'pointer' : 'default',
+                    textDecoration: primaryArtist && handleMoreByArtist ? 'underline' : 'none',
+                    textDecorationColor: 'rgba(125, 211, 252, 0.45)',
+                    textUnderlineOffset: 3,
+                  }}
+                >
+                  {track.artists.join(', ')}
+                </span>
+              ) : (
+                <>
+                  Select a track from Library & Queue<span className="simp-gp-badge"> (R1)</span>
+                </>
+              )}
+              {track?.album ? ` • ${track.album}` : ''}
+              {track?.source === 'soundcloud' && (
+                <SoundCloudAttributionLink
+                  permalinkUrl={scTrackPermalink}
+                  kind="track"
+                  id={track.uri}
+                  width={30}
+                  style={{ marginLeft: 8, verticalAlign: 'middle' }}
+                />
+              )}
+              {track?.source === 'apple_music' && (
+                <AppleMusicAttributionLink
+                  id={track.uri}
+                  kind="song"
+                  style={{ marginLeft: 8, verticalAlign: 'middle' }}
+                />
+              )}
+              {track?.source === 'soundcloud' && track?.album?.includes('• Preview') && (
+                <span
+                  style={{
+                    marginLeft: 8,
+                    padding: '2px 7px',
+                    borderRadius: 6,
+                    background: '#3b1506',
+                    border: '1px solid #f97316',
+                    color: '#fdba74',
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                    fontWeight: 800,
+                    verticalAlign: 'middle',
+                  }}
+                >
+                  30s PREVIEW • Sign in for full track
+                </span>
+              )}
+              {(() => {
+                const uri = track?.uri;
+                if (!uri || (!uri.startsWith('file://') && !uri.startsWith('/'))) return null;
+                const clean = uri.split('?')[0].split('#')[0];
+                const dot = clean.lastIndexOf('.');
+                if (dot < 0 || dot === clean.length - 1) return null;
+                const ext = clean.slice(dot + 1).toUpperCase();
+                return ['FLAC', 'MP3', 'WAV', 'OGG', 'OPUS', 'M4A', 'AAC', 'ALAC', 'AIFF'].includes(ext)
+                  ? ` • ${ext}`
+                  : null;
+              })()}
+              {isVideoTrack && activeQuality ? ` • ${activeQuality.label}` : ''}
+            </p>
+          </div>
+        </div>
+
+        {/* Row 2 Left Column: Clean 240x240 Album Art OR 16:9 Live Video Stage */}
         <div
           style={{
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
-            gap: 16,
             flexShrink: 0,
+            marginBottom: 29,
           }}
         >
           <div
@@ -1597,15 +1864,85 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               />
             )}
           </div>
+        </div>
 
-          {/* Queue Mode Controls: Shuffle (X) & Loop/Repeat (Y) */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        {/* Row 2 Right Column: Unified 7-Button Transport Row Above + Waveform Scrub Bar Below (Aligned with Bottom of Art) */}
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'flex-end',
+            gap: 20,
+            minWidth: 0,
+            overflow: 'visible',
+            position: 'relative',
+          }}
+        >
+          {/* Symmetrical Centered 7-Button Transport Row: Shuffle (X) | Rewind (L2) | Prev (◄) | Play/Pause (A) | Next (►) | Fast-Forward (R2) | Repeat (Y) */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
             <TransportIconButton
               icon="🔀"
               badge="X"
               title={snap?.shuffle ? 'Shuffle: On' : 'Shuffle: Off'}
               active={!!snap?.shuffle}
               onClick={() => defaultSimpClient.setShuffle(!snap?.shuffle)}
+            />
+            <TransportIconButton
+              icon="⏪"
+              badge="L2"
+              onClick={() => defaultSimpClient.seekRelative(-10_000)}
+            />
+            <TransportIconButton
+              icon="⏮"
+              badge="◄"
+              onClick={() => defaultSimpClient.previous()}
+            />
+            <button
+              data-default-focus="true"
+              onClick={() => defaultSimpClient.togglePlayPause()}
+              title={isPlaying ? 'Pause (Silence Audio)' : 'Resume Playback'}
+              style={{
+                width: 92,
+                height: 86,
+                borderRadius: 22,
+                background: isPlaying ? '#0f222a' : '#12121a',
+                color: isPlaying ? '#bfeaf5' : '#d4d4dc',
+                border: isPlaying ? '2px solid #2aa3c4' : '2px solid #3f3f4e',
+                boxShadow:
+                  '0 12px 32px rgba(0, 0, 0, 0.94), 0 3px 10px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 5,
+                cursor: 'pointer',
+                fontWeight: 900,
+              }}
+            >
+              <span style={{ fontSize: 28 }}>{isPlaying ? '⏸' : '▶'}</span>
+              <span
+                className="simp-gp-badge"
+                style={{
+                  padding: '2px 10px',
+                  borderRadius: 99,
+                  background: isPlaying ? '#16313c' : '#1f1f2b',
+                  color: isPlaying ? '#7dd3fc' : '#a1a1aa',
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                }}
+              >
+                {isPlaying ? 'A • 🔊' : 'A • 🔇'}
+              </span>
+            </button>
+            <TransportIconButton
+              icon="⏭"
+              badge="►"
+              onClick={() => defaultSimpClient.next()}
+            />
+            <TransportIconButton
+              icon="⏩"
+              badge="R2"
+              onClick={() => defaultSimpClient.seekRelative(10_000)}
             />
             <TransportIconButton
               icon="🔁"
@@ -1634,154 +1971,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               onClick={() => defaultSimpClient.cycleRepeat()}
             />
           </div>
-        </div>
-
-        {/* Right Column: Track Info + Ephemeral SoundCloud Comment Bubbles (+25% scaled) + Tall Scrub Bar + Centered Transport Row */}
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 22,
-            minWidth: 0,
-            overflow: 'visible',
-            position: 'relative',
-          }}
-        >
-          <div
-            style={{
-              minWidth: 0,
-              position: 'relative',
-              padding: '10px 14px',
-              margin: '-10px -14px',
-              borderRadius: 16,
-              background:
-                !isVideoTrack && vizMode !== 'off'
-                  ? 'radial-gradient(ellipse at 35% 50%, rgba(6, 7, 12, 0.72) 0%, rgba(6, 7, 12, 0.38) 68%, rgba(6, 7, 12, 0) 100%)'
-                  : 'transparent',
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 12,
-              }}
-            >
-              <h1
-                style={{
-                  margin: 0,
-                  fontSize: 30,
-                  fontWeight: 800,
-                  letterSpacing: -0.5,
-                  color: '#f4f4fa',
-                  textShadow:
-                    '0 2px 6px rgba(0, 0, 0, 0.98), 0 0 18px rgba(0, 0, 0, 0.96), 0 0 34px rgba(0, 0, 0, 0.9)',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  flex: 1,
-                  minWidth: 0,
-                }}
-              >
-                {track?.title || 'No Track Loaded'}
-              </h1>
-            </div>
-            <p
-              style={{
-                margin: '6px 0 0',
-                fontSize: 16,
-                fontWeight: 600,
-                color: '#d4d4e2',
-                textShadow:
-                  '0 2px 5px rgba(0, 0, 0, 0.98), 0 0 14px rgba(0, 0, 0, 0.96), 0 0 26px rgba(0, 0, 0, 0.92)',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {track?.artists?.length ? (
-                <span
-                  onClick={() => {
-                    if (primaryArtist && handleMoreByArtist) {
-                      handleMoreByArtist(
-                        primaryArtist,
-                        track.source,
-                        scTrackUserId || undefined
-                      );
-                    }
-                  }}
-                  title={
-                    primaryArtist
-                      ? `Open ${primaryArtist} Artist Profile`
-                      : undefined
-                  }
-                  style={{
-                    cursor: primaryArtist && handleMoreByArtist ? 'pointer' : 'default',
-                    textDecoration: primaryArtist && handleMoreByArtist ? 'underline' : 'none',
-                    textDecorationColor: 'rgba(125, 211, 252, 0.45)',
-                    textUnderlineOffset: 3,
-                  }}
-                >
-                  {track.artists.join(', ')}
-                </span>
-              ) : (
-                <>
-                  Select a track from Library & Queue<span className="simp-gp-badge"> (R1)</span>
-                </>
-              )}
-              {track?.album ? ` • ${track.album}` : ''}
-              {track?.source === 'soundcloud' && (
-                <SoundCloudAttributionLink
-                  permalinkUrl={scTrackPermalink}
-                  kind="track"
-                  id={track.uri}
-                  width={30}
-                  style={{ marginLeft: 8, verticalAlign: 'middle' }}
-                />
-              )}
-              {track?.source === 'apple_music' && (
-                <AppleMusicAttributionLink
-                  id={track.uri}
-                  kind="song"
-                  style={{ marginLeft: 8, verticalAlign: 'middle' }}
-                />
-              )}
-              {track?.source === 'soundcloud' && track?.album?.includes('• Preview') && (
-                <span
-                  style={{
-                    marginLeft: 8,
-                    padding: '2px 7px',
-                    borderRadius: 6,
-                    background: '#3b1506',
-                    border: '1px solid #f97316',
-                    color: '#fdba74',
-                    fontSize: 11,
-                    fontFamily: 'monospace',
-                    fontWeight: 800,
-                    verticalAlign: 'middle',
-                  }}
-                >
-                  30s PREVIEW • Sign in for full track
-                </span>
-              )}
-              {(() => {
-                const uri = track?.uri;
-                if (!uri || (!uri.startsWith('file://') && !uri.startsWith('/'))) return null;
-                const clean = uri.split('?')[0].split('#')[0];
-                const dot = clean.lastIndexOf('.');
-                if (dot < 0 || dot === clean.length - 1) return null;
-                const ext = clean.slice(dot + 1).toUpperCase();
-                return ['FLAC', 'MP3', 'WAV', 'OGG', 'OPUS', 'M4A', 'AAC', 'ALAC', 'AIFF'].includes(ext)
-                  ? ` • ${ext}`
-                  : null;
-              })()}
-              {isVideoTrack && activeQuality ? ` • ${activeQuality.label}` : ''}
-            </p>
-          </div>
 
           <div style={{ position: 'relative', width: '100%' }}>
-            {/* Ephemeral SoundCloud Timed Comment Speech Bubbles — Alternating Over & Under Scrub Bar */}
+            {/* Ephemeral SoundCloud Timed Comment Speech Bubbles */}
             {isSoundCloudTrack &&
               scCommentsEnabled &&
               activeBubbles.map((b) => {
@@ -1920,140 +2112,54 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               hidden={hidden}
             />
           </div>
-
-          {/* Symmetrical Centered Transport Row: Rewind (L2) | Prev (◄) | Play/Pause (A) | Next (►) | Fast-Forward (R2) */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
-            <TransportIconButton
-              icon="⏪"
-              badge="L2"
-              onClick={() => defaultSimpClient.seekRelative(-10_000)}
-            />
-            <TransportIconButton
-              icon="⏮"
-              badge="◄"
-              onClick={() => defaultSimpClient.previous()}
-            />
-            <button
-              data-default-focus="true"
-              onClick={() => defaultSimpClient.togglePlayPause()}
-              title={isPlaying ? 'Pause (Silence Audio)' : 'Resume Playback'}
-              style={{
-                width: 96,
-                height: 92,
-                borderRadius: 24,
-                background: isPlaying ? '#0f222a' : '#12121a',
-                color: isPlaying ? '#bfeaf5' : '#d4d4dc',
-                border: isPlaying ? '2px solid #2aa3c4' : '2px solid #3f3f4e',
-                boxShadow:
-                  '0 12px 32px rgba(0, 0, 0, 0.94), 0 3px 10px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 6,
-                cursor: 'pointer',
-                fontWeight: 900,
-              }}
-            >
-              <span style={{ fontSize: 30 }}>{isPlaying ? '⏸' : '▶'}</span>
-              <span
-                className="simp-gp-badge"
-                style={{
-                  padding: '2px 10px',
-                  borderRadius: 99,
-                  background: isPlaying ? '#16313c' : '#1f1f2b',
-                  color: isPlaying ? '#7dd3fc' : '#a1a1aa',
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                }}
-              >
-                {isPlaying ? 'A • 🔊' : 'A • 🔇'}
-              </span>
-            </button>
-            <TransportIconButton
-              icon="⏭"
-              badge="►"
-              onClick={() => defaultSimpClient.next()}
-            />
-            <TransportIconButton
-              icon="⏩"
-              badge="R2"
-              onClick={() => defaultSimpClient.seekRelative(10_000)}
-            />
-          </div>
-
-          {/* Clean Non-Focus-Stealing Up Next Readout Strip */}
-          {snap?.up_next && snap.up_next.length > 0 ? (
-            <div
-              style={{
-                width: '100%',
-                padding: '9px 14px',
-                borderRadius: 12,
-                background: 'rgba(8, 9, 14, 0.94)',
-                border: '1px solid #283044',
-                boxShadow:
-                  '0 10px 26px rgba(0, 0, 0, 0.92), 0 2px 8px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.8)',
-                fontSize: 12,
-                color: '#c4c4d0',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                minWidth: 0,
-                boxSizing: 'border-box',
-              }}
-            >
-              <span
-                style={{
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  minWidth: 0,
-                  marginRight: 12,
-                }}
-              >
-                <strong style={{ fontFamily: 'monospace', color: '#2aa3c4', marginRight: 8 }}>
-                  NEXT:
-                </strong>
-                {snap.up_next[0].title} — {snap.up_next[0].artists.join(', ')}
-              </span>
-              <span
-                className="simp-gp-badge"
-                style={{
-                  fontFamily: 'monospace',
-                  color: '#71717a',
-                  fontSize: 11,
-                  flexShrink: 0,
-                }}
-              >
-                SELECT • Actions
-              </span>
-            </div>
-          ) : null}
         </div>
+      </div>
 
-        {/* Centered Synced Lyrics Pill — Framed Beneath Art & Next Up (Zero Layout Shift, Text-Fitted, Borderless) */}
-        {!isVideoTrack && (() => {
-          const showLyricsBubble = Boolean(
-            lyricsEnabled &&
-              lyricsData &&
-              (lyricsData.synced_lines.length > 0 || lyricsData.instrumental)
-          );
-          return (
+      {/* Bottom-Edge Synced Lyrics Pill — Anchored near bottom screen edge & centered to Scrub Bar / Play/Pause */}
+      {!isVideoTrack && (() => {
+        const showLyricsBubble = Boolean(
+          lyricsEnabled &&
+            lyricsData &&
+            (lyricsData.synced_lines.length > 0 || lyricsData.instrumental)
+        );
+        if (!showLyricsBubble || !lyricsData) return null;
+        return (
+          <div
+            style={{
+              position: 'absolute',
+              bottom: 18,
+              left: 48,
+              right: 48,
+              zIndex: 3,
+              pointerEvents: 'none',
+              opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
+              transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
+            }}
+          >
             <div
               style={{
-                gridColumn: '1 / -1',
+                display: 'grid',
+                gridTemplateColumns: '240px 1fr',
+                columnGap: 36,
+                maxWidth: 1080,
                 width: '100%',
-                height: 54,
-                minHeight: 54,
-                maxHeight: 54,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                boxSizing: 'border-box',
-                pointerEvents: 'none',
+                margin: '0 auto',
+                transform:
+                  !videoTheatreExpanded && playerScale > 1.02 ? `scale(${playerScale})` : undefined,
+                transformOrigin: 'bottom center',
               }}
             >
-              {showLyricsBubble && lyricsData && (
+              <div
+                style={{
+                  gridColumn: '2 / 3',
+                  width: '100%',
+                  minWidth: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxSizing: 'border-box',
+                }}
+              >
                 <div
                   style={{
                     width: 'fit-content',
@@ -2148,11 +2254,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     </>
                   )}
                 </div>
-              )}
+              </div>
             </div>
-          );
-        })()}
-      </div>
+          </div>
+        );
+      })()}
       </main>
 
       {/* Unified Two-Column Controller-First `SELECT` Track & Queue Actions Overlay Menu */}
@@ -2916,6 +3022,143 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                       </button>
                     )}
 
+                    {/* 2c. Idle Controls Auto-Fade & Opacity */}
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                        padding: '8px 12px',
+                        borderRadius: 12,
+                        background: idleFadeEnabled ? '#0f222a' : '#101018',
+                        border: idleFadeEnabled ? '1px solid #2aa3c4' : '1px solid #222230',
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={toggleIdleFade}
+                        style={{
+                          width: '100%',
+                          padding: 0,
+                          border: 'none',
+                          background: 'transparent',
+                          color: '#f4f4f6',
+                          textAlign: 'left',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 12,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 800, color: '#67e8f9' }}>
+                            🫧 Idle Controls Fade (6s)
+                          </span>
+                          <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                            Auto-hide Nav Bar & fade controls to {idleOpacityPct}% opacity when idle
+                          </span>
+                        </div>
+                        <span
+                          style={{
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: idleFadeEnabled ? '#67e8f9' : '#71717a',
+                          }}
+                        >
+                          {idleFadeEnabled ? `ON (${idleOpacityPct}%)` : 'OFF'}
+                        </span>
+                      </button>
+
+                      {idleFadeEnabled && (
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8,
+                            paddingTop: 4,
+                            borderTop: '1px solid rgba(42, 163, 196, 0.22)',
+                          }}
+                        >
+                          <span
+                            style={{
+                              fontSize: 10.5,
+                              fontFamily: 'monospace',
+                              color: '#9ca3af',
+                              minWidth: 78,
+                            }}
+                          >
+                            Idle Opacity:
+                          </span>
+                          <button
+                            type="button"
+                            data-row-aux="true"
+                            onClick={() => updateIdleOpacityPct(idleOpacityPct - 10)}
+                            style={{
+                              minWidth: 28,
+                              height: 26,
+                              borderRadius: 6,
+                              background: '#14141e',
+                              border: '1px solid #2a2c3c',
+                              color: '#bfeaf5',
+                              fontFamily: 'monospace',
+                              fontSize: 12,
+                              fontWeight: 800,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            −
+                          </button>
+                          <input
+                            type="range"
+                            data-row-aux="true"
+                            min={0}
+                            max={90}
+                            step={5}
+                            value={idleOpacityPct}
+                            onChange={(e) => updateIdleOpacityPct(Number(e.target.value))}
+                            style={{
+                              flex: 1,
+                              accentColor: '#2aa3c4',
+                              cursor: 'pointer',
+                            }}
+                          />
+                          <button
+                            type="button"
+                            data-row-aux="true"
+                            onClick={() => updateIdleOpacityPct(idleOpacityPct + 10)}
+                            style={{
+                              minWidth: 28,
+                              height: 26,
+                              borderRadius: 6,
+                              background: '#14141e',
+                              border: '1px solid #2a2c3c',
+                              color: '#bfeaf5',
+                              fontFamily: 'monospace',
+                              fontSize: 12,
+                              fontWeight: 800,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            +
+                          </button>
+                          <span
+                            style={{
+                              fontSize: 11,
+                              fontFamily: 'monospace',
+                              fontWeight: 800,
+                              color: '#67e8f9',
+                              minWidth: 36,
+                              textAlign: 'right',
+                            }}
+                          >
+                            {idleOpacityPct}%
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
                     {/* 3. Timed Comment Bubbles (SoundCloud only) */}
                     {isSoundCloudTrack && (
                       <button
@@ -3070,8 +3313,8 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({
     onClick={onClick}
     title={title}
     style={{
-      width: 76,
-      height: 76,
+      width: 72,
+      height: 72,
       borderRadius: 18,
       background: active ? '#0d1b22' : '#0b0c12',
       border: active ? '2px solid #2aa3c4' : '2px solid #2a2c3c',

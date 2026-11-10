@@ -571,35 +571,53 @@ export const ProgressBarRaf: React.FC<Props> = ({
             />
 
             {/* SoundCloud Timed Comment Cluster Micro-Dots */}
-            {durationMs > 0 && commentTimestampsMs && commentTimestampsMs.length > 0 && (
-              <div
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  pointerEvents: 'none',
-                  zIndex: 4,
-                }}
-              >
-                {commentTimestampsMs.slice(0, 80).map((ts, idx) => {
-                  const pct = Math.max(2, Math.min(98, (ts / durationMs) * 100));
-                  return (
-                    <div
-                      key={`${ts}-${idx}`}
-                      style={{
-                        position: 'absolute',
-                        left: `${pct}%`,
-                        bottom: 2,
-                        width: 3,
-                        height: 3,
-                        borderRadius: 99,
-                        background: 'rgba(253, 186, 116, 0.78)',
-                        transform: 'translateX(-50%)',
-                      }}
-                    />
-                  );
-                })}
-              </div>
-            )}
+            {durationMs > 0 && commentTimestampsMs && commentTimestampsMs.length > 0 && (() => {
+              const maxDots = 120;
+              const sampled =
+                commentTimestampsMs.length <= maxDots
+                  ? commentTimestampsMs
+                  : Array.from({ length: maxDots }, (_, i) =>
+                      commentTimestampsMs[
+                        Math.min(
+                          commentTimestampsMs.length - 1,
+                          Math.floor((i * commentTimestampsMs.length) / maxDots)
+                        )
+                      ]
+                    );
+              const effectiveDurMs = Math.max(
+                durationMs,
+                commentTimestampsMs[commentTimestampsMs.length - 1] || 0
+              );
+              return (
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    pointerEvents: 'none',
+                    zIndex: 4,
+                  }}
+                >
+                  {sampled.map((ts, idx) => {
+                    const pct = Math.max(2, Math.min(98, (ts / effectiveDurMs) * 100));
+                    return (
+                      <div
+                        key={`${ts}-${idx}`}
+                        style={{
+                          position: 'absolute',
+                          left: `${pct}%`,
+                          bottom: 2,
+                          width: 3,
+                          height: 3,
+                          borderRadius: 99,
+                          background: 'rgba(253, 186, 116, 0.78)',
+                          transform: 'translateX(-50%)',
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
 
           {/* OLED-Safe Low-Luminance Playhead Thumb */}

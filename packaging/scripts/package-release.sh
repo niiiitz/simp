@@ -102,7 +102,7 @@ if os.path.isfile(idx_path):
         with open(idx_path, "w", encoding="utf-8") as f:
             f.write(idx_next)
 
-# 5. Sync README.md Status shields.io badge
+# 5. Sync README.md Status shields.io badge & Download headings
 readme_path = "README.md"
 if os.path.isfile(readme_path):
     with open(readme_path, "r", encoding="utf-8") as f:
@@ -112,6 +112,16 @@ if os.path.isfile(readme_path):
         r"\[!\[Status: v[^\]]+\]\(https://img\.shields\.io/badge/status-v[^)]+\)\]\([^)]+\)",
         f"[![Status: v{raw_ver}](https://img.shields.io/badge/status-v{shield_ver}-ff6a00?style=flat-square)](https://github.com/niiiitz/simp/releases)",
         readme_src,
+    )
+    readme_next = re.sub(
+        r"## ⬇️ Download SIMP \(`v[^`]+`([^)]*)\)",
+        f"## ⬇️ Download SIMP (`v{raw_ver}`\\1)",
+        readme_next,
+    )
+    readme_next = re.sub(
+        r"latest GitHub Release \(`v[^`]+`\)",
+        f"latest GitHub Release (`v{raw_ver}`)",
+        readme_next,
     )
     if readme_next != readme_src:
         with open(readme_path, "w", encoding="utf-8") as f:

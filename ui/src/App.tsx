@@ -408,7 +408,6 @@ const ConsoleMainApp: React.FC = () => {
   ];
   const [orbitX, orbitY] = ORBIT_OFFSETS[orbitStep % ORBIT_OFFSETS.length];
   const activeOpacity = Math.max(0.25, Math.min(1, brightnessPct / 100));
-  const idleOpacity = activeOpacity * 0.5;
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -1266,31 +1265,64 @@ const ConsoleMainApp: React.FC = () => {
     isUiVideoTrack(snap?.current_track) && snap?.is_playing && view === 'lock'
   );
 
+  const isOverlayOrPopoverOpen = Boolean(
+    sourceModalOpen ||
+      powerModalOpen ||
+      volumePopoverOpen ||
+      brightnessPopoverOpen ||
+      quickHelpOpen ||
+      oskTarget ||
+      pendingHybridAdd
+  );
+
   useEffect(() => {
     let timerId: number | undefined;
     const resetIdleTimer = () => {
       setIsDimmed(false);
       if (timerId) window.clearTimeout(timerId);
-      // Do not engage 30s OLED screen dimming while a video is actively playing;
-      // when video is paused or concludes, the 30s timer runs normally so dimming engages.
-      if (!isActiveVideoPlayback) {
-        timerId = window.setTimeout(() => setIsDimmed(true), 30_000);
+      if (view === 'lock' && !isOverlayOrPopoverOpen) {
+        timerId = window.setTimeout(() => setIsDimmed(true), 6_000);
       }
     };
 
     resetIdleTimer();
-    window.addEventListener('pointerdown', resetIdleTimer);
-    window.addEventListener('pointermove', resetIdleTimer);
+    window.addEventListener('pointerdown', resetIdleTimer, { passive: true });
+    window.addEventListener('pointermove', resetIdleTimer, { passive: true });
     window.addEventListener('wheel', resetIdleTimer, { passive: true });
     window.addEventListener('keydown', resetIdleTimer);
+    window.addEventListener('touchstart', resetIdleTimer, { passive: true });
+    window.addEventListener('simp-wake-idle', resetIdleTimer);
+
+    let lastGpSig = '';
+    const gpPoll =
+      view === 'lock'
+        ? window.setInterval(() => {
+            const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+            for (const p of pads) {
+              if (!p) continue;
+              const pressed = p.buttons.map((b) => (b.pressed ? '1' : '0')).join('');
+              const axes = p.axes.map((a) => (Math.abs(a) > 0.3 ? a.toFixed(1) : '0')).join(',');
+              const sig = `${pressed}|${axes}`;
+              if (lastGpSig && sig !== lastGpSig) {
+                resetIdleTimer();
+              }
+              lastGpSig = sig;
+              break;
+            }
+          }, 150)
+        : undefined;
+
     return () => {
       if (timerId) window.clearTimeout(timerId);
+      if (gpPoll) window.clearInterval(gpPoll);
       window.removeEventListener('pointerdown', resetIdleTimer);
       window.removeEventListener('pointermove', resetIdleTimer);
       window.removeEventListener('wheel', resetIdleTimer);
       window.removeEventListener('keydown', resetIdleTimer);
+      window.removeEventListener('touchstart', resetIdleTimer);
+      window.removeEventListener('simp-wake-idle', resetIdleTimer);
     };
-  }, [isActiveVideoPlayback]);
+  }, [view, isOverlayOrPopoverOpen]);
 
   // 6 & 7. Gamepad / Spatial Focus Navigation Hook
   const { applyFocusMarker } = useGamepadNavigation({
@@ -1724,7 +1756,7 @@ const ConsoleMainApp: React.FC = () => {
   };
 
   const track = snap?.current_track;
-  const effectiveDimmed = isDimmed && !isActiveVideoPlayback;
+  const isNavBarHidden = view === 'lock' && isDimmed && !isOverlayOrPopoverOpen;
 
   return (
     <div
@@ -1751,9 +1783,9 @@ const ConsoleMainApp: React.FC = () => {
         color: '#d4d4dc',
         display: 'flex',
         flexDirection: 'column',
-        opacity: effectiveDimmed ? idleOpacity : activeOpacity,
+        opacity: activeOpacity,
         transform: isActiveVideoPlayback ? undefined : `translate3d(${orbitX}px, ${orbitY}px, 0)`,
-        transition: 'opacity 350ms ease, transform 4000ms linear',
+        transition: 'opacity 200ms ease, transform 4000ms linear',
         position: 'relative',
       }}
     >
@@ -1784,22 +1816,6 @@ const ConsoleMainApp: React.FC = () => {
           box-shadow: none !important;
         }
       `}</style>
-
-      {/* Wake-Tap Guard: intercepts the first tap when dimmed so no button is misfired */}
-      {effectiveDimmed && !isSleeping && (
-        <div
-          onPointerDown={(e) => {
-            e.stopPropagation();
-            setIsDimmed(false);
-          }}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 100,
-            cursor: 'pointer',
-          }}
-        />
-      )}
 
       {/* True-Black OLED Sleep Screen (Wake on Tap or Any Controller Button) */}
       {isSleeping && (
@@ -1888,19 +1904,27 @@ const ConsoleMainApp: React.FC = () => {
         </div>
       )}
 
-      {/* Top Action Bar: Source Pop-Up Trigger | View Switcher (L1/R1) | Interactive Volume & OLED Saver */}
+      {/* Top Action Bar: Source Pop-Up Trigger | View Switcher (L1/R1) | Interactive Volume & Brightness */}
       <header
         style={{
           height: 58,
           boxSizing: 'border-box',
           padding: '0 24px',
-          borderBottom: '1px solid #16161c',
+          borderBottom: isNavBarHidden ? '1px solid transparent' : '1px solid #16161c',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          background: '#000000',
+          background: isNavBarHidden ? 'transparent' : '#000000',
           width: '100%',
           flexShrink: 0,
+          opacity: isNavBarHidden ? 0 : 1,
+          pointerEvents: isNavBarHidden ? 'none' : 'auto',
+          transform: isNavBarHidden ? 'translateY(-8px)' : 'translateY(0)',
+          transition: isNavBarHidden
+            ? 'opacity 420ms ease, transform 420ms ease, background 420ms ease, border-color 420ms ease'
+            : 'opacity 60ms ease-out, transform 60ms ease-out',
+          position: 'relative',
+          zIndex: 40,
         }}
       >
         <button
@@ -2046,28 +2070,8 @@ const ConsoleMainApp: React.FC = () => {
           </span>
         </div>
 
-        {/* Compact Volume & Brightness Dropdown Controls + Power Button */}
+        {/* Compact Volume & Brightness Dropdown Controls + Settings Button */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative', zIndex: 40 }}>
-          {snap?.power.on_battery && (
-            <span
-              style={{
-                padding: '0 10px',
-                height: 44,
-                borderRadius: 12,
-                background: '#0a0a0e',
-                border: '1px solid #1c1c24',
-                display: 'flex',
-                alignItems: 'center',
-                color: '#0d9488',
-                fontSize: 12,
-                fontFamily: 'monospace',
-                fontWeight: 700,
-              }}
-            >
-              🔋 {snap.power.battery_pct ?? ''}%
-            </span>
-          )}
-
           {/* Unified Play/Pause (Silence) Toggle + Volume % Vertical Slider Popover */}
           <div
             onWheel={(e) => {
@@ -2323,17 +2327,6 @@ const ConsoleMainApp: React.FC = () => {
                     }}
                   />
                 </div>
-                <span
-                  style={{
-                    fontSize: 9,
-                    color: '#71717a',
-                    fontFamily: 'monospace',
-                    textAlign: 'center',
-                    lineHeight: 1.2,
-                  }}
-                >
-                  Idle: {Math.round(brightnessPct * 0.5)}%
-                </span>
               </div>
             )}
           </div>
@@ -2387,6 +2380,7 @@ const ConsoleMainApp: React.FC = () => {
       {/* Main Viewport: Lock Screen (PlayerView stays mounted across L1/R1 so video audio continues in background) + Persistent Split Browser */}
       <PlayerView
         hidden={view !== 'lock'}
+        isPlayerIdle={isNavBarHidden}
         snap={snap}
         track={track}
         isPlaying={isPlaying}
