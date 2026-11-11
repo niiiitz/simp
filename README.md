@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://repository-images.githubusercontent.com/1441133946/de9281d2-ff28-45cf-8106-531a73e15907" width="100%" alt="SIMP — Simple Integrated Media Player" />
+  <img src="https://repository-images.githubusercontent.com/1441133946/1558d7d2-9b3f-4982-999b-b26d67474fa9" width="100%" alt="SIMP — Simple Integrated Media Player" />
 
   # SIMP — Simple Integrated Media Player
 
