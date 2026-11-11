@@ -1,7 +1,7 @@
 <div align="center">
-  <img src="https://repository-images.githubusercontent.com/1441133946/de9281d2-ff28-45cf-8106-531a73e15907" width="100%" alt="SIMP — Simple Integrated Media Player" />
+  <img src="docs/open-graph-banner.png" width="100%" alt="IMP — Interactive Media Player (SIMP)" />
 
-  # SIMP — Simple Integrated Media Player
+  # IMP — Interactive Media Player (`SIMP`)
 
   **A lightweight, controller-first & desktop-native audio and video player for SteamOS, Linux, macOS, Windows, and SteamVR.**
 

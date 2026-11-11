@@ -13,6 +13,7 @@ import { OskTargetKind } from "../../../hooks/useGamepadNavigation";
 import { BrowserTarget } from "../../PlayerView";
 import { SourceVisibilityPrefs } from "../../SettingsModal";
 import { cleanCollectionTitle } from "../libraryHelpers";
+import { ImpIcon, ImpIconName } from "../../../components/icons/ImpIcon";
 
 export interface LibraryXmbLeftColumnProps {
   browserSourceFilter: "all" | "local" | "apple_music" | "soundcloud" | "internet_archive";
@@ -160,15 +161,21 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
         {/* Top-Level Multi-Select Source Filter Bar (`[ 🌐 All | 💾 Local | 🍎 Apple | ☁️ SC | 🏛️ Archive ]`)
             🌐 All resets to all sources; clicking individual pills toggles them into a custom multi-source mix. */}
         {(() => {
-          const sourceTabs = [
-            { id: 'all' as const, label: '🌐 All', accent: 'teal' as const },
-            { id: 'local' as const, label: '💾 Local', accent: 'teal' as const },
+          const sourceTabs: Array<{
+            id: 'all' | 'local' | 'apple_music' | 'soundcloud' | 'internet_archive';
+            label: string;
+            icon: ImpIconName;
+            accent: 'teal' | 'apple' | 'soundcloud' | 'archive';
+          }> = [
+            { id: 'all', label: 'All', icon: 'globe', accent: 'teal' },
+            { id: 'local', label: 'Local', icon: 'disc', accent: 'teal' },
             ...(sourceVisibility.apple_music &&
             (snap?.apple_authenticated || appleAuthState === 'reauth_required')
               ? [
                   {
                     id: 'apple_music' as const,
-                    label: appleAuthState === 'reauth_required' ? '🍎 Apple⚠️' : '🍎 Apple',
+                    label: appleAuthState === 'reauth_required' ? 'Apple!' : 'Apple',
+                    icon: 'apple' as const,
                     accent: 'apple' as const,
                   },
                 ]
@@ -177,7 +184,8 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
               ? [
                   {
                     id: 'soundcloud' as const,
-                    label: '☁️ SC',
+                    label: 'SC',
+                    icon: 'soundcloud' as const,
                     accent: 'soundcloud' as const,
                   },
                 ]
@@ -186,7 +194,8 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
               ? [
                   {
                     id: 'internet_archive' as const,
-                    label: '🏛️ Archive',
+                    label: 'Archive',
+                    icon: 'archive' as const,
                     accent: 'archive' as const,
                   },
                 ]
@@ -311,9 +320,14 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
                       fontSize: 11,
                       fontWeight: 800,
                       cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 4,
                     }}
                   >
-                    {tab.label}
+                    <ImpIcon name={tab.icon} size={11} />
+                    <span>{tab.label}</span>
                   </button>
                 );
               })}
@@ -321,7 +335,7 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
           );
         })()}
 
-        {/* Row 2b: Media Type Filter Strip (`[ All Media | 🎬 Video | 🎵 Audio ]`) */}
+        {/* Row 2b: Media Type Filter Strip (`[ All Media | Video | Audio ]`) */}
         <div
           style={{
             display: 'grid',
@@ -331,9 +345,9 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
         >
           {(
             [
-              { id: 'all' as const, label: 'All Media' },
-              { id: 'video' as const, label: '🎬 Video' },
-              { id: 'audio' as const, label: '🎵 Audio' },
+              { id: 'all' as const, label: 'All Media', icon: null },
+              { id: 'video' as const, label: 'Video', icon: 'video' as const },
+              { id: 'audio' as const, label: 'Audio', icon: 'music' as const },
             ] as const
           ).map((m) => {
             const active = mediaTypeFilter === m.id;
@@ -351,9 +365,14 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
                   fontSize: 10,
                   fontWeight: 800,
                   cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 4,
                 }}
               >
-                {m.label}
+                {m.icon && <ImpIcon name={m.icon} size={11} />}
+                <span>{m.label}</span>
               </button>
             );
           })}
@@ -391,7 +410,7 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
                 [
                   {
                     id: 'pinned' as const,
-                    label: `SIMP Library (${filteredPlaylists.length})`,
+                    label: `IMP Library (${filteredPlaylists.length})`,
                     isSimp: true,
                     defaultSub: 'all',
                   },
@@ -493,7 +512,7 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
                 [
                   {
                     id: 'pinned' as const,
-                    label: `📌 SIMP Library (${filteredPlaylists.length})`,
+                    label: `📌 IMP Library (${filteredPlaylists.length})`,
                     isSimp: true,
                   },
                   {
@@ -588,7 +607,7 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
                 ? [
                     {
                       id: 'pinned' as const,
-                      label: `📌 SIMP Library (${filteredPlaylists.length + pinnedAppleAlbumCount})`,
+                      label: `📌 IMP Library (${filteredPlaylists.length + pinnedAppleAlbumCount})`,
                       isSimp: true,
                     },
                     { id: 'for_you' as const, label: '✨ For You', isSimp: false },
@@ -608,7 +627,7 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
                       label:
                         browserSourceFilter === 'local'
                           ? `💾 All Local Albums (${filteredAlbums.length})`
-                          : `📌 My SIMP Library (${filteredPlaylists.length + pinnedAppleAlbumCount})`,
+                          : `📌 My IMP Library (${filteredPlaylists.length + pinnedAppleAlbumCount})`,
                       isSimp: true,
                     },
                   ]
@@ -1066,7 +1085,7 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
               cursor: 'pointer',
             }}
           >
-            {playlistsOpen ? '▾' : '▸'} SIMP PLAYLISTS ({filteredPlaylists.length})
+            {playlistsOpen ? '▾' : '▸'} IMP PLAYLISTS ({filteredPlaylists.length})
           </button>
           <button
             data-xmb-drill-action="true"
@@ -1088,7 +1107,7 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
                 return next;
               });
             }}
-            title={creatingPlaylist ? 'Cancel New SIMP Playlist' : 'Create New SIMP Hybrid Playlist'}
+            title={creatingPlaylist ? 'Cancel New IMP Playlist' : 'Create New IMP Hybrid Playlist'}
             style={{
               padding: '2px 8px',
               borderRadius: 6,
@@ -1111,7 +1130,7 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
             <input
               type="text"
               data-osk-input="playlist"
-              placeholder="New SIMP Playlist name..."
+              placeholder="New IMP Playlist name..."
               value={newPlaylistName}
               onChange={(e) => setNewPlaylistName(e.target.value)}
               onClick={(e) => {

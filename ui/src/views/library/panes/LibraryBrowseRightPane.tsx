@@ -957,7 +957,7 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                         <input
                           type="text"
                           data-osk-input="playlist"
-                          placeholder="Name your new SIMP Hybrid Playlist (Local + Apple + SoundCloud)..."
+                          placeholder="Name your new IMP Hybrid Playlist (Local + Apple + SoundCloud)..."
                           value={newPlaylistName}
                           onChange={(e) => setNewPlaylistName(e.target.value)}
                           onClick={(e) => {
@@ -1041,7 +1041,7 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                     {simpHubFilter === 'all' && hybridPlaylistsList.length > 0 && (
                       <>
                         <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                          ★ SIMP HYBRID PLAYLISTS ({hybridPlaylistsList.length})
+                          ★ IMP HYBRID PLAYLISTS ({hybridPlaylistsList.length})
                         </div>
                         <div style={tileGridStyle}>
                           {hybridPlaylistsList.map(renderSimpPlaylistCard)}

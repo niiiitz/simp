@@ -52,6 +52,7 @@ import { SettingsModal, SimpUpdateStatus, SourceVisibilityPrefs } from './views/
 import { QuickHelpModal } from './components/QuickHelpModal';
 import { TrackPropertiesModal, TrackPropertiesTarget } from './components/TrackPropertiesModal';
 import { ImpIcon } from './components/icons/ImpIcon';
+import { applySkinPackToDocument, loadActiveSkinPackId } from './theme/skinPacks';
 
 const isCompanionPairRoute =
   typeof window !== 'undefined' &&
@@ -64,13 +65,16 @@ const isDedicatedAppleWorkerRoute =
 
 const DedicatedAppleWorkerApp: React.FC = () => {
   useEffect(() => {
-    document.title = 'SIMP Headless Audio Worker';
+    document.title = 'IMP Headless Audio Worker';
     defaultSimpClient.connect();
   }, []);
   return <AppleMusicDriver />;
 };
 
 export const App: React.FC = () => {
+  useEffect(() => {
+    applySkinPackToDocument(loadActiveSkinPackId());
+  }, []);
   if (isDedicatedAppleWorkerRoute) {
     return <DedicatedAppleWorkerApp />;
   }
@@ -546,7 +550,7 @@ const ConsoleMainApp: React.FC = () => {
 
   const applySimpUpdate = useCallback(async () => {
     setUpdateStatus((prev) => ({ ...prev, applying: true, error: undefined }));
-    showToast('Downloading & installing latest SIMP release from GitHub...');
+    showToast('Downloading & installing latest IMP release from GitHub...');
     const base = resolveDaemonBaseUrl();
     try {
       const resp = await fetch(`${base}/api/update/apply`, { method: 'POST', cache: 'no-store' });
@@ -564,7 +568,7 @@ const ConsoleMainApp: React.FC = () => {
             update_available: false,
           }));
         }
-        showToast(`${data.message} — restarting SIMP...`);
+        showToast(`${data.message} — restarting IMP...`);
         await new Promise((r) => window.setTimeout(r, 950));
         for (let attempt = 0; attempt < 15; attempt++) {
           try {
@@ -1525,12 +1529,12 @@ const ConsoleMainApp: React.FC = () => {
               setPendingDroppedFolder(res.resolved_folder);
             } else {
               setSourceModalOpen(true);
-              showToast('Select the folder in Local Folders -> [Browse...] to index it into SIMP');
+              showToast('Select the folder in Local Folders -> [Browse...] to index it into IMP');
             }
           })
           .catch(() => {
             setSourceModalOpen(true);
-            showToast('Select the folder in Local Folders -> [Browse...] to index it into SIMP');
+            showToast('Select the folder in Local Folders -> [Browse...] to index it into IMP');
           });
       }
     };
@@ -1550,7 +1554,7 @@ const ConsoleMainApp: React.FC = () => {
     try {
       const created = await defaultSimpClient.query<PlaylistRecord>('create_playlist', {
         name: trimmed,
-        description: 'Created in SIMP',
+        description: 'Created in IMP',
       });
       setNewPlaylistName('');
       setCreatingPlaylist(false);
@@ -1616,10 +1620,10 @@ const ConsoleMainApp: React.FC = () => {
       let targetPlName = 'Favorites';
 
       if (createNewName !== undefined) {
-        const trimmedName = createNewName.trim() || 'New SIMP Playlist';
+        const trimmedName = createNewName.trim() || 'New IMP Playlist';
         const created = await defaultSimpClient.query<PlaylistRecord>('create_playlist', {
           name: trimmedName,
-          description: 'Hybrid Local + Apple Music SIMP playlist',
+          description: 'Hybrid Local + Apple Music IMP playlist',
         });
         targetPlId = created.id;
         targetPlName = created.name;
@@ -1635,7 +1639,7 @@ const ConsoleMainApp: React.FC = () => {
           }).catch(() => {});
         }
         targetPlId = found?.id || explicitPlaylistId;
-        targetPlName = found?.name || 'SIMP Playlist';
+        targetPlName = found?.name || 'IMP Playlist';
         setActivePlaylistId(targetPlId);
       } else if (writablePlaylists.length === 1) {
         targetPlId = writablePlaylists[0].id;
@@ -1650,7 +1654,7 @@ const ConsoleMainApp: React.FC = () => {
       if (!targetPlId) {
         const created = await defaultSimpClient.query<PlaylistRecord>('create_playlist', {
           name: 'Favorites',
-          description: 'Hybrid Local + Apple Music SIMP playlist',
+          description: 'Hybrid Local + Apple Music IMP playlist',
         });
         targetPlId = created.id;
         targetPlName = created.name;
@@ -1874,7 +1878,7 @@ const ConsoleMainApp: React.FC = () => {
       );
       setActivePlaylistId((prev) => (prev === playlistId ? '' : prev));
       refreshLibraryData();
-      showToast(`Removed playlist "${playlistName}" from SIMP`);
+      showToast(`Removed playlist "${playlistName}" from IMP`);
     } catch {
       showToast('Could not remove playlist');
     }
@@ -1891,7 +1895,7 @@ const ConsoleMainApp: React.FC = () => {
           : prev
       );
       refreshLibraryData();
-      showToast(`Unpinned album "${albumTitle}" from SIMP`);
+      showToast(`Unpinned album "${albumTitle}" from IMP`);
     } catch {
       showToast('Could not remove album');
     }
@@ -1906,7 +1910,7 @@ const ConsoleMainApp: React.FC = () => {
       await pinApplePlaylistToSimp(pl, preloadedTracks, showToast);
       refreshLibraryData();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to pin playlist to SIMP');
+      showToast(err?.message || 'Failed to pin playlist to IMP');
     } finally {
       setCloudLoading(false);
     }
@@ -1918,7 +1922,7 @@ const ConsoleMainApp: React.FC = () => {
       await pinAppleAlbumToSimp(album, tracks, showToast);
       refreshLibraryData();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to pin album to SIMP');
+      showToast(err?.message || 'Failed to pin album to IMP');
     } finally {
       setCloudLoading(false);
     }
@@ -1933,7 +1937,7 @@ const ConsoleMainApp: React.FC = () => {
       await pinSoundCloudPlaylistToSimp(pl, preloadedTracks, showToast);
       refreshLibraryData();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to pin SoundCloud set to SIMP');
+      showToast(err?.message || 'Failed to pin SoundCloud set to IMP');
     } finally {
       setCloudLoading(false);
     }
@@ -1998,9 +2002,9 @@ const ConsoleMainApp: React.FC = () => {
         select:focus, select:focus-visible,
         [data-focusable="true"]:focus, [data-focusable="true"]:focus-visible,
         .simp-gpfocus, [data-simp-active-focus="true"] {
-          outline: 2px solid #2aa3c4 !important;
+          outline: 2px solid var(--imp-accent-primary, #2aa3c4) !important;
           outline-offset: 2px !important;
-          box-shadow: 0 0 0 3px rgba(42, 163, 196, 0.28) !important;
+          box-shadow: 0 0 0 3px var(--imp-accent-glow, rgba(42, 163, 196, 0.28)) !important;
         }
         html[data-simp-input="pointer"] .simp-gp-badge {
           display: none !important;
@@ -2057,8 +2061,8 @@ const ConsoleMainApp: React.FC = () => {
               textAlign: 'center',
             }}
           >
-            <span>
-              🌙 SIMP Screen Sleep • {snap?.is_playing && track ? `▶ ${track.title}` : 'Standby'}
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+              <ImpIcon name="moon" size={12} /> IMP Screen Sleep • {snap?.is_playing && track ? `▶ ${track.title}` : 'Standby'}
             </span>
             <span style={{ fontSize: 11 }}>Tap anywhere or press any button to wake</span>
           </div>
@@ -2174,7 +2178,7 @@ const ConsoleMainApp: React.FC = () => {
             SELECT
           </span>
           <img
-            src="/favicon.png"
+            src="/favicon.png?v=0.3.0-alpha.1"
             alt="SIMP"
             style={{
               width: 26,
@@ -2856,7 +2860,7 @@ const ConsoleMainApp: React.FC = () => {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 800, color: '#bfeaf5' }}>
-                  ★ Add to SIMP Hybrid Playlist
+                  ★ Add to IMP Hybrid Playlist
                 </div>
                 <div
                   style={{
@@ -2987,7 +2991,7 @@ const ConsoleMainApp: React.FC = () => {
                   textAlign: 'left',
                 }}
               >
-                + Add to New SIMP Playlist...
+                + Add to New IMP Playlist...
               </button>
             ) : (
               <div
@@ -3003,7 +3007,7 @@ const ConsoleMainApp: React.FC = () => {
                 <input
                   type="text"
                   data-osk-input="playlist"
-                  placeholder="New SIMP Playlist name..."
+                  placeholder="New IMP Playlist name..."
                   value={newPlaylistName}
                   onChange={(e) => setNewPlaylistName(e.target.value)}
                   onClick={() => {
@@ -3430,7 +3434,7 @@ const ConsoleMainApp: React.FC = () => {
               <div style={{ fontSize: 15, fontWeight: 800 }}>Add Folder to Local Folders?</div>
             </div>
             <div style={{ fontSize: 12.5, color: '#cbd5e1', lineHeight: 1.45 }}>
-              Index this folder into your local SIMP library so its albums, tracks, artwork, and `.lrc` lyrics are available across all views:
+              Index this folder into your local IMP library so its albums, tracks, artwork, and `.lrc` lyrics are available across all views:
             </div>
             <div
               style={{

@@ -265,6 +265,7 @@ else
   echo "   • Signing with Keychain identity (Hardened Runtime): ${SIGN_LABEL:-${SIGN_IDENTITY}} (${SIGN_IDENTITY})"
   codesign --force --deep \
     --options runtime \
+    --timestamp \
     --entitlements "${REPO_ROOT}/packaging/macos/entitlements.plist" \
     --sign "${SIGN_IDENTITY}" \
     "${APP_BUNDLE}"
@@ -272,6 +273,19 @@ fi
 
 codesign --verify --deep --strict "${APP_BUNDLE}"
 ditto -c -k --keepParent "${APP_BUNDLE}" "${ZIP_ARCHIVE}"
+
+if [[ -n "${APPLE_NOTARIZE_PROFILE:-}" && "${SIGN_IDENTITY}" != "-" ]]; then
+  echo "   • Submitting ${ZIP_ARCHIVE} to Apple Notary Service (profile: ${APPLE_NOTARIZE_PROFILE})..."
+  xcrun notarytool submit "${ZIP_ARCHIVE}" \
+    --keychain-profile "${APPLE_NOTARIZE_PROFILE}" \
+    --wait
+  echo "   • Stapling notarization ticket to ${APP_BUNDLE}..."
+  xcrun stapler staple "${APP_BUNDLE}"
+  xcrun stapler validate "${APP_BUNDLE}"
+  rm -f "${ZIP_ARCHIVE}"
+  ditto -c -k --keepParent "${APP_BUNDLE}" "${ZIP_ARCHIVE}"
+  echo "   • Repacked notarized + stapled ${ZIP_ARCHIVE}"
+fi
 
 echo "============================================================"
 echo "✅ macOS Application Bundle Ready (${ARCH_SLUG}):"

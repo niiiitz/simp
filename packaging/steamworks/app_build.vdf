@@ -1,0 +1,17 @@
+"AppBuild"
+{
+	"AppID" "0" // Replace with assigned Steamworks AppID in production Partner portal
+	"Desc" "IMP — Interactive Media Player (SIMP) Multi-Platform Release"
+	"BuildOutput" "../../dist/steampipe_output"
+	"ContentRoot" "../../dist"
+	"SetLive" "default"
+	"Preview" "0"
+	"Local" ""
+	"Depots"
+	{
+		"1001" "depot_build_1001_linux_x64.vdf"
+		"1002" "depot_build_1002_linux_arm64.vdf"
+		"1003" "depot_build_1003_windows_x64.vdf"
+		"1004" "depot_build_1004_macos.vdf"
+	}
+}

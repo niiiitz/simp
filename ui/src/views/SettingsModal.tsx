@@ -22,6 +22,12 @@ import { OskTargetKind } from '../hooks/useGamepadNavigation';
 import { BrowserTarget } from './PlayerView';
 import { ImpIcon } from '../components/icons/ImpIcon';
 import { FolderChooserModal } from '../components/FolderChooserModal';
+import {
+  applySkinPackToDocument,
+  loadActiveSkinPackId,
+  SKIN_PACK_REGISTRY,
+  SkinPackId,
+} from '../theme/skinPacks';
 
 interface DaemonPerfSnapshot {
   cpu_percent: number;
@@ -185,6 +191,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   );
   const [iaSafeSearch, setIaSafeSearch] = useState(true);
   const [perfSnap, setPerfSnap] = useState<DaemonPerfSnapshot | null>(null);
+  const [activeSkinPack, setActiveSkinPack] = useState<SkinPackId>(() => loadActiveSkinPackId());
 
   const closeSettingsDrawer = () => {
     setSourceModalOpen(false);
@@ -446,8 +453,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 borderBottom: '1px solid #1e1e2a',
               }}
             >
-              <strong style={{ fontSize: 13.5, color: '#bfeaf5' }}>
-                📁 Folders & Accounts
+              <strong style={{ fontSize: 13.5, color: '#bfeaf5', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <ImpIcon name="folder" size={14} /> Folders & Accounts
               </strong>
               <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#67e8f9' }}>
                 <span className="simp-gp-badge">D-Pad ▸ / B</span>
@@ -457,8 +464,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {/* + Internet Archive [Show/Hide, Safe Search, Sign In] */}
             <div style={nestedCardStyle}>
               <div style={nestedHeaderRowStyle}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: '#6ee7b7' }}>
-                  🏛️ Internet Archive
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#6ee7b7', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <ImpIcon name="archive" size={13} /> Internet Archive
                 </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button
@@ -467,7 +474,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('internet_archive')}
                     style={pillToggleStyle(sourceVisibility.internet_archive, '#34d399')}
                   >
-                    {sourceVisibility.internet_archive ? '👁 Shown' : '🚫 Hidden'}
+                    <ImpIcon
+                      name={sourceVisibility.internet_archive ? 'eye' : 'eye-off'}
+                      size={11}
+                      style={{ marginRight: 4 }}
+                    />
+                    {sourceVisibility.internet_archive ? 'Shown' : 'Hidden'}
                   </button>
                   <button
                     type="button"
@@ -482,14 +494,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       });
                       showToast(
                         nextSafe
-                          ? '🛡️ Archive Safer Search enabled (at least we tried)'
-                          : '🛡️ Archive Safer Search disabled'
+                          ? 'Archive Safer Search enabled (at least we tried)'
+                          : 'Archive Safer Search disabled'
                       );
                       refreshLibraryData();
                     }}
                     style={pillToggleStyle(iaSafeSearch, '#38bdf8')}
                   >
-                    🛡️ Safer Search: {iaSafeSearch ? 'On' : 'Off'}
+                    <ImpIcon name="shield" size={11} style={{ marginRight: 4 }} />
+                    Safer Search: {iaSafeSearch ? 'On' : 'Off'}
                   </button>
                   <button
                     type="button"
@@ -560,8 +573,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {/* + Apple Music [Show/Hide, Sign In] */}
             <div style={nestedCardStyle}>
               <div style={nestedHeaderRowStyle}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: '#fda4af' }}>
-                  🍎 Apple Music
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#fda4af', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <ImpIcon name="apple" size={13} /> Apple Music
                 </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <button
@@ -569,14 +582,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('apple_music')}
                     style={pillToggleStyle(sourceVisibility.apple_music, '#f43f5e')}
                   >
-                    {sourceVisibility.apple_music ? '👁 Shown' : '🚫 Hidden'}
+                    <ImpIcon
+                      name={sourceVisibility.apple_music ? 'eye' : 'eye-off'}
+                      size={11}
+                      style={{ marginRight: 4 }}
+                    />
+                    {sourceVisibility.apple_music ? 'Shown' : 'Hidden'}
                   </button>
                   <button
                     type="button"
                     onClick={() => setAppleAuthOpen((v) => !v)}
                     style={pillToggleStyle(!!snap?.apple_authenticated || appleAuthOpen, '#fda4af')}
                   >
-                    {snap?.apple_authenticated ? '🟢 Connected' : 'Sign In'} {appleAuthOpen ? '▾' : '▸'}
+                    {snap?.apple_authenticated ? 'Connected' : 'Sign In'} {appleAuthOpen ? '▾' : '▸'}
                   </button>
                 </div>
               </div>
@@ -702,7 +720,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('soundcloud')}
                     style={pillToggleStyle(sourceVisibility.soundcloud, '#ea580c')}
                   >
-                    {sourceVisibility.soundcloud ? '👁 Shown' : '🚫 Hidden'}
+                    <ImpIcon
+                      name={sourceVisibility.soundcloud ? 'eye' : 'eye-off'}
+                      size={11}
+                      style={{ marginRight: 4 }}
+                    />
+                    {sourceVisibility.soundcloud ? 'Shown' : 'Hidden'}
                   </button>
                   {(() => {
                     const isPersonalUser = Boolean(
@@ -720,8 +743,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         )}
                       >
                         {isPersonalUser
-                          ? `🟢 @${soundcloudAuthCfg?.username}`
-                          : '🌐 Public · Sign In'}{' '}
+                          ? `@${soundcloudAuthCfg?.username}`
+                          : 'Public · Sign In'}{' '}
                         {scAuthOpen ? '▾' : '▸'}
                       </button>
                     );
@@ -802,8 +825,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {/* + Optical Drive [Show/Hide] */}
             <div style={nestedCardStyle}>
               <div style={nestedHeaderRowStyle}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: '#fcd34d' }}>
-                  💿 Optical Drive
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#fcd34d', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <ImpIcon name="disc" size={13} /> Optical Drive
                 </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button
@@ -811,7 +834,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onClick={() => toggleSourceVisible('optical_drive')}
                     style={pillToggleStyle(sourceVisibility.optical_drive, '#f59e0b')}
                   >
-                    {sourceVisibility.optical_drive ? '👁 Shown' : '🚫 Hidden'}
+                    <ImpIcon
+                      name={sourceVisibility.optical_drive ? 'eye' : 'eye-off'}
+                      size={11}
+                      style={{ marginRight: 4 }}
+                    />
+                    {sourceVisibility.optical_drive ? 'Shown' : 'Hidden'}
                   </button>
                   {sourceVisibility.optical_drive && (
                     <>
@@ -821,7 +849,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         onClick={() => handleScanOpticalDisc(true, false)}
                         style={pillToggleStyle(false, '#fcd34d')}
                       >
-                        {cdScanning ? '⏳...' : '🔄 Scan'}
+                        <ImpIcon name="refresh" size={11} style={{ marginRight: 4 }} />
+                        {cdScanning ? 'Scanning...' : 'Scan'}
                       </button>
                       {opticalDisc?.drive_present && (
                         <button
@@ -829,7 +858,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           onClick={handleEjectOpticalDisc}
                           style={pillToggleStyle(false, '#fca5a5')}
                         >
-                          ⏏ Eject
+                          <ImpIcon name="eject" size={11} style={{ marginRight: 4 }} />
+                          Eject
                         </button>
                       )}
                     </>
@@ -841,8 +871,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {/* + Folders */}
             <div style={nestedCardStyle}>
               <div style={nestedHeaderRowStyle}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: '#67e8f9' }}>
-                  📁 Local Folders ({snap?.mounts?.length || 0})
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#67e8f9', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <ImpIcon name="folder" size={13} /> Local Folders ({snap?.mounts?.length || 0})
                 </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button
@@ -868,7 +898,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     }}
                     style={pillToggleStyle(false, '#bfeaf5')}
                   >
-                    🔄 Rescan
+                    <ImpIcon name="refresh" size={11} style={{ marginRight: 4 }} />
+                    Rescan
                   </button>
                   <button
                     type="button"
@@ -999,7 +1030,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   textAlign: 'left',
                 }}
               >
-                🧹 Reset DB (Preserves Auth)
+                <ImpIcon name="trash" size={11} style={{ marginRight: 4 }} />
+                Reset DB (Preserves Auth)
               </button>
 
               <button
@@ -1018,7 +1050,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   textAlign: 'left',
                 }}
               >
-                ⚠️ Hard Reset
+                <ImpIcon name="alert" size={11} style={{ marginRight: 4 }} />
+                Hard Reset
               </button>
             </div>
 
@@ -1034,8 +1067,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   gap: 8,
                 }}
               >
-                <div style={{ fontSize: 11.5, fontWeight: 800, color: '#fecaca' }}>
-                  ⚠️ Confirm Hard Reset (Wipes Auth, Playlists & Settings)?
+                <div style={{ fontSize: 11.5, fontWeight: 800, color: '#fecaca', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <ImpIcon name="alert" size={12} /> Confirm Hard Reset (Wipes Auth, Playlists & Settings)?
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button
@@ -1131,8 +1164,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               gap: 8,
             }}
           >
-            <strong style={{ fontSize: 14, color: '#bfeaf5' }}>
-              ☰ Settings<span className="simp-gp-badge"> (START)</span>
+            <strong style={{ fontSize: 14, color: '#bfeaf5', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <ImpIcon name="settings" size={14} /> IMP Settings<span className="simp-gp-badge"> (START)</span>
             </strong>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               {onOpenQuickHelp && (
@@ -1153,9 +1186,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     fontSize: 11.5,
                     fontWeight: 800,
                     cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
                   }}
                 >
-                  ❓ Help
+                  <ImpIcon name="help" size={12} /> Help
                 </button>
               )}
               <button
@@ -1201,19 +1237,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 cursor: 'pointer',
               }}
             >
-              <span style={{ fontSize: 13, fontWeight: 800 }}>🌙 Sleep Screen</span>
+              <span style={{ fontSize: 13, fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <ImpIcon name="moon" size={13} /> Sleep Screen
+              </span>
               <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#67e8f9' }}>OLED 0%</span>
             </button>
 
             <button
               type="button"
-              title="Shutdown SIMP (Hold Shift to Restart Service)"
-              aria-label="Shutdown SIMP"
+              title="Shutdown IMP (Hold Shift to Restart Service)"
+              aria-label="Shutdown IMP"
               onClick={(e) => {
                 if (e.shiftKey) {
                   defaultSimpClient.pause();
                   defaultSimpClient.restartDaemon();
-                  showToast('Restarting SIMP background service...');
+                  showToast('Restarting IMP background service...');
                   closeSettingsDrawer();
                   if (window.parent && window.parent !== window) {
                     window.setTimeout(() => dismissConsole(), 300);
@@ -1241,7 +1279,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 cursor: 'pointer',
               }}
             >
-              ⏻
+              <ImpIcon name="power" size={16} />
             </button>
           </div>
 
@@ -1274,8 +1312,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 width: '100%',
               }}
             >
-              <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5' }}>
-                🔆 Brightness
+              <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <ImpIcon name="sun" size={13} /> Brightness
               </span>
               <span style={{ fontSize: 11.5, fontFamily: 'monospace', color: '#67e8f9' }}>
                 {brightnessScrubActive ? `◄ ${brightnessPct}% ►` : `${brightnessPct}%`}
@@ -1361,13 +1399,71 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               textAlign: 'left',
             }}
           >
-            <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
-              📁 Folders & Accounts
+            <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <ImpIcon name="folder" size={14} /> Folders & Accounts
             </span>
             <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#67e8f9', fontWeight: 900 }}>
               ◄
             </span>
           </button>
+
+          {/* Row 3b: [Skin Pack Switcher] */}
+          <div
+            style={{
+              padding: '9px 12px',
+              borderRadius: 14,
+              background: '#0d0d14',
+              border: '1px solid #222230',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: 12, fontWeight: 800, color: '#bfeaf5', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <ImpIcon name="palette" size={13} /> Skin Pack
+              </span>
+              <span style={{ fontFamily: 'monospace', fontSize: 10.5, color: '#67e8f9' }}>
+                {SKIN_PACK_REGISTRY.find((s) => s.id === activeSkinPack)?.name || 'IMP Portal Dark'}
+              </span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+              {SKIN_PACK_REGISTRY.map((pack) => {
+                const isActive = activeSkinPack === pack.id;
+                return (
+                  <button
+                    key={pack.id}
+                    type="button"
+                    title={pack.tagline}
+                    onClick={() => {
+                      setActiveSkinPack(pack.id);
+                      applySkinPackToDocument(pack.id);
+                      showToast(`Skin Pack: ${pack.name}`);
+                    }}
+                    style={{
+                      minHeight: 34,
+                      padding: '4px 6px',
+                      borderRadius: 8,
+                      background: isActive ? pack.tokens.surfaceElevated : '#13131d',
+                      border: isActive
+                        ? `1.5px solid ${pack.tokens.brandPrimary}`
+                        : '1px solid #252534',
+                      color: isActive ? pack.tokens.textPrimary : '#a1a1aa',
+                      fontSize: 10.5,
+                      fontWeight: isActive ? 800 : 700,
+                      cursor: 'pointer',
+                      textAlign: 'center',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                  >
+                    {pack.name.replace(/^IMP\s+/i, '')}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
           {/* Row 4: [System Load] */}
           <div
@@ -1382,8 +1478,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 12, fontWeight: 800, color: '#d4d4dc' }}>
-                📊 System Load
+              <span style={{ fontSize: 12, fontWeight: 800, color: '#d4d4dc', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <ImpIcon name="cpu" size={13} /> System Load
               </span>
               <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#8e8e99' }}>
                 {perfSnap?.audio_backend || 'PipeWire'} • {perfSnap?.platform || 'Linux'}

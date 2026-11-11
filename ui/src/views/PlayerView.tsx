@@ -2108,8 +2108,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               />
             ) : (
               <img
-                src="/simp-icon-dark.png"
-                alt="SIMP"
+                src="/simp-icon-dark.png?v=0.3.0-alpha.1"
+                alt="IMP"
                 style={{
                   width: '100%',
                   height: '100%',

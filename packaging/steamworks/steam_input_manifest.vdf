@@ -1,0 +1,49 @@
+"In Game Actions"
+{
+	"actions"
+	{
+		"PlayerControls"
+		{
+			"title" "#Set_PlayerControls"
+			"StickPadGyro"
+			{
+				"Navigate2D"
+				{
+					"title" "#Action_Navigate2D"
+					"input_mode" "joystick_move"
+				}
+			}
+			"Button"
+			{
+				"PlayPause" "#Action_PlayPause"
+				"BackCancel" "#Action_BackCancel"
+				"ShuffleVisualizer" "#Action_ShuffleVisualizer"
+				"QueueLyricsDrawer" "#Action_QueueLyricsDrawer"
+				"PrevTab" "#Action_PrevTab"
+				"NextTab" "#Action_NextTab"
+				"SeekBackward" "#Action_SeekBackward"
+				"SeekForward" "#Action_SeekForward"
+				"TrackContextMenu" "#Action_TrackContextMenu"
+				"OpenSettings" "#Action_OpenSettings"
+			}
+		}
+	}
+	"localization"
+	{
+		"english"
+		{
+			"Set_PlayerControls" "IMP Console & Visualizer Controls"
+			"Action_Navigate2D" "2D Spatial Focus Navigation"
+			"Action_PlayPause" "Select / Play / Pause (A)"
+			"Action_BackCancel" "Back / Dismiss Drawer (B)"
+			"Action_ShuffleVisualizer" "Shuffle / Cycle Visualizer (X)"
+			"Action_QueueLyricsDrawer" "Toggle Queue & Synced Lyrics (Y)"
+			"Action_PrevTab" "Switch to Player View (L1)"
+			"Action_NextTab" "Switch to Library & Queue (R1)"
+			"Action_SeekBackward" "Seek Backward -10s (L2)"
+			"Action_SeekForward" "Seek Forward +10s (R2)"
+			"Action_TrackContextMenu" "Context Menu / Visualizer Rotation Drawer (SELECT)"
+			"Action_OpenSettings" "IMP Settings & Sleep Timer (START)"
+		}
+	}
+}
