@@ -1454,10 +1454,12 @@ const ConsoleMainApp: React.FC = () => {
       const files = Array.from(dt.files || []);
       let hasDirectory = false;
       let droppedFolderName = '';
+      let droppedDirEntry: any = null;
       for (const item of items) {
         const entry = (item as any).webkitGetAsEntry ? (item as any).webkitGetAsEntry() : null;
         if (entry && entry.isDirectory) {
           hasDirectory = true;
+          if (!droppedDirEntry) droppedDirEntry = entry;
           if (!droppedFolderName && entry.name) {
             droppedFolderName = String(entry.name);
           }
@@ -1487,6 +1489,9 @@ const ConsoleMainApp: React.FC = () => {
         return;
       }
 
+      const stripVerbatimPrefix = (p: string) =>
+        p.replace(/^(\\\\?\\\?\\|\/\/\?\/|\/\?\/)/, '');
+
       // Extract native filesystem path if exposed by Tauri/WebView or URI list
       let extractedPath = '';
       const uriList = dt.getData('text/uri-list') || dt.getData('text/plain') || '';
@@ -1496,28 +1501,29 @@ const ConsoleMainApp: React.FC = () => {
         .find((l) => l && !l.startsWith('#'));
 
       if (files.length > 0 && (files[0] as any).path) {
-        const rawPath = String((files[0] as any).path);
+        const rawPath = stripVerbatimPrefix(String((files[0] as any).path));
         if (hasDirectory) {
           extractedPath = rawPath;
         } else {
           extractedPath = rawPath.replace(/[\\/][^\\/]+$/, '');
         }
       } else if (firstLine) {
-        const cleaned = decodeURIComponent(firstLine.replace(/^file:\/\//i, ''));
+        const cleaned = stripVerbatimPrefix(
+          decodeURIComponent(firstLine.replace(/^file:\/\/\/?/i, '')),
+        );
         if (cleaned.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(cleaned)) {
           extractedPath = hasDirectory ? cleaned : cleaned.replace(/[\\/][^\\/]+$/, '');
         }
       }
 
-      if (extractedPath) {
-        setPendingDroppedFolder(extractedPath);
-      } else if (hasDirectory || supportedFileFound) {
-        // Resolve the canonical parent folder on disk via daemon /api/fs/resolve-drop
+      const resolveViaDaemon = (childHint: string | null) => {
         fetch('/api/fs/resolve-drop', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            folder_name: droppedFolderName || (hasDirectory && files[0]?.name ? files[0].name : null),
+            folder_name:
+              droppedFolderName || (hasDirectory && files[0]?.name ? files[0].name : null),
+            child_name: childHint,
             file_name: sampleMediaFile ? sampleMediaFile.name : null,
             file_size: sampleMediaFile ? sampleMediaFile.size : null,
             uri_hint: firstLine || null,
@@ -1526,7 +1532,7 @@ const ConsoleMainApp: React.FC = () => {
           .then((r) => r.json())
           .then((res) => {
             if (res && res.ok && res.resolved_folder) {
-              setPendingDroppedFolder(res.resolved_folder);
+              setPendingDroppedFolder(stripVerbatimPrefix(String(res.resolved_folder)));
             } else {
               setSourceModalOpen(true);
               showToast('Select the folder in Local Folders -> [Browse...] to index it into IMP');
@@ -1536,6 +1542,40 @@ const ConsoleMainApp: React.FC = () => {
             setSourceModalOpen(true);
             showToast('Select the folder in Local Folders -> [Browse...] to index it into IMP');
           });
+      };
+
+      if (extractedPath) {
+        setPendingDroppedFolder(extractedPath);
+      } else if (hasDirectory || supportedFileFound) {
+        if (droppedDirEntry && typeof droppedDirEntry.createReader === 'function') {
+          let settled = false;
+          const finish = (childHint: string | null) => {
+            if (settled) return;
+            settled = true;
+            resolveViaDaemon(childHint);
+          };
+          const timer = window.setTimeout(() => finish(null), 180);
+          try {
+            droppedDirEntry.createReader().readEntries(
+              (entries: any[]) => {
+                window.clearTimeout(timer);
+                const firstChild = (entries || []).find(
+                  (en) => en && en.name && !String(en.name).startsWith('.'),
+                );
+                finish(firstChild ? String(firstChild.name) : null);
+              },
+              () => {
+                window.clearTimeout(timer);
+                finish(null);
+              },
+            );
+          } catch {
+            window.clearTimeout(timer);
+            finish(null);
+          }
+        } else {
+          resolveViaDaemon(null);
+        }
       }
     };
 

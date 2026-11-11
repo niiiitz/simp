@@ -208,11 +208,36 @@ pub fn parse_library_roots_from_vdf(vdf_text: &str) -> Vec<PathBuf> {
     roots
 }
 
+/// Strips Windows extended-length verbatim path prefixes (`\\?\`, `\\?\UNC\`, or a previously
+/// mangled single-backslash `\?\` prefix) so paths always use clean drive-letter or UNC syntax.
+pub fn strip_windows_verbatim_prefix(s: &str) -> String {
+    let t = s.trim();
+    if let Some(rest) = t
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| t.strip_prefix(r"\?\UNC\"))
+        .or_else(|| t.strip_prefix(r"\\\\?\\UNC\\"))
+    {
+        return format!(r"\\{}", rest);
+    }
+    if let Some(rest) = t
+        .strip_prefix(r"\\?\")
+        .or_else(|| t.strip_prefix(r"\?\"))
+        .or_else(|| t.strip_prefix(r"\\\\?\\"))
+        .or_else(|| t.strip_prefix("//?/"))
+        .or_else(|| t.strip_prefix("/?/"))
+    {
+        return rest.to_string();
+    }
+    t.to_string()
+}
+
 /// Converts Windows VDF/Explorer paths (`"C:\\Users\\...\\Music"` or `"D:\\SteamLibrary"`),
 /// bash-escaped paths (`"/mnt/c/Users/.../Apple\\ Music/"`), and `~/...` paths into clean
-/// canonical platform paths on Linux/WSL2.
+/// canonical platform paths on Linux/WSL2 and Windows.
 pub fn normalize_platform_path(raw_path: &str) -> PathBuf {
-    let trimmed = raw_path.trim().trim_matches('"').trim_matches('\'').trim();
+    let raw_trimmed = raw_path.trim().trim_matches('"').trim_matches('\'').trim();
+    let stripped = strip_windows_verbatim_prefix(raw_trimmed);
+    let trimmed = stripped.as_str();
 
     // 1. Expand leading `~/` to the user's home directory
     if let Some(rest) = trimmed.strip_prefix("~/") {
@@ -234,7 +259,8 @@ pub fn normalize_platform_path(raw_path: &str) -> PathBuf {
 
     // 3. Detect Windows drive letter prefix like `C:\` or `D:/`
     let unescaped = trimmed.replace("\\\\", "\\");
-    let bytes = unescaped.as_bytes();
+    let unescaped_trimmed = strip_windows_verbatim_prefix(&unescaped);
+    let bytes = unescaped_trimmed.as_bytes();
     if bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
@@ -243,13 +269,23 @@ pub fn normalize_platform_path(raw_path: &str) -> PathBuf {
         #[cfg(not(target_os = "windows"))]
         {
             let drive_letter = (bytes[0] as char).to_ascii_lowercase();
-            let rest = unescaped[3..].replace('\\', "/");
+            let rest = unescaped_trimmed[3..].replace('\\', "/");
             let rest_clean = rest.trim_end_matches('/');
             return PathBuf::from(format!("/mnt/{drive_letter}/{rest_clean}"));
         }
+        #[cfg(target_os = "windows")]
+        {
+            let normalized_slashes = unescaped_trimmed.replace('/', "\\");
+            let clean_win = if normalized_slashes.len() > 3 {
+                normalized_slashes.trim_end_matches('\\').to_string()
+            } else {
+                normalized_slashes
+            };
+            return PathBuf::from(clean_win);
+        }
     }
 
-    PathBuf::from(unescaped)
+    PathBuf::from(unescaped_trimmed)
 }
 
 /// Path to `~/.config/simp/settings.vdf` (or `<exe_dir>/data/settings.vdf` in Portable Mode).
@@ -335,16 +371,36 @@ mod tests {
             PathBuf::from("/home/deck/.local/share/Steam")
         );
 
-        let escaped_wsl_path = r"/mnt/c/Users/niiii/Music/Apple\ Music/Media/Music/";
+        let escaped_wsl_path = r"/mnt/c/Users/ExampleUser/Music/Apple\ Music/Media/Music/";
         assert_eq!(
             normalize_platform_path(escaped_wsl_path),
-            PathBuf::from("/mnt/c/Users/niiii/Music/Apple Music/Media/Music")
+            PathBuf::from("/mnt/c/Users/ExampleUser/Music/Apple Music/Media/Music")
         );
 
-        let win_apple_path = r"C:\Users\niiii\Music\Apple Music\Media\Music";
+        let win_apple_path = r"C:\Users\ExampleUser\Music\Apple Music\Media\Music";
         assert_eq!(
             normalize_platform_path(win_apple_path),
-            PathBuf::from("/mnt/c/Users/niiii/Music/Apple Music/Media/Music")
+            PathBuf::from("/mnt/c/Users/ExampleUser/Music/Apple Music/Media/Music")
+        );
+
+        let verbatim_win_path = r"\\?\C:\Users\ExampleUser\Music\Apple Music\Media\Music";
+        assert_eq!(
+            strip_windows_verbatim_prefix(verbatim_win_path),
+            r"C:\Users\ExampleUser\Music\Apple Music\Media\Music"
+        );
+        assert_eq!(
+            normalize_platform_path(verbatim_win_path),
+            PathBuf::from("/mnt/c/Users/ExampleUser/Music/Apple Music/Media/Music")
+        );
+
+        let mangled_verbatim_path = r"\?\C:\Users\ExampleUser\Music\Apple Music\Media\Music";
+        assert_eq!(
+            strip_windows_verbatim_prefix(mangled_verbatim_path),
+            r"C:\Users\ExampleUser\Music\Apple Music\Media\Music"
+        );
+        assert_eq!(
+            normalize_platform_path(mangled_verbatim_path),
+            PathBuf::from("/mnt/c/Users/ExampleUser/Music/Apple Music/Media/Music")
         );
     }
 

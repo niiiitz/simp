@@ -1777,23 +1777,35 @@ async fn fs_roots_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true, "roots": roots }))
 }
 
+fn clean_fs_path(p: &std::path::Path) -> std::path::PathBuf {
+    let raw = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let cleaned = simp_core::library::vdf::strip_windows_verbatim_prefix(&raw.to_string_lossy());
+    std::path::PathBuf::from(cleaned)
+}
+
 async fn fs_list_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let requested = params.get("path").cloned().unwrap_or_default();
     let res = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
-        let target_path = if requested.trim().is_empty() {
+        let cleaned_req = simp_core::library::vdf::strip_windows_verbatim_prefix(&requested);
+        let target_path = if cleaned_req.trim().is_empty() {
             dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"))
         } else {
-            std::path::PathBuf::from(requested.trim())
+            std::path::PathBuf::from(cleaned_req.trim())
         };
         if !target_path.is_dir() {
             anyhow::bail!("Directory does not exist: {}", target_path.display());
         }
-        let canonical = std::fs::canonicalize(&target_path).unwrap_or(target_path);
-        let parent_path = canonical
-            .parent()
-            .map(|p| p.to_string_lossy().to_string());
+        let canonical = clean_fs_path(&target_path);
+        let parent_path = canonical.parent().and_then(|p| {
+            let s = simp_core::library::vdf::strip_windows_verbatim_prefix(&p.to_string_lossy());
+            if s.is_empty() || s == canonical.to_string_lossy() {
+                None
+            } else {
+                Some(s)
+            }
+        });
 
         let audio_exts = [
             "flac", "mp3", "wav", "m4a", "aac", "ogg", "opus", "aiff", "aif", "wma", "alac",
@@ -1805,7 +1817,7 @@ async fn fs_list_handler(
 
         if let Ok(entries) = std::fs::read_dir(&canonical) {
             for entry in entries.flatten() {
-                let path = entry.path();
+                let path = clean_fs_path(&entry.path());
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with('.') {
                     continue;
@@ -1866,6 +1878,8 @@ struct FsResolveDropPayload {
     #[serde(default)]
     folder_name: Option<String>,
     #[serde(default)]
+    child_name: Option<String>,
+    #[serde(default)]
     file_name: Option<String>,
     #[serde(default)]
     file_size: Option<u64>,
@@ -1883,7 +1897,7 @@ async fn fs_resolve_drop_handler(
             .get_mounts()
             .unwrap_or_default()
             .into_iter()
-            .map(|m| std::path::PathBuf::from(m.mount_root))
+            .map(|m| clean_fs_path(std::path::Path::new(&m.mount_root)))
             .collect();
         // 1. Check direct uri_hint first
         if let Some(hint) = payload
@@ -1892,15 +1906,17 @@ async fn fs_resolve_drop_handler(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let cleaned = hint.strip_prefix("file://").unwrap_or(hint);
-            let p = std::path::Path::new(cleaned);
+            let stripped_uri = hint
+                .strip_prefix("file:///")
+                .or_else(|| hint.strip_prefix("file://"))
+                .unwrap_or(hint);
+            let cleaned = simp_core::library::vdf::strip_windows_verbatim_prefix(stripped_uri);
+            let p = std::path::Path::new(&cleaned);
             if p.is_dir() {
-                let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-                return Some(c.to_string_lossy().to_string());
+                return Some(clean_fs_path(p).to_string_lossy().to_string());
             } else if p.is_file() {
                 if let Some(parent) = p.parent() {
-                    let c = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-                    return Some(c.to_string_lossy().to_string());
+                    return Some(clean_fs_path(parent).to_string_lossy().to_string());
                 }
             }
         }
@@ -1909,12 +1925,15 @@ async fn fs_resolve_drop_handler(
         let mut roots = Vec::new();
         if let Some(home) = dirs::home_dir() {
             for sub in ["Music", "Downloads", "Videos", "Desktop", "Documents"] {
-                let p = home.join(sub);
-                if p.is_dir() {
+                let p = clean_fs_path(&home.join(sub));
+                if p.is_dir() && !roots.contains(&p) {
                     roots.push(p);
                 }
             }
-            roots.push(home);
+            let clean_home = clean_fs_path(&home);
+            if clean_home.is_dir() && !roots.contains(&clean_home) {
+                roots.push(clean_home);
+            }
         }
         for mp in mounted_paths {
             if mp.is_dir() && !roots.contains(&mp) {
@@ -1933,6 +1952,11 @@ async fn fs_resolve_drop_handler(
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let target_child = payload
+            .child_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let target_file = payload
             .file_name
             .as_deref()
@@ -1945,6 +1969,7 @@ async fn fs_resolve_drop_handler(
             depth: usize,
             max_depth: usize,
             target_folder: Option<&str>,
+            target_child: Option<&str>,
             target_file: Option<&str>,
             target_size: Option<u64>,
         ) -> Option<std::path::PathBuf> {
@@ -1961,12 +1986,14 @@ async fn fs_resolve_drop_handler(
                 }
                 if path.is_dir() {
                     if let Some(tf) = target_folder {
-                        if name_str == tf {
-                            if let Some(sample_file) = target_file {
-                                if path.join(sample_file).exists() {
-                                    return Some(path);
-                                }
-                            } else {
+                        if name_str.eq_ignore_ascii_case(tf) {
+                            let child_ok = target_child
+                                .map(|tc| path.join(tc).exists())
+                                .unwrap_or(true);
+                            let file_ok = target_file
+                                .map(|sf| path.join(sf).exists())
+                                .unwrap_or(true);
+                            if child_ok && file_ok {
                                 return Some(path);
                             }
                         }
@@ -1976,6 +2003,7 @@ async fn fs_resolve_drop_handler(
                         depth + 1,
                         max_depth,
                         target_folder,
+                        target_child,
                         target_file,
                         target_size,
                     ) {
@@ -1983,7 +2011,7 @@ async fn fs_resolve_drop_handler(
                     }
                 } else if target_folder.is_none() {
                     if let Some(tfile) = target_file {
-                        if name_str == tfile {
+                        if name_str.eq_ignore_ascii_case(tfile) {
                             let size_ok = match target_size {
                                 Some(sz) if sz > 0 => entry
                                     .metadata()
@@ -2003,10 +2031,26 @@ async fn fs_resolve_drop_handler(
             None
         }
 
+        // First pass: strict match with child_name / file_name verification
         for root in &roots {
-            if let Some(found) = search_dir(root, 0, 3, target_folder, target_file, target_size) {
-                let c = std::fs::canonicalize(&found).unwrap_or(found);
-                return Some(c.to_string_lossy().to_string());
+            if let Some(found) = search_dir(
+                root,
+                0,
+                6,
+                target_folder,
+                target_child,
+                target_file,
+                target_size,
+            ) {
+                return Some(clean_fs_path(&found).to_string_lossy().to_string());
+            }
+        }
+        // Second pass fallback if child_name was not matched directly
+        if target_child.is_some() && target_folder.is_some() {
+            for root in &roots {
+                if let Some(found) = search_dir(root, 0, 6, target_folder, None, None, None) {
+                    return Some(clean_fs_path(&found).to_string_lossy().to_string());
+                }
             }
         }
 

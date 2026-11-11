@@ -205,6 +205,13 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       return true;
     }
   });
+  const [factoidsEnabled, setFactoidsEnabled] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('simp_factoids_enabled') !== '0';
+    } catch {
+      return true;
+    }
+  });
   const [idleFadeEnabled, setIdleFadeEnabled] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem('simp_idle_fade_enabled') !== '0';
@@ -794,6 +801,17 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         window.localStorage.setItem('simp_lyrics_enabled', next ? '1' : '0');
       } catch {}
       showToast?.(next ? '🎤 Synced Lyrics overlay ON' : '🎤 Synced Lyrics overlay OFF');
+      return next;
+    });
+  }, [showToast]);
+
+  const toggleFactoids = useCallback(() => {
+    setFactoidsEnabled((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('simp_factoids_enabled', next ? '1' : '0');
+      } catch {}
+      showToast?.(next ? '💬 Pop-Up Factoid bubbles ON' : '💬 Pop-Up Factoid bubbles OFF');
       return next;
     });
   }, [showToast]);
@@ -1480,7 +1498,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               factoidBubbles={factoidBubbles}
               suppressLyrics={Boolean(trackPropsState.suppress_lyrics)}
               suppressComments={Boolean(trackPropsState.suppress_comments)}
-              suppressFactoids={Boolean(trackPropsState.suppress_factoids)}
+              suppressFactoids={!factoidsEnabled || Boolean(trackPropsState.suppress_factoids)}
               isForegroundFaded={isForegroundFaded}
               idleOpacityPct={idleOpacityPct}
               oskOrModalOpen={Boolean(playerActionsOpen || vizDrawerOpen)}
@@ -2781,7 +2799,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                       🖥️ Interface
                     </span>
                     <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
-                      Fullscreen, Visualizer
+                      Fullscreen, Visualizer, Lyrics, Factoids
                       {isSoundCloudTrack ? ', Comments' : ''}
                       {isVideoTrack ? ', Stream' : ''}
                     </span>
@@ -3315,7 +3333,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                               'Glyph Matrix'}
                           </span>
                           <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
-                            12 Scenes (5 Classic + 7 WASM Moodboard) • {enabledVizScenes.length}/12 in Cycle/Shuffle
+                            12 High-DPI Scenes • {enabledVizScenes.length}/12 in Cycle/Shuffle
                           </span>
                         </div>
                         <span
@@ -3365,6 +3383,42 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                           }}
                         >
                           {lyricsEnabled ? 'ON' : 'OFF'}
+                        </span>
+                      </button>
+                    )}
+
+                    {/* 2b-ii. VH1 Pop-Up Factoid Speech Bubbles (Wikipedia / MusicBrainz) */}
+                    {!isVideoTrack && (
+                      <button
+                        type="button"
+                        onClick={toggleFactoids}
+                        style={{
+                          ...actionRowBtnStyle,
+                          minHeight: 46,
+                          padding: '8px 12px',
+                          background: factoidsEnabled ? '#241d0c' : '#101018',
+                          border: factoidsEnabled ? '1px solid #eab308' : '1px solid #222230',
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 800, color: '#fde047' }}>
+                            💬 Pop-Up Factoids (VH1 / Wikipedia)
+                          </span>
+                          <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                            {factoidBubbles.length > 0
+                              ? `${factoidBubbles.length} trivia bubble${factoidBubbles.length === 1 ? '' : 's'} queued for this track`
+                              : 'Timed song & artist trivia speech bubbles'}
+                          </span>
+                        </div>
+                        <span
+                          style={{
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: factoidsEnabled ? '#fde047' : '#71717a',
+                          }}
+                        >
+                          {factoidsEnabled ? 'ON' : 'OFF'}
                         </span>
                       </button>
                     )}

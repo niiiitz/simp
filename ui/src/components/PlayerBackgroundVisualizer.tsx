@@ -2587,12 +2587,9 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         // =====================================================================
         // MODES 6–12: HIGH-DPI CANVAS2D MOODBOARD SCENES (a through h)
         // =====================================================================
-        const poolComments = commentsListRef.current;
-        const effectiveComment: SoundCloudComment | null =
-          activeCommentRef.current ||
-          (poolComments.length > 0
-            ? poolComments[Math.floor(timeSec / 7.0) % poolComments.length]
-            : null);
+        // Strictly use the temporal timed comment (`activeCommentRef.current`) so comments
+        // appear only during their timed window along the track and never loop endlessly.
+        const effectiveComment: SoundCloudComment | null = activeCommentRef.current || null;
 
         let effectiveAvatarImg: HTMLImageElement | null = null;
         if (effectiveComment?.avatar_url) {
