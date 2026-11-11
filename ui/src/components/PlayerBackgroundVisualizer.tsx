@@ -12,9 +12,18 @@ import {
 } from './visualizers/sceneRegistry';
 import { isValidAttributedComment } from './visualizers/VisualizerOverlayHud';
 import {
-  ensureWasmVizEngineLoaded,
-  getLoadedWasmVizEngine,
-} from './visualizers/wasmVizBridge';
+  CANVAS_H,
+  CANVAS_W,
+  RENDER_SCALE,
+  type SceneRenderContext,
+} from './visualizers/scenes/types';
+import { renderRhythmScene } from './visualizers/scenes/rhythmScene';
+import { renderMidnightScene } from './visualizers/scenes/midnightScene';
+import { renderCosmosScene } from './visualizers/scenes/cosmosScene';
+import { renderReefScene } from './visualizers/scenes/reefScene';
+import { renderArcadeScene } from './visualizers/scenes/arcadeScene';
+import { renderVaporwaveScene } from './visualizers/scenes/vaporwaveScene';
+import { renderSanctumScene } from './visualizers/scenes/sanctumScene';
 
 export {
   getSceneDescriptor,
@@ -46,9 +55,6 @@ interface Props {
   lyricsMarqueeFallback?: string | null;
   hidden?: boolean;
 }
-
-const CANVAS_W = 640;
-const CANVAS_H = 360;
 
 // High-density 80x45 micro-glyph grid (3,600 cells, 8x8px per cell on 640x360 canvas)
 const GRID_COLS = 80;
@@ -281,10 +287,6 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
     [rawComments],
   );
 
-  useEffect(() => {
-    ensureWasmVizEngineLoaded();
-  }, []);
-
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const modeRef = useRef<VisualizerMode>(mode);
   modeRef.current = mode;
@@ -308,6 +310,9 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
   trackRef.current = track;
   const activeCommentRef = useRef<SoundCloudComment | null | undefined>(activeComment);
   activeCommentRef.current = activeComment;
+  const commentsListRef = useRef<SoundCloudComment[]>(comments);
+  commentsListRef.current = comments;
+  const avatarImgCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const activeLyricRef = useRef<string | null | undefined>(activeLyricLine);
   activeLyricRef.current = activeLyricLine;
   const nextLyricRef = useRef<string | null | undefined>(nextLyricLine);
@@ -328,7 +333,12 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
   // Offscreen buffers (created lazily once, zero per-frame allocations)
   const imageDataRef = useRef<ImageData | null>(null);
   const u32FrameRef = useRef<Uint32Array | null>(null);
+  const lowResBlitCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const feedbackCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const artCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const artReadyRef = useRef<boolean>(false);
+  const artSquareRgbRef = useRef<Uint8Array>(new Uint8Array(ART_BUF_PIXELS * 3));
+  const commentAvatarImgRef = useRef<HTMLImageElement | null>(null);
   const paletteRef = useRef<[number, number, number][]>(DEFAULT_PALETTE_RGB);
   const paletteAbgrRef = useRef<Uint32Array>(
     new Uint32Array(DEFAULT_PALETTE_RGB.map(([r, g, b]) => packAbgr(r, g, b)))
@@ -664,6 +674,8 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           edge[idx] = Math.abs(Math.sin(dist * 16)) * radial * 0.55;
         }
       }
+      artCanvasRef.current = null;
+      artReadyRef.current = false;
       updatePaletteAbgr(fallbackPal);
     };
 
@@ -693,9 +705,12 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         const sx = Math.floor((iw - side) * 0.5);
         const sy = Math.floor((ih - side) * 0.5);
         octx.drawImage(img, sx, sy, side, side, 0, 0, ART_BUF_SIZE, ART_BUF_SIZE);
+        artCanvasRef.current = off;
+        artReadyRef.current = true;
         const data = octx.getImageData(0, 0, ART_BUF_SIZE, ART_BUF_SIZE).data;
 
         const luma = artSquareLumaRef.current;
+        const rgbBuf = artSquareRgbRef.current;
         const edge = artSquareEdgeRef.current;
         const colorSamples: { luma: number; sat: number; rgb: [number, number, number] }[] = [];
 
@@ -704,6 +719,9 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           const r = data[p];
           const g = data[p + 1];
           const b = data[p + 2];
+          rgbBuf[i * 3] = r;
+          rgbBuf[i * 3 + 1] = g;
+          rgbBuf[i * 3 + 2] = b;
           const y = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
           luma[i] = y;
 
@@ -787,6 +805,7 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
   useEffect(() => {
     if (!activeComment?.avatar_url) {
       avatarBlendRef.current = 0;
+      commentAvatarImgRef.current = null;
       return;
     }
     triggerGlitchBurst(0.65);
@@ -796,6 +815,7 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
     img.crossOrigin = 'anonymous';
     img.onload = () => {
       if (cancelled) return;
+      commentAvatarImgRef.current = img;
       try {
         const off = document.createElement('canvas');
         off.width = GRID_COLS;
@@ -910,6 +930,8 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
       if (!canvas) return;
       const ctx = canvas.getContext('2d', { alpha: false });
       if (!ctx) return;
+      // Supersample logical 640×360 coordinate space onto the 1280×720 High-DPI backing buffer
+      ctx.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
 
       // 1. Update or synthesize 16-band audio spectrum (fallback when Widevine browser worker is active)
       const tb = targetBandsRef.current;
@@ -1400,8 +1422,21 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           }
         }
 
-        // Single-shot flush of all 3,600 cells + multi-scale mutations!
-        ctx.putImageData(imgData, 0, 0);
+        // Single-shot flush of all 3,600 cells + multi-scale mutations onto 1280×720 via crisp 2× nearest-neighbor blit!
+        if (!lowResBlitCanvasRef.current) {
+          lowResBlitCanvasRef.current = document.createElement('canvas');
+          lowResBlitCanvasRef.current.width = CANVAS_W;
+          lowResBlitCanvasRef.current.height = CANVAS_H;
+        }
+        const blitCanvas = lowResBlitCanvasRef.current;
+        const blitCtx = blitCanvas.getContext('2d');
+        if (blitCtx) {
+          blitCtx.putImageData(imgData, 0, 0);
+          const prevSmooth = ctx.imageSmoothingEnabled;
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(blitCanvas, 0, 0, CANVAS_W, CANVAS_H);
+          ctx.imageSmoothingEnabled = prevSmooth;
+        }
       }
 
       // =======================================================================
@@ -1410,8 +1445,8 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
       else if (activeMode === 'avs') {
         if (!feedbackCanvasRef.current) {
           feedbackCanvasRef.current = document.createElement('canvas');
-          feedbackCanvasRef.current.width = CANVAS_W;
-          feedbackCanvasRef.current.height = CANVAS_H;
+          feedbackCanvasRef.current.width = CANVAS_W * RENDER_SCALE;
+          feedbackCanvasRef.current.height = CANVAS_H * RENDER_SCALE;
         }
         const fb = feedbackCanvasRef.current;
         const fbCtx = fb.getContext('2d');
@@ -1543,9 +1578,10 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         }
 
         if (fbCtx) {
+          fbCtx.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
           fbCtx.fillStyle = '#000000';
           fbCtx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-          fbCtx.drawImage(canvas, 0, 0);
+          fbCtx.drawImage(canvas, 0, 0, CANVAS_W, CANVAS_H);
         }
 
         // Crisp, flicker-free foreground AVS lyric overlay (drawn after feedback capture)
@@ -2549,47 +2585,77 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         }
       } else {
         // =====================================================================
-        // MODES 6–12: RUST + WASM "SMOL ENGINE" MOODBOARD SCENES (a through h)
+        // MODES 6–12: HIGH-DPI CANVAS2D MOODBOARD SCENES (a through h)
         // =====================================================================
-        const sceneDesc = getSceneDescriptor(activeMode);
-        const wasm = getLoadedWasmVizEngine();
-        if (wasm && sceneDesc.wasmSceneId !== null) {
-          wasm.viz_set_bands(
-            Math.round(sb[0] * 255),
-            Math.round(sb[1] * 255),
-            Math.round(sb[2] * 255),
-            Math.round(sb[3] * 255),
-            Math.round(sb[4] * 255),
-            Math.round(sb[5] * 255),
-            Math.round(sb[6] * 255),
-            Math.round(sb[7] * 255),
-            Math.round(sb[8] * 255),
-            Math.round(sb[9] * 255),
-            Math.round(sb[10] * 255),
-            Math.round(sb[11] * 255),
-            Math.round(sb[12] * 255),
-            Math.round(sb[13] * 255),
-            Math.round(sb[14] * 255),
-            Math.round(sb[15] * 255),
-          );
-          wasm.viz_render_frame(
-            sceneDesc.wasmSceneId,
-            timeSec,
-            playheadRatioRef.current,
-            rmsRef.current,
-            peakRef.current,
-            beat,
-            bpmRef.current || 120,
-            trans,
-          );
-          const ptr = wasm.viz_frame_ptr();
-          const wasmPixels = new Uint8ClampedArray(
-            wasm.memory.buffer,
-            ptr,
-            CANVAS_W * CANVAS_H * 4,
-          );
-          const imgData = new ImageData(wasmPixels, CANVAS_W, CANVAS_H);
-          ctx.putImageData(imgData, 0, 0);
+        const poolComments = commentsListRef.current;
+        const effectiveComment: SoundCloudComment | null =
+          activeCommentRef.current ||
+          (poolComments.length > 0
+            ? poolComments[Math.floor(timeSec / 7.0) % poolComments.length]
+            : null);
+
+        let effectiveAvatarImg: HTMLImageElement | null = null;
+        if (effectiveComment?.avatar_url) {
+          const avUrl = effectiveComment.avatar_url;
+          const cachedAv = avatarImgCacheRef.current.get(avUrl);
+          if (cachedAv) {
+            effectiveAvatarImg = cachedAv.complete && cachedAv.naturalWidth > 0 ? cachedAv : null;
+          } else {
+            if (avatarImgCacheRef.current.size > 48) {
+              avatarImgCacheRef.current.clear();
+            }
+            const avImg = new Image();
+            avImg.crossOrigin = 'anonymous';
+            avatarImgCacheRef.current.set(avUrl, avImg);
+            avImg.src = avUrl;
+          }
+        }
+
+        const sceneCtx: SceneRenderContext = {
+          ctx,
+          timeSec,
+          dt,
+          playheadRatio: playheadRatioRef.current,
+          bpm: bpmRef.current || 120,
+          rms: rmsRef.current,
+          peak: peakRef.current,
+          beat,
+          subBass,
+          midEnergy,
+          highEnergy,
+          drop,
+          buildup,
+          trans,
+          sb,
+          palette,
+          artCanvas: artCanvasRef.current,
+          artReady: artReadyRef.current,
+          artLuma: artSquareLumaRef.current,
+          artRgb: artSquareRgbRef.current,
+          activeLyric: activeLyricRef.current || null,
+          nextLyric: nextLyricRef.current || null,
+          activeComment: effectiveComment,
+          commentAvatarImg: effectiveAvatarImg || commentAvatarImgRef.current,
+          trackTitle: trackRef.current?.title || '',
+          trackArtist: trackRef.current?.artists?.join(', ') || '',
+          cropTopY,
+          cropBottomY,
+        };
+
+        if (activeMode === 'rhythm') {
+          renderRhythmScene(sceneCtx);
+        } else if (activeMode === 'midnight') {
+          renderMidnightScene(sceneCtx);
+        } else if (activeMode === 'cosmos') {
+          renderCosmosScene(sceneCtx);
+        } else if (activeMode === 'reef') {
+          renderReefScene(sceneCtx);
+        } else if (activeMode === 'arcade') {
+          renderArcadeScene(sceneCtx);
+        } else if (activeMode === 'vaporwave') {
+          renderVaporwaveScene(sceneCtx);
+        } else if (activeMode === 'sanctum') {
+          renderSanctumScene(sceneCtx);
         }
       }
     };
@@ -2618,8 +2684,8 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
     >
       <canvas
         ref={canvasRef}
-        width={CANVAS_W}
-        height={CANVAS_H}
+        width={CANVAS_W * RENDER_SCALE}
+        height={CANVAS_H * RENDER_SCALE}
         style={{
           position: 'absolute',
           inset: 0,

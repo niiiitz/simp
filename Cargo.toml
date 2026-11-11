@@ -4,7 +4,6 @@ members = [
     "crates/simp-protocol",
     "crates/simp-core",
     "crates/simp-daemon",
-    "crates/simp-viz-engine",
     "src-tauri",
 ]
 

@@ -126,10 +126,10 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     id: 'rhythm',
     label: 'Rhythm Stage & Micro-Party',
     shortLabel: 'RHYTHM',
-    subtitle: 'DDR step arrows, Miku lasers, Mode-7 Miis & WarioWare prompts',
-    eraBadge: 'WASM • [a]',
+    subtitle: 'DDR step arrows, Miku lasers, Mode-7 crowd & Jumbotron art',
+    eraBadge: 'STAGE • 720P',
     transitionLabel: 'Arcade Strobe Curtain',
-    wasmSceneId: 0,
+    wasmSceneId: null,
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-left',
@@ -142,10 +142,10 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     id: 'midnight',
     label: 'Midnight Mountain Parallax',
     shortLabel: 'MIDNIGHT',
-    subtitle: '16-bit moonlit forest, sheet lightning, wind sleet & lake mirror',
-    eraBadge: 'WASM • [b]',
+    subtitle: 'Moonlit aurora, branching lightning, pine ridges & mirror lake',
+    eraBadge: 'NATURE • 720P',
     transitionLabel: 'Rolling Mist & Sleet Wipe',
-    wasmSceneId: 1,
+    wasmSceneId: null,
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -158,10 +158,10 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     id: 'cosmos',
     label: 'Cosmic Warp & 50s Saucer',
     shortLabel: 'SAUCER',
-    subtitle: 'Big Bang nebula, black hole & 1950s tin UFO dangling on a string',
-    eraBadge: 'WASM • [c]',
+    subtitle: 'Big Bang nebula, black hole & 1950s tin UFO on a pendulum string',
+    eraBadge: 'COSMOS • 720P',
     transitionLabel: 'Hyperspace Event-Horizon Zoom',
-    wasmSceneId: 2,
+    wasmSceneId: null,
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -174,10 +174,10 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     id: 'reef',
     label: 'Coral Reef & Water Caustics',
     shortLabel: 'REEF',
-    subtitle: '2D water caustics shader, bubbles, seahorses, starfish & snapping crab',
-    eraBadge: 'WASM • [d]',
+    subtitle: 'Volumetric water caustics, kelp, jellyfish, bubbles & snapping crab',
+    eraBadge: 'ABYSS • 720P',
     transitionLabel: 'Rising Bubble Wall & Ripple',
-    wasmSceneId: 3,
+    wasmSceneId: null,
     safeZones: {
       lyricAnchor: 'top-center',
       commentAnchor: 'top-right',
@@ -190,10 +190,10 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     id: 'arcade',
     label: 'Retro Arcade Remix',
     shortLabel: 'ARCADE',
-    subtitle: 'Pac-Man, Joust, Pong, Donkey Kong, Space Invaders & Missile Command',
-    eraBadge: 'WASM • [e]',
+    subtitle: 'Pac-Man neon maze, Pong waveform, Space Invaders & Missile Command',
+    eraBadge: 'COIN-OP • 720P',
     transitionLabel: 'CRT Degauss Collapse',
-    wasmSceneId: 4,
+    wasmSceneId: null,
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -206,10 +206,10 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     id: 'vaporwave',
     label: 'Y2K / Vaporwave Odyssey',
     shortLabel: 'VAPOR',
-    subtitle: 'Marble Greek god bust, Fiji water, Tron lightcycles, dolphins & Solitaire',
-    eraBadge: 'WASM • [g]',
+    subtitle: 'Marble Helios bust, Fiji bottle, Tron lightcycles, dolphins & Solitaire',
+    eraBadge: 'Y2K • 720P',
     transitionLabel: 'Win95 Card Cascade & VHS Wipe',
-    wasmSceneId: 5,
+    wasmSceneId: null,
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -222,10 +222,10 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     id: 'sanctum',
     label: '16-Bit Dark Fantasy Sanctum',
     shortLabel: 'SANCTUM',
-    subtitle: 'Cloaked river travelers, torchlit ruins, bats, knights, dinosaurs & Orb',
-    eraBadge: 'WASM • [h]',
+    subtitle: 'Gothic stained-glass rose window, river boat, torchlight & Arcane Orb',
+    eraBadge: 'SNES RPG • 720P',
     transitionLabel: 'SNES RPG Battle Swirl',
-    wasmSceneId: 6,
+    wasmSceneId: null,
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -238,13 +238,7 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
 
 export const VISUALIZER_ENGINES: VisualizerEngine[] = VISUALIZER_SCENES.map((s) => s.id);
 
-export const CORE_POLISHED_SCENES: VisualizerEngine[] = [
-  'glyph',
-  'avs',
-  'demoscene',
-  'vertigo',
-  'trapper',
-];
+export const CORE_POLISHED_SCENES: VisualizerEngine[] = [...VISUALIZER_ENGINES];
 
 export const VISUALIZER_MODES: { id: VisualizerMode; label: string; shortLabel: string }[] = [
   ...VISUALIZER_SCENES.map((s) => ({
@@ -257,7 +251,7 @@ export const VISUALIZER_MODES: { id: VisualizerMode; label: string; shortLabel: 
   { id: 'off', label: 'Off', shortLabel: 'OFF' },
 ];
 
-const ENABLED_SCENES_STORAGE_KEY = 'simp_viz_enabled_scenes_v2';
+const ENABLED_SCENES_STORAGE_KEY = 'simp_viz_enabled_scenes_v3';
 
 export function loadEnabledVisualizerScenes(): VisualizerEngine[] {
   try {

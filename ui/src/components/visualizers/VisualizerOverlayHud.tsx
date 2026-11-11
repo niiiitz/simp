@@ -1,5 +1,9 @@
-import React from 'react';
-import type { SoundCloudComment, TrackMetadata } from '@simp/client';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  defaultSimpClient,
+  type SoundCloudComment,
+  type TrackMetadata,
+} from '@simp/client';
 import { ImpIcon } from '../icons/ImpIcon';
 import {
   getSceneDescriptor,
@@ -14,6 +18,8 @@ export interface FactoidBubbleItem {
   source: string;
   start_sec: number;
   duration_sec: number;
+  part_index?: number | null;
+  part_total?: number | null;
 }
 
 interface VisualizerOverlayHudProps {
@@ -56,11 +62,11 @@ function getAnchorStyle(
   anchor: SafeAnchorPosition,
   oskOrModalOpen: boolean,
 ): React.CSSProperties {
-  const bottomOffset = oskOrModalOpen ? 190 : 32;
-  const topOffset = 22;
+  const bottomOffset = oskOrModalOpen ? 190 : 88;
+  const topOffset = 68;
   switch (anchor) {
     case 'top-left':
-      return { top: topOffset, left: 32, alignItems: 'flex-start' };
+      return { top: topOffset, left: 36, alignItems: 'flex-start' };
     case 'top-center':
       return {
         top: topOffset,
@@ -69,11 +75,11 @@ function getAnchorStyle(
         alignItems: 'center',
       };
     case 'top-right':
-      return { top: topOffset, right: 32, alignItems: 'flex-end' };
+      return { top: topOffset, right: 36, alignItems: 'flex-end' };
     case 'bottom-left':
-      return { bottom: bottomOffset, left: 32, alignItems: 'flex-start' };
+      return { bottom: bottomOffset, left: 36, alignItems: 'flex-start' };
     case 'bottom-right':
-      return { bottom: bottomOffset, right: 32, alignItems: 'flex-end' };
+      return { bottom: bottomOffset, right: 36, alignItems: 'flex-end' };
     case 'bottom-center':
     default:
       return {
@@ -85,47 +91,95 @@ function getAnchorStyle(
   }
 }
 
+/**
+ * Computes a soft VHS fade-in / fade-out envelope (0.0 .. 1.0) over `[startSec, endSec]`
+ * with `fadeSec` ramps at both ends.
+ */
+function computeSoftVhsEnvelope(
+  posSec: number,
+  startSec: number,
+  endSec: number,
+  fadeSec: number,
+): number {
+  if (posSec < startSec || posSec > endSec) return 0;
+  const fadeIn = Math.min(1, Math.max(0, (posSec - startSec) / Math.max(0.1, fadeSec)));
+  const fadeOut = Math.min(1, Math.max(0, (endSec - posSec) / Math.max(0.1, fadeSec)));
+  const raw = Math.min(fadeIn, fadeOut);
+  // Smoothstep easing for warm analog CRT phosphor rise/decay
+  return raw * raw * (3 - 2 * raw);
+}
+
 export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
   activeEngine,
   track,
   upNextTrack,
   positionMs,
   durationMs,
-  activeLyricLine,
-  nextLyricLine,
-  activeComment,
   factoidBubbles,
-  suppressLyrics,
-  suppressComments,
   suppressFactoids,
   isForegroundFaded,
-  idleOpacityPct,
   oskOrModalOpen,
 }) => {
+  const [livePosMs, setLivePosMs] = useState<number>(positionMs);
+  const fadeIntroStartSecRef = useRef<number>(0.4);
+  const lastTrackUriRef = useRef<string | undefined>(track?.uri);
+  const prevFadedRef = useRef<boolean>(isForegroundFaded);
+
+  // Sync initial / seek / pause snapshot position
+  useEffect(() => {
+    setLivePosMs(positionMs);
+  }, [positionMs, track?.uri]);
+
+  // Subscribe to real-time playback progress ticks so chyrons & factoids advance continuously while playing
+  useEffect(() => {
+    const unsub = defaultSimpClient.subscribeProgress((posMs) => {
+      if (typeof posMs === 'number' && Number.isFinite(posMs)) {
+        setLivePosMs(posMs);
+      }
+    });
+    return unsub;
+  }, []);
+
+  const posSec = Math.max(0, livePosMs / 1000);
+
+  // Reset intro window on track change, or trigger an 8s VHS intro window when the display first fades out
+  if (track?.uri !== lastTrackUriRef.current) {
+    lastTrackUriRef.current = track?.uri;
+    fadeIntroStartSecRef.current = 0.4;
+  }
+  if (isForegroundFaded && !prevFadedRef.current) {
+    // If display just faded out during the first 40s of the song, start the 8s VHS Intro Chyron right now!
+    if (posSec > 2.0 && posSec < 40.0 && posSec > fadeIntroStartSecRef.current + 6.0) {
+      fadeIntroStartSecRef.current = posSec;
+    }
+  }
+  prevFadedRef.current = isForegroundFaded;
+
   if (!track) return null;
 
   const scene = getSceneDescriptor(activeEngine);
   const { safeZones } = scene;
-  const posSec = Math.max(0, positionMs / 1000);
   const durSec = Math.max(0, (durationMs || track.duration_ms || 0) / 1000);
   const remainingSec = durSec > 0 ? durSec - posSec : 999;
 
-  // "Video Mode": when foreground opacity is < 20% and idle-faded, normal player chrome is invisible,
-  // so we pop in the full-legibility MTV Broadcast Chyron (0s–8s), T-15s "UP NEXT" Flyover,
-  // Synced Lyrics, Attributed Comments, and Pop-Up Video Factoids!
-  const isVideoMode = isForegroundFaded && idleOpacityPct < 20;
+  // 1. MTV Cable-Broadcast VHS Track Intro Chyron — ONLY when display is faded out (`isForegroundFaded`)
+  const introStart = fadeIntroStartSecRef.current;
+  const introEnd = introStart + 8.2;
+  const introEnv = isForegroundFaded
+    ? computeSoftVhsEnvelope(posSec, introStart, introEnd, 1.35)
+    : 0;
+  const showMtvIntroChyron = introEnv > 0.01;
 
-  const showMtvIntroChyron = isVideoMode && posSec >= 0.3 && posSec <= 8.5;
-  const showUpNextFlyover =
-    isVideoMode &&
-    Boolean(upNextTrack) &&
-    durSec >= 35 &&
-    remainingSec <= 15.0 &&
-    remainingSec >= 0.8;
+  // 2. MTV ~15s "UP NEXT" VHS Flyover Chyron — ONLY when display is faded out (`isForegroundFaded`)
+  const upNextStartSec = durSec - 15.0;
+  const upNextEndSec = durSec - 0.8;
+  const upNextEnv =
+    isForegroundFaded && Boolean(upNextTrack) && durSec >= 35
+      ? computeSoftVhsEnvelope(posSec, upNextStartSec, upNextEndSec, 1.35)
+      : 0;
+  const showUpNextFlyover = upNextEnv > 0.01 && !showMtvIntroChyron;
 
-  const attributedComment =
-    !suppressComments && isValidAttributedComment(activeComment) ? activeComment : null;
-
+  // 3. VH1-Style "Pop-Up Video" Speech-Bubble Factoids (18s .. T-20s, with 2-part sequential support)
   const activeFactoid =
     !suppressFactoids && !showMtvIntroChyron && !showUpNextFlyover
       ? factoidBubbles.find(
@@ -133,8 +187,17 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
         ) || null
       : null;
 
-  const showVideoModeLyrics =
-    isVideoMode && !suppressLyrics && Boolean(activeLyricLine && activeLyricLine.trim());
+  const factoidEnv = activeFactoid
+    ? computeSoftVhsEnvelope(
+        posSec,
+        activeFactoid.start_sec,
+        activeFactoid.start_sec + activeFactoid.duration_sec,
+        0.45,
+      )
+    : 0;
+
+  const vhsChromaticShadow =
+    '-1.3px 0 rgba(251, 113, 133, 0.62), 1.3px 0 rgba(56, 189, 248, 0.62), 0 2px 12px rgba(0, 0, 0, 0.95)';
 
   return (
     <div
@@ -146,7 +209,7 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
         overflow: 'hidden',
       }}
     >
-      {/* 1. MTV Cable-Broadcast Track Intro Chyron (0s–8s in <20% Opacity Video Mode) */}
+      {/* 1. MTV Cable-Broadcast Soft VHS Track Intro Chyron (Faded-Out Display Mode) */}
       {showMtvIntroChyron && (
         <div
           style={{
@@ -154,14 +217,20 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
             ...getAnchorStyle(safeZones.chyronAnchor, oskOrModalOpen),
             display: 'flex',
             alignItems: 'center',
-            gap: 14,
-            padding: '12px 18px',
-            borderRadius: 14,
-            background: 'rgba(6, 8, 16, 0.90)',
-            border: '1px solid var(--imp-accent-border, rgba(56, 189, 248, 0.55))',
-            borderLeft: '5px solid var(--imp-accent, #38bdf8)',
-            boxShadow: '0 14px 36px rgba(0, 0, 0, 0.88)',
-            maxWidth: 'min(520px, 78vw)',
+            gap: 15,
+            padding: '13px 22px 13px 16px',
+            borderRadius: 12,
+            backgroundImage:
+              'repeating-linear-gradient(0deg, rgba(255,255,255,0.035) 0px, rgba(255,255,255,0.035) 1px, transparent 1px, transparent 3px), linear-gradient(90deg, rgba(8, 10, 18, 0.88) 0%, rgba(12, 15, 28, 0.78) 78%, rgba(12, 15, 28, 0.15) 100%)',
+            borderLeft: '4px solid rgba(250, 204, 21, 0.85)',
+            borderTop: '1px solid rgba(255, 255, 255, 0.14)',
+            borderBottom: '1px solid rgba(56, 189, 248, 0.24)',
+            boxShadow:
+              '0 14px 36px rgba(0, 0, 0, 0.78), 0 0 24px rgba(56, 189, 248, 0.16)',
+            maxWidth: 'min(540px, 80vw)',
+            opacity: introEnv,
+            filter: `blur(${((1 - introEnv) * 2.6).toFixed(2)}px)`,
+            transform: `translateY(${((1 - introEnv) * 8).toFixed(1)}px)`,
           }}
         >
           {track.art_url && (
@@ -169,12 +238,14 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
               src={track.art_url}
               alt=""
               style={{
-                width: 54,
-                height: 54,
-                borderRadius: 9,
+                width: 56,
+                height: 56,
+                borderRadius: 8,
                 objectFit: 'cover',
                 flexShrink: 0,
-                border: '1px solid rgba(255,255,255,0.14)',
+                border: '1px solid rgba(255, 255, 255, 0.22)',
+                boxShadow:
+                  '-2px 0 8px rgba(251, 113, 133, 0.35), 2px 0 8px rgba(56, 189, 248, 0.35)',
               }}
             />
           )}
@@ -182,45 +253,66 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
             <div
               style={{
                 fontSize: 10,
-                fontFamily: 'monospace',
+                fontFamily: '"JetBrains Mono", "Courier New", monospace',
                 fontWeight: 800,
-                letterSpacing: '0.12em',
-                color: 'var(--imp-accent, #38bdf8)',
+                letterSpacing: '0.16em',
+                color: '#fde047',
                 textTransform: 'uppercase',
+                textShadow: vhsChromaticShadow,
               }}
             >
-              NOW PLAYING • {scene.shortLabel}
+              IMP CABLE • {scene.shortLabel}
             </div>
             <div
               style={{
-                fontSize: 16,
+                fontSize: 15,
                 fontWeight: 900,
+                letterSpacing: '0.04em',
                 color: '#f8fafc',
+                textTransform: 'uppercase',
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
+                textShadow: vhsChromaticShadow,
+              }}
+            >
+              {track.artists?.join(', ') || 'Unknown Artist'}
+            </div>
+            <div
+              style={{
+                fontSize: 17,
+                fontFamily: 'Georgia, "Times New Roman", serif',
+                fontStyle: 'italic',
+                fontWeight: 700,
+                color: '#fef9c3',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                textShadow: vhsChromaticShadow,
               }}
             >
               “{track.title}”
             </div>
-            <div
-              style={{
-                fontSize: 13,
-                fontWeight: 700,
-                color: '#cbd5e1',
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-              }}
-            >
-              {track.artists?.join(', ') || 'Unknown Artist'}
-              {track.album && track.album !== 'Unknown Album' ? ` — ${track.album}` : ''}
-            </div>
+            {track.album && track.album !== 'Unknown Album' && (
+              <div
+                style={{
+                  fontSize: 12,
+                  fontWeight: 700,
+                  color: '#cbd5e1',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  textShadow: '0 1px 6px rgba(0, 0, 0, 0.95)',
+                }}
+              >
+                {track.album}
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* 2. MTV ~15s "UP NEXT" Flyover Card (T-15s in <20% Opacity Video Mode) */}
+      {/* 2. MTV ~15s "UP NEXT" Soft VHS Flyover Chyron (Faded-Out Display Mode) */}
       {showUpNextFlyover && upNextTrack && (
         <div
           style={{
@@ -229,13 +321,18 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
             display: 'flex',
             alignItems: 'center',
             gap: 14,
-            padding: '12px 18px',
-            borderRadius: 14,
-            background: 'rgba(8, 10, 20, 0.92)',
-            border: '1px solid rgba(42, 163, 196, 0.65)',
-            borderLeft: '5px solid #2aa3c4',
-            boxShadow: '0 14px 36px rgba(0, 0, 0, 0.9)',
+            padding: '12px 20px 12px 15px',
+            borderRadius: 12,
+            backgroundImage:
+              'repeating-linear-gradient(0deg, rgba(255,255,255,0.035) 0px, rgba(255,255,255,0.035) 1px, transparent 1px, transparent 3px), linear-gradient(90deg, rgba(8, 12, 22, 0.90) 0%, rgba(12, 18, 32, 0.78) 80%, rgba(12, 18, 32, 0.16) 100%)',
+            borderLeft: '4px solid #38bdf8',
+            borderTop: '1px solid rgba(255, 255, 255, 0.14)',
+            borderBottom: '1px solid rgba(250, 204, 21, 0.25)',
+            boxShadow: '0 14px 36px rgba(0, 0, 0, 0.82)',
             maxWidth: 'min(520px, 78vw)',
+            opacity: upNextEnv,
+            filter: `blur(${((1 - upNextEnv) * 2.4).toFixed(2)}px)`,
+            transform: `translateY(${((1 - upNextEnv) * 8).toFixed(1)}px)`,
           }}
         >
           {upNextTrack.art_url && (
@@ -245,10 +342,10 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
               style={{
                 width: 50,
                 height: 50,
-                borderRadius: 9,
+                borderRadius: 8,
                 objectFit: 'cover',
                 flexShrink: 0,
-                border: '1px solid rgba(255,255,255,0.14)',
+                border: '1px solid rgba(255,255,255,0.2)',
               }}
             />
           )}
@@ -256,35 +353,41 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
             <div
               style={{
                 fontSize: 10,
-                fontFamily: 'monospace',
+                fontFamily: '"JetBrains Mono", "Courier New", monospace',
                 fontWeight: 800,
-                letterSpacing: '0.12em',
-                color: '#67e8f9',
+                letterSpacing: '0.15em',
+                color: '#38bdf8',
                 textTransform: 'uppercase',
+                textShadow: vhsChromaticShadow,
               }}
             >
-              UP NEXT IN {Math.max(1, Math.ceil(remainingSec))}S
+              UP NEXT • {Math.max(1, Math.ceil(remainingSec))}S
             </div>
             <div
               style={{
-                fontSize: 15,
-                fontWeight: 900,
-                color: '#f8fafc',
+                fontSize: 15.5,
+                fontFamily: 'Georgia, "Times New Roman", serif',
+                fontStyle: 'italic',
+                fontWeight: 700,
+                color: '#fef9c3',
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
+                textShadow: vhsChromaticShadow,
               }}
             >
-              {upNextTrack.title}
+              “{upNextTrack.title}”
             </div>
             <div
               style={{
                 fontSize: 12.5,
-                fontWeight: 700,
-                color: '#94a3b8',
+                fontWeight: 800,
+                color: '#e2e8f0',
+                textTransform: 'uppercase',
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
+                textShadow: vhsChromaticShadow,
               }}
             >
               {upNextTrack.artists?.join(', ') || 'Unknown Artist'}
@@ -293,173 +396,110 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
         </div>
       )}
 
-      {/* 3. VH1-Style "Pop-Up Video" Factoid Bubble (factoids.rs) */}
-      {activeFactoid && (
+      {/* 3. VH1-Style "Pop-Up Video" Speech Bubble (with 2-Part Continuation & Pointer Tail, No SFX) */}
+      {activeFactoid && factoidEnv > 0.01 && (
         <div
           style={{
             position: 'absolute',
             ...getAnchorStyle(safeZones.factoidAnchor, oskOrModalOpen),
             display: 'flex',
             flexDirection: 'column',
-            gap: 4,
-            padding: '10px 15px',
-            borderRadius: 16,
-            background: 'rgba(10, 14, 26, 0.88)',
-            border: '1.5px solid rgba(250, 204, 21, 0.55)',
-            boxShadow: '0 12px 30px rgba(0, 0, 0, 0.85)',
-            maxWidth: 'min(390px, 64vw)',
+            maxWidth: 'min(375px, 62vw)',
+            opacity: factoidEnv,
+            transform: `scale(${(0.92 + factoidEnv * 0.08).toFixed(3)}) translateY(${((1 - factoidEnv) * 6).toFixed(1)}px)`,
+            transformOrigin: safeZones.factoidAnchor.includes('right')
+              ? 'bottom right'
+              : 'bottom left',
           }}
         >
           <div
             style={{
+              position: 'relative',
               display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              fontSize: 10,
-              fontFamily: 'monospace',
-              fontWeight: 800,
-              color: '#facc15',
-              letterSpacing: '0.08em',
-              textTransform: 'uppercase',
+              flexDirection: 'column',
+              gap: 5,
+              padding: '12px 18px 13px 18px',
+              borderRadius: safeZones.factoidAnchor.includes('right')
+                ? '24px 24px 6px 24px'
+                : '24px 24px 24px 6px',
+              background:
+                'radial-gradient(circle at 22% 18%, rgba(24, 32, 54, 0.95) 0%, rgba(10, 14, 26, 0.94) 100%)',
+              border: '2px solid rgba(250, 204, 21, 0.78)',
+              boxShadow:
+                '0 14px 32px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.22)',
             }}
           >
-            <ImpIcon name="factoid" size={12} color="#facc15" />
-            <span>
-              {activeFactoid.category} • {activeFactoid.source}
-            </span>
-          </div>
-          <div
-            style={{
-              fontSize: 12.5,
-              fontWeight: 700,
-              color: '#f1f5f9',
-              lineHeight: 1.38,
-            }}
-          >
-            {activeFactoid.body}
-          </div>
-        </div>
-      )}
-
-      {/* 4. Reserved Attributed Timed Comment Slot (Video Mode — Never Unattributed, Never Contends with Lyrics) */}
-      {isVideoMode && attributedComment && (
-        <div
-          style={{
-            position: 'absolute',
-            ...getAnchorStyle(safeZones.commentAnchor, oskOrModalOpen),
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            padding: '9px 14px',
-            borderRadius: 14,
-            background: 'rgba(12, 10, 20, 0.88)',
-            border: '1px solid rgba(251, 146, 60, 0.55)',
-            boxShadow: '0 10px 26px rgba(0, 0, 0, 0.85)',
-            maxWidth: 'min(400px, 65vw)',
-          }}
-        >
-          {attributedComment.avatar_url ? (
-            <img
-              src={attributedComment.avatar_url}
-              alt=""
-              style={{
-                width: 30,
-                height: 30,
-                borderRadius: '50%',
-                objectFit: 'cover',
-                flexShrink: 0,
-                border: '1px solid #fb923c',
-              }}
-            />
-          ) : (
             <div
               style={{
-                width: 30,
-                height: 30,
-                borderRadius: '50%',
-                background: '#27170c',
-                border: '1px solid #fb923c',
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-              }}
-            >
-              <ImpIcon name="comments" size={14} color="#fb923c" />
-            </div>
-          )}
-          <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
-            <span
-              style={{
-                fontSize: 10.5,
-                fontFamily: 'monospace',
+                justifyContent: 'space-between',
+                gap: 8,
+                fontSize: 10,
+                fontFamily: '"JetBrains Mono", monospace',
                 fontWeight: 800,
-                color: '#fb923c',
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
+                color: '#facc15',
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
               }}
             >
-              @{attributedComment.username}
-            </span>
-            <span
-              style={{
-                fontSize: 12.5,
-                fontWeight: 700,
-                color: '#f8fafc',
-                lineHeight: 1.3,
-                display: '-webkit-box',
-                WebkitLineClamp: 2,
-                WebkitBoxOrient: 'vertical',
-                overflow: 'hidden',
-              }}
-            >
-              “{attributedComment.body}”
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* 5. Reserved Synced Lyrics Container in Video Mode (<20% Opacity) */}
-      {showVideoModeLyrics && activeLyricLine && (
-        <div
-          style={{
-            position: 'absolute',
-            ...getAnchorStyle(safeZones.lyricAnchor, oskOrModalOpen),
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 4,
-            padding: '10px 20px',
-            borderRadius: 14,
-            background: 'rgba(6, 8, 16, 0.84)',
-            border: '1px solid rgba(103, 232, 249, 0.35)',
-            boxShadow: '0 10px 28px rgba(0, 0, 0, 0.85)',
-            maxWidth: 'min(620px, 84vw)',
-            textAlign: 'center',
-          }}
-        >
-          <div
-            style={{
-              fontSize: 17,
-              fontWeight: 900,
-              color: '#f8fafc',
-              textShadow: '0 2px 10px rgba(0,0,0,0.95)',
-            }}
-          >
-            ♪ {activeLyricLine} ♪
-          </div>
-          {nextLyricLine && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <ImpIcon name="factoid" size={12} color="#facc15" />
+                <span>
+                  {activeFactoid.category} • {activeFactoid.source}
+                </span>
+              </span>
+              {activeFactoid.part_total && activeFactoid.part_total > 1 && (
+                <span
+                  style={{
+                    padding: '1px 6px',
+                    borderRadius: 999,
+                    background: 'rgba(250, 204, 21, 0.18)',
+                    border: '1px solid rgba(250, 204, 21, 0.45)',
+                    color: '#fef08a',
+                    fontSize: 9.5,
+                  }}
+                >
+                  {activeFactoid.part_index || 1}/{activeFactoid.part_total}
+                </span>
+              )}
+            </div>
             <div
               style={{
-                fontSize: 12.5,
-                fontWeight: 600,
-                color: '#94a3b8',
+                fontSize: 13,
+                fontWeight: 700,
+                color: '#f8fafc',
+                lineHeight: 1.38,
+                textShadow: '0 1px 4px rgba(0, 0, 0, 0.9)',
               }}
             >
-              {nextLyricLine}
+              {activeFactoid.body}
             </div>
-          )}
+          </div>
+          {/* Speech Bubble Pointer Tail */}
+          <svg
+            width="24"
+            height="13"
+            viewBox="0 0 24 13"
+            style={{
+              marginTop: -2,
+              marginLeft: safeZones.factoidAnchor.includes('right') ? 'auto' : 18,
+              marginRight: safeZones.factoidAnchor.includes('right') ? 18 : 'auto',
+              filter: 'drop-shadow(0 4px 6px rgba(0,0,0,0.65))',
+            }}
+          >
+            <path
+              d={
+                safeZones.factoidAnchor.includes('right')
+                  ? 'M4 0 L20 0 L22 12 Z'
+                  : 'M4 0 L20 0 L2 12 Z'
+              }
+              fill="rgba(12, 16, 30, 0.95)"
+              stroke="rgba(250, 204, 21, 0.78)"
+              strokeWidth="2"
+              strokeLinejoin="round"
+            />
+          </svg>
         </div>
       )}
     </div>

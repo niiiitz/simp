@@ -16,6 +16,10 @@ pub struct FactoidBubble {
     pub source: String,
     pub start_sec: u32,
     pub duration_sec: u32,
+    #[serde(default)]
+    pub part_index: Option<u8>,
+    #[serde(default)]
+    pub part_total: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +206,58 @@ fn truncate_factoid_sentence(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// Splits a factoid sentence into either 1 compact speech bubble (`<= 92` chars)
+/// or a 2-part sequential speech-bubble pair (`Part 1/2` -> `Part 2/2`) at a natural
+/// clause/word boundary so facts fit inside a VH1 speech bubble without abrupt mid-sentence truncation.
+pub fn split_sentence_into_bubble_parts(text: &str) -> Vec<String> {
+    let cleaned = text
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let char_count = cleaned.chars().count();
+    if char_count <= 92 {
+        return vec![cleaned];
+    }
+
+    let capped = truncate_factoid_sentence(&cleaned, 184);
+    let words: Vec<&str> = capped.split_whitespace().collect();
+    if words.len() < 6 {
+        return vec![truncate_factoid_sentence(&cleaned, 92)];
+    }
+
+    // Find a word split near the middle (preferring after a comma, semicolon, or dash)
+    let target_len = capped.len() / 2;
+    let mut best_split_idx = words.len() / 2;
+    let mut best_score = usize::MAX;
+    let mut running_len = 0usize;
+
+    for (idx, w) in words.iter().enumerate().take(words.len() - 2).skip(2) {
+        running_len += w.len() + 1;
+        let dist = running_len.abs_diff(target_len);
+        let punctuation_bonus = if w.ends_with(',') || w.ends_with(';') || w.ends_with('—') || w.ends_with('-') {
+            0
+        } else {
+            14
+        };
+        let score = dist + punctuation_bonus;
+        if score < best_score && running_len <= 92 {
+            best_score = score;
+            best_split_idx = idx + 1;
+        }
+    }
+
+    let part1_raw = words[..best_split_idx].join(" ");
+    let part2_raw = words[best_split_idx..].join(" ");
+    if part2_raw.is_empty() {
+        return vec![truncate_factoid_sentence(&part1_raw, 92)];
+    }
+
+    let part1 = format!("{} …", part1_raw.trim_end_matches([',', ';', '.']));
+    let part2 = format!("… {}", truncate_factoid_sentence(&part2_raw, 92));
+    vec![part1, part2]
+}
+
 fn split_extract_into_sentences(extract: &str, max_sentences: usize) -> Vec<String> {
     let mut results = Vec::new();
     for raw in extract.split(". ") {
@@ -214,7 +270,7 @@ fn split_extract_into_sentences(extract: &str, max_sentences: usize) -> Vec<Stri
         } else {
             format!("{trimmed}.")
         };
-        results.push(truncate_factoid_sentence(&with_dot, 145));
+        results.push(truncate_factoid_sentence(&with_dot, 184));
         if results.len() >= max_sentences {
             break;
         }
@@ -271,6 +327,39 @@ fn query_wikipedia_summary(page_title: &str) -> Option<(String, String)> {
         return None;
     }
     Some((canonical_title, extract.to_string()))
+}
+
+fn query_wikipedia_search_fallback(search_query: &str) -> Option<(String, String)> {
+    let trimmed = search_query.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let url = format!(
+        "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={}&srlimit=3&format=json",
+        url_encode_component(trimmed)
+    );
+    let body = http_get_text(
+        &url,
+        &[
+            ("User-Agent", "SIMP-MediaPlayer/0.3 (https://github.com/niiiitz/simp)"),
+            ("Accept", "application/json"),
+        ],
+        4,
+    )
+    .ok()?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let hits = json
+        .get("query")
+        .and_then(|q| q.get("search"))
+        .and_then(|s| s.as_array())?;
+    for hit in hits.iter().take(3) {
+        if let Some(title) = hit.get("title").and_then(|t| t.as_str()) {
+            if let Some(found) = query_wikipedia_summary(title) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn query_musicbrainz_recording_factoid(title: &str, artist: &str) -> Option<String> {
@@ -357,12 +446,14 @@ fn query_musicbrainz_recording_factoid(title: &str, artist: &str) -> Option<Stri
     if parts.is_empty() {
         None
     } else {
-        Some(truncate_factoid_sentence(&parts.join(" • "), 145))
+        Some(truncate_factoid_sentence(&parts.join(" • "), 180))
     }
 }
 
-/// Schedules 2–4 VH1-style "Pop-Up Video" bubbles cleanly between `18s` and `duration_sec - 20s`
-/// so they never collide with the `0s–8s` MTV Track Intro Chyron or the `T-15s` Up Next Flyover.
+/// Schedules 2–4 VH1-style "Pop-Up Video" factoid slots cleanly between `18s` and `duration_sec - 20s`
+/// so they never collide with the `0.5s–8.5s` MTV Track Intro Chyron or the `T-15s` Up Next Flyover.
+/// Longer sentences (`> 92` chars) are automatically split into a 2-part sequential speech-bubble pair
+/// (`Part 1/2` for `5s` -> `Part 2/2` for `5s`).
 pub fn schedule_factoid_bubbles(
     raw_items: Vec<(String, String, String, String)>,
     duration_ms: u32,
@@ -372,7 +463,7 @@ pub fn schedule_factoid_bubbles(
     }
     let total_sec = (duration_ms / 1000).max(90);
     let safe_start = 18u32;
-    let safe_end = total_sec.saturating_sub(22).max(safe_start + 15);
+    let safe_end = total_sec.saturating_sub(24).max(safe_start + 16);
     let count = raw_items.len().min(4);
     let span = safe_end.saturating_sub(safe_start);
     let step = if count > 1 {
@@ -381,22 +472,45 @@ pub fn schedule_factoid_bubbles(
         0
     };
 
-    raw_items
-        .into_iter()
-        .take(4)
-        .enumerate()
-        .map(|(idx, (category, headline, body, source))| {
-            let start_sec = (safe_start + (idx as u32) * step).min(safe_end);
-            FactoidBubble {
+    let mut out = Vec::new();
+    for (idx, (category, headline, body, source)) in raw_items.into_iter().take(4).enumerate() {
+        let slot_start = (safe_start + (idx as u32) * step).min(safe_end);
+        let parts = split_sentence_into_bubble_parts(&body);
+        if parts.len() >= 2 {
+            out.push(FactoidBubble {
+                category: category.clone(),
+                headline: headline.clone(),
+                body: parts[0].clone(),
+                source: source.clone(),
+                start_sec: slot_start,
+                duration_sec: 5,
+                part_index: Some(1),
+                part_total: Some(2),
+            });
+            out.push(FactoidBubble {
                 category,
                 headline,
-                body,
+                body: parts[1].clone(),
                 source,
-                start_sec,
-                duration_sec: 9,
-            }
-        })
-        .collect()
+                start_sec: slot_start + 5,
+                duration_sec: 5,
+                part_index: Some(2),
+                part_total: Some(2),
+            });
+        } else if let Some(single) = parts.into_iter().next() {
+            out.push(FactoidBubble {
+                category,
+                headline,
+                body: single,
+                source,
+                start_sec: slot_start,
+                duration_sec: 8,
+                part_index: None,
+                part_total: None,
+            });
+        }
+    }
+    out
 }
 
 pub fn fetch_track_factoids(
@@ -406,20 +520,49 @@ pub fn fetch_track_factoids(
     album: Option<&str>,
     duration_ms: u32,
 ) -> TrackFactoidsResponse {
-    let clean_title = title.trim();
-    let clean_artist = artist.trim();
+    let (cleaned_title_str, cleaned_artist_str) =
+        crate::lyrics::clean_metadata_for_lyrics(title, artist);
+    let clean_title = if cleaned_title_str.is_empty() {
+        title.trim()
+    } else {
+        cleaned_title_str.as_str()
+    };
+    let clean_artist = if cleaned_artist_str.is_empty() {
+        artist.trim()
+    } else {
+        cleaned_artist_str.as_str()
+    };
     let clean_album = album.map(str::trim).filter(|s| !s.is_empty() && *s != "Unknown Album");
     let key = normalize_key(clean_title, clean_artist, clean_album);
 
-    if let Some(cached) = load_factoids_from_db(&key, track_uri) {
+    if let Some(mut cached) = load_factoids_from_db(&key, track_uri) {
+        // Automatically upgrade any pre-Wave-6 cached single-bubble row (`> 92` chars without `part_total`)
+        let needs_resplit = cached
+            .bubbles
+            .iter()
+            .any(|b| b.part_total.is_none() && b.body.chars().count() > 92);
+        if needs_resplit {
+            let raw_items: Vec<(String, String, String, String)> = cached
+                .bubbles
+                .into_iter()
+                .map(|b| (b.category, b.headline, b.body, b.source))
+                .collect();
+            cached.bubbles = schedule_factoid_bubbles(raw_items, duration_ms);
+        }
         return cached;
     }
+
+    let primary_artist = clean_artist
+        .split(&[',', '&', '/'][..])
+        .next()
+        .unwrap_or(clean_artist)
+        .trim();
 
     let mut raw_items: Vec<(String, String, String, String)> = Vec::new();
     let mut providers: Vec<&str> = Vec::new();
 
     // 1. MusicBrainz Recording / Release Metadata
-    if let Some(mb_fact) = query_musicbrainz_recording_factoid(clean_title, clean_artist) {
+    if let Some(mb_fact) = query_musicbrainz_recording_factoid(clean_title, primary_artist) {
         raw_items.push((
             "RELEASE ARCHIVE".to_string(),
             clean_title.to_string(),
@@ -429,52 +572,83 @@ pub fn fetch_track_factoids(
         providers.push("musicbrainz");
     }
 
-    // 2. Wikipedia REST v1 Summary — Album or Song first
-    if let Some(alb) = clean_album {
-        let album_candidates = [
-            format!("{alb} ({clean_artist} album)"),
-            format!("{alb} (album)"),
-        ];
-        for cand in &album_candidates {
-            if let Some((canon, extract)) = query_wikipedia_summary(cand) {
-                for sentence in split_extract_into_sentences(&extract, 1) {
-                    raw_items.push((
-                        "ALBUM LORE".to_string(),
-                        canon.clone(),
-                        sentence,
-                        "Wikipedia".to_string(),
-                    ));
-                }
-                if !providers.contains(&"wikipedia") {
-                    providers.push("wikipedia");
-                }
+    // 2. Wikipedia REST v1 Summary — Song or Album (even when album metadata is absent)
+    {
+        let mut work_candidates = Vec::new();
+        if let Some(alb) = clean_album {
+            work_candidates.push(format!("{alb} ({primary_artist} album)"));
+            work_candidates.push(format!("{alb} (album)"));
+        }
+        if !clean_title.is_empty() && !primary_artist.is_empty() {
+            work_candidates.push(format!("{clean_title} ({primary_artist} song)"));
+            work_candidates.push(format!("{clean_title} (song)"));
+        }
+        let mut matched_work = None;
+        for cand in &work_candidates {
+            if let Some(res) = query_wikipedia_summary(cand) {
+                matched_work = Some(res);
                 break;
+            }
+        }
+        if matched_work.is_none() && !primary_artist.is_empty() {
+            if let Some(alb) = clean_album {
+                matched_work =
+                    query_wikipedia_search_fallback(&format!("{alb} {primary_artist} album"));
+            }
+            if matched_work.is_none() && !clean_title.is_empty() {
+                matched_work =
+                    query_wikipedia_search_fallback(&format!("{clean_title} {primary_artist} song"));
+            }
+        }
+        if let Some((canon, extract)) = matched_work {
+            for sentence in split_extract_into_sentences(&extract, 1) {
+                raw_items.push((
+                    "TRACK & ALBUM LORE".to_string(),
+                    canon.clone(),
+                    sentence,
+                    "Wikipedia".to_string(),
+                ));
+            }
+            if !providers.contains(&"wikipedia") {
+                providers.push("wikipedia");
             }
         }
     }
 
-    // 3. Wikipedia REST v1 Summary — Artist Bio
-    if !clean_artist.is_empty() && !clean_artist.eq_ignore_ascii_case("Unknown Artist") && raw_items.len() < 4 {
+    // 3. Wikipedia REST v1 Summary — Artist Bio (with Search API fallback)
+    if !primary_artist.is_empty()
+        && !primary_artist.eq_ignore_ascii_case("Unknown Artist")
+        && raw_items.len() < 4
+    {
         let artist_candidates = [
-            format!("{clean_artist} (band)"),
-            format!("{clean_artist} (musician)"),
-            clean_artist.to_string(),
+            format!("{primary_artist} (band)"),
+            format!("{primary_artist} (musician)"),
+            format!("{primary_artist} (singer)"),
+            primary_artist.to_string(),
         ];
+        let mut matched_artist = None;
         for cand in &artist_candidates {
-            if let Some((canon, extract)) = query_wikipedia_summary(cand) {
-                let needed = (4usize).saturating_sub(raw_items.len()).min(2);
-                for sentence in split_extract_into_sentences(&extract, needed) {
-                    raw_items.push((
-                        "ARTIST PROFILE".to_string(),
-                        canon.clone(),
-                        sentence,
-                        "Wikipedia".to_string(),
-                    ));
-                }
-                if !providers.contains(&"wikipedia") {
-                    providers.push("wikipedia");
-                }
+            if let Some(res) = query_wikipedia_summary(cand) {
+                matched_artist = Some(res);
                 break;
+            }
+        }
+        if matched_artist.is_none() {
+            matched_artist =
+                query_wikipedia_search_fallback(&format!("{primary_artist} musician band"));
+        }
+        if let Some((canon, extract)) = matched_artist {
+            let needed = (4usize).saturating_sub(raw_items.len()).min(2);
+            for sentence in split_extract_into_sentences(&extract, needed) {
+                raw_items.push((
+                    "ARTIST PROFILE".to_string(),
+                    canon.clone(),
+                    sentence,
+                    "Wikipedia".to_string(),
+                ));
+            }
+            if !providers.contains(&"wikipedia") {
+                providers.push("wikipedia");
             }
         }
     }
@@ -522,15 +696,26 @@ mod tests {
     }
 
     #[test]
-    fn test_factoid_bubble_scheduling_avoids_intro_and_outro() {
+    fn test_factoid_bubble_scheduling_avoids_intro_and_outro_and_splits_long_sentences() {
         let raw = vec![
-            ("RELEASE".into(), "Track 01".into(), "Fact 1.".into(), "MusicBrainz".into()),
-            ("ALBUM".into(), "Sample Album".into(), "Fact 2.".into(), "Wikipedia".into()),
-            ("ARTIST".into(), "Example Artist".into(), "Fact 3.".into(), "Wikipedia".into()),
+            ("RELEASE".into(), "Track 01".into(), "Fact 1 is short.".into(), "MusicBrainz".into()),
+            (
+                "ALBUM".into(),
+                "Sample Album".into(),
+                "Sample Album is the second studio album by electronic music duo Example Artist, recorded in Paris and released worldwide in March 2001.".into(),
+                "Wikipedia".into(),
+            ),
+            ("ARTIST".into(), "Example Artist".into(), "Fact 3 is short.".into(), "Wikipedia".into()),
         ];
         let bubbles = schedule_factoid_bubbles(raw, 200_000);
-        assert_eq!(bubbles.len(), 3);
+        // Item 1 (1 bubble) + Item 2 (2 sequential parts) + Item 3 (1 bubble) = 4 bubbles
+        assert_eq!(bubbles.len(), 4);
         assert!(bubbles[0].start_sec >= 18);
-        assert!(bubbles[2].start_sec + bubbles[2].duration_sec <= 188);
+        assert_eq!(bubbles[1].part_index, Some(1));
+        assert_eq!(bubbles[1].part_total, Some(2));
+        assert_eq!(bubbles[2].part_index, Some(2));
+        assert_eq!(bubbles[2].part_total, Some(2));
+        assert_eq!(bubbles[2].start_sec, bubbles[1].start_sec + 5);
+        assert!(bubbles[3].start_sec + bubbles[3].duration_sec <= 188);
     }
 }
