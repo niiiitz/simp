@@ -395,7 +395,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       togglePlayerFullscreen();
     };
     const onFullscreenChange = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement));
+      const fs = Boolean(document.fullscreenElement);
+      setIsFullscreen(fs);
+      if (!fs) {
+        setVideoTheatreExpanded(false);
+      }
     };
     const onSelectCategoryFocus = (ev: Event) => {
       const cat = (ev as CustomEvent<{ category?: string }>).detail?.category;
@@ -1508,7 +1512,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       )}
 
       {/* Top-Right Up Next Readout Strip — Right-aligned & anchored just beneath the top Nav Bar */}
-      {hasUpNext && snap?.up_next ? (
+      {hasUpNext && snap?.up_next && !(isVideoTrack && videoTheatreExpanded) ? (
         <div
           style={{
             position: 'absolute',
@@ -1577,7 +1581,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           position: 'absolute',
           top: 14,
           left: 48,
-          zIndex: 2,
+          zIndex: isVideoTrack && videoTheatreExpanded ? 48 : 2,
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'flex-start',
@@ -1595,6 +1599,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         {/* Track Title & Artist / Collection / Source Header at Top-Left */}
         <div
           style={{
+            display: isVideoTrack && videoTheatreExpanded ? 'none' : undefined,
             minWidth: 0,
             maxWidth: '100%',
             position: 'relative',
@@ -2149,7 +2154,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           left: buttonsOffsetLeftPx !== null ? buttonsOffsetLeftPx : 48,
           right: 48,
           zIndex: 2,
-          display: 'flex',
+          display: isVideoTrack && videoTheatreExpanded ? 'none' : 'flex',
           justifyContent: 'center',
           pointerEvents: 'none',
           opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
@@ -2276,7 +2281,12 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           left: scrubOffsetLeftPx !== null ? scrubOffsetLeftPx : 48,
           right: 48,
           zIndex: 8,
-          display: scrubOffsetLeftPx !== null ? 'block' : 'flex',
+          display:
+            isVideoTrack && videoTheatreExpanded
+              ? 'none'
+              : scrubOffsetLeftPx !== null
+              ? 'block'
+              : 'flex',
           justifyContent: scrubOffsetLeftPx !== null ? undefined : 'center',
           pointerEvents: 'none',
         }}
@@ -2315,7 +2325,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
               }
               onPlayheadTick={handlePlayheadTick}
-              hidden={hidden}
+              hidden={hidden || (isVideoTrack && videoTheatreExpanded)}
             />
           </div>
 
