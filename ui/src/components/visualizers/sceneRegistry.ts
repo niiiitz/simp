@@ -238,6 +238,14 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
 
 export const VISUALIZER_ENGINES: VisualizerEngine[] = VISUALIZER_SCENES.map((s) => s.id);
 
+export const CORE_POLISHED_SCENES: VisualizerEngine[] = [
+  'glyph',
+  'avs',
+  'demoscene',
+  'vertigo',
+  'trapper',
+];
+
 export const VISUALIZER_MODES: { id: VisualizerMode; label: string; shortLabel: string }[] = [
   ...VISUALIZER_SCENES.map((s) => ({
     id: s.id as VisualizerMode,
@@ -249,12 +257,12 @@ export const VISUALIZER_MODES: { id: VisualizerMode; label: string; shortLabel: 
   { id: 'off', label: 'Off', shortLabel: 'OFF' },
 ];
 
-const ENABLED_SCENES_STORAGE_KEY = 'simp_viz_enabled_scenes';
+const ENABLED_SCENES_STORAGE_KEY = 'simp_viz_enabled_scenes_v2';
 
 export function loadEnabledVisualizerScenes(): VisualizerEngine[] {
   try {
     const raw = window.localStorage.getItem(ENABLED_SCENES_STORAGE_KEY);
-    if (!raw) return [...VISUALIZER_ENGINES];
+    if (!raw) return [...CORE_POLISHED_SCENES];
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       const valid = parsed.filter((id): id is VisualizerEngine =>
@@ -265,12 +273,12 @@ export function loadEnabledVisualizerScenes(): VisualizerEngine[] {
   } catch {
     // ignore storage errors
   }
-  return [...VISUALIZER_ENGINES];
+  return [...CORE_POLISHED_SCENES];
 }
 
 export function saveEnabledVisualizerScenes(scenes: VisualizerEngine[]): void {
   try {
-    const next = scenes.length > 0 ? scenes : [...VISUALIZER_ENGINES];
+    const next = scenes.length > 0 ? scenes : [...CORE_POLISHED_SCENES];
     window.localStorage.setItem(ENABLED_SCENES_STORAGE_KEY, JSON.stringify(next));
   } catch {
     // ignore storage errors
