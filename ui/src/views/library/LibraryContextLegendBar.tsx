@@ -12,6 +12,7 @@ import {
 } from '../../drivers/AppleMusicDriver';
 import { SoundCloudPlaylistSummary } from '../../drivers/SoundCloudDriver';
 import { BrowserTarget } from '../PlayerView';
+import { ImpIcon } from '../../components/icons/ImpIcon';
 
 export interface LibraryContextLegendBarProps {
   rightPaneMode: 'browse' | 'tracks' | 'artist';
@@ -277,6 +278,40 @@ export const LibraryContextLegendBar: React.FC<LibraryContextLegendBarProps> = (
             + Add All ({browserTracks.length})
           </button>
         )}
+
+        {browserTarget?.kind === 'playlist' &&
+          selectedPlaylistObj &&
+          selectedPlaylistObj.origin !== 'simp_local' && (
+            <button
+              data-collection-fork="true"
+              onClick={async () => {
+                try {
+                  await fetch('http://127.0.0.1:18888/api/library/playlists/convert-to-hybrid', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ playlist_id: selectedPlaylistObj.id }),
+                  });
+                } catch {}
+              }}
+              title="Convert this pinned collection into an editable Hybrid SIMP Playlist"
+              style={{
+                padding: '3px 9px',
+                borderRadius: 6,
+                background: 'rgba(52, 211, 153, 0.14)',
+                border: '1px solid rgba(52, 211, 153, 0.45)',
+                color: '#6ee7b7',
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+              }}
+            >
+              <ImpIcon name="fork" size={12} color="#34d399" />
+              Fork / Convert to Hybrid
+            </button>
+          )}
       </div>
 
       {/* Right side: Single Pin / Unpin / Delete control (exposes [Y] badge when controller is active) */}

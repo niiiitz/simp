@@ -48,6 +48,8 @@ import {
 } from '../drivers/SoundCloudDriver';
 import { SoundCloudAttributionLink, SoundCloudLogo } from '../components/SoundCloudLogo';
 import { AppleMusicAttributionLink } from '../components/AppleMusicLogo';
+import { ImpIcon } from '../components/icons/ImpIcon';
+import { getSourceThemeForLibraryFilter, getSourceThemeCssVars } from '../theme/sourceTheme';
 import { LibraryMiniPlayerBar } from './library/LibraryMiniPlayerBar';
 import { LibraryContextMenuModal } from './library/LibraryContextMenuModal';
 import { LibraryArtistProfilePane } from './library/LibraryArtistProfilePane';
@@ -2480,30 +2482,150 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
     />
   );
 
+  const libTheme = getSourceThemeForLibraryFilter(
+    browserSourceFilter,
+    undefined,
+    track?.uri,
+  );
+  const libCssVars = getSourceThemeCssVars(libTheme);
+
   return (
     <main
       style={{
         flex: 1,
         display: hidden ? 'none' : 'grid',
         gridTemplateColumns: 'minmax(250px, 32%) minmax(0, 68%)',
-        gridTemplateRows: track ? 'auto minmax(0, 1fr)' : 'minmax(0, 1fr)',
+        gridTemplateRows: 'auto minmax(0, 1fr)',
         overflow: 'hidden',
         boxSizing: 'border-box',
         width: '100%',
         minWidth: 0,
+        ...libCssVars,
       }}
     >
       {/* =====================================================================
-          TOP MINI-PLAYER BAR (Spans Full Width Above Left + Right Columns)
+          PERMANENT 32% / 68% TOP HEADER SPLIT:
+          - Top-Left (32%): Unified Search Bar over Left Library Source Column
+          - Top-Right (68%): Miniplayer Bar over Right Nav/Browse Pane
          ===================================================================== */}
-      {track && (
-        <LibraryMiniPlayerBar
-          track={track}
-          snap={snap}
-          hidden={hidden}
-          onReturnToPlayer={() => setView('lock')}
-        />
-      )}
+      <div
+        data-nav-col="left"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          minHeight: 53,
+          padding: '7px 14px',
+          background: '#06070b',
+          borderRight: '1px solid #16161c',
+          borderBottom: `1px solid ${browserSearch ? libTheme.accentBorder : '#181a24'}`,
+          boxSizing: 'border-box',
+          minWidth: 0,
+        }}
+      >
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', width: '100%' }}>
+          <span
+            style={{
+              position: 'absolute',
+              left: 10,
+              display: 'inline-flex',
+              alignItems: 'center',
+              color: browserSearch ? libTheme.accent : '#64748b',
+              pointerEvents: 'none',
+            }}
+          >
+            <ImpIcon name="search" size={14} />
+          </span>
+          <input
+            type="text"
+            data-osk-input="search"
+            placeholder={
+              browserSourceFilter === 'local'
+                ? 'Filter local playlists, albums, or tracks...'
+                : browserSourceFilter === 'soundcloud'
+                ? 'Search SoundCloud Tracks, Sets & DJ Mixes...'
+                : browserSourceFilter === 'internet_archive'
+                ? 'Search Internet Archive Films, TV & Audio...'
+                : 'Search SIMP Library, Apple Music, SoundCloud & Archive...'
+            }
+            value={browserSearch}
+            onChange={(e) => setBrowserSearch(e.target.value)}
+            onClick={(e) => {
+              if (e.detail === 0 || document.documentElement.dataset.simpInput === 'gamepad') {
+                setOskTarget('search');
+                if (window.parent && window.parent !== window) {
+                  window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+                }
+              }
+            }}
+            style={{
+              width: '100%',
+              minHeight: 36,
+              padding: browserSearch ? '0 58px 0 32px' : '0 34px 0 32px',
+              borderRadius: 8,
+              background: '#08080c',
+              border: browserSearch ? `1px solid ${libTheme.accent}` : '1px solid #242430',
+              color: '#d4d4dc',
+              fontSize: 12,
+              boxSizing: 'border-box',
+            }}
+          />
+          <button
+            data-row-aux="true"
+            onClick={() => {
+              setOskTarget((prev) => (prev === 'search' ? null : 'search'));
+              if (window.parent && window.parent !== window) {
+                window.parent.postMessage({ type: 'SIMP_OPEN_OSK' }, '*');
+              }
+            }}
+            title="Toggle On-Screen Keyboard"
+            style={{
+              position: 'absolute',
+              right: browserSearch ? 32 : 6,
+              width: 24,
+              height: 24,
+              borderRadius: 6,
+              background: '#12121a',
+              border: '1px solid #242432',
+              color: '#9ca3af',
+              fontSize: 11,
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            ⌨
+          </button>
+          {browserSearch && (
+            <button
+              data-row-aux="true"
+              data-clear-search="true"
+              onClick={() => setBrowserSearch('')}
+              title="Clear search"
+              style={{
+                position: 'absolute',
+                right: 6,
+                width: 24,
+                height: 24,
+                borderRadius: 6,
+                background: '#161622',
+                border: '1px solid #2e2e3c',
+                color: '#9ca3af',
+                fontSize: 11,
+                cursor: 'pointer',
+                padding: 0,
+              }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
+
+      <LibraryMiniPlayerBar
+        track={track || null}
+        snap={snap}
+        hidden={hidden}
+        onReturnToPlayer={() => setView('lock')}
+      />
       <LibraryXmbLeftColumn
         browserSourceFilter={browserSourceFilter}
         setBrowserSourceFilter={setBrowserSourceFilter}

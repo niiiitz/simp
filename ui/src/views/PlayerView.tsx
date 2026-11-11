@@ -26,6 +26,8 @@ import {
 import { SoundCloudAttributionLink, SoundCloudLogo } from '../components/SoundCloudLogo';
 import { AppleMusicAttributionLink } from '../components/AppleMusicLogo';
 import { fetchTrackLyrics, type TrackLyricsResponse } from '../drivers/appleApi';
+import { ImpIcon } from '../components/icons/ImpIcon';
+import { getSourceThemeForTrack, getSourceThemeCssVars } from '../theme/sourceTheme';
 
 export interface BrowserTarget {
   kind:
@@ -803,12 +805,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   }, [showToast]);
 
   // Fetch synced lyrics from LRCLIB (v1 + v2 beta) or local .lrc sidecar on track change
-  useEffect(() => {
-    setLyricsData(null);
-    setActiveLyricIdx(-1);
-    activeLyricIdxRef.current = -1;
+  const loadLyricsForCurrentTrack = useCallback(() => {
     if (!track?.uri || !track?.title || isVideoTrack) {
-      return;
+      setLyricsData(null);
+      return () => {};
     }
     let cancelled = false;
     fetchTrackLyrics({
@@ -819,15 +819,47 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       duration_ms: track.duration_ms || 0,
     })
       .then((res) => {
-        if (!cancelled && res && res.source !== 'none') {
-          setLyricsData(res);
+        if (!cancelled) {
+          if (res && res.source !== 'none' && res.source !== 'suppressed') {
+            setLyricsData(res);
+          } else {
+            setLyricsData(null);
+          }
         }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [track?.uri, track?.title, isVideoTrack]);
+  }, [track?.uri, track?.title, track?.artists, track?.album, track?.duration_ms, isVideoTrack]);
+
+  useEffect(() => {
+    setLyricsData(null);
+    setActiveLyricIdx(-1);
+    activeLyricIdxRef.current = -1;
+    return loadLyricsForCurrentTrack();
+  }, [loadLyricsForCurrentTrack]);
+
+  useEffect(() => {
+    const onPropsUpdated = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail;
+      if (!detail || !track?.uri || detail.uri !== track.uri) return;
+      if (detail.properties?.suppress_comments) {
+        setActiveBubbles([]);
+      }
+      if (detail.lyrics) {
+        if (detail.lyrics.found && !detail.properties?.suppress_lyrics) {
+          setLyricsData(detail.lyrics);
+        } else {
+          setLyricsData(null);
+        }
+      } else {
+        loadLyricsForCurrentTrack();
+      }
+    };
+    window.addEventListener('simp-track-properties-updated', onPropsUpdated);
+    return () => window.removeEventListener('simp-track-properties-updated', onPropsUpdated);
+  }, [track?.uri, loadLyricsForCurrentTrack]);
 
   useEffect(() => {
     shownCommentIdsRef.current.clear();
@@ -1257,6 +1289,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const hasUpNext = Boolean(snap?.up_next && snap.up_next.length > 0);
   const buttonsBottomPx = Math.round(18 + 60 * effectiveScale);
   const scrubBottomPx = Math.round(18 + (60 + 86 + 18) * effectiveScale);
+  const playerTheme = getSourceThemeForTrack(track?.uri, track?.source);
+  const playerCssVars = getSourceThemeCssVars(playerTheme);
 
   return (
     <>
@@ -1272,6 +1306,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           width: '100%',
           overflow: 'hidden',
           position: 'relative',
+          ...playerCssVars,
         }}
       >
       {!isVideoTrack && !hidden && (
@@ -2015,11 +2050,12 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               width: 92,
               height: 86,
               borderRadius: 22,
-              background: isPlaying ? '#0f222a' : '#12121a',
-              color: isPlaying ? '#bfeaf5' : '#d4d4dc',
-              border: isPlaying ? '2px solid #2aa3c4' : '2px solid #3f3f4e',
-              boxShadow:
-                '0 12px 32px rgba(0, 0, 0, 0.94), 0 3px 10px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
+              background: isPlaying ? playerTheme.accentMuted : '#12121a',
+              color: isPlaying ? '#f8fafc' : '#d4d4dc',
+              border: isPlaying ? `2px solid ${playerTheme.accent}` : '2px solid #3f3f4e',
+              boxShadow: isPlaying
+                ? `0 12px 32px rgba(0, 0, 0, 0.94), 0 0 22px ${playerTheme.accentGlow}, 0 0 0 1px rgba(0, 0, 0, 0.85)`
+                : '0 12px 32px rgba(0, 0, 0, 0.94), 0 3px 10px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
@@ -2029,14 +2065,16 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               fontWeight: 900,
             }}
           >
-            <span style={{ fontSize: 28 }}>{isPlaying ? '⏸' : '▶'}</span>
+            <span style={{ fontSize: 28, color: isPlaying ? playerTheme.accent : '#d4d4dc' }}>
+              {isPlaying ? '⏸' : '▶'}
+            </span>
             <span
               className="simp-gp-badge"
               style={{
                 padding: '2px 10px',
                 borderRadius: 99,
-                background: isPlaying ? '#16313c' : '#1f1f2b',
-                color: isPlaying ? '#7dd3fc' : '#a1a1aa',
+                background: isPlaying ? 'rgba(0, 0, 0, 0.45)' : '#1f1f2b',
+                color: isPlaying ? playerTheme.accent : '#a1a1aa',
                 fontSize: 11,
                 fontFamily: 'monospace',
               }}
@@ -2875,6 +2913,52 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                             </span>
                           </button>
                         )}
+
+                        {/* 7. Track Properties & Local Curation */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPlayerActionsOpen(false);
+                            window.dispatchEvent(
+                              new CustomEvent('simp-open-track-properties', { detail: track }),
+                            );
+                          }}
+                          style={{
+                            ...actionRowBtnStyle,
+                            minHeight: 46,
+                            padding: '8px 12px',
+                            background: '#111a26',
+                            border: `1px solid ${playerTheme.accentBorder}`,
+                          }}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            <span
+                              style={{
+                                fontSize: 12.5,
+                                fontWeight: 800,
+                                color: playerTheme.accent,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 6,
+                              }}
+                            >
+                              <ImpIcon name="sliders" size={14} color={playerTheme.accent} />
+                              Track Properties & Curation
+                            </span>
+                            <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                              Refetch/suppress lyrics, sync offset ±250ms, cover art & overlays
+                            </span>
+                          </div>
+                          <span
+                            style={{
+                              fontFamily: 'monospace',
+                              fontSize: 11,
+                              color: playerTheme.accent,
+                            }}
+                          >
+                            ▸
+                          </span>
+                        </button>
                       </>
                     ) : (
                       <div style={{ padding: 18, color: '#8e8e99', fontSize: 12 }}>
@@ -3450,8 +3534,8 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({
       width: 72,
       height: 72,
       borderRadius: 18,
-      background: active ? '#0d1b22' : '#0b0c12',
-      border: active ? '2px solid #2aa3c4' : '2px solid #2a2c3c',
+      background: active ? 'var(--imp-accent-muted, #0d1b22)' : '#0b0c12',
+      border: active ? '2px solid var(--imp-accent, #2aa3c4)' : '2px solid #2a2c3c',
       boxShadow:
         '0 10px 26px rgba(0, 0, 0, 0.94), 0 3px 8px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
       color: '#d4d4dc',
@@ -3477,8 +3561,8 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({
             padding: '0 3px',
             borderRadius: 99,
             background: '#061820',
-            border: '1.5px solid #38bdf8',
-            color: '#7dd3fc',
+            border: '1.5px solid var(--imp-accent, #38bdf8)',
+            color: 'var(--imp-accent, #7dd3fc)',
             fontSize: 10.5,
             fontFamily: 'monospace',
             fontWeight: 900,
@@ -3502,7 +3586,7 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({
         border: '1px solid #262632',
         fontSize: 12,
         fontFamily: 'monospace',
-        color: active ? '#7dd3fc' : '#8e8e99',
+        color: active ? 'var(--imp-accent, #7dd3fc)' : '#8e8e99',
         fontWeight: 700,
       }}
     >

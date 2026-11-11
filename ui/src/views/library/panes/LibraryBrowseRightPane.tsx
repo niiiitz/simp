@@ -48,6 +48,7 @@ import { UniversalSearchResultsPane } from "./UniversalSearchResultsPane";
 import { AppleMusicDiscoverPane } from "./AppleMusicDiscoverPane";
 import { SoundCloudDiscoverPane } from "./SoundCloudDiscoverPane";
 import { InternetArchiveDiscoverPane } from "./InternetArchiveDiscoverPane";
+import { ImpIcon } from "../../../components/icons/ImpIcon";
 
 export interface LibraryBrowseRightPaneProps {
   activeHubLabel: string;
@@ -348,6 +349,49 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
   soundCloudSubTab,
   totalCloudPages,
 }) => {
+  const [activeSmartFacet, setActiveSmartFacet] = React.useState<
+    'synced_lyrics' | 'has_art' | 'missing_art' | null
+  >(null);
+  const [facetTracks, setFacetTracks] = React.useState<TrackMetadata[]>([]);
+  const [facetLoading, setFacetLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!activeSmartFacet) {
+      setFacetTracks([]);
+      return;
+    }
+    let cancelled = false;
+    setFacetLoading(true);
+    fetch(`http://127.0.0.1:18888/api/library/facets?facet=${encodeURIComponent(activeSmartFacet)}`)
+      .then((r) => r.json())
+      .then((facetJson) => {
+        if (cancelled) return;
+        const matched: TrackMetadata[] = Array.isArray(facetJson?.tracks) ? facetJson.tracks : [];
+        setFacetTracks(matched);
+      })
+      .catch(() => {
+        if (!cancelled) setFacetTracks([]);
+      })
+      .finally(() => {
+        if (!cancelled) setFacetLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSmartFacet]);
+
+  const unifiedSavedPlaylists = React.useMemo(() => {
+    const seen = new Set<string>();
+    const combined: PlaylistRecord[] = [];
+    for (const pl of [...hybridPlaylistsList, ...pinnedPlaylistsList]) {
+      if (!seen.has(pl.id)) {
+        seen.add(pl.id);
+        combined.push(pl);
+      }
+    }
+    return combined;
+  }, [hybridPlaylistsList, pinnedPlaylistsList]);
+
   return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0, width: '100%' }}>
             {/* Not Signed In Setup Card (only shown when opening an Apple Cloud Hub while not authenticated) */}
@@ -693,7 +737,7 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                               : []),
                             {
                               id: 'hybrid',
-                              label: `★ SIMP Playlists (${hybridPlaylistsList.length})`,
+                              label: `★ Saved / Playlists (${unifiedSavedPlaylists.length})`,
                             },
                             ...(browserSourceFilter !== 'local' || pinnedPlaylistsList.length > 0
                               ? [
@@ -723,12 +767,15 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                               : []),
                           ] as const
                         ).map((f) => {
-                          const active = simpHubFilter === f.id;
+                          const active = simpHubFilter === f.id && !activeSmartFacet;
                           return (
                             <button
                               key={f.id}
                               data-right-filter-pill="true"
-                              onClick={() => setSimpHubFilter(f.id)}
+                              onClick={() => {
+                                setActiveSmartFacet(null);
+                                setSimpHubFilter(f.id);
+                              }}
                               style={{
                                 padding: '4px 10px',
                                 borderRadius: 6,
@@ -745,7 +792,136 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                           );
                         })}
                       </div>
+
+                      {/* Smart Facet Filter Bar (Local / My Library View) */}
+                      {(browserSourceFilter === 'all' || browserSourceFilter === 'local') && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          {(
+                            [
+                              {
+                                id: 'synced_lyrics' as const,
+                                icon: 'lyrics' as const,
+                                label: 'Synced Lyrics',
+                                accent: '#34d399',
+                              },
+                              {
+                                id: 'has_art' as const,
+                                icon: 'artwork' as const,
+                                label: 'Has Artwork',
+                                accent: '#38bdf8',
+                              },
+                              {
+                                id: 'missing_art' as const,
+                                icon: 'artwork-missing' as const,
+                                label: 'Missing Artwork',
+                                accent: '#facc15',
+                              },
+                            ] as const
+                          ).map((facet) => {
+                            const active = activeSmartFacet === facet.id;
+                            return (
+                              <button
+                                key={facet.id}
+                                data-right-filter-pill="true"
+                                onClick={() =>
+                                  setActiveSmartFacet((prev) =>
+                                    prev === facet.id ? null : facet.id,
+                                  )
+                                }
+                                style={{
+                                  padding: '4px 10px',
+                                  borderRadius: 6,
+                                  background: active ? 'rgba(52, 211, 153, 0.14)' : '#0d1017',
+                                  border: active
+                                    ? `1px solid ${facet.accent}`
+                                    : '1px solid rgba(255,255,255,0.1)',
+                                  color: active ? facet.accent : '#94a3b8',
+                                  fontSize: 11,
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 5,
+                                }}
+                              >
+                                <ImpIcon name={facet.icon} size={12} color={active ? facet.accent : '#64748b'} />
+                                {facet.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
+
+                    {activeSmartFacet && (
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                          padding: 12,
+                          borderRadius: 12,
+                          background: 'rgba(12, 18, 28, 0.85)',
+                          border: '1px solid rgba(56, 189, 248, 0.28)',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, fontWeight: 800, color: '#e2e8f0' }}>
+                            <ImpIcon
+                              name={
+                                activeSmartFacet === 'synced_lyrics'
+                                  ? 'lyrics'
+                                  : activeSmartFacet === 'has_art'
+                                  ? 'artwork'
+                                  : 'artwork-missing'
+                              }
+                              size={14}
+                              color="#34d399"
+                            />
+                            <span>
+                              Smart Facet:{' '}
+                              {activeSmartFacet === 'synced_lyrics'
+                                ? 'Synced Lyrics (Karaoke Ready)'
+                                : activeSmartFacet === 'has_art'
+                                ? 'Tracks with Cover Artwork'
+                                : 'Tracks Missing Cover Artwork'}{' '}
+                              ({facetTracks.length})
+                            </span>
+                          </div>
+                          <button
+                            data-right-filter-pill="true"
+                            onClick={() => setActiveSmartFacet(null)}
+                            style={{
+                              padding: '3px 9px',
+                              borderRadius: 6,
+                              background: 'rgba(255,255,255,0.06)',
+                              border: '1px solid rgba(255,255,255,0.14)',
+                              color: '#cbd5e1',
+                              fontSize: 11,
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Clear Facet
+                          </button>
+                        </div>
+                        {facetLoading ? (
+                          <div style={{ fontSize: 12, color: '#94a3b8', padding: '10px 4px' }}>
+                            Filtering library by facet…
+                          </div>
+                        ) : facetTracks.length === 0 ? (
+                          <div style={{ fontSize: 12, color: '#94a3b8', padding: '10px 4px' }}>
+                            No indexed tracks match this facet yet.
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {facetTracks.slice(0, 120).map((ft) =>
+                              renderSingleSongRow(ft, facetTracks, `facet_${activeSmartFacet}`),
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {creatingPlaylist && (
                       <div
@@ -830,18 +1006,28 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                         </>
                       )}
 
-                    {/* SIMP Hybrid Playlists Section */}
-                    {(simpHubFilter === 'all' || simpHubFilter === 'hybrid') &&
-                      hybridPlaylistsList.length > 0 && (
-                        <>
-                          <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
-                            ★ SIMP HYBRID PLAYLISTS ({hybridPlaylistsList.length})
-                          </div>
-                          <div style={tileGridStyle}>
-                            {hybridPlaylistsList.map(renderSimpPlaylistCard)}
-                          </div>
-                        </>
-                      )}
+                    {/* Saved / Hybrid Playlists Section (Unifies Hybrid + Pinned when on `hybrid` tab) */}
+                    {simpHubFilter === 'hybrid' && unifiedSavedPlaylists.length > 0 && (
+                      <>
+                        <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                          ★ SAVED & HYBRID PLAYLISTS ({unifiedSavedPlaylists.length})
+                        </div>
+                        <div style={tileGridStyle}>
+                          {unifiedSavedPlaylists.map(renderSimpPlaylistCard)}
+                        </div>
+                      </>
+                    )}
+
+                    {simpHubFilter === 'all' && hybridPlaylistsList.length > 0 && (
+                      <>
+                        <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#2aa3c4' }}>
+                          ★ SIMP HYBRID PLAYLISTS ({hybridPlaylistsList.length})
+                        </div>
+                        <div style={tileGridStyle}>
+                          {hybridPlaylistsList.map(renderSimpPlaylistCard)}
+                        </div>
+                      </>
+                    )}
 
                     {/* Pinned Cloud Playlists Section */}
                     {(simpHubFilter === 'all' || simpHubFilter === 'pinned') &&

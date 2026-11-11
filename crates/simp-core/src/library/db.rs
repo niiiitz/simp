@@ -15,6 +15,38 @@ pub struct LocalArtistProfile {
     pub related_artists: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrackPropertiesRecord {
+    pub uri: String,
+    pub has_art: bool,
+    pub has_lyrics: bool,
+    pub has_synced_lyrics: bool,
+    pub has_comments: bool,
+    pub has_factoids: bool,
+    pub suppress_lyrics: bool,
+    pub suppress_comments: bool,
+    pub suppress_factoids: bool,
+    pub lyrics_offset_ms: i64,
+    pub custom_art_url: Option<String>,
+    pub preferred_viz_mode: Option<String>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrackPropertiesPatch {
+    pub has_art: Option<bool>,
+    pub has_lyrics: Option<bool>,
+    pub has_synced_lyrics: Option<bool>,
+    pub has_comments: Option<bool>,
+    pub has_factoids: Option<bool>,
+    pub suppress_lyrics: Option<bool>,
+    pub suppress_comments: Option<bool>,
+    pub suppress_factoids: Option<bool>,
+    pub lyrics_offset_ms: Option<i64>,
+    pub custom_art_url: Option<String>,
+    pub preferred_viz_mode: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct LibraryDatabase {
     conn: Arc<Mutex<Connection>>,
@@ -143,6 +175,32 @@ impl LibraryDatabase {
                 source          TEXT NOT NULL,
                 added_at        INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS track_properties (
+                uri                 TEXT PRIMARY KEY,
+                has_art             INTEGER NOT NULL DEFAULT 0,
+                has_lyrics          INTEGER NOT NULL DEFAULT 0,
+                has_synced_lyrics   INTEGER NOT NULL DEFAULT 0,
+                has_comments        INTEGER NOT NULL DEFAULT 0,
+                has_factoids        INTEGER NOT NULL DEFAULT 0,
+                suppress_lyrics     INTEGER NOT NULL DEFAULT 0,
+                suppress_comments   INTEGER NOT NULL DEFAULT 0,
+                suppress_factoids   INTEGER NOT NULL DEFAULT 0,
+                lyrics_offset_ms    INTEGER NOT NULL DEFAULT 0,
+                custom_art_url      TEXT,
+                preferred_viz_mode  TEXT,
+                updated_at          INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_track_props_synced_lyrics ON track_properties(has_synced_lyrics, suppress_lyrics);
+            CREATE INDEX IF NOT EXISTS idx_track_props_art ON track_properties(has_art);
+
+            INSERT INTO track_properties (uri, has_art, updated_at)
+            SELECT uri,
+                   CASE WHEN art_url IS NOT NULL AND art_url != '' THEN 1 ELSE 0 END,
+                   strftime('%s', 'now')
+            FROM tracks
+            WHERE uri NOT IN (SELECT uri FROM track_properties);
             ",
         )?;
 
@@ -1410,6 +1468,313 @@ impl LibraryDatabase {
             albums,
             related_artists,
         })
+    }
+
+    pub fn get_track_properties(&self, uri: &str) -> Result<TrackPropertiesRecord> {
+        let trimmed = uri.trim();
+        let conn = self.conn.lock().unwrap();
+        let row_opt = conn
+            .query_row(
+                "SELECT uri, has_art, has_lyrics, has_synced_lyrics, has_comments, has_factoids,
+                        suppress_lyrics, suppress_comments, suppress_factoids, lyrics_offset_ms,
+                        custom_art_url, preferred_viz_mode, updated_at
+                 FROM track_properties
+                 WHERE uri = ?1",
+                params![trimmed],
+                |r| {
+                    Ok(TrackPropertiesRecord {
+                        uri: r.get(0)?,
+                        has_art: r.get::<_, i64>(1)? != 0,
+                        has_lyrics: r.get::<_, i64>(2)? != 0,
+                        has_synced_lyrics: r.get::<_, i64>(3)? != 0,
+                        has_comments: r.get::<_, i64>(4)? != 0,
+                        has_factoids: r.get::<_, i64>(5)? != 0,
+                        suppress_lyrics: r.get::<_, i64>(6)? != 0,
+                        suppress_comments: r.get::<_, i64>(7)? != 0,
+                        suppress_factoids: r.get::<_, i64>(8)? != 0,
+                        lyrics_offset_ms: r.get(9)?,
+                        custom_art_url: r.get(10)?,
+                        preferred_viz_mode: r.get(11)?,
+                        updated_at: r.get(12)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        if let Some(rec) = row_opt {
+            return Ok(rec);
+        }
+
+        // Fall back to checking if the track row has `art_url`
+        let track_has_art: bool = conn
+            .query_row(
+                "SELECT CASE WHEN art_url IS NOT NULL AND art_url != '' THEN 1 ELSE 0 END
+                 FROM tracks WHERE uri = ?1",
+                params![trimmed],
+                |r| r.get::<_, i64>(0).map(|v| v != 0),
+            )
+            .optional()?
+            .unwrap_or(false);
+
+        Ok(TrackPropertiesRecord {
+            uri: trimmed.to_string(),
+            has_art: track_has_art,
+            ..Default::default()
+        })
+    }
+
+    pub fn upsert_track_properties_patch(
+        &self,
+        uri: &str,
+        patch: &TrackPropertiesPatch,
+    ) -> Result<TrackPropertiesRecord> {
+        let trimmed = uri.trim();
+        let current = self.get_track_properties(trimmed)?;
+        let next = TrackPropertiesRecord {
+            uri: trimmed.to_string(),
+            has_art: patch.has_art.unwrap_or(current.has_art),
+            has_lyrics: patch.has_lyrics.unwrap_or(current.has_lyrics),
+            has_synced_lyrics: patch.has_synced_lyrics.unwrap_or(current.has_synced_lyrics),
+            has_comments: patch.has_comments.unwrap_or(current.has_comments),
+            has_factoids: patch.has_factoids.unwrap_or(current.has_factoids),
+            suppress_lyrics: patch.suppress_lyrics.unwrap_or(current.suppress_lyrics),
+            suppress_comments: patch.suppress_comments.unwrap_or(current.suppress_comments),
+            suppress_factoids: patch.suppress_factoids.unwrap_or(current.suppress_factoids),
+            lyrics_offset_ms: patch
+                .lyrics_offset_ms
+                .unwrap_or(current.lyrics_offset_ms)
+                .clamp(-15_000, 15_000),
+            custom_art_url: match &patch.custom_art_url {
+                Some(s) if s.trim().is_empty() => None,
+                Some(s) => Some(s.trim().to_string()),
+                None => current.custom_art_url,
+            },
+            preferred_viz_mode: match &patch.preferred_viz_mode {
+                Some(s) if s.trim().is_empty() => None,
+                Some(s) => Some(s.trim().to_string()),
+                None => current.preferred_viz_mode,
+            },
+            updated_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+        };
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO track_properties (
+                uri, has_art, has_lyrics, has_synced_lyrics, has_comments, has_factoids,
+                suppress_lyrics, suppress_comments, suppress_factoids, lyrics_offset_ms,
+                custom_art_url, preferred_viz_mode, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(uri) DO UPDATE SET
+                has_art = excluded.has_art,
+                has_lyrics = excluded.has_lyrics,
+                has_synced_lyrics = excluded.has_synced_lyrics,
+                has_comments = excluded.has_comments,
+                has_factoids = excluded.has_factoids,
+                suppress_lyrics = excluded.suppress_lyrics,
+                suppress_comments = excluded.suppress_comments,
+                suppress_factoids = excluded.suppress_factoids,
+                lyrics_offset_ms = excluded.lyrics_offset_ms,
+                custom_art_url = excluded.custom_art_url,
+                preferred_viz_mode = excluded.preferred_viz_mode,
+                updated_at = excluded.updated_at",
+            params![
+                next.uri,
+                if next.has_art { 1 } else { 0 },
+                if next.has_lyrics { 1 } else { 0 },
+                if next.has_synced_lyrics { 1 } else { 0 },
+                if next.has_comments { 1 } else { 0 },
+                if next.has_factoids { 1 } else { 0 },
+                if next.suppress_lyrics { 1 } else { 0 },
+                if next.suppress_comments { 1 } else { 0 },
+                if next.suppress_factoids { 1 } else { 0 },
+                next.lyrics_offset_ms,
+                next.custom_art_url,
+                next.preferred_viz_mode,
+                next.updated_at,
+            ],
+        )?;
+
+        Ok(next)
+    }
+
+    pub fn record_indexed_track_capabilities(
+        &self,
+        uri: &str,
+        has_art: bool,
+        has_lyrics: bool,
+        has_synced_lyrics: bool,
+    ) -> Result<()> {
+        let trimmed = uri.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO track_properties (
+                uri, has_art, has_lyrics, has_synced_lyrics, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, strftime('%s', 'now'))
+             ON CONFLICT(uri) DO UPDATE SET
+                has_art = CASE WHEN excluded.has_art = 1 THEN 1 ELSE track_properties.has_art END,
+                has_lyrics = CASE WHEN excluded.has_lyrics = 1 THEN 1 ELSE track_properties.has_lyrics END,
+                has_synced_lyrics = CASE WHEN excluded.has_synced_lyrics = 1 THEN 1 ELSE track_properties.has_synced_lyrics END,
+                updated_at = strftime('%s', 'now')",
+            params![
+                trimmed,
+                if has_art { 1 } else { 0 },
+                if has_lyrics { 1 } else { 0 },
+                if has_synced_lyrics { 1 } else { 0 },
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns track URIs matching a Smart Facet (`"synced_lyrics"`, `"has_art"`, `"missing_art"`, `"has_factoids"`, `"has_comments"`).
+    pub fn get_facet_matching_uris(&self, facet: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = match facet.trim() {
+            "synced_lyrics" => {
+                "SELECT uri FROM track_properties WHERE has_synced_lyrics = 1 AND suppress_lyrics = 0"
+            }
+            "has_art" => {
+                "SELECT t.uri FROM tracks t
+                 LEFT JOIN track_properties tp ON tp.uri = t.uri
+                 WHERE (t.art_url IS NOT NULL AND t.art_url != '')
+                    OR (tp.custom_art_url IS NOT NULL AND tp.custom_art_url != '')
+                    OR COALESCE(tp.has_art, 0) = 1"
+            }
+            "missing_art" => {
+                "SELECT t.uri FROM tracks t
+                 LEFT JOIN track_properties tp ON tp.uri = t.uri
+                 WHERE (t.art_url IS NULL OR t.art_url = '')
+                   AND (tp.custom_art_url IS NULL OR tp.custom_art_url = '')
+                   AND COALESCE(tp.has_art, 0) = 0"
+            }
+            "has_factoids" => {
+                "SELECT uri FROM track_properties WHERE has_factoids = 1 AND suppress_factoids = 0"
+            }
+            "has_comments" => {
+                "SELECT uri FROM track_properties WHERE has_comments = 1 AND suppress_comments = 0"
+            }
+            _ => return Ok(Vec::new()),
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn get_facet_matching_tracks(&self, facet: &str) -> Result<Vec<TrackMetadata>> {
+        let uris = self.get_facet_matching_uris(facet)?;
+        if uris.is_empty() {
+            return Ok(Vec::new());
+        }
+        let uri_set: std::collections::HashSet<String> = uris.into_iter().collect();
+        let all = self.get_tracks_filtered(None, None, None, 1000, 0)?;
+        Ok(all.into_iter().filter(|t| uri_set.contains(&t.uri)).collect())
+    }
+
+    /// Upgrades a pinned cloud playlist (`apple_pinned`, `soundcloud_pinned`, `ia_pinned`, etc.)
+    /// into a mutable Hybrid SIMP Playlist (`origin = 'simp_local'`).
+    pub fn convert_playlist_to_hybrid(&self, playlist_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE playlists
+             SET origin = 'simp_local',
+                 updated_at = strftime('%s', 'now')
+             WHERE id = ?1",
+            params![playlist_id.trim()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Purges all database records (tracks, pins, play history, favorites, and source caches)
+    /// for a single source (`"local"`, `"apple"`, `"soundcloud"`, `"ia"`).
+    pub fn purge_source_data(&self, source: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut removed = 0usize;
+        match source.trim() {
+            "local" => {
+                removed += conn.execute(
+                    "DELETE FROM tracks WHERE source != 'apple_music' AND source != 'soundcloud' AND source != 'internet_archive' AND source != 'ia_video'",
+                    [],
+                )?;
+                let _ = conn.execute("DELETE FROM play_history WHERE source = 'local'", []);
+                let _ = conn.execute("DELETE FROM local_favorites WHERE source = 'local'", []);
+                let _ = conn.execute("DELETE FROM musicbrainz_album_art_cache", []);
+            }
+            "apple" | "apple_music" => {
+                removed += conn.execute(
+                    "DELETE FROM playlists WHERE origin LIKE 'apple_%'",
+                    [],
+                )?;
+                removed += conn.execute(
+                    "DELETE FROM tracks WHERE source = 'apple_music' OR uri LIKE 'applemusic:%'",
+                    [],
+                )?;
+                let _ = conn.execute(
+                    "DELETE FROM play_history WHERE source = 'apple_music' OR uri LIKE 'applemusic:%'",
+                    [],
+                );
+                let _ = conn.execute(
+                    "DELETE FROM local_favorites WHERE source = 'apple_music' OR uri LIKE 'applemusic:%'",
+                    [],
+                );
+                let _ = conn.execute("DELETE FROM apple_catalog_map", []);
+                let _ = conn.execute("DELETE FROM apple_playlist_art_cache", []);
+            }
+            "soundcloud" => {
+                removed += conn.execute(
+                    "DELETE FROM playlists WHERE origin LIKE 'soundcloud_%'",
+                    [],
+                )?;
+                removed += conn.execute(
+                    "DELETE FROM tracks WHERE source = 'soundcloud' OR uri LIKE 'soundcloud:%'",
+                    [],
+                )?;
+                let _ = conn.execute(
+                    "DELETE FROM play_history WHERE source = 'soundcloud' OR uri LIKE 'soundcloud:%'",
+                    [],
+                );
+                let _ = conn.execute(
+                    "DELETE FROM local_favorites WHERE source = 'soundcloud' OR uri LIKE 'soundcloud:%'",
+                    [],
+                );
+            }
+            "ia" | "internet_archive" => {
+                removed += conn.execute(
+                    "DELETE FROM playlists WHERE origin LIKE 'ia_%' OR origin LIKE 'archive_%'",
+                    [],
+                )?;
+                removed += conn.execute(
+                    "DELETE FROM tracks WHERE source IN ('internet_archive', 'ia_video') OR uri LIKE 'ia:%' OR uri LIKE 'ia://%'",
+                    [],
+                )?;
+                let _ = conn.execute(
+                    "DELETE FROM play_history WHERE source IN ('internet_archive', 'ia_video') OR uri LIKE 'ia:%' OR uri LIKE 'ia://%'",
+                    [],
+                );
+                let _ = conn.execute(
+                    "DELETE FROM local_favorites WHERE source IN ('internet_archive', 'ia_video') OR uri LIKE 'ia:%' OR uri LIKE 'ia://%'",
+                    [],
+                );
+            }
+            _ => {}
+        }
+
+        // Clean up any orphaned albums and update playlist track counts
+        let _ = conn.execute(
+            "DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL)",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE playlists SET track_count = (SELECT COUNT(*) FROM playlist_items WHERE playlist_id = playlists.id)",
+            [],
+        );
+
+        Ok(removed)
     }
 }
 

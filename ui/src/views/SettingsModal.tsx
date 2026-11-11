@@ -20,6 +20,8 @@ import {
 import { SoundCloudLogo } from '../components/SoundCloudLogo';
 import { OskTargetKind } from '../hooks/useGamepadNavigation';
 import { BrowserTarget } from './PlayerView';
+import { ImpIcon } from '../components/icons/ImpIcon';
+import { FolderChooserModal } from '../components/FolderChooserModal';
 
 interface DaemonPerfSnapshot {
   cpu_percent: number;
@@ -147,6 +149,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [appleAuthOpen, setAppleAuthOpen] = useState(false);
   const [scAuthOpen, setScAuthOpen] = useState(false);
   const [addPathOpen, setAddPathOpen] = useState(false);
+  const [folderChooserOpen, setFolderChooserOpen] = useState(false);
+  const [confirmPurgeSource, setConfirmPurgeSource] = useState<string | null>(null);
+
+  const handlePurgeSource = async (source: 'local' | 'apple' | 'soundcloud' | 'ia', label: string) => {
+    if (confirmPurgeSource !== source) {
+      setConfirmPurgeSource(source);
+      showToast(`Click [Confirm Purge ${label} DB] again to wipe ${label} records`);
+      return;
+    }
+    setConfirmPurgeSource(null);
+    try {
+      const resp = await fetch('http://127.0.0.1:18888/api/library/purge-source', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source }),
+      });
+      const json = await resp.json();
+      if (json?.ok) {
+        showToast(`Purged ${label} database records (${json.removed || 0} items)`);
+        refreshLibraryData();
+      } else {
+        showToast(`Failed to purge ${label} DB`);
+      }
+    } catch {
+      showToast(`Failed to purge ${label} DB`);
+    }
+  };
 
   const [iaUsername, setIaUsername] = useState('');
   const [iaAccessKey, setIaAccessKey] = useState('');
@@ -514,6 +543,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       Save
                     </button>
                   </div>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => handlePurgeSource('ia', 'Internet Archive')}
+                      style={compactDangerBtnStyle}
+                    >
+                      <ImpIcon name="database" size={11} style={{ marginRight: 4 }} />
+                      {confirmPurgeSource === 'ia' ? 'Confirm Purge IA DB' : 'Purge IA DB'}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -591,9 +630,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         }}
                         style={compactDangerBtnStyle}
                       >
-                        Disconnect
+                        <ImpIcon name="sign-out" size={11} style={{ marginRight: 4 }} />
+                        Sign Out (Keep DB)
                       </button>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => handlePurgeSource('apple', 'Apple Music')}
+                      style={compactDangerBtnStyle}
+                    >
+                      <ImpIcon name="database" size={11} style={{ marginRight: 4 }} />
+                      {confirmPurgeSource === 'apple' ? 'Confirm Purge Apple DB' : 'Purge Apple DB'}
+                    </button>
                   </div>
 
                   {!snap?.apple_authenticated && appleAuthCfg?.pair_url && (
@@ -735,9 +783,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         }}
                         style={compactDangerBtnStyle}
                       >
-                        Sign Out
+                        <ImpIcon name="sign-out" size={11} style={{ marginRight: 4 }} />
+                        Sign Out (Keep DB)
                       </button>
                     )}
+                  <button
+                    type="button"
+                    onClick={() => handlePurgeSource('soundcloud', 'SoundCloud')}
+                    style={compactDangerBtnStyle}
+                  >
+                    <ImpIcon name="database" size={11} style={{ marginRight: 4 }} />
+                    {confirmPurgeSource === 'soundcloud' ? 'Confirm Purge SC DB' : 'Purge SC DB'}
+                  </button>
                 </div>
               )}
             </div>
@@ -787,7 +844,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <span style={{ fontSize: 12, fontWeight: 800, color: '#67e8f9' }}>
                   📁 Local Folders ({snap?.mounts?.length || 0})
                 </span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => setFolderChooserOpen(true)}
+                    style={pillToggleStyle(folderChooserOpen, '#34d399')}
+                  >
+                    <ImpIcon name="folder-plus" size={11} style={{ marginRight: 4 }} />
+                    Browse...
+                  </button>
                   <button
                     type="button"
                     onClick={() => setAddPathOpen((v) => !v)}
@@ -804,6 +869,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     style={pillToggleStyle(false, '#bfeaf5')}
                   >
                     🔄 Rescan
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handlePurgeSource('local', 'Local Media')}
+                    style={compactDangerBtnStyle}
+                  >
+                    <ImpIcon name="database" size={11} style={{ marginRight: 4 }} />
+                    {confirmPurgeSource === 'local' ? 'Confirm Purge Local DB' : 'Purge Local DB'}
                   </button>
                 </div>
               </div>
@@ -1438,6 +1511,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
       </div>
+
+      <FolderChooserModal
+        open={folderChooserOpen}
+        initialPath={customFolderPath}
+        onSelectFolder={(folderPath) => {
+          setCustomFolderPath(folderPath);
+          handleAddFolder(folderPath);
+        }}
+        onClose={() => setFolderChooserOpen(false)}
+      />
     </div>
   );
 };

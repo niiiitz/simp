@@ -302,6 +302,8 @@ fn scan_mount_directory(db: &LibraryDatabase, dir: &Path, mount_root: &str, sour
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
+        let has_local_lrc = path.with_extension("lrc").is_file();
+
         if let Some((cached_mtime, cached_size, cached_art)) = fingerprints.get(&uri) {
             if *cached_mtime == file_mtime && *cached_size == file_size {
                 let art_str = cached_art.as_deref().unwrap_or("");
@@ -313,13 +315,32 @@ fn scan_mount_directory(db: &LibraryDatabase, dir: &Path, mount_root: &str, sour
                 // - Artwork came from MusicBrainz (`mb_`) and no local folder cover image was added.
                 // This ensures deleting or adding `cover.png`/`cover.jpg` in a folder is immediately detected!
                 if is_emb || (is_mb && !has_local_dir_art) || (!is_mb && has_local_dir_art) {
+                    if has_local_lrc || !art_str.is_empty() {
+                        let _ = db.record_indexed_track_capabilities(
+                            &uri,
+                            !art_str.is_empty(),
+                            has_local_lrc,
+                            has_local_lrc,
+                        );
+                    }
                     continue;
                 }
             }
         }
 
         if let Some(track_meta) = parse_audio_file(db, &path, &uri, mount_root, source) {
+            let has_art = track_meta
+                .art_url
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
             let _ = db.upsert_track(&track_meta, Some(file_mtime), Some(file_size));
+            let _ = db.record_indexed_track_capabilities(
+                &uri,
+                has_art,
+                has_local_lrc,
+                has_local_lrc,
+            );
         }
     }
 

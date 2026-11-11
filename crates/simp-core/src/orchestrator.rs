@@ -707,9 +707,8 @@ impl AudioOrchestrator {
                     volume: None,
                 });
                 AppleMusicSink::purge_worker_auth_storage();
-                let _ = self
-                    .db
-                    .remove_streaming_source("apple_music", "apple_remote");
+                // Non-destructive sign-out: keep all Pinned collections, Hybrid playlist items,
+                // and cached metadata in `library.db` intact (use `[Purge Apple Music DB]` in Settings to wipe DB).
                 let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
                 let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
                     total_albums,
@@ -809,9 +808,8 @@ impl AudioOrchestrator {
                 };
                 self.soundcloud_sink.is_authenticated = is_ready;
                 self.state.lock().unwrap().soundcloud_authenticated = is_ready;
-                let _ = self
-                    .db
-                    .remove_streaming_source("soundcloud", "soundcloud_remote");
+                // Non-destructive sign-out: keep all Pinned collections, Hybrid playlist items,
+                // and cached metadata in `library.db` intact.
                 let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
                 let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
                     total_albums,
@@ -861,9 +859,8 @@ impl AudioOrchestrator {
                 }
                 self.internet_archive_sink.is_authenticated = false;
                 self.state.lock().unwrap().internet_archive_authenticated = false;
-                let _ = self
-                    .db
-                    .remove_streaming_source("internet_archive", "archive_remote");
+                // Non-destructive sign-out: keep all Pinned collections, Hybrid playlist items,
+                // and cached metadata in `library.db` intact.
                 let (total_albums, total_tracks) = self.db.get_library_counts().unwrap_or((0, 0));
                 let _ = self.broadcast_tx.send(PlaybackEvent::LibraryUpdated {
                     total_albums,

@@ -18,6 +18,7 @@ import {
   AppleMusicDriver,
   AppleRadioStationSummary,
   AppleRecommendationShelf,
+  disconnectAppleMusicCleanSlate,
   fetchAppleCloudPlaylists,
   fetchAppleNewFeed,
   fetchApplePlaylistTracks,
@@ -29,6 +30,7 @@ import {
   setAppleItemFavorited,
 } from './drivers/AppleMusicDriver';
 import {
+  disconnectSoundCloudCleanSlate,
   fetchSoundCloudDiscover,
   fetchSoundCloudLikesAndPlaylists,
   fetchSoundCloudPlaylistTracks,
@@ -48,6 +50,8 @@ import { BrowserTarget, isUiVideoTrack, PlayerView } from './views/PlayerView';
 import { LibraryBrowserView } from './views/LibraryBrowserView';
 import { SettingsModal, SimpUpdateStatus, SourceVisibilityPrefs } from './views/SettingsModal';
 import { QuickHelpModal } from './components/QuickHelpModal';
+import { TrackPropertiesModal, TrackPropertiesTarget } from './components/TrackPropertiesModal';
+import { ImpIcon } from './components/icons/ImpIcon';
 
 const isCompanionPairRoute =
   typeof window !== 'undefined' &&
@@ -1354,6 +1358,191 @@ const ConsoleMainApp: React.FC = () => {
     applyVolume,
   });
 
+  const [trackPropertiesTarget, setTrackPropertiesTarget] =
+    useState<TrackPropertiesTarget | null>(null);
+  const [expiredAuthAlert, setExpiredAuthAlert] = useState<{
+    provider: 'apple' | 'soundcloud';
+    label: string;
+    reason?: string;
+  } | null>(null);
+  const [pendingDroppedFolder, setPendingDroppedFolder] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onOpenTrackProps = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail;
+      if (detail && detail.uri) {
+        setTrackPropertiesTarget(detail);
+      }
+    };
+    window.addEventListener('simp-open-track-properties', onOpenTrackProps);
+    return () => window.removeEventListener('simp-open-track-properties', onOpenTrackProps);
+  }, []);
+
+  // Proactive Auth Probe (startup + every 30 minutes)
+  useEffect(() => {
+    const runProbe = async () => {
+      if (localStorage.getItem('simp_mute_auth_reminders') === '1') return;
+      try {
+        const resp = await fetch('http://127.0.0.1:18888/api/auth/probe');
+        const json = await resp.json();
+        if (!json?.ok || !json.data) return;
+        const { apple, soundcloud } = json.data;
+        if (apple?.was_connected && apple?.expired) {
+          setExpiredAuthAlert({
+            provider: 'apple',
+            label: 'Apple Music',
+            reason: apple.reason,
+          });
+        } else if (soundcloud?.was_connected && soundcloud?.expired) {
+          setExpiredAuthAlert({
+            provider: 'soundcloud',
+            label: 'SoundCloud',
+            reason: soundcloud.reason,
+          });
+        }
+      } catch {}
+    };
+    const initialTimer = window.setTimeout(runProbe, 3500);
+    const interval = window.setInterval(runProbe, 30 * 60 * 1000);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  // Global Window Drag-and-Drop Interceptor (Folder Ingestion Only — Never Navigate or Play Unindexed Files)
+  useEffect(() => {
+    const supportedExts = new Set([
+      'flac',
+      'mp3',
+      'wav',
+      'm4a',
+      'aac',
+      'ogg',
+      'opus',
+      'aiff',
+      'aif',
+      'wma',
+      'alac',
+      'mp4',
+      'mkv',
+      'webm',
+      'mov',
+      'avi',
+      'm4v',
+    ]);
+
+    const onDragOver = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'copy';
+      }
+    };
+
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const dt = e.dataTransfer;
+      if (!dt) return;
+
+      const items = Array.from(dt.items || []);
+      const files = Array.from(dt.files || []);
+      let hasDirectory = false;
+      let droppedFolderName = '';
+      for (const item of items) {
+        const entry = (item as any).webkitGetAsEntry ? (item as any).webkitGetAsEntry() : null;
+        if (entry && entry.isDirectory) {
+          hasDirectory = true;
+          if (!droppedFolderName && entry.name) {
+            droppedFolderName = String(entry.name);
+          }
+        }
+      }
+
+      let supportedFileFound = false;
+      let unsupportedExt: string | null = null;
+      let sampleMediaFile: File | null = null;
+      for (const f of files) {
+        const parts = f.name.split('.');
+        if (parts.length > 1) {
+          const ext = parts[parts.length - 1].toLowerCase();
+          if (supportedExts.has(ext)) {
+            supportedFileFound = true;
+            if (!sampleMediaFile) sampleMediaFile = f;
+          } else {
+            unsupportedExt = `.${ext}`;
+          }
+        }
+      }
+
+      if (!hasDirectory && !supportedFileFound && unsupportedExt) {
+        showToast(
+          `Unsupported filetype (${unsupportedExt}) — drop audio/video files or a media folder to index`,
+        );
+        return;
+      }
+
+      // Extract native filesystem path if exposed by Tauri/WebView or URI list
+      let extractedPath = '';
+      const uriList = dt.getData('text/uri-list') || dt.getData('text/plain') || '';
+      const firstLine = uriList
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .find((l) => l && !l.startsWith('#'));
+
+      if (files.length > 0 && (files[0] as any).path) {
+        const rawPath = String((files[0] as any).path);
+        if (hasDirectory) {
+          extractedPath = rawPath;
+        } else {
+          extractedPath = rawPath.replace(/[\\/][^\\/]+$/, '');
+        }
+      } else if (firstLine) {
+        const cleaned = decodeURIComponent(firstLine.replace(/^file:\/\//i, ''));
+        if (cleaned.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(cleaned)) {
+          extractedPath = hasDirectory ? cleaned : cleaned.replace(/[\\/][^\\/]+$/, '');
+        }
+      }
+
+      if (extractedPath) {
+        setPendingDroppedFolder(extractedPath);
+      } else if (hasDirectory || supportedFileFound) {
+        // Resolve the canonical parent folder on disk via daemon /api/fs/resolve-drop
+        fetch('/api/fs/resolve-drop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            folder_name: droppedFolderName || (hasDirectory && files[0]?.name ? files[0].name : null),
+            file_name: sampleMediaFile ? sampleMediaFile.name : null,
+            file_size: sampleMediaFile ? sampleMediaFile.size : null,
+            uri_hint: firstLine || null,
+          }),
+        })
+          .then((r) => r.json())
+          .then((res) => {
+            if (res && res.ok && res.resolved_folder) {
+              setPendingDroppedFolder(res.resolved_folder);
+            } else {
+              setSourceModalOpen(true);
+              showToast('Select the folder in Local Folders -> [Browse...] to index it into SIMP');
+            }
+          })
+          .catch(() => {
+            setSourceModalOpen(true);
+            showToast('Select the folder in Local Folders -> [Browse...] to index it into SIMP');
+          });
+      }
+    };
+
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, []);
+
   // 8. Playlist & Custom Folder Handlers
   const handleCreatePlaylist = async () => {
     const trimmed = newPlaylistName.trim();
@@ -1437,7 +1626,14 @@ const ConsoleMainApp: React.FC = () => {
         setActivePlaylistId(created.id);
         setNewPlaylistName('');
       } else if (explicitPlaylistId) {
-        const found = writablePlaylists.find((p) => p.id === explicitPlaylistId);
+        const found = playlists.find((p) => p.id === explicitPlaylistId);
+        if (found && found.origin && found.origin !== 'simp_local') {
+          await fetch('/api/library/playlists/convert-to-hybrid', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ playlist_id: found.id }),
+          }).catch(() => {});
+        }
         targetPlId = found?.id || explicitPlaylistId;
         targetPlName = found?.name || 'SIMP Playlist';
         setActivePlaylistId(targetPlId);
@@ -1487,8 +1683,9 @@ const ConsoleMainApp: React.FC = () => {
   ) => {
     if (uris.length === 0) return;
     const writablePlaylists = playlists.filter((p) => p.origin === 'simp_local');
-    // When more than 1 SIMP Hybrid Playlist exists, prompt the user to choose which playlist (or + Add to New)
-    if (writablePlaylists.length > 1) {
+    const hasPinnedPlaylists = playlists.some((p) => p.origin !== 'simp_local');
+    // When > 1 playlist exists or when Pinned collections exist alongside Hybrid playlists, prompt user to choose (or Fork & Add)
+    if (writablePlaylists.length > 1 || (hasPinnedPlaylists && playlists.length >= 1)) {
       setPendingHybridAdd({
         uris,
         label,
@@ -2697,9 +2894,10 @@ const ConsoleMainApp: React.FC = () => {
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-              {playlists
-                .filter((p) => p.origin === 'simp_local')
+              {[...playlists]
+                .sort((a, b) => (a.origin === 'simp_local' ? -1 : 1) - (b.origin === 'simp_local' ? -1 : 1))
                 .map((p, idx) => {
+                  const isPinned = Boolean(p.origin && p.origin !== 'simp_local');
                   const isPreferred =
                     p.id === activePlaylistId || (!activePlaylistId && idx === 0);
                   return (
@@ -2734,11 +2932,14 @@ const ConsoleMainApp: React.FC = () => {
                         textAlign: 'left',
                       }}
                     >
-                      <span style={{ fontSize: 13, fontWeight: 800, color: '#bfeaf5' }}>
-                        ★ {p.name}
+                      <span style={{ fontSize: 13, fontWeight: 800, color: isPinned ? '#fde68a' : '#bfeaf5' }}>
+                        {isPinned ? '📌 ' : '★ '}
+                        {p.name}
                       </span>
-                      <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#67e8f9' }}>
-                        {p.track_count} {p.track_count === 1 ? 'track' : 'tracks'}
+                      <span style={{ fontSize: 11, fontFamily: 'monospace', color: isPinned ? '#fbbf24' : '#67e8f9' }}>
+                        {isPinned
+                          ? `Fork to Hybrid • ${p.track_count}`
+                          : `${p.track_count} ${p.track_count === 1 ? 'track' : 'tracks'}`}
                       </span>
                     </button>
                   );
@@ -3066,6 +3267,228 @@ const ConsoleMainApp: React.FC = () => {
               })}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Track Properties & Local Curation Modal */}
+      {trackPropertiesTarget && (
+        <TrackPropertiesModal
+          track={trackPropertiesTarget}
+          onClose={() => setTrackPropertiesTarget(null)}
+          onToast={showToast}
+        />
+      )}
+
+      {/* Proactive Auth Probe Banner */}
+      {expiredAuthAlert && (
+        <div
+          data-modal-root="true"
+          style={{
+            position: 'fixed',
+            top: 14,
+            right: 16,
+            zIndex: 9920,
+            maxWidth: 440,
+            padding: '12px 14px',
+            borderRadius: 12,
+            background: 'rgba(15, 22, 34, 0.97)',
+            border: '1px solid rgba(250, 204, 21, 0.5)',
+            boxShadow: '0 16px 40px rgba(0, 0, 0, 0.72)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+            color: '#f8fafc',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 800, color: '#facc15' }}>
+              <ImpIcon name="key" size={15} color="#facc15" />
+              <span>{expiredAuthAlert.label} Session Needs Re-Sign-In</span>
+            </div>
+            <button
+              onClick={() => setExpiredAuthAlert(null)}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: '#94a3b8',
+                cursor: 'pointer',
+                padding: 2,
+              }}
+            >
+              <ImpIcon name="close" size={14} />
+            </button>
+          </div>
+          <div style={{ fontSize: 11.5, color: '#cbd5e1', lineHeight: 1.4 }}>
+            Your {expiredAuthAlert.label} token has expired. Your pinned collections and hybrid playlists are safe in your local database.
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            <button
+              data-focusable="true"
+              onClick={() => {
+                setExpiredAuthAlert(null);
+                setSourceModalOpen(true);
+              }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 7,
+                background: 'rgba(56, 189, 248, 0.16)',
+                border: '1px solid rgba(56, 189, 248, 0.5)',
+                color: '#bae6fd',
+                fontSize: 11,
+                fontWeight: 800,
+                cursor: 'pointer',
+              }}
+            >
+              Open Connected Accounts
+            </button>
+            <button
+              data-focusable="true"
+              onClick={async () => {
+                const prov = expiredAuthAlert.provider;
+                setExpiredAuthAlert(null);
+                if (prov === 'apple') {
+                  await disconnectAppleMusicCleanSlate(showToast);
+                } else {
+                  await disconnectSoundCloudCleanSlate(showToast);
+                }
+              }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 7,
+                background: 'rgba(255, 255, 255, 0.06)',
+                border: '1px solid rgba(255, 255, 255, 0.16)',
+                color: '#e2e8f0',
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Sign Out (Keep DB)
+            </button>
+            <button
+              data-focusable="true"
+              onClick={() => {
+                localStorage.setItem('simp_mute_auth_reminders', '1');
+                setExpiredAuthAlert(null);
+                showToast('Muted proactive auth reminder notifications');
+              }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 7,
+                background: 'transparent',
+                border: '1px solid rgba(255, 255, 255, 0.12)',
+                color: '#94a3b8',
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+              }}
+            >
+              <ImpIcon name="bell-off" size={12} />
+              Mute
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Dropped Folder Ingestion Confirmation Modal */}
+      {pendingDroppedFolder && (
+        <div
+          data-modal-root="true"
+          onClick={() => setPendingDroppedFolder(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9970,
+            background: 'rgba(4, 7, 13, 0.82)',
+            backdropFilter: 'blur(12px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 20,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(480px, 92vw)',
+              borderRadius: 16,
+              background: 'linear-gradient(180deg, rgba(15, 23, 36, 0.99), rgba(9, 13, 22, 0.99))',
+              border: '1px solid rgba(52, 211, 153, 0.5)',
+              boxShadow: '0 22px 55px rgba(0, 0, 0, 0.75)',
+              padding: 20,
+              color: '#f1f5f9',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 14,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <ImpIcon name="folder-plus" size={20} color="#34d399" />
+              <div style={{ fontSize: 15, fontWeight: 800 }}>Add Folder to Local Folders?</div>
+            </div>
+            <div style={{ fontSize: 12.5, color: '#cbd5e1', lineHeight: 1.45 }}>
+              Index this folder into your local SIMP library so its albums, tracks, artwork, and `.lrc` lyrics are available across all views:
+            </div>
+            <div
+              style={{
+                padding: '8px 12px',
+                borderRadius: 8,
+                background: 'rgba(0, 0, 0, 0.38)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                fontFamily: 'monospace',
+                fontSize: 12,
+                color: '#6ee7b7',
+                wordBreak: 'break-all',
+              }}
+            >
+              {pendingDroppedFolder}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                data-focusable="true"
+                onClick={() => setPendingDroppedFolder(null)}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: 8,
+                  background: 'rgba(255, 255, 255, 0.06)',
+                  border: '1px solid rgba(255, 255, 255, 0.14)',
+                  color: '#cbd5e1',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                data-focusable="true"
+                onClick={() => {
+                  const pathToAdd = pendingDroppedFolder;
+                  setPendingDroppedFolder(null);
+                  handleAddFolder(pathToAdd);
+                }}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: 8,
+                  background: 'linear-gradient(135deg, rgba(5, 150, 105, 0.45), rgba(52, 211, 153, 0.25))',
+                  border: '1px solid rgba(52, 211, 153, 0.6)',
+                  color: '#ecfdf5',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <ImpIcon name="folder-plus" size={14} color="#34d399" />
+                Add to Local Folders
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

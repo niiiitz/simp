@@ -1,8 +1,9 @@
 use anyhow::Result;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 /// Registered public LRCLIB App ID for SIMP (`https://lrclib.net/docs`).
@@ -30,9 +31,218 @@ pub struct TrackLyricsResponse {
 }
 
 static LYRICS_MEM_CACHE: OnceLock<Mutex<HashMap<String, TrackLyricsResponse>>> = OnceLock::new();
+static LYRICS_DB_CONN: OnceLock<Mutex<Option<Connection>>> = OnceLock::new();
 
 fn lyrics_cache() -> &'static Mutex<HashMap<String, TrackLyricsResponse>> {
     LYRICS_MEM_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn lyrics_db_path() -> PathBuf {
+    crate::simp_data_dir().join("lyrics.db")
+}
+
+fn open_lyrics_db_conn() -> Option<Connection> {
+    let path = lyrics_db_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let conn = Connection::open(&path).ok()?;
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(3000));
+    let _ = conn.execute_batch(
+        "
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        CREATE TABLE IF NOT EXISTS lyrics_entries (
+            track_key     TEXT PRIMARY KEY,
+            track_uri     TEXT NOT NULL DEFAULT '',
+            title         TEXT NOT NULL DEFAULT '',
+            artist        TEXT NOT NULL DEFAULT '',
+            album         TEXT NOT NULL DEFAULT '',
+            duration_ms   INTEGER NOT NULL DEFAULT 0,
+            synced_lrc    TEXT,
+            plain_lyrics  TEXT,
+            instrumental  INTEGER NOT NULL DEFAULT 0,
+            provider      TEXT NOT NULL DEFAULT 'none',
+            lrclib_id     INTEGER,
+            fetched_at    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_lyrics_entries_uri ON lyrics_entries(track_uri);
+        ",
+    );
+    Some(conn)
+}
+
+fn with_lyrics_db<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&Connection) -> Option<R>,
+{
+    let mutex = LYRICS_DB_CONN.get_or_init(|| Mutex::new(open_lyrics_db_conn()));
+    let mut guard = mutex.lock().ok()?;
+    if guard.is_none() {
+        *guard = open_lyrics_db_conn();
+    }
+    let conn = guard.as_ref()?;
+    f(conn)
+}
+
+fn load_lyrics_from_db(track_key: &str, track_uri: Option<&str>) -> Option<TrackLyricsResponse> {
+    with_lyrics_db(|conn| {
+        let row_opt = conn
+            .query_row(
+                "SELECT title, artist, album, synced_lrc, plain_lyrics, instrumental, provider, lrclib_id
+                 FROM lyrics_entries
+                 WHERE track_key = ?1
+                    OR (?2 != '' AND track_uri = ?2)
+                 ORDER BY CASE WHEN track_key = ?1 THEN 0 ELSE 1 END
+                 LIMIT 1",
+                params![track_key, track_uri.unwrap_or("")],
+                |row| {
+                    let title: String = row.get(0)?;
+                    let artist: String = row.get(1)?;
+                    let album: String = row.get(2)?;
+                    let synced_json: Option<String> = row.get(3)?;
+                    let plain_lyrics: Option<String> = row.get(4)?;
+                    let instrumental: i64 = row.get(5)?;
+                    let provider: String = row.get(6)?;
+                    let lrclib_id: Option<i64> = row.get(7)?;
+                    let synced_lines: Vec<SyncedLyricLine> = synced_json
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default();
+                    Ok(TrackLyricsResponse {
+                        found: true,
+                        instrumental: instrumental != 0,
+                        source: provider,
+                        track_name: if title.is_empty() { None } else { Some(title) },
+                        artist_name: if artist.is_empty() { None } else { Some(artist) },
+                        album_name: if album.is_empty() { None } else { Some(album) },
+                        synced_lines,
+                        plain_lyrics,
+                        lrclib_id: lrclib_id.and_then(|v| u64::try_from(v).ok()),
+                    })
+                },
+            )
+            .optional()
+            .ok()?;
+        row_opt
+    })
+}
+
+fn save_lyrics_to_db(
+    track_key: &str,
+    track_uri: Option<&str>,
+    clean_title: &str,
+    clean_artist: &str,
+    clean_album: Option<&str>,
+    duration_ms: u32,
+    resp: &TrackLyricsResponse,
+) {
+    if !resp.found {
+        return;
+    }
+    let synced_json = if resp.synced_lines.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&resp.synced_lines).ok()
+    };
+    let now_sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let title = resp.track_name.as_deref().unwrap_or(clean_title);
+    let artist = resp.artist_name.as_deref().unwrap_or(clean_artist);
+    let album = resp
+        .album_name
+        .as_deref()
+        .or(clean_album)
+        .unwrap_or("");
+    let _ = with_lyrics_db(|conn| {
+        let _ = conn.execute(
+            "INSERT INTO lyrics_entries (
+                track_key, track_uri, title, artist, album, duration_ms,
+                synced_lrc, plain_lyrics, instrumental, provider, lrclib_id, fetched_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(track_key) DO UPDATE SET
+                track_uri = excluded.track_uri,
+                title = excluded.title,
+                artist = excluded.artist,
+                album = excluded.album,
+                duration_ms = excluded.duration_ms,
+                synced_lrc = excluded.synced_lrc,
+                plain_lyrics = excluded.plain_lyrics,
+                instrumental = excluded.instrumental,
+                provider = excluded.provider,
+                lrclib_id = excluded.lrclib_id,
+                fetched_at = excluded.fetched_at",
+            params![
+                track_key,
+                track_uri.unwrap_or(""),
+                title,
+                artist,
+                album,
+                duration_ms as i64,
+                synced_json,
+                resp.plain_lyrics,
+                if resp.instrumental { 1 } else { 0 },
+                resp.source,
+                resp.lrclib_id.map(|v| v as i64),
+                now_sec,
+            ],
+        );
+        Some(())
+    });
+}
+
+/// Clears cached lyrics for a track from both `LYRICS_MEM_CACHE` and SQLite `lyrics.db`.
+pub fn clear_cached_lyrics_for_track(
+    uri: Option<&str>,
+    raw_title: &str,
+    raw_artist: &str,
+    duration_ms: u32,
+) -> usize {
+    let (clean_title, clean_artist) = clean_metadata_for_lyrics(raw_title, raw_artist);
+    let dur_sec = (duration_ms / 1000).max(0);
+    let cache_key = format!(
+        "{}|{}|{}|{}",
+        uri.unwrap_or(""),
+        clean_artist.to_lowercase(),
+        clean_title.to_lowercase(),
+        dur_sec
+    );
+    let uri_str = uri.unwrap_or("").trim();
+
+    if let Ok(mut guard) = lyrics_cache().lock() {
+        guard.remove(&cache_key);
+        if !uri_str.is_empty() {
+            let prefix = format!("{}|", uri_str);
+            guard.retain(|k, _| !k.starts_with(&prefix));
+        }
+    }
+
+    with_lyrics_db(|conn| {
+        let deleted = conn
+            .execute(
+                "DELETE FROM lyrics_entries
+                 WHERE track_key = ?1
+                    OR (?2 != '' AND track_uri = ?2)",
+                params![cache_key, uri_str],
+            )
+            .unwrap_or(0);
+        Some(deleted)
+    })
+    .unwrap_or(0)
+}
+
+/// Clears cached lyrics in `lyrics.db` + memory and immediately re-runs the auto-match lookup.
+pub fn refetch_track_lyrics(
+    uri: Option<&str>,
+    raw_title: &str,
+    raw_artist: &str,
+    raw_album: Option<&str>,
+    duration_ms: u32,
+) -> TrackLyricsResponse {
+    clear_cached_lyrics_for_track(uri, raw_title, raw_artist, duration_ms);
+    fetch_track_lyrics(uri, raw_title, raw_artist, raw_album, duration_ms)
 }
 
 fn urlencode(s: &str) -> String {
@@ -510,16 +720,6 @@ pub fn fetch_track_lyrics(
         }
     }
 
-    // 1. Check for local `.lrc` sidecar file next to audio file
-    if let Some(u) = uri {
-        if let Some(local_hit) = try_load_local_sidecar_lrc(u) {
-            if let Ok(mut guard) = lyrics_cache().lock() {
-                guard.insert(cache_key, local_hit.clone());
-            }
-            return local_hit;
-        }
-    }
-
     let clean_album = raw_album
         .map(|a| a.trim().trim_start_matches("☁️ ").trim())
         .filter(|a| {
@@ -528,6 +728,25 @@ pub fn fetch_track_lyrics(
                 && !a.eq_ignore_ascii_case("soundcloud")
                 && !a.eq_ignore_ascii_case("apple music")
         });
+
+    // 1. Check for local `.lrc` sidecar file next to audio file
+    if let Some(u) = uri {
+        if let Some(local_hit) = try_load_local_sidecar_lrc(u) {
+            save_lyrics_to_db(&cache_key, uri, &clean_title, &clean_artist, clean_album, duration_ms, &local_hit);
+            if let Ok(mut guard) = lyrics_cache().lock() {
+                guard.insert(cache_key, local_hit.clone());
+            }
+            return local_hit;
+        }
+    }
+
+    // 1b. Check persistent SQLite `lyrics.db`
+    if let Some(db_hit) = load_lyrics_from_db(&cache_key, uri) {
+        if let Ok(mut guard) = lyrics_cache().lock() {
+            guard.insert(cache_key, db_hit.clone());
+        }
+        return db_hit;
+    }
 
     // 2. Try exact match via `/api/get` when artist + title + duration are known
     if !clean_artist.is_empty() && dur_sec >= 15 && dur_sec <= 3600 {
@@ -543,6 +762,7 @@ pub fn fetch_track_lyrics(
         if let Ok(json) = lrclib_get_json(&get_url) {
             if let Some(parsed) = parse_lrclib_record(&json, "lrclib_v1") {
                 if !parsed.synced_lines.is_empty() {
+                    save_lyrics_to_db(&cache_key, uri, &clean_title, &clean_artist, clean_album, duration_ms, &parsed);
                     if let Ok(mut guard) = lyrics_cache().lock() {
                         guard.insert(cache_key, parsed.clone());
                     }
@@ -588,6 +808,7 @@ pub fn fetch_track_lyrics(
 
         if let Some((_, winner)) = best_cand {
             if let Some(inline_parsed) = parse_lrclib_record(&winner, "lrclib_v2") {
+                save_lyrics_to_db(&cache_key, uri, &clean_title, &clean_artist, clean_album, duration_ms, &inline_parsed);
                 if let Ok(mut guard) = lyrics_cache().lock() {
                     guard.insert(cache_key, inline_parsed.clone());
                 }
@@ -597,6 +818,7 @@ pub fn fetch_track_lyrics(
                 let get_by_id_url = format!("https://lrclib.net/api/get/{id}");
                 if let Ok(hydrated) = lrclib_get_json(&get_by_id_url) {
                     if let Some(parsed) = parse_lrclib_record(&hydrated, "lrclib_v2") {
+                        save_lyrics_to_db(&cache_key, uri, &clean_title, &clean_artist, clean_album, duration_ms, &parsed);
                         if let Ok(mut guard) = lyrics_cache().lock() {
                             guard.insert(cache_key, parsed.clone());
                         }
@@ -627,6 +849,7 @@ pub fn fetch_track_lyrics(
             }
             if let Some((_, winner)) = best_cand {
                 if let Some(parsed) = parse_lrclib_record(winner, "lrclib_v1") {
+                    save_lyrics_to_db(&cache_key, uri, &clean_title, &clean_artist, clean_album, duration_ms, &parsed);
                     if let Ok(mut guard) = lyrics_cache().lock() {
                         if guard.len() > 256 {
                             guard.clear();
