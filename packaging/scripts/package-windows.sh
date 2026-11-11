@@ -127,9 +127,9 @@ rm -rf "${OUT_DIR}" "${ZIP_ARCHIVE}"
 mkdir -p "${OUT_DIR}/ui" "${OUT_DIR}/data/lib" "${OUT_DIR}/data/bin"
 
 cp "${BUILT_EXE}" "${OUT_DIR}/simp.exe"
-if [[ -f "${REPO_ROOT}/packaging/windows/simp.ico" ]]; then
-  cp "${REPO_ROOT}/packaging/windows/simp.ico" "${OUT_DIR}/simp.ico"
-fi
+# Note: multi-resolution `simp.ico` is already compiled into `simp.exe` PE resources via `build.rs`.
+# Do not copy a loose `simp.ico` next to `simp.exe` in the root portable folder so users never
+# confuse the icon file with the `simp.exe` application launcher when file extensions are hidden.
 cp -r "${REPO_ROOT}/ui/dist/"* "${OUT_DIR}/ui/"
 
 # Optional Authenticode Code Signing (via osslsigncode on Linux/macOS or signtool.exe)

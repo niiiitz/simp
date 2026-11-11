@@ -31,6 +31,19 @@ pub fn ensure_daemon_running() {
     {
         if let Ok(exe) = std::env::current_exe() {
             let _ = std::fs::remove_file(exe.with_extension("exe.old"));
+            if let Some(dir) = exe.parent() {
+                let _ = std::fs::remove_file(dir.join("simp.exe.old"));
+                let _ = std::fs::remove_file(dir.join("simp.ico"));
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.starts_with("simp.exe.") && name_str.ends_with(".old") {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
         }
     }
     let addr = SocketAddr::from(([127, 0, 0, 1], 18888));

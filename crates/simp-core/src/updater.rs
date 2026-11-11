@@ -311,18 +311,44 @@ pub fn spawn_delayed_daemon_restart() {
                 .as_ref()
                 .map(|d| d.join("simp.exe.old"))
                 .unwrap_or_else(|| target_exe.with_extension("exe.old"));
+            let pid_old_exe = exe_dir
+                .as_ref()
+                .map(|d| d.join(format!("simp.exe.{pid}.old")))
+                .unwrap_or_else(|| target_exe.with_extension(format!("exe.{pid}.old")));
+            let loose_ico = exe_dir
+                .as_ref()
+                .map(|d| d.join("simp.ico"))
+                .unwrap_or_else(|| target_exe.with_file_name("simp.ico"));
+
             let target_str = target_exe.to_string_lossy().to_string();
             let old_str = old_exe.to_string_lossy().to_string();
-            let cmd_line = format!(
-                "ping 127.0.0.1 -n 2 >nul 2>&1 & taskkill /F /PID {pid} >nul 2>&1 & ping 127.0.0.1 -n 2 >nul 2>&1 & del /F /Q \"{old_str}\" >nul 2>&1 & start \"\" \"{target_str}\" --daemon"
+            let pid_old_str = pid_old_exe.to_string_lossy().to_string();
+            let ico_str = loose_ico.to_string_lossy().to_string();
+
+            // Write a clean batch file to %TEMP% rather than passing embedded quotes to `cmd /C`
+            // (Rust's Windows Command escapes inner quotes as `\"`, which breaks `cmd.exe` path parsing).
+            let bat_path = std::env::temp_dir().join(format!("simp-restart-{pid}.bat"));
+            let bat_contents = format!(
+                "@echo off\r\n\
+                 ping 127.0.0.1 -n 2 >nul 2>&1\r\n\
+                 taskkill /F /PID {pid} >nul 2>&1\r\n\
+                 ping 127.0.0.1 -n 2 >nul 2>&1\r\n\
+                 if exist \"{old_str}\" del /F /Q \"{old_str}\" >nul 2>&1\r\n\
+                 if exist \"{pid_old_str}\" del /F /Q \"{pid_old_str}\" >nul 2>&1\r\n\
+                 if exist \"{ico_str}\" del /F /Q \"{ico_str}\" >nul 2>&1\r\n\
+                 start \"\" \"{target_str}\" --daemon\r\n\
+                 del /F /Q \"%~f0\" >nul 2>&1\r\n"
             );
-            let mut cmd = Command::new("cmd");
-            cmd.args(["/C", &cmd_line])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            crate::configure_background_command(&mut cmd);
-            let _ = cmd.spawn();
+            if std::fs::write(&bat_path, bat_contents).is_ok() {
+                let mut cmd = Command::new("cmd");
+                cmd.arg("/C")
+                    .arg(&bat_path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                crate::configure_background_command(&mut cmd);
+                let _ = cmd.spawn();
+            }
         }
         return;
     }
@@ -721,6 +747,8 @@ pub fn apply_self_update(
     }
 
     // 1. Atomically replace `~/.local/share/simp/bin/simp` using a `.new` temp file + rename
+    // Runs 100% in userland (`~/.local/share/simp`); only tries non-interactive `sudo -n` if an older
+    // root-run script left root-owned files behind, never prompting interactively with `sudo` or `pkexec`.
     let dest_bin = bin_dest_dir.join("simp");
     let dest_bin_new = bin_dest_dir.join("simp.new");
     let _ = std::fs::remove_file(&dest_bin_new);
@@ -740,17 +768,6 @@ pub fn apply_self_update(
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
-            if std::fs::copy(&src_bin, &dest_bin_new).is_err()
-                && (std::env::var_os("DISPLAY").is_some()
-                    || std::env::var_os("WAYLAND_DISPLAY").is_some())
-            {
-                let _ = Command::new("pkexec")
-                    .args(["sh", "-c", &fix_userland_cmd])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
         }
     }
     std::fs::copy(&src_bin, &dest_bin_new).with_context(|| {
@@ -852,7 +869,10 @@ pub fn apply_self_update(
                 let fix_perms_cmd =
                     "mkdir -p \"$1\" && chown -R \"$2:$3\" \"$4\" \"$1\" && chmod 0755 \"$4\" \"$1\"";
 
-                // 3a. Try non-interactive sudo first
+                // 3a. Only try non-interactive `sudo -n` (never prompt with interactive `sudo` or `pkexec`!).
+                // If `~/homebrew/plugins` is owned by root and passwordless sudo is not enabled,
+                // `~/.local/share/simp/decky-staged/` is already updated in userland and Decky Loader's
+                // root `main.py` (`_sync_staged_decky_plugin`) automatically syncs it without sudo.
                 let _ = Command::new("sudo")
                     .args([
                         "-n",
@@ -872,48 +892,6 @@ pub fn apply_self_update(
 
                 if copy_dir_contents(&src_decky, &decky_target).is_ok() {
                     decky_updated = true;
-                } else if unsafe { libc::isatty(0) == 1 } {
-                    // 3b. Running interactively from `simp update` CLI in a terminal — prompt with sudo
-                    println!(
-                        "🔒 ~/homebrew/plugins is owned by root (Decky Loader). Restoring ~/homebrew/plugins/simp-decky..."
-                    );
-                    let _ = Command::new("sudo")
-                        .args([
-                            "sh",
-                            "-c",
-                            fix_perms_cmd,
-                            "--",
-                            &target_str,
-                            &uid_str,
-                            &gid_str,
-                            &plugins_str,
-                        ])
-                        .status();
-                    if copy_dir_contents(&src_decky, &decky_target).is_ok() {
-                        decky_updated = true;
-                    }
-                } else if std::env::var_os("DISPLAY").is_some()
-                    || std::env::var_os("WAYLAND_DISPLAY").is_some()
-                {
-                    // 3c. Running from GUI on KDE/Desktop Linux where Decky directory is owned by root — try pkexec
-                    let _ = Command::new("pkexec")
-                        .args([
-                            "sh",
-                            "-c",
-                            fix_perms_cmd,
-                            "--",
-                            &target_str,
-                            &uid_str,
-                            &gid_str,
-                            &plugins_str,
-                        ])
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                    if copy_dir_contents(&src_decky, &decky_target).is_ok() {
-                        decky_updated = true;
-                    }
                 }
             }
         }
@@ -1219,8 +1197,15 @@ fn apply_windows_self_update(
     // Windows allows renaming a currently running `.exe` (`simp.exe` -> `simp.exe.old`) in the same folder
     // without Administrator privileges, while keeping `data\` (`library.db`, `settings.vdf`, `art\`) untouched!
     let dest_exe = install_dir.join("simp.exe");
-    let old_exe = install_dir.join("simp.exe.old");
-    let _ = std::fs::remove_file(&old_exe);
+    let primary_old_exe = install_dir.join("simp.exe.old");
+    let _ = std::fs::remove_file(&primary_old_exe);
+    let _ = std::fs::remove_file(install_dir.join("simp.ico"));
+    let old_exe = if primary_old_exe.exists() {
+        // Fallback if a previous `.old` file is still locked by another process
+        install_dir.join(format!("simp.exe.{}.old", std::process::id()))
+    } else {
+        primary_old_exe
+    };
     if dest_exe.is_file() {
         std::fs::rename(&dest_exe, &old_exe).with_context(|| {
             format!(

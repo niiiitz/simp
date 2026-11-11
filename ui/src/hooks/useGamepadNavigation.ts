@@ -234,6 +234,7 @@ export function useGamepadNavigation({
     (dir: 'up' | 'down' | 'left' | 'right') => {
       setIsDimmed(false);
       setIsSleeping(false);
+      window.dispatchEvent(new CustomEvent('simp-wake-idle'));
       const hasDomModal = Boolean(document.querySelector('[data-modal-root="true"]'));
       const isModalOpen = sourceModalOpen || powerModalOpen || hasDomModal;
       const selector = oskTarget
@@ -732,6 +733,7 @@ export function useGamepadNavigation({
         document.documentElement.dataset.simpInput = 'gamepad';
       }
       setIsDimmed(false);
+      window.dispatchEvent(new CustomEvent('simp-wake-idle'));
       if (isSleeping) {
         setIsSleeping(false);
         return;
@@ -1542,6 +1544,7 @@ export function useGamepadNavigation({
         if (isSleeping && anyButtonPressed) {
           setIsSleeping(false);
           setIsDimmed(false);
+          window.dispatchEvent(new CustomEvent('simp-wake-idle'));
           lastWebGamepadTsRef.current = performance.now();
           prevButtonsByPad.set(
             pad.index,

@@ -1285,7 +1285,9 @@ const ConsoleMainApp: React.FC = () => {
       }
     };
 
-    resetIdleTimer();
+    if (!isDimmed) {
+      resetIdleTimer();
+    }
     window.addEventListener('pointerdown', resetIdleTimer, { passive: true });
     window.addEventListener('pointermove', resetIdleTimer, { passive: true });
     window.addEventListener('wheel', resetIdleTimer, { passive: true });
@@ -1322,7 +1324,7 @@ const ConsoleMainApp: React.FC = () => {
       window.removeEventListener('touchstart', resetIdleTimer);
       window.removeEventListener('simp-wake-idle', resetIdleTimer);
     };
-  }, [view, isOverlayOrPopoverOpen]);
+  }, [view, isOverlayOrPopoverOpen, isDimmed]);
 
   // 6 & 7. Gamepad / Spatial Focus Navigation Hook
   const { applyFocusMarker } = useGamepadNavigation({

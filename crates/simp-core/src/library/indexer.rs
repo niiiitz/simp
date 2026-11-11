@@ -78,6 +78,7 @@ pub fn prune_ignored_and_stale_mounts(db: &LibraryDatabase, settings: &SimpSetti
 /// Crawls configured local directories, Steam OST directories (`libraryfolders.vdf`),
 /// and removable USB/MicroSD mounts (`/run/media`), incrementally indexing tracks into SQLite.
 pub fn scan_all_storage(db: &LibraryDatabase, settings: &SimpSettings) -> (usize, usize) {
+    crate::prefer_efficiency_core_for_current_thread();
     let ignored_roots: HashSet<String> = settings
         .library
         .ignored_paths
