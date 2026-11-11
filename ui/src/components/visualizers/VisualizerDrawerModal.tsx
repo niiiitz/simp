@@ -80,7 +80,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                 Visualizer Scene Queue & Rotation
               </div>
               <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
-                Pick a single scene or customize which scenes participate in Cycle / Shuffle
+                Toggle scenes on the left for Cycle/Shuffle, or click a scene to lock onto it
               </div>
             </div>
           </div>
@@ -204,16 +204,34 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
-            padding: '0 4px',
+            gap: 8,
+            padding: '0 2px',
             fontSize: 11,
             color: '#94a3b8',
           }}
         >
           <span>
-            Click a scene to lock onto it immediately, or toggle <strong>In Rotation</strong> for
-            Cycle/Shuffle:
+            <strong>Left toggle</strong> = include in rotation • <strong>Scene row</strong> = lock now
           </span>
-          <div style={{ display: 'flex', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+            <button
+              type="button"
+              onClick={() =>
+                onSetAllScenesInRotation(['glyph', 'avs', 'demoscene', 'vertigo', 'trapper'])
+              }
+              style={{
+                padding: '4px 9px',
+                borderRadius: 7,
+                background: '#161926',
+                border: '1px solid #2a2f45',
+                color: '#67e8f9',
+                fontSize: 10.5,
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Core (5)
+            </button>
             <button
               type="button"
               onClick={() => onSetAllScenesInRotation([...VISUALIZER_ENGINES])}
@@ -228,33 +246,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                 cursor: 'pointer',
               }}
             >
-              Enable All (12)
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                onSetAllScenesInRotation([
-                  'rhythm',
-                  'midnight',
-                  'cosmos',
-                  'reef',
-                  'arcade',
-                  'vaporwave',
-                  'sanctum',
-                ])
-              }
-              style={{
-                padding: '4px 9px',
-                borderRadius: 7,
-                background: '#161926',
-                border: '1px solid #2a2f45',
-                color: '#67e8f9',
-                fontSize: 10.5,
-                fontWeight: 700,
-                cursor: 'pointer',
-              }}
-            >
-              WASM Pack Only (7)
+              All (12)
             </button>
           </div>
         </div>
@@ -263,6 +255,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
         <div
           style={{
             overflowY: 'auto',
+            overflowX: 'hidden',
             display: 'flex',
             flexDirection: 'column',
             gap: 7,
@@ -278,19 +271,53 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
               <div
                 key={scene.id}
                 style={{
-                  display: 'flex',
+                  display: 'grid',
+                  gridTemplateColumns: '76px minmax(0, 1fr)',
                   alignItems: 'stretch',
                   gap: 8,
                 }}
               >
+                {/* Left-Aligned Rotation Enable Toggle */}
+                <button
+                  type="button"
+                  onClick={() => onToggleSceneInRotation(scene.id)}
+                  title="Include or exclude this scene when Cycle or Shuffle is active"
+                  style={{
+                    width: '100%',
+                    minHeight: 50,
+                    borderRadius: 11,
+                    background: isInRotation ? 'rgba(16, 185, 129, 0.14)' : '#12141e',
+                    border: isInRotation
+                      ? '1px solid rgba(52, 211, 153, 0.45)'
+                      : '1px solid #222638',
+                    color: isInRotation ? '#34d399' : '#64748b',
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 5,
+                  }}
+                >
+                  <ImpIcon
+                    name={isInRotation ? 'check' : 'close'}
+                    size={12}
+                    color={isInRotation ? '#34d399' : '#64748b'}
+                  />
+                  <span>{isInRotation ? 'On' : 'Off'}</span>
+                </button>
+
+                {/* Right Scene Lock Card */}
                 <button
                   type="button"
                   data-default-focus={isLockedSingle ? 'true' : undefined}
                   onClick={() => onSelectMode(scene.id)}
                   style={{
-                    flex: 1,
-                    minHeight: 54,
-                    padding: '8px 12px',
+                    minWidth: 0,
+                    minHeight: 50,
+                    padding: '7px 12px',
                     borderRadius: 11,
                     background: isCurrentlyRendering
                       ? 'rgba(15, 34, 46, 0.92)'
@@ -307,15 +334,19 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                     gap: 10,
                     cursor: 'pointer',
                     textAlign: 'left',
+                    overflow: 'hidden',
                   }}
                 >
-                  <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
                       <span
                         style={{
                           fontSize: 13,
                           fontWeight: 800,
                           color: isCurrentlyRendering ? '#67e8f9' : '#f1f5f9',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
                         }}
                       >
                         {scene.label}
@@ -325,8 +356,9 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                           fontSize: 9.5,
                           fontFamily: 'monospace',
                           fontWeight: 800,
-                          padding: '2px 6px',
+                          padding: '1px 6px',
                           borderRadius: 5,
+                          flexShrink: 0,
                           background:
                             scene.wasmSceneId !== null
                               ? 'rgba(16, 185, 129, 0.18)'
@@ -347,6 +379,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                             fontFamily: 'monospace',
                             fontWeight: 800,
                             color: '#facc15',
+                            flexShrink: 0,
                           }}
                         >
                           ● LIVE
@@ -362,14 +395,14 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                         textOverflow: 'ellipsis',
                       }}
                     >
-                      {scene.subtitle} • Transition: {scene.transitionLabel}
+                      {scene.subtitle}
                     </div>
                   </div>
 
                   <span
                     style={{
                       fontFamily: 'monospace',
-                      fontSize: 11,
+                      fontSize: 10.5,
                       fontWeight: 800,
                       color: isLockedSingle ? '#38bdf8' : '#64748b',
                       flexShrink: 0,
@@ -377,38 +410,6 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                   >
                     {isLockedSingle ? 'LOCKED' : scene.shortLabel}
                   </span>
-                </button>
-
-                {/* Rotation Inclusion Checkbox Button */}
-                <button
-                  type="button"
-                  onClick={() => onToggleSceneInRotation(scene.id)}
-                  title="Include or exclude this scene when Cycle or Shuffle is active"
-                  style={{
-                    width: 112,
-                    borderRadius: 11,
-                    background: isInRotation ? 'rgba(16, 185, 129, 0.14)' : '#12141e',
-                    border: isInRotation
-                      ? '1px solid rgba(52, 211, 153, 0.45)'
-                      : '1px solid #222638',
-                    color: isInRotation ? '#34d399' : '#64748b',
-                    fontSize: 11,
-                    fontFamily: 'monospace',
-                    fontWeight: 800,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 6,
-                    flexShrink: 0,
-                  }}
-                >
-                  <ImpIcon
-                    name={isInRotation ? 'check' : 'close'}
-                    size={13}
-                    color={isInRotation ? '#34d399' : '#64748b'}
-                  />
-                  <span>{isInRotation ? 'In Cycle' : 'Skipped'}</span>
                 </button>
               </div>
             );
