@@ -207,9 +207,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   });
   const [factoidsEnabled, setFactoidsEnabled] = useState<boolean>(() => {
     try {
-      return window.localStorage.getItem('simp_factoids_enabled') !== '0';
+      return window.localStorage.getItem('simp_factoids_enabled') === '1';
     } catch {
-      return true;
+      return false;
     }
   });
   const [idleFadeEnabled, setIdleFadeEnabled] = useState<boolean>(() => {
@@ -229,7 +229,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         }
       }
     } catch {}
-    return 35;
+    return 0;
   });
   const [lyricsData, setLyricsData] = useState<TrackLyricsResponse | null>(null);
   const [activeLyricIdx, setActiveLyricIdx] = useState<number>(-1);

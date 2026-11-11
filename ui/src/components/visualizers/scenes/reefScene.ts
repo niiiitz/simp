@@ -233,24 +233,48 @@ export function renderReefScene(s: SceneRenderContext): void {
     ctx.restore();
   }
 
-  // 7. Slow, Steady Rising Bubble Streams (No `bandVal * timeSec` position jumping!)
+  // 7. Gentle Vertical Bubble Columns (Varied Sizes, Less Dense, Rising Slowly from Seabed Vents)
+  const bubbleColumns = [68, 178, 304, 436, 562];
   ctx.save();
-  for (let b = 0; b < 28; b++) {
-    const bandVal = sb[b & 15];
-    const steadyRiseSpeed = 10 + (b % 5) * 2.6;
-    const bx =
-      ((b * 41.7) % (CANVAS_W - 24)) +
-      12 +
-      Math.sin(timeSec * 0.75 + b) * 5;
-    const by =
-      seabedY - ((timeSec * steadyRiseSpeed + b * 29) % (seabedY - 22));
-    const br = 1.8 + (b % 3) * 1.1 + bandVal * 1.8;
+  for (let colIdx = 0; colIdx < bubbleColumns.length; colIdx++) {
+    const colBaseX = bubbleColumns[colIdx];
+    const bubblesPerCol = 4;
+    for (let k = 0; k < bubblesPerCol; k++) {
+      const idx = colIdx * bubblesPerCol + k;
+      const bandVal = sb[idx & 15];
+      // Slower rising speed, slightly faster for larger bubbles
+      const sizeTier = (colIdx + k) % 4; // 0: tiny, 1: small, 2: medium, 3: large
+      const br =
+        (sizeTier === 0 ? 1.5 : sizeTier === 1 ? 2.6 : sizeTier === 2 ? 4.2 : 6.2) +
+        bandVal * 0.9;
+      const riseSpeed = 6.5 + sizeTier * 1.9;
+      const staggerOffset = k * 78 + colIdx * 43;
+      const spanH = seabedY - 24;
+      const progress = ((timeSec * riseSpeed + staggerOffset) % spanH) / spanH;
+      const by = seabedY - progress * spanH;
+      const wobbleX =
+        Math.sin(timeSec * (0.85 + sizeTier * 0.15) + idx * 1.7) * (3.5 + sizeTier * 1.4);
+      const bx = colBaseX + ((k - 1.5) * 4.5) + wobbleX;
 
-    ctx.strokeStyle = rgbToCss(palette[6 + (b & 1)], 0.48 + bandVal * 0.32);
-    ctx.lineWidth = 1.1;
-    ctx.beginPath();
-    ctx.arc(bx, by, br, 0, Math.PI * 2);
-    ctx.stroke();
+      const bCol = palette[6 + (idx & 1)];
+      const alpha = (1 - progress * 0.35) * (0.42 + bandVal * 0.25);
+
+      // Subtle translucent bubble fill + rim + specular highlight dot
+      ctx.fillStyle = rgbToCss(bCol, alpha * 0.18);
+      ctx.strokeStyle = rgbToCss(bCol, alpha);
+      ctx.lineWidth = sizeTier >= 2 ? 1.25 : 0.95;
+      ctx.beginPath();
+      ctx.arc(bx, by, br, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      if (br >= 3.2) {
+        ctx.fillStyle = `rgba(255, 255, 255, ${(alpha * 0.75).toFixed(2)})`;
+        ctx.beginPath();
+        ctx.arc(bx - br * 0.34, by - br * 0.34, br * 0.24, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
   }
   ctx.restore();
 
@@ -377,17 +401,43 @@ export function renderReefScene(s: SceneRenderContext): void {
     ctx.restore();
   }
 
-  // 10. Rising Bubble Wall Transition (`trans > 0.01`)
+  // 10. Staggered Rising Bubble Columns Transition (`trans > 0.01`, rising UP from the bottom)
   if (trans > 0.01) {
+    // Note: `trans` decays 1.0 -> 0.0 during scene entry, so `riseProgress = 1 - trans` goes 0.0 (bottom) -> 1.0 (top)
+    const riseProgress = 1 - trans;
+    const env = Math.sin(trans * Math.PI);
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    for (let i = 0; i < 28; i++) {
-      const bx = ((i * 53) % CANVAS_W);
-      const by = (1 - trans) * CANVAS_H + ((i * 29) % 80) - 40;
-      ctx.fillStyle = rgbToCss(palette[5 + (i & 1)], Math.sin(trans * Math.PI) * 0.55);
-      ctx.beginPath();
-      ctx.arc(bx, by, 8 + (i % 5) * 4, 0, Math.PI * 2);
-      ctx.fill();
+    for (let colIdx = 0; colIdx < bubbleColumns.length; colIdx++) {
+      const colBaseX = bubbleColumns[colIdx];
+      const colDelay = (colIdx % 3) * 0.12;
+      const adjProg = Math.max(0, Math.min(1.15, (riseProgress - colDelay) / (1 - colDelay)));
+      for (let k = 0; k < 3; k++) {
+        const idx = colIdx * 3 + k;
+        const sizeTier = (colIdx + k) % 4;
+        const br = 3.2 + sizeTier * 2.8 + (k === 0 ? 2.5 : 0);
+        const startOffsetY = CANVAS_H + 24 + k * 46 + (colIdx % 2) * 22;
+        const travelDist = CANVAS_H + 130 + sizeTier * 28;
+        const by = startOffsetY - adjProg * travelDist;
+        if (by < -20 || by > CANVAS_H + 20) continue;
+
+        const swayX = Math.sin(adjProg * 4.5 + idx * 1.3) * (6 + sizeTier * 2);
+        const bx = colBaseX + (k - 1) * 9 + swayX;
+        const bCol = palette[5 + (idx & 2)];
+
+        ctx.fillStyle = rgbToCss(bCol, env * 0.16);
+        ctx.strokeStyle = rgbToCss(bCol, env * 0.62);
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(bx, by, br, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = `rgba(255, 255, 255, ${(env * 0.55).toFixed(2)})`;
+        ctx.beginPath();
+        ctx.arc(bx - br * 0.32, by - br * 0.32, br * 0.22, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     ctx.restore();
   }
