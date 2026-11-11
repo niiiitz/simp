@@ -320,10 +320,15 @@ pub fn spawn_delayed_daemon_restart() {
                 .map(|d| d.join("simp.ico"))
                 .unwrap_or_else(|| target_exe.with_file_name("simp.ico"));
 
-            let target_str = target_exe.to_string_lossy().to_string();
-            let old_str = old_exe.to_string_lossy().to_string();
-            let pid_old_str = pid_old_exe.to_string_lossy().to_string();
-            let ico_str = loose_ico.to_string_lossy().to_string();
+            let clean_win_path = |p: &std::path::Path| -> String {
+                p.to_string_lossy()
+                    .trim_start_matches(r"\\?\")
+                    .to_string()
+            };
+            let target_str = clean_win_path(&target_exe);
+            let old_str = clean_win_path(&old_exe);
+            let pid_old_str = clean_win_path(&pid_old_exe);
+            let ico_str = clean_win_path(&loose_ico);
 
             // Write a clean batch file to %TEMP% rather than passing embedded quotes to `cmd /C`
             // (Rust's Windows Command escapes inner quotes as `\"`, which breaks `cmd.exe` path parsing).
@@ -336,7 +341,7 @@ pub fn spawn_delayed_daemon_restart() {
                  if exist \"{old_str}\" del /F /Q \"{old_str}\" >nul 2>&1\r\n\
                  if exist \"{pid_old_str}\" del /F /Q \"{pid_old_str}\" >nul 2>&1\r\n\
                  if exist \"{ico_str}\" del /F /Q \"{ico_str}\" >nul 2>&1\r\n\
-                 start \"\" \"{target_str}\" --daemon\r\n\
+                 start \"IMP\" \"{target_str}\" --daemon\r\n\
                  del /F /Q \"%~f0\" >nul 2>&1\r\n"
             );
             if std::fs::write(&bat_path, bat_contents).is_ok() {

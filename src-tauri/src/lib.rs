@@ -289,10 +289,10 @@ fn run_windows_ui(ui_url: &str, profile_dir: &std::path::Path, user_data_arg: &s
         }
     }
 
-    // Fallback: open in default Windows browser via `cmd /C start`
-    let mut fallback = Command::new("cmd");
+    // Fallback: open in default Windows browser via `explorer.exe` (avoids `cmd /C start ""` quote escaping issues)
+    let mut fallback = Command::new("explorer");
     fallback
-        .args(["/C", "start", "", ui_url])
+        .arg(ui_url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

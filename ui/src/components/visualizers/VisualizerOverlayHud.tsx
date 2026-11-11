@@ -170,14 +170,11 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
     : 0;
   const showMtvIntroChyron = introEnv > 0.01;
 
-  // 2. MTV ~15s "UP NEXT" VHS Flyover Chyron — ONLY when display is faded out (`isForegroundFaded`)
-  const upNextStartSec = durSec - 15.0;
-  const upNextEndSec = durSec - 0.8;
-  const upNextEnv =
-    isForegroundFaded && Boolean(upNextTrack) && durSec >= 35
-      ? computeSoftVhsEnvelope(posSec, upNextStartSec, upNextEndSec, 1.35)
-      : 0;
-  const showUpNextFlyover = upNextEnv > 0.01 && !showMtvIntroChyron;
+  // 2. MTV "UP NEXT" VHS Flyover Chyron — disabled per user preference
+  const upNextEnv = 0;
+  const showUpNextFlyover = false;
+  void durationMs;
+  void upNextTrack;
 
   // 3. VH1-Style "Pop-Up Video" Speech-Bubble Factoids (18s .. T-20s, with 2-part sequential support)
   const activeFactoid =
@@ -209,7 +206,7 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
         overflow: 'hidden',
       }}
     >
-      {/* 1. MTV Cable-Broadcast Soft VHS Track Intro Chyron (Faded-Out Display Mode) */}
+      {/* 1. MTV Cable-Broadcast Soft VHS Track Intro Chyron (Faded-Out Display Mode, 1.5x Scaled) */}
       {showMtvIntroChyron && (
         <div
           style={{
@@ -217,20 +214,20 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
             ...getAnchorStyle(safeZones.chyronAnchor, oskOrModalOpen),
             display: 'flex',
             alignItems: 'center',
-            gap: 15,
-            padding: '13px 22px 13px 16px',
-            borderRadius: 12,
+            gap: 22,
+            padding: '19px 32px 19px 24px',
+            borderRadius: 16,
             backgroundImage:
-              'repeating-linear-gradient(0deg, rgba(255,255,255,0.035) 0px, rgba(255,255,255,0.035) 1px, transparent 1px, transparent 3px), linear-gradient(90deg, rgba(8, 10, 18, 0.88) 0%, rgba(12, 15, 28, 0.78) 78%, rgba(12, 15, 28, 0.15) 100%)',
-            borderLeft: '4px solid rgba(250, 204, 21, 0.85)',
-            borderTop: '1px solid rgba(255, 255, 255, 0.14)',
-            borderBottom: '1px solid rgba(56, 189, 248, 0.24)',
+              'repeating-linear-gradient(0deg, rgba(255,255,255,0.038) 0px, rgba(255,255,255,0.038) 1px, transparent 1px, transparent 3px), linear-gradient(90deg, rgba(8, 10, 18, 0.90) 0%, rgba(12, 15, 28, 0.80) 78%, rgba(12, 15, 28, 0.16) 100%)',
+            borderLeft: '6px solid rgba(250, 204, 21, 0.88)',
+            borderTop: '1px solid rgba(255, 255, 255, 0.16)',
+            borderBottom: '1px solid rgba(56, 189, 248, 0.28)',
             boxShadow:
-              '0 14px 36px rgba(0, 0, 0, 0.78), 0 0 24px rgba(56, 189, 248, 0.16)',
-            maxWidth: 'min(540px, 80vw)',
+              '0 18px 44px rgba(0, 0, 0, 0.82), 0 0 28px rgba(56, 189, 248, 0.18)',
+            maxWidth: 'min(780px, 88vw)',
             opacity: introEnv,
             filter: `blur(${((1 - introEnv) * 2.6).toFixed(2)}px)`,
-            transform: `translateY(${((1 - introEnv) * 8).toFixed(1)}px)`,
+            transform: `translateY(${((1 - introEnv) * 10).toFixed(1)}px)`,
           }}
         >
           {track.art_url && (
@@ -238,21 +235,21 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
               src={track.art_url}
               alt=""
               style={{
-                width: 56,
-                height: 56,
-                borderRadius: 8,
+                width: 84,
+                height: 84,
+                borderRadius: 11,
                 objectFit: 'cover',
                 flexShrink: 0,
-                border: '1px solid rgba(255, 255, 255, 0.22)',
+                border: '1.5px solid rgba(255, 255, 255, 0.25)',
                 boxShadow:
-                  '-2px 0 8px rgba(251, 113, 133, 0.35), 2px 0 8px rgba(56, 189, 248, 0.35)',
+                  '-2.5px 0 10px rgba(251, 113, 133, 0.38), 2.5px 0 10px rgba(56, 189, 248, 0.38)',
               }}
             />
           )}
-          <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
             <div
               style={{
-                fontSize: 10,
+                fontSize: 14,
                 fontFamily: '"JetBrains Mono", "Courier New", monospace',
                 fontWeight: 800,
                 letterSpacing: '0.16em',
@@ -265,7 +262,7 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
             </div>
             <div
               style={{
-                fontSize: 15,
+                fontSize: 22.5,
                 fontWeight: 900,
                 letterSpacing: '0.04em',
                 color: '#f8fafc',
@@ -280,7 +277,7 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
             </div>
             <div
               style={{
-                fontSize: 17,
+                fontSize: 25.5,
                 fontFamily: 'Georgia, "Times New Roman", serif',
                 fontStyle: 'italic',
                 fontWeight: 700,
@@ -296,7 +293,7 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
             {track.album && track.album !== 'Unknown Album' && (
               <div
                 style={{
-                  fontSize: 12,
+                  fontSize: 17.5,
                   fontWeight: 700,
                   color: '#cbd5e1',
                   whiteSpace: 'nowrap',
@@ -396,37 +393,36 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
         </div>
       )}
 
-      {/* 3. VH1-Style "Pop-Up Video" Speech Bubble (with 2-Part Continuation & Pointer Tail, No SFX) */}
+      {/* 3. VH1-Style "Pop-Up Video" Speech Bubble (Bottom-Center, Scaled Up, 2-Part Continuation & Pointer Tail) */}
       {activeFactoid && factoidEnv > 0.01 && (
         <div
           style={{
             position: 'absolute',
-            ...getAnchorStyle(safeZones.factoidAnchor, oskOrModalOpen),
+            bottom: oskOrModalOpen ? 190 : 82,
+            left: '50%',
             display: 'flex',
             flexDirection: 'column',
-            maxWidth: 'min(375px, 62vw)',
+            alignItems: 'center',
+            width: 'min(580px, 84vw)',
             opacity: factoidEnv,
-            transform: `scale(${(0.92 + factoidEnv * 0.08).toFixed(3)}) translateY(${((1 - factoidEnv) * 6).toFixed(1)}px)`,
-            transformOrigin: safeZones.factoidAnchor.includes('right')
-              ? 'bottom right'
-              : 'bottom left',
+            transform: `translateX(-50%) scale(${(0.92 + factoidEnv * 0.08).toFixed(3)}) translateY(${((1 - factoidEnv) * 8).toFixed(1)}px)`,
+            transformOrigin: 'bottom center',
           }}
         >
           <div
             style={{
               position: 'relative',
+              width: '100%',
               display: 'flex',
               flexDirection: 'column',
-              gap: 5,
-              padding: '12px 18px 13px 18px',
-              borderRadius: safeZones.factoidAnchor.includes('right')
-                ? '24px 24px 6px 24px'
-                : '24px 24px 24px 6px',
+              gap: 7,
+              padding: '16px 24px 18px 24px',
+              borderRadius: '28px',
               background:
-                'radial-gradient(circle at 22% 18%, rgba(24, 32, 54, 0.95) 0%, rgba(10, 14, 26, 0.94) 100%)',
-              border: '2px solid rgba(250, 204, 21, 0.78)',
+                'radial-gradient(circle at 22% 18%, rgba(24, 32, 54, 0.96) 0%, rgba(10, 14, 26, 0.95) 100%)',
+              border: '2.5px solid rgba(250, 204, 21, 0.85)',
               boxShadow:
-                '0 14px 32px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.22)',
+                '0 18px 42px rgba(0, 0, 0, 0.88), 0 0 28px rgba(250, 204, 21, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.24)',
             }}
           >
             <div
@@ -434,17 +430,17 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                gap: 8,
-                fontSize: 10,
+                gap: 10,
+                fontSize: 12,
                 fontFamily: '"JetBrains Mono", monospace',
                 fontWeight: 800,
                 color: '#facc15',
-                letterSpacing: '0.08em',
+                letterSpacing: '0.09em',
                 textTransform: 'uppercase',
               }}
             >
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                <ImpIcon name="factoid" size={12} color="#facc15" />
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <ImpIcon name="factoid" size={15} color="#facc15" />
                 <span>
                   {activeFactoid.category} • {activeFactoid.source}
                 </span>
@@ -452,12 +448,12 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
               {activeFactoid.part_total && activeFactoid.part_total > 1 && (
                 <span
                   style={{
-                    padding: '1px 6px',
+                    padding: '2px 9px',
                     borderRadius: 999,
-                    background: 'rgba(250, 204, 21, 0.18)',
-                    border: '1px solid rgba(250, 204, 21, 0.45)',
+                    background: 'rgba(250, 204, 21, 0.2)',
+                    border: '1px solid rgba(250, 204, 21, 0.5)',
                     color: '#fef08a',
-                    fontSize: 9.5,
+                    fontSize: 11,
                   }}
                 >
                   {activeFactoid.part_index || 1}/{activeFactoid.part_total}
@@ -466,37 +462,31 @@ export const VisualizerOverlayHud: React.FC<VisualizerOverlayHudProps> = ({
             </div>
             <div
               style={{
-                fontSize: 13,
+                fontSize: 'clamp(15.5px, 1.8vw, 18.5px)',
                 fontWeight: 700,
                 color: '#f8fafc',
-                lineHeight: 1.38,
-                textShadow: '0 1px 4px rgba(0, 0, 0, 0.9)',
+                lineHeight: 1.42,
+                textShadow: '0 1px 5px rgba(0, 0, 0, 0.92)',
               }}
             >
               {activeFactoid.body}
             </div>
           </div>
-          {/* Speech Bubble Pointer Tail */}
+          {/* Speech Bubble Pointer Tail (Bottom-Center) */}
           <svg
-            width="24"
-            height="13"
-            viewBox="0 0 24 13"
+            width="30"
+            height="16"
+            viewBox="0 0 30 16"
             style={{
-              marginTop: -2,
-              marginLeft: safeZones.factoidAnchor.includes('right') ? 'auto' : 18,
-              marginRight: safeZones.factoidAnchor.includes('right') ? 18 : 'auto',
-              filter: 'drop-shadow(0 4px 6px rgba(0,0,0,0.65))',
+              marginTop: -2.5,
+              filter: 'drop-shadow(0 5px 8px rgba(0,0,0,0.7))',
             }}
           >
             <path
-              d={
-                safeZones.factoidAnchor.includes('right')
-                  ? 'M4 0 L20 0 L22 12 Z'
-                  : 'M4 0 L20 0 L2 12 Z'
-              }
-              fill="rgba(12, 16, 30, 0.95)"
-              stroke="rgba(250, 204, 21, 0.78)"
-              strokeWidth="2"
+              d="M4 0 L26 0 L15 14 Z"
+              fill="rgba(12, 16, 30, 0.96)"
+              stroke="rgba(250, 204, 21, 0.85)"
+              strokeWidth="2.5"
               strokeLinejoin="round"
             />
           </svg>

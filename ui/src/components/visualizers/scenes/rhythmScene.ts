@@ -125,31 +125,110 @@ export function renderRhythmScene(s: SceneRenderContext): void {
   const jumboX = cx - jumboW * 0.5;
   const jumboY = horizonY - jumboH - 12;
 
-  // Flanking 8-segment LED Equalizer Towers
+  // Flanking Concert Speaker Stacks (Pulsing Dual Woofer / Subwoofer Cabinets + Sonic Rings)
   for (let side = -1; side <= 1; side += 2) {
-    const towerX = side < 0 ? jumboX - 38 : jumboX + jumboW + 10;
-    const towerW = 28;
-    const towerH = jumboH + 6;
-    const towerY = horizonY - towerH - 8;
+    const towerW = 38;
+    const towerH = jumboH + 10;
+    const towerX = side < 0 ? jumboX - towerW - 12 : jumboX + jumboW + 12;
+    const towerY = horizonY - towerH - 6;
+    const cxTower = towerX + towerW * 0.5;
 
-    ctx.fillStyle = 'rgba(6, 9, 18, 0.92)';
-    ctx.strokeStyle = rgbToCss(palette[4], 0.55);
-    ctx.lineWidth = 1.2;
-    ctx.fillRect(towerX, towerY, towerW, towerH);
-    ctx.strokeRect(towerX, towerY, towerW, towerH);
+    // Cabinet enclosure with bevelled acoustic frame
+    const cabTilt = side * (subBass * 1.4 + beat * 0.9);
+    ctx.save();
+    ctx.translate(cxTower, towerY + towerH);
+    ctx.scale(1 + subBass * 0.045, 1 + beat * 0.035);
+    ctx.rotate(cabTilt * 0.012);
+    ctx.translate(-cxTower, -(towerY + towerH));
 
-    const segs = 10;
-    const segH = (towerH - 8) / segs;
-    const bandAmp = sb[side < 0 ? 2 : 5];
-    const litSegs = Math.round(bandAmp * segs);
-    for (let sIdx = 0; sIdx < segs; sIdx++) {
-      const sy = towerY + towerH - 4 - (sIdx + 1) * segH;
-      const isLit = sIdx <= litSegs;
-      const segColor =
-        sIdx >= 8 ? palette[7] : sIdx >= 5 ? palette[5] : palette[3];
-      ctx.fillStyle = isLit ? rgbToCss(segColor, 0.9) : 'rgba(255,255,255,0.06)';
-      ctx.fillRect(towerX + 4, sy + 1, towerW - 8, segH - 2.2);
+    ctx.fillStyle = '#070a14';
+    ctx.strokeStyle = rgbToCss(palette[4], 0.75 + beat * 0.25);
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.roundRect(towerX, towerY, towerW, towerH, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    // Inner acoustic grille texture lines
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    ctx.lineWidth = 0.8;
+    for (let gy = towerY + 6; gy < towerY + towerH - 4; gy += 4) {
+      ctx.beginPath();
+      ctx.moveTo(towerX + 3, gy);
+      ctx.lineTo(towerX + towerW - 3, gy);
+      ctx.stroke();
     }
+
+    // Upper Mid-High Woofer Cone + Lower Sub-Bass Woofer Cone
+    const drivers = [
+      {
+        cy: towerY + towerH * 0.29,
+        baseR: 11.5,
+        amp: Math.max(midEnergy, sb[side < 0 ? 4 : 6]),
+        col: palette[5],
+      },
+      {
+        cy: towerY + towerH * 0.71,
+        baseR: 14.5,
+        amp: Math.max(subBass, sb[side < 0 ? 1 : 2]),
+        col: palette[6],
+      },
+    ];
+
+    for (const drv of drivers) {
+      const pump = drv.amp * 3.6 + beat * 2.2 + drop * 2.0;
+      const outerR = drv.baseR + pump * 0.45;
+      const coneR = drv.baseR * 0.78 + pump * 0.65;
+      const capR = drv.baseR * 0.32 + pump * 0.4;
+
+      // Outer rubber surround ring
+      ctx.fillStyle = '#03050a';
+      ctx.strokeStyle = rgbToCss(drv.col, 0.65 + drv.amp * 0.35);
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.arc(cxTower, drv.cy, outerR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Ribbed speaker cone radial gradient
+      const coneGrad = ctx.createRadialGradient(
+        cxTower - 1.5,
+        drv.cy - 1.5,
+        1,
+        cxTower,
+        drv.cy,
+        coneR,
+      );
+      coneGrad.addColorStop(0, rgbToCss(palette[7], 0.55 + drv.amp * 0.4));
+      coneGrad.addColorStop(0.55, rgbToCss(drv.col, 0.32 + drv.amp * 0.3));
+      coneGrad.addColorStop(1, '#050811');
+      ctx.fillStyle = coneGrad;
+      ctx.beginPath();
+      ctx.arc(cxTower, drv.cy, coneR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Center dust-cap dome
+      ctx.fillStyle = rgbToCss(palette[7], 0.78 + beat * 0.22);
+      ctx.beginPath();
+      ctx.arc(cxTower, drv.cy, capR, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Expanding sonic pressure wave ring on beats/bass
+      if (drv.amp > 0.32 || beat > 0.35) {
+        const wavePhase = (timeSec * 3.2 + (side < 0 ? 0 : 0.4)) % 1;
+        const waveR = outerR + wavePhase * 18;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.strokeStyle = rgbToCss(drv.col, (1 - wavePhase) * (0.45 + drv.amp * 0.4));
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(cxTower, drv.cy, waveR, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    ctx.restore();
   }
 
   // Jumbotron Outer Frame & Album Artwork
@@ -299,6 +378,86 @@ export function renderRhythmScene(s: SceneRenderContext): void {
 
   drawStepHighway(96, 0);
   drawStepHighway(CANVAS_W - 96, 5);
+
+  // 5b. Stage CO2 / Fog Machine Jets — Fire on Track Start (`timeSec < 7.5s`), Transition (`trans`), and Beat Drops (`drop`)
+  const startFogEnv =
+    timeSec < 7.5 ? Math.max(0, Math.min(1, (7.5 - timeSec) / 3.5)) : 0;
+  const fogTrigger = Math.min(
+    1,
+    Math.max(
+      startFogEnv,
+      trans * 1.15,
+      drop * 1.25,
+      subBass > 0.72 && beat > 0.5 ? (subBass - 0.55) * 1.8 : 0,
+    ),
+  );
+
+  const fogNozzles = [cx - 128, cx - 58, cx + 58, cx + 128];
+  // Nozzle hardware housings on the stage lip
+  for (const nx of fogNozzles) {
+    ctx.fillStyle = '#0f172a';
+    ctx.strokeStyle = rgbToCss(palette[5], 0.65);
+    ctx.lineWidth = 1;
+    ctx.fillRect(nx - 5, horizonY - 4, 10, 6);
+    ctx.strokeRect(nx - 5, horizonY - 4, 10, 6);
+  }
+
+  if (fogTrigger > 0.04) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    // Vertical pressurized CO2 cryo-plume bursts shooting up from the 4 stage nozzles
+    for (let nIdx = 0; nIdx < fogNozzles.length; nIdx++) {
+      const nx = fogNozzles[nIdx];
+      const jetH = (48 + subBass * 42 + drop * 38) * fogTrigger;
+      const jetSpread = 16 + fogTrigger * 22;
+      const sway = Math.sin(timeSec * 5.5 + nIdx * 1.4) * 6;
+
+      const jetGrad = ctx.createLinearGradient(nx, horizonY, nx + sway, horizonY - jetH);
+      jetGrad.addColorStop(0, `rgba(241, 245, 249, ${(0.52 * fogTrigger).toFixed(3)})`);
+      jetGrad.addColorStop(
+        0.45,
+        rgbToCss(palette[6], 0.28 * fogTrigger),
+      );
+      jetGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+
+      ctx.fillStyle = jetGrad;
+      ctx.beginPath();
+      ctx.moveTo(nx - 3, horizonY - 2);
+      ctx.lineTo(nx - jetSpread + sway, horizonY - jetH);
+      ctx.lineTo(nx + jetSpread + sway, horizonY - jetH);
+      ctx.lineTo(nx + 3, horizonY - 2);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Billowing low-lying stage fog clouds rolling across the stage floor & front row
+    const puffCount = 14;
+    for (let p = 0; p < puffCount; p++) {
+      const seed = p * 1.37;
+      const driftX =
+        ((p / (puffCount - 1) - 0.5) * (CANVAS_W * 0.85)) +
+        Math.sin(timeSec * 0.9 + seed) * 28;
+      const px = cx + driftX;
+      const riseCycle = (timeSec * 0.55 + p * 0.17) % 1;
+      const py = horizonY + 18 - riseCycle * (36 + fogTrigger * 34);
+      const pr = (28 + (p % 4) * 14) * (0.7 + fogTrigger * 0.55);
+
+      const puffColor = lerpRgb(palette[5 + (p & 1)], [226, 232, 240], 0.55);
+      const puffAlpha = (1 - riseCycle * 0.75) * 0.22 * fogTrigger;
+      const puffGrad = ctx.createRadialGradient(px, py, 2, px, py, pr);
+      puffGrad.addColorStop(0, rgbToCss(puffColor, puffAlpha));
+      puffGrad.addColorStop(0.6, rgbToCss(puffColor, puffAlpha * 0.45));
+      puffGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+      ctx.fillStyle = puffGrad;
+      ctx.beginPath();
+      ctx.arc(px, py, pr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
 
   // 6. Mode-7 Perspective Dancing Crowd Silhouettes + Dual Concert Glowsticks
   const crowdCount = 20;
