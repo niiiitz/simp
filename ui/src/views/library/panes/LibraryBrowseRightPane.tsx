@@ -414,10 +414,15 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                   }}
                 >
                   <div>
-                    <div style={{ fontSize: 13, fontWeight: 800, color: '#fda4af' }}>
-                      {appleAuthState === 'reauth_required'
-                        ? '⚠️ Apple Music Session Expired / Signed Out'
-                        : '🍎 Connect Apple Music'}
+                    <div style={{ fontSize: 13, fontWeight: 800, color: '#fda4af', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      {appleAuthState === 'reauth_required' ? (
+                        '⚠️ Apple Music Session Expired / Signed Out'
+                      ) : (
+                        <>
+                          <ImpIcon name="apple" size={14} color="#fda4af" />
+                          <span>Connect Apple Music</span>
+                        </>
+                      )}
                     </div>
                     <div style={{ fontSize: 11, color: '#a1a1aa', marginTop: 2 }}>
                       {appleAuthState === 'reauth_required'

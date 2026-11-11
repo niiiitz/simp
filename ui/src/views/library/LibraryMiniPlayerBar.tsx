@@ -133,13 +133,15 @@ export const LibraryMiniPlayerBar: React.FC<LibraryMiniPlayerBarProps> = ({
                 fontSize: 16,
               }}
             >
-              {track.source === 'apple_music'
-                ? '🍎'
-                : track.source === 'soundcloud'
-                ? '☁️'
-                : track.source === 'internet_archive' || track.source === 'ia_video'
-                ? '🏛️'
-                : '🎵'}
+              {track.source === 'apple_music' ? (
+                <ImpIcon name="apple" size={16} color="#fda4af" />
+              ) : track.source === 'soundcloud' ? (
+                <ImpIcon name="soundcloud" size={13} color="#ffffff" />
+              ) : track.source === 'internet_archive' || track.source === 'ia_video' ? (
+                <ImpIcon name="archive" size={15} color="#6ee7b7" />
+              ) : (
+                <ImpIcon name="music" size={15} color="#67e8f9" />
+              )}
             </div>
           )}
         </button>

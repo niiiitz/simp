@@ -573,8 +573,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             {/* + Apple Music [Show/Hide, Sign In] */}
             <div style={nestedCardStyle}>
               <div style={nestedHeaderRowStyle}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: '#fda4af', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                  <ImpIcon name="apple" size={13} /> Apple Music
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#fda4af', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <ImpIcon name="apple" size={15} color="#ffffff" /> Apple Music
                 </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <button

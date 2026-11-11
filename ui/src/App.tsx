@@ -2189,16 +2189,18 @@ const ConsoleMainApp: React.FC = () => {
               flexShrink: 0,
             }}
           />
-          <span style={{ fontSize: 14, lineHeight: 1, flexShrink: 0 }}>
-            {track?.source === 'apple_music'
-              ? '🍎'
-              : track?.source === 'soundcloud'
-              ? '☁️'
-              : track?.source === 'internet_archive' || track?.source === 'ia_video'
-              ? '🏛️'
-              : track?.source === 'cdda' || track?.source === 'dvd'
-              ? '💿'
-              : '💾'}
+          <span style={{ display: 'inline-flex', alignItems: 'center', lineHeight: 1, flexShrink: 0 }}>
+            {track?.source === 'apple_music' ? (
+              <ImpIcon name="apple" size={14} color="#fda4af" />
+            ) : track?.source === 'soundcloud' ? (
+              <ImpIcon name="soundcloud" size={12} color="#ffffff" />
+            ) : track?.source === 'internet_archive' || track?.source === 'ia_video' ? (
+              <ImpIcon name="archive" size={13} color="#6ee7b7" />
+            ) : track?.source === 'cdda' || track?.source === 'dvd' ? (
+              <ImpIcon name="disc" size={13} color="#fcd34d" />
+            ) : (
+              <ImpIcon name="disc" size={13} color="#67e8f9" />
+            )}
           </span>
           <span
             style={{

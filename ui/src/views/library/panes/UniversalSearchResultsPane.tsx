@@ -34,6 +34,7 @@ import {
 } from "../../../drivers/SoundCloudDriver";
 import { SoundCloudAttributionLink, SoundCloudLogo } from "../../../components/SoundCloudLogo";
 import { AppleMusicAttributionLink } from "../../../components/AppleMusicLogo";
+import { ImpIcon } from "../../../components/icons/ImpIcon";
 import { isUiVideoTrack } from "../../PlayerView";
 import {
   AlphaBucket,
@@ -320,13 +321,16 @@ export const UniversalSearchResultsPane: React.FC<UniversalSearchResultsPaneProp
 
                                 {catalogSearchResults.albums.some((a) => a.kind !== 'library') && (
                                   <>
-                                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>
-                                      🍎 APPLE CATALOG ALBUMS (
-                                      {
-                                        catalogSearchResults.albums.filter((a) => a.kind !== 'library')
-                                          .length
-                                      }
-                                      )
+                                    <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                                      <ImpIcon name="apple" size={12} color="#fda4af" />
+                                      <span>
+                                        APPLE CATALOG ALBUMS (
+                                        {
+                                          catalogSearchResults.albums.filter((a) => a.kind !== 'library')
+                                            .length
+                                        }
+                                        )
+                                      </span>
                                     </div>
                                     <div style={tileGridStyle}>
                                       {catalogSearchResults.albums

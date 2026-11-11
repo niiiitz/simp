@@ -730,7 +730,10 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
                   alignItems: 'center',
                 }}
               >
-                <span>🍎 Apple Music</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <ImpIcon name="apple" size={13} color="#fda4af" />
+                  <span>Apple Music</span>
+                </span>
                 <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#fda4af' }}>▸</span>
               </button>
             )}

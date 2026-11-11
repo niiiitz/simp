@@ -278,19 +278,23 @@ export const ImpIcon: React.FC<ImpIconProps> = ({
         );
       case 'apple':
         return (
-          <>
-            <path d="M12 7c-2.5 0-5 2-5 5.8 0 3.5 2.4 7.2 4.4 7.2 1 0 1.5-.6 2.6-.6 1.1 0 1.5.6 2.6.6 2 0 4.4-3.7 4.4-7.2 0-2-.9-3.6-2.3-4.6" />
-            <path d="M12 7c0-2 1.5-3.8 3.5-4" />
-          </>
+          <g fill={color} stroke="none">
+            <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83z" />
+            <path d="M15.97 6.33c.67-.81 1.12-1.94 1-3.08-.96.04-2.13.64-2.82 1.45-.58.68-1.06 1.8-.92 2.92 1.07.08 2.07-.48 2.74-1.29z" />
+          </g>
         );
       case 'soundcloud':
         return (
-          <>
-            <path d="M3 14v4" />
-            <path d="M6 11v7" />
-            <path d="M9 9v9" />
-            <path d="M12 18h6a3.5 3.5 0 0 0 .5-6.96A5 5 0 0 0 12 8v10z" />
-          </>
+          <g fill={color} stroke="none">
+            <rect x="0.5" y="15.0" width="2.4" height="9.5" rx="1.1" />
+            <rect x="4.5" y="11.5" width="2.4" height="13.5" rx="1.1" />
+            <rect x="8.5" y="13.0" width="2.4" height="12.0" rx="1.1" />
+            <rect x="12.5" y="8.5" width="2.4" height="16.5" rx="1.1" />
+            <rect x="16.5" y="5.5" width="2.4" height="19.5" rx="1.1" />
+            <rect x="20.5" y="7.0" width="2.4" height="18.0" rx="1.1" />
+            <rect x="24.5" y="4.0" width="2.4" height="21.0" rx="1.1" />
+            <path d="M29.2 4.2C31.3 2.7 33.9 1.8 36.8 1.8C43.6 1.8 49.2 6.9 50.0 13.5C50.9 13.1 52.0 12.9 53.1 12.9C57.6 12.9 61.2 16.5 61.2 21.0C61.2 23.2 59.4 25.0 57.2 25.0H29.8C29.1 25.0 28.6 24.5 28.6 23.8V5.3C28.6 4.8 28.8 4.4 29.2 4.2Z" />
+          </g>
         );
       case 'local':
         return (
@@ -559,11 +563,12 @@ export const ImpIcon: React.FC<ImpIconProps> = ({
     }
   };
 
+  const isWideCloudmark = name === 'soundcloud';
   return (
     <svg
-      width={size}
+      width={isWideCloudmark ? Math.round(size * 1.85) : size}
       height={size}
-      viewBox="0 0 24 24"
+      viewBox={isWideCloudmark ? '0 0 64 28' : '0 0 24 24'}
       fill="none"
       stroke={color}
       strokeWidth={strokeWidth}
