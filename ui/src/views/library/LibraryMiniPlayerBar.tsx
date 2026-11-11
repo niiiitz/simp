@@ -44,25 +44,6 @@ export const LibraryMiniPlayerBar: React.FC<LibraryMiniPlayerBarProps> = ({
           <ImpIcon name="disc" size={16} color="#38bdf8" />
           <span>No track playing — select any album, playlist, or song below</span>
         </div>
-        <button
-          data-row-aux="true"
-          onClick={onReturnToPlayer}
-          title="Switch to Full Player View"
-          style={{
-            minHeight: 32,
-            padding: '0 10px',
-            borderRadius: 8,
-            background: '#121822',
-            border: '1px solid #2aa3c4',
-            color: '#bfeaf5',
-            fontSize: 11,
-            fontWeight: 800,
-            cursor: 'pointer',
-            flexShrink: 0,
-          }}
-        >
-          ↗ Player
-        </button>
       </div>
     );
   }
@@ -302,24 +283,6 @@ export const LibraryMiniPlayerBar: React.FC<LibraryMiniPlayerBarProps> = ({
               {snap.repeat_mode === 'track' ? '1' : '∞'}
             </span>
           )}
-        </button>
-        <button
-          data-row-aux="true"
-          onClick={onReturnToPlayer}
-          title="Switch to Full Player View"
-          style={{
-            minHeight: 32,
-            padding: '0 10px',
-            borderRadius: 8,
-            background: '#121822',
-            border: '1px solid #2aa3c4',
-            color: '#bfeaf5',
-            fontSize: 11,
-            fontWeight: 800,
-            cursor: 'pointer',
-          }}
-        >
-          ↗ Player
         </button>
       </div>
     </div>
