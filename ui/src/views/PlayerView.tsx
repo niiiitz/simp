@@ -12,10 +12,19 @@ import {
 } from '@simp/client';
 import { ProgressBarRaf } from '../components/ProgressBarRaf';
 import {
+  loadEnabledVisualizerScenes,
   PlayerBackgroundVisualizer,
+  saveEnabledVisualizerScenes,
+  VISUALIZER_ENGINES,
   VISUALIZER_MODES,
+  type VisualizerEngine,
   type VisualizerMode,
 } from '../components/PlayerBackgroundVisualizer';
+import {
+  VisualizerOverlayHud,
+  type FactoidBubbleItem,
+} from '../components/visualizers/VisualizerOverlayHud';
+import { VisualizerDrawerModal } from '../components/visualizers/VisualizerDrawerModal';
 import {
   fetchSoundCloudTrackComments,
   fetchSoundCloudTrackWaveform,
@@ -171,20 +180,24 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const [vizMode, setVizMode] = useState<VisualizerMode>(() => {
     try {
       const saved = window.localStorage.getItem('simp.visualizer_mode') as VisualizerMode | null;
-      if (
-        saved === 'glyph' ||
-        saved === 'avs' ||
-        saved === 'demoscene' ||
-        saved === 'vertigo' ||
-        saved === 'trapper' ||
-        saved === 'cycle' ||
-        saved === 'off'
-      ) {
+      if (saved && VISUALIZER_MODES.some((m) => m.id === saved)) {
         return saved;
       }
     } catch {}
     return 'cycle';
   });
+  const [enabledVizScenes, setEnabledVizScenes] = useState<VisualizerEngine[]>(() =>
+    loadEnabledVisualizerScenes(),
+  );
+  const [activeVizEngine, setActiveVizEngine] = useState<VisualizerEngine>('glyph');
+  const [vizDrawerOpen, setVizDrawerOpen] = useState<boolean>(false);
+  const [factoidBubbles, setFactoidBubbles] = useState<FactoidBubbleItem[]>([]);
+  const [trackPropsState, setTrackPropsState] = useState<{
+    suppress_lyrics?: boolean;
+    suppress_comments?: boolean;
+    suppress_factoids?: boolean;
+    preferred_viz_mode?: string | null;
+  }>({});
   const [lyricsEnabled, setLyricsEnabled] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem('simp_lyrics_enabled') !== '0';
@@ -742,17 +755,37 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return () => window.clearTimeout(t);
   }, [playerActionsOpen, selectCategory, rightColMode]);
 
-  const cycleVisualizerMode = useCallback(() => {
-    setVizMode((prev) => {
-      const idx = VISUALIZER_MODES.findIndex((m) => m.id === prev);
-      const next = VISUALIZER_MODES[(idx + 1) % VISUALIZER_MODES.length];
+  const handleSelectVizMode = useCallback(
+    (nextMode: VisualizerMode) => {
+      setVizMode(nextMode);
       try {
-        window.localStorage.setItem('simp.visualizer_mode', next.id);
+        window.localStorage.setItem('simp.visualizer_mode', nextMode);
       } catch {}
-      showToast?.(`✨ Visualizer: ${next.label}`);
-      return next.id;
+      const found = VISUALIZER_MODES.find((m) => m.id === nextMode);
+      if (found) {
+        showToast?.(`Visualizer: ${found.label}`);
+      }
+    },
+    [showToast],
+  );
+
+  const handleToggleSceneInRotation = useCallback((engine: VisualizerEngine) => {
+    setEnabledVizScenes((prev) => {
+      const exists = prev.includes(engine);
+      if (exists && prev.length <= 1) {
+        return prev;
+      }
+      const next = exists ? prev.filter((e) => e !== engine) : [...prev, engine];
+      saveEnabledVisualizerScenes(next);
+      return next;
     });
-  }, [showToast]);
+  }, []);
+
+  const handleSetAllScenesInRotation = useCallback((engines: VisualizerEngine[]) => {
+    const next = engines.length > 0 ? engines : [...VISUALIZER_ENGINES];
+    setEnabledVizScenes(next);
+    saveEnabledVisualizerScenes(next);
+  }, []);
 
   const toggleLyrics = useCallback(() => {
     setLyricsEnabled((prev) => {
@@ -840,12 +873,66 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return loadLyricsForCurrentTrack();
   }, [loadLyricsForCurrentTrack]);
 
+  // Fetch per-track properties (suppression flags, preferred_viz_mode) and Pop-Up Video Factoids (factoids.rs)
+  const loadFactoidsAndPropsForCurrentTrack = useCallback(() => {
+    if (!track?.uri || !track?.title || isVideoTrack) {
+      setFactoidBubbles([]);
+      setTrackPropsState({});
+      return () => {};
+    }
+    let cancelled = false;
+    fetch(`/api/library/track-properties?uri=${encodeURIComponent(track.uri)}`)
+      .then((r) => r.json())
+      .then((res) => {
+        if (!cancelled && res && res.ok && res.data) {
+          setTrackPropsState(res.data);
+        }
+      })
+      .catch(() => {});
+
+    const params = new URLSearchParams({
+      uri: track.uri,
+      title: track.title,
+      artist: track.artists?.[0] || '',
+      album: track.album || '',
+      duration_ms: String(track.duration_ms || 180000),
+    });
+    fetch(`/api/factoids?${params.toString()}`)
+      .then((r) => r.json())
+      .then((res) => {
+        if (!cancelled && res && res.ok && res.data && Array.isArray(res.data.bubbles)) {
+          setFactoidBubbles(res.data.bubbles);
+        } else if (!cancelled) {
+          setFactoidBubbles([]);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setFactoidBubbles([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [track?.uri, track?.title, track?.artists, track?.album, track?.duration_ms, isVideoTrack]);
+
+  useEffect(() => {
+    return loadFactoidsAndPropsForCurrentTrack();
+  }, [loadFactoidsAndPropsForCurrentTrack]);
+
   useEffect(() => {
     const onPropsUpdated = (ev: Event) => {
       const detail = (ev as CustomEvent).detail;
       if (!detail || !track?.uri || detail.uri !== track.uri) return;
+      if (detail.properties) {
+        setTrackPropsState(detail.properties);
+      }
       if (detail.properties?.suppress_comments) {
         setActiveBubbles([]);
+      }
+      if (detail.properties?.suppress_factoids) {
+        setFactoidBubbles([]);
+      } else {
+        loadFactoidsAndPropsForCurrentTrack();
       }
       if (detail.lyrics) {
         if (detail.lyrics.found && !detail.properties?.suppress_lyrics) {
@@ -859,7 +946,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     };
     window.addEventListener('simp-track-properties-updated', onPropsUpdated);
     return () => window.removeEventListener('simp-track-properties-updated', onPropsUpdated);
-  }, [track?.uri, loadLyricsForCurrentTrack]);
+  }, [track?.uri, loadLyricsForCurrentTrack, loadFactoidsAndPropsForCurrentTrack]);
 
   useEffect(() => {
     shownCommentIdsRef.current.clear();
@@ -1310,54 +1397,96 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         }}
       >
       {!isVideoTrack && !hidden && (
-        <PlayerBackgroundVisualizer
-          mode={vizMode}
-          isPlaying={isPlaying}
-          track={track || null}
-          artUrl={track?.art_url || opticalDisc?.art_url || null}
-          bpm={scTrackBpm}
-          waveformBars={scWaveformBars}
-          activeComment={activeBubbles[activeBubbles.length - 1]?.comment || null}
-          comments={scComments}
-          activeChapterLabel={
-            chapterModalItems.find((c) => c.isCurrent)?.title || null
-          }
-          activeLyricLine={
-            activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx]
-              ? lyricsData.synced_lines[activeLyricIdx].text
-              : null
-          }
-          nextLyricLine={
-            activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx + 1]
-              ? lyricsData.synced_lines[activeLyricIdx + 1].text
-              : null
-          }
-          hasLyrics={Boolean(
-            lyricsData &&
-              !lyricsData.instrumental &&
-              (lyricsData.synced_lines.length > 0 ||
-                (lyricsData.plain_lyrics && lyricsData.plain_lyrics.trim().length > 0))
-          )}
-          lyricsMarqueeFallback={
-            lyricsData && !lyricsData.instrumental
-              ? lyricsData.synced_lines.length > 0
-                ? lyricsData.synced_lines
-                    .map((l) => l.text.trim())
-                    .filter(Boolean)
-                    .slice(0, 12)
-                    .join('   ♪   ')
-                : lyricsData.plain_lyrics
-                  ? lyricsData.plain_lyrics
-                      .split(/\r?\n/)
-                      .map((l) => l.trim())
+        <>
+          <PlayerBackgroundVisualizer
+            mode={vizMode}
+            enabledScenes={enabledVizScenes}
+            preferredScene={
+              (trackPropsState.preferred_viz_mode as VisualizerEngine | null | undefined) || null
+            }
+            onActiveEngineChange={setActiveVizEngine}
+            isPlaying={isPlaying}
+            track={track || null}
+            artUrl={track?.art_url || opticalDisc?.art_url || null}
+            bpm={scTrackBpm}
+            waveformBars={scWaveformBars}
+            activeComment={activeBubbles[activeBubbles.length - 1]?.comment || null}
+            comments={scComments}
+            activeChapterLabel={
+              chapterModalItems.find((c) => c.isCurrent)?.title || null
+            }
+            activeLyricLine={
+              activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx]
+                ? lyricsData.synced_lines[activeLyricIdx].text
+                : null
+            }
+            nextLyricLine={
+              activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx + 1]
+                ? lyricsData.synced_lines[activeLyricIdx + 1].text
+                : null
+            }
+            hasLyrics={Boolean(
+              lyricsData &&
+                !lyricsData.instrumental &&
+                (lyricsData.synced_lines.length > 0 ||
+                  (lyricsData.plain_lyrics && lyricsData.plain_lyrics.trim().length > 0))
+            )}
+            lyricsMarqueeFallback={
+              lyricsData && !lyricsData.instrumental
+                ? lyricsData.synced_lines.length > 0
+                  ? lyricsData.synced_lines
+                      .map((l) => l.text.trim())
                       .filter(Boolean)
                       .slice(0, 12)
                       .join('   ♪   ')
+                  : lyricsData.plain_lyrics
+                    ? lyricsData.plain_lyrics
+                        .split(/\r?\n/)
+                        .map((l) => l.trim())
+                        .filter(Boolean)
+                        .slice(0, 12)
+                        .join('   ♪   ')
+                    : null
+                : null
+            }
+            hidden={hidden}
+          />
+          {vizMode !== 'off' && (
+            <VisualizerOverlayHud
+              activeEngine={activeVizEngine}
+              track={track || null}
+              upNextTrack={snap?.up_next && snap.up_next.length > 0 ? snap.up_next[0] : null}
+              positionMs={snap?.position_ms || 0}
+              durationMs={track?.duration_ms || 0}
+              activeLyricLine={
+                lyricsEnabled &&
+                activeLyricIdx >= 0 &&
+                lyricsData?.synced_lines[activeLyricIdx]
+                  ? lyricsData.synced_lines[activeLyricIdx].text
                   : null
-              : null
-          }
-          hidden={hidden}
-        />
+              }
+              nextLyricLine={
+                lyricsEnabled &&
+                activeLyricIdx >= 0 &&
+                lyricsData?.synced_lines[activeLyricIdx + 1]
+                  ? lyricsData.synced_lines[activeLyricIdx + 1].text
+                  : null
+              }
+              activeComment={
+                scCommentsEnabled
+                  ? activeBubbles[activeBubbles.length - 1]?.comment || null
+                  : null
+              }
+              factoidBubbles={factoidBubbles}
+              suppressLyrics={Boolean(trackPropsState.suppress_lyrics)}
+              suppressComments={Boolean(trackPropsState.suppress_comments)}
+              suppressFactoids={Boolean(trackPropsState.suppress_factoids)}
+              isForegroundFaded={isForegroundFaded}
+              idleOpacityPct={idleOpacityPct}
+              oskOrModalOpen={Boolean(playerActionsOpen || vizDrawerOpen)}
+            />
+          )}
+        </>
       )}
 
       {/* Top-Right Up Next Readout Strip — Right-aligned & anchored just beneath the top Nav Bar */}
@@ -3166,11 +3295,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                       </span>
                     </button>
 
-                    {/* 2. Visualizer (Audio tracks) */}
+                    {/* 2. Visualizer Scene Queue & Rotation Drawer (Audio tracks) */}
                     {!isVideoTrack && (
                       <button
                         type="button"
-                        onClick={cycleVisualizerMode}
+                        onClick={() => setVizDrawerOpen(true)}
                         style={{
                           ...actionRowBtnStyle,
                           minHeight: 46,
@@ -3186,7 +3315,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                               'Glyph Matrix'}
                           </span>
                           <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
-                            Glyph • AVS • 64K • Vertigo • Trapper • Cycle • Off
+                            12 Scenes (5 Classic + 7 WASM Moodboard) • {enabledVizScenes.length}/12 in Cycle/Shuffle
                           </span>
                         </div>
                         <span
@@ -3197,7 +3326,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                             color: vizMode !== 'off' ? '#67e8f9' : '#71717a',
                           }}
                         >
-                          {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'}
+                          {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'} ▸
                         </span>
                       </button>
                     )}
@@ -3490,6 +3619,17 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           </div>
         </div>
       )}
+
+      <VisualizerDrawerModal
+        open={vizDrawerOpen}
+        onClose={() => setVizDrawerOpen(false)}
+        vizMode={vizMode}
+        activeEngine={activeVizEngine}
+        enabledScenes={enabledVizScenes}
+        onSelectMode={handleSelectVizMode}
+        onToggleSceneInRotation={handleToggleSceneInRotation}
+        onSetAllScenesInRotation={handleSetAllScenesInRotation}
+      />
     </>
   );
 };

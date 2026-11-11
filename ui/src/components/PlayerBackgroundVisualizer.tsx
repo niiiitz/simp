@@ -1,29 +1,37 @@
 import React, { useEffect, useRef } from 'react';
 import { defaultSimpClient, type SoundCloudComment, type TrackMetadata } from '@simp/client';
+import {
+  getSceneDescriptor,
+  loadEnabledVisualizerScenes,
+   saveEnabledVisualizerScenes,
+  VISUALIZER_ENGINES,
+  VISUALIZER_MODES,
+  VISUALIZER_SCENES,
+  type VisualizerEngine,
+  type VisualizerMode,
+} from './visualizers/sceneRegistry';
+import { isValidAttributedComment } from './visualizers/VisualizerOverlayHud';
+import {
+  ensureWasmVizEngineLoaded,
+  getLoadedWasmVizEngine,
+} from './visualizers/wasmVizBridge';
 
-export type VisualizerMode = 'glyph' | 'avs' | 'demoscene' | 'vertigo' | 'trapper' | 'cycle' | 'off';
-export type VisualizerEngine = 'glyph' | 'avs' | 'demoscene' | 'vertigo' | 'trapper';
-
-export const VISUALIZER_ENGINES: VisualizerEngine[] = [
-  'glyph',
-  'avs',
-  'demoscene',
-  'vertigo',
-  'trapper',
-];
-
-export const VISUALIZER_MODES: { id: VisualizerMode; label: string; shortLabel: string }[] = [
-  { id: 'glyph', label: 'Glyph Matrix', shortLabel: 'GLYPH' },
-  { id: 'avs', label: 'Winamp AVS', shortLabel: 'AVS' },
-  { id: 'demoscene', label: 'Demoscene 64K', shortLabel: '64K' },
-  { id: 'vertigo', label: 'Vertigo Corridor', shortLabel: 'VERTIGO' },
-  { id: 'trapper', label: '90s Bryce Trapper', shortLabel: 'TRAPPER' },
-  { id: 'cycle', label: 'Cycle on Track Change', shortLabel: 'CYCLE' },
-  { id: 'off', label: 'Off', shortLabel: 'OFF' },
-];
+export {
+  getSceneDescriptor,
+  loadEnabledVisualizerScenes,
+  saveEnabledVisualizerScenes,
+  VISUALIZER_ENGINES,
+  VISUALIZER_MODES,
+  VISUALIZER_SCENES,
+  type VisualizerEngine,
+  type VisualizerMode,
+};
 
 interface Props {
   mode: VisualizerMode;
+  enabledScenes?: VisualizerEngine[];
+  preferredScene?: VisualizerEngine | null;
+  onActiveEngineChange?: (engine: VisualizerEngine) => void;
   isPlaying: boolean;
   track: TrackMetadata | null;
   artUrl?: string | null;
@@ -249,13 +257,16 @@ function getRpsLoserSide(left: TrapperShapeKind, right: TrapperShapeKind): 'left
 
 export const PlayerBackgroundVisualizer: React.FC<Props> = ({
   mode,
+  enabledScenes,
+  preferredScene = null,
+  onActiveEngineChange,
   isPlaying,
   track,
   artUrl,
   bpm,
   waveformBars,
-  activeComment,
-  comments,
+  activeComment: rawActiveComment,
+  comments: rawComments,
   activeChapterLabel,
   activeLyricLine,
   nextLyricLine,
@@ -263,9 +274,32 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
   lyricsMarqueeFallback = null,
   hidden = false,
 }) => {
+  // Strictly enforce SoundCloud comment user attribution before any visualizer consumer sees it
+  const activeComment = isValidAttributedComment(rawActiveComment) ? rawActiveComment : null;
+  const comments = React.useMemo(
+    () => (rawComments ? rawComments.filter(isValidAttributedComment) : []),
+    [rawComments],
+  );
+
+  useEffect(() => {
+    ensureWasmVizEngineLoaded();
+  }, []);
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const modeRef = useRef<VisualizerMode>(mode);
   modeRef.current = mode;
+  const enabledScenesRef = useRef<VisualizerEngine[]>(
+    enabledScenes && enabledScenes.length > 0 ? enabledScenes : VISUALIZER_ENGINES,
+  );
+  enabledScenesRef.current =
+    enabledScenes && enabledScenes.length > 0 ? enabledScenes : VISUALIZER_ENGINES;
+  const preferredSceneRef = useRef<VisualizerEngine | null>(preferredScene || null);
+  preferredSceneRef.current = preferredScene || null;
+  const onActiveEngineChangeRef = useRef<((engine: VisualizerEngine) => void) | undefined>(
+    onActiveEngineChange,
+  );
+  onActiveEngineChangeRef.current = onActiveEngineChange;
+  const lastReportedEngineRef = useRef<VisualizerEngine | null>(null);
   const isPlayingRef = useRef<boolean>(isPlaying);
   isPlayingRef.current = isPlaying;
   const hiddenRef = useRef<boolean>(hidden);
@@ -410,16 +444,13 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
     const seed = glitchSeedRef.current;
 
     const lyric = (activeLyricRef.current || '').trim().toUpperCase();
-    const commentBody = (activeCommentRef.current?.body || '').trim().toUpperCase();
     const titleUpper = (trackRef.current?.title || 'SIMP').trim().toUpperCase();
     const sourceText =
       preferLyric && lyric.length > 0
         ? lyric
         : lyric.length > 0 && (seed & 1) === 0
           ? lyric
-          : commentBody.length > 0 && (seed & 3) === 0
-            ? commentBody
-            : titleUpper;
+          : titleUpper;
 
     const words = sourceText
       .replace(/[^A-Z0-9 !?#$&*@/-]/g, '')
@@ -574,7 +605,17 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
     const uriChanged = Boolean(track?.uri && track.uri !== prevTrackUriRef.current);
     const modeChanged = mode !== prevModeRef.current && mode !== 'off';
     if (uriChanged) {
-      cycleIndexRef.current = (cycleIndexRef.current + 1) % VISUALIZER_ENGINES.length;
+      const pool =
+        enabledScenesRef.current.length > 0 ? enabledScenesRef.current : VISUALIZER_ENGINES;
+      if (mode === 'shuffle' && pool.length > 1) {
+        let nextIdx = Math.floor(Math.random() * pool.length);
+        if (nextIdx === cycleIndexRef.current % pool.length) {
+          nextIdx = (nextIdx + 1) % pool.length;
+        }
+        cycleIndexRef.current = nextIdx;
+      } else {
+        cycleIndexRef.current = (cycleIndexRef.current + 1) % pool.length;
+      }
       // Clear any lingering glyph mutations from the previous track
       for (const p of mutationPatchesRef.current) {
         p.active = false;
@@ -1018,10 +1059,20 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
       const buildup = buildupChargeRef.current;
       const palette = paletteRef.current;
       const palAbgr = paletteAbgrRef.current;
-      const activeMode =
-        modeRef.current === 'cycle'
-          ? VISUALIZER_ENGINES[cycleIndexRef.current % VISUALIZER_ENGINES.length]
-          : modeRef.current;
+      const pool =
+        enabledScenesRef.current.length > 0 ? enabledScenesRef.current : VISUALIZER_ENGINES;
+      const activeMode: VisualizerEngine = preferredSceneRef.current
+        ? preferredSceneRef.current
+        : modeRef.current === 'cycle' || modeRef.current === 'shuffle'
+          ? pool[cycleIndexRef.current % pool.length]
+          : (modeRef.current as VisualizerEngine);
+
+      if (lastReportedEngineRef.current !== activeMode) {
+        lastReportedEngineRef.current = activeMode;
+        if (onActiveEngineChangeRef.current) {
+          onActiveEngineChangeRef.current(activeMode);
+        }
+      }
 
       // Exact viewport crop calculation for `objectFit: 'cover'` on ultra-wide displays (21:9, 32:9, etc.)
       const clientW = canvas.clientWidth || CANVAS_W;
@@ -1958,13 +2009,8 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         ctx.stroke();
         ctx.restore();
 
-        // 6. Stable, Un-Clipped Floating 3D Hologram Lyric Banner (ONLY when synced lyrics or timed comment exist!)
-        //    No flickering song title when playing instrumental / non-lyric tracks!
-        const rawOverlayText = (
-          activeLyricRef.current ||
-          activeCommentRef.current?.body ||
-          ''
-        ).trim();
+        // 6. Stable, Un-Clipped Floating 3D Hologram Lyric Banner (ONLY when synced lyrics exist — never unattributed comments!)
+        const rawOverlayText = (activeLyricRef.current || '').trim();
 
         if (rawOverlayText.length > 0) {
           drawVertigoStyleHologram(
@@ -2500,6 +2546,50 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
               0
             );
           }
+        }
+      } else {
+        // =====================================================================
+        // MODES 6–12: RUST + WASM "SMOL ENGINE" MOODBOARD SCENES (a through h)
+        // =====================================================================
+        const sceneDesc = getSceneDescriptor(activeMode);
+        const wasm = getLoadedWasmVizEngine();
+        if (wasm && sceneDesc.wasmSceneId !== null) {
+          wasm.viz_set_bands(
+            Math.round(sb[0] * 255),
+            Math.round(sb[1] * 255),
+            Math.round(sb[2] * 255),
+            Math.round(sb[3] * 255),
+            Math.round(sb[4] * 255),
+            Math.round(sb[5] * 255),
+            Math.round(sb[6] * 255),
+            Math.round(sb[7] * 255),
+            Math.round(sb[8] * 255),
+            Math.round(sb[9] * 255),
+            Math.round(sb[10] * 255),
+            Math.round(sb[11] * 255),
+            Math.round(sb[12] * 255),
+            Math.round(sb[13] * 255),
+            Math.round(sb[14] * 255),
+            Math.round(sb[15] * 255),
+          );
+          wasm.viz_render_frame(
+            sceneDesc.wasmSceneId,
+            timeSec,
+            playheadRatioRef.current,
+            rmsRef.current,
+            peakRef.current,
+            beat,
+            bpmRef.current || 120,
+            trans,
+          );
+          const ptr = wasm.viz_frame_ptr();
+          const wasmPixels = new Uint8ClampedArray(
+            wasm.memory.buffer,
+            ptr,
+            CANVAS_W * CANVAS_H * 4,
+          );
+          const imgData = new ImageData(wasmPixels, CANVAS_W, CANVAS_H);
+          ctx.putImageData(imgData, 0, 0);
         }
       }
     };

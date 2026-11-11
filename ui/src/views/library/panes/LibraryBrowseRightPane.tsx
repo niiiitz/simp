@@ -350,7 +350,7 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
   totalCloudPages,
 }) => {
   const [activeSmartFacet, setActiveSmartFacet] = React.useState<
-    'synced_lyrics' | 'has_art' | 'missing_art' | null
+    'synced_lyrics' | 'has_art' | 'missing_art' | 'has_factoids' | 'has_comments' | null
   >(null);
   const [facetTracks, setFacetTracks] = React.useState<TrackMetadata[]>([]);
   const [facetLoading, setFacetLoading] = React.useState(false);
@@ -805,6 +805,18 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                                 accent: '#34d399',
                               },
                               {
+                                id: 'has_factoids' as const,
+                                icon: 'factoid' as const,
+                                label: 'Pop-Up Factoids',
+                                accent: '#c084fc',
+                              },
+                              {
+                                id: 'has_comments' as const,
+                                icon: 'comments' as const,
+                                label: 'Timed Comments',
+                                accent: '#fb923c',
+                              },
+                              {
                                 id: 'has_art' as const,
                                 icon: 'artwork' as const,
                                 label: 'Has Artwork',
@@ -871,6 +883,10 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                               name={
                                 activeSmartFacet === 'synced_lyrics'
                                   ? 'lyrics'
+                                  : activeSmartFacet === 'has_factoids'
+                                  ? 'factoid'
+                                  : activeSmartFacet === 'has_comments'
+                                  ? 'comments'
                                   : activeSmartFacet === 'has_art'
                                   ? 'artwork'
                                   : 'artwork-missing'
@@ -882,6 +898,10 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                               Smart Facet:{' '}
                               {activeSmartFacet === 'synced_lyrics'
                                 ? 'Synced Lyrics (Karaoke Ready)'
+                                : activeSmartFacet === 'has_factoids'
+                                ? 'Tracks with Pop-Up Video Factoids'
+                                : activeSmartFacet === 'has_comments'
+                                ? 'Tracks with Attributed Timed Comments'
                                 : activeSmartFacet === 'has_art'
                                 ? 'Tracks with Cover Artwork'
                                 : 'Tracks Missing Cover Artwork'}{' '}

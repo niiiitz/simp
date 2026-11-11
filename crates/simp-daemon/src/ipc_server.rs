@@ -183,6 +183,8 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/apple/open", get(apple_open_handler))
         .route("/api/lyrics", get(lyrics_handler))
         .route("/api/lyrics/refetch", post(lyrics_refetch_handler))
+        .route("/api/factoids", get(factoids_handler))
+        .route("/api/factoids/refetch", post(factoids_refetch_handler))
         .route(
             "/api/library/track-properties",
             get(track_properties_get_handler).post(track_properties_post_handler),
@@ -1068,8 +1070,25 @@ async fn soundcloud_comments_handler(
 ) -> impl IntoResponse {
     let cfg = state.settings.lock().unwrap().clone();
     let id = params.get("id").cloned().unwrap_or_default();
+    let db = state.db.clone();
+    let id_for_db = id.clone();
     let res = tokio::task::spawn_blocking(move || {
-        simp_core::sinks::soundcloud_api::fetch_track_comments(&cfg, &id)
+        let res = simp_core::sinks::soundcloud_api::fetch_track_comments(&cfg, &id);
+        if let Ok(ref list) = res {
+            let uri_key = if id_for_db.starts_with("soundcloud://") {
+                id_for_db
+            } else {
+                format!("soundcloud://track/{}", id_for_db.trim())
+            };
+            let _ = db.upsert_track_properties_patch(
+                &uri_key,
+                &simp_core::library::db::TrackPropertiesPatch {
+                    has_comments: Some(!list.is_empty()),
+                    ..Default::default()
+                },
+            );
+        }
+        res
     })
     .await;
     match res {
@@ -1390,6 +1409,112 @@ async fn lyrics_refetch_handler(
             "data": lyrics,
             "properties": props,
         })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn factoids_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let uri = params.get("uri").cloned().unwrap_or_default();
+    let title = params.get("title").cloned().unwrap_or_default();
+    let artist = params.get("artist").cloned().unwrap_or_default();
+    let album = params.get("album").cloned().filter(|s| !s.trim().is_empty());
+    let duration_ms: u32 = params
+        .get("duration_ms")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(180_000);
+    let db = state.db.clone();
+
+    let res = tokio::task::spawn_blocking(move || {
+        let uri_ref = if uri.trim().is_empty() {
+            None
+        } else {
+            Some(uri.as_str())
+        };
+        if let Some(u) = uri_ref {
+            if let Ok(props) = db.get_track_properties(u) {
+                if props.suppress_factoids {
+                    return simp_core::factoids::TrackFactoidsResponse {
+                        found: false,
+                        provider: "suppressed".to_string(),
+                        bubbles: Vec::new(),
+                    };
+                }
+            }
+        }
+        let factoids = simp_core::factoids::fetch_track_factoids(
+            uri_ref,
+            &title,
+            &artist,
+            album.as_deref(),
+            duration_ms,
+        );
+        if let Some(u) = uri_ref {
+            let _ = db.upsert_track_properties_patch(
+                u,
+                &simp_core::library::db::TrackPropertiesPatch {
+                    has_factoids: Some(factoids.found),
+                    ..Default::default()
+                },
+            );
+        }
+        factoids
+    })
+    .await;
+
+    match res {
+        Ok(data) => Json(serde_json::json!({ "ok": true, "data": data })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FactoidsRefetchBody {
+    uri: Option<String>,
+    title: String,
+    artist: String,
+    album: Option<String>,
+    duration_ms: Option<u32>,
+}
+
+async fn factoids_refetch_handler(
+    State(state): State<DaemonIpcState>,
+    Json(body): Json<FactoidsRefetchBody>,
+) -> impl IntoResponse {
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let uri_ref = body.uri.as_deref().filter(|s| !s.trim().is_empty());
+        simp_core::factoids::clear_cached_factoids_for_track(
+            uri_ref,
+            &body.title,
+            &body.artist,
+            body.album.as_deref(),
+        );
+        let factoids = simp_core::factoids::fetch_track_factoids(
+            uri_ref,
+            &body.title,
+            &body.artist,
+            body.album.as_deref(),
+            body.duration_ms.unwrap_or(180_000),
+        );
+        if let Some(u) = uri_ref {
+            let _ = db.upsert_track_properties_patch(
+                u,
+                &simp_core::library::db::TrackPropertiesPatch {
+                    has_factoids: Some(factoids.found),
+                    suppress_factoids: Some(false),
+                    ..Default::default()
+                },
+            );
+        }
+        factoids
+    })
+    .await;
+
+    match res {
+        Ok(data) => Json(serde_json::json!({ "ok": true, "data": data })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
 }

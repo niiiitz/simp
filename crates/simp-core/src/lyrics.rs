@@ -67,12 +67,23 @@ fn open_lyrics_db_conn() -> Option<Connection> {
             fetched_at    INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_lyrics_entries_uri ON lyrics_entries(track_uri);
+        CREATE TABLE IF NOT EXISTS factoid_entries (
+            track_key     TEXT PRIMARY KEY,
+            track_uri     TEXT NOT NULL DEFAULT '',
+            title         TEXT NOT NULL DEFAULT '',
+            artist        TEXT NOT NULL DEFAULT '',
+            album         TEXT NOT NULL DEFAULT '',
+            factoids_json TEXT NOT NULL DEFAULT '[]',
+            provider      TEXT NOT NULL DEFAULT 'none',
+            fetched_at    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_factoid_entries_uri ON factoid_entries(track_uri);
         ",
     );
     Some(conn)
 }
 
-fn with_lyrics_db<F, R>(f: F) -> Option<R>
+pub(crate) fn with_lyrics_db<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&Connection) -> Option<R>,
 {

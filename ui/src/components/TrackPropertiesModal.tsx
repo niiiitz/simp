@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ImpIcon } from './icons/ImpIcon';
 import { getSourceThemeForTrack, getSourceThemeCssVars } from '../theme/sourceTheme';
+import { VISUALIZER_SCENES } from './visualizers/sceneRegistry';
 
 export interface TrackPropertiesData {
   uri: string;
@@ -135,6 +136,50 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
       }
     } catch {
       if (onToast) onToast('Failed to refetch lyrics');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleRefetchFactoids = async () => {
+    if (!track.uri) return;
+    setBusyAction('factoids');
+    try {
+      const resp = await fetch('http://127.0.0.1:18888/api/factoids/refetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uri: track.uri,
+          title: track.title,
+          artist: (track.artists || []).join(', '),
+          album: track.album || '',
+          duration_ms: track.duration_ms || 0,
+        }),
+      });
+      const json = await resp.json();
+      if (json?.ok) {
+        if (json.properties) setPropsData(json.properties);
+        window.dispatchEvent(
+          new CustomEvent('simp-track-properties-updated', {
+            detail: {
+              uri: track.uri,
+              properties: json.properties,
+              factoids: json.data,
+            },
+          }),
+        );
+        const found = json.data?.found;
+        const count = json.data?.bubbles?.length || 0;
+        if (onToast) {
+          onToast(
+            found && count > 0
+              ? `Refetched ${count} Pop-Up Factoid bubble${count === 1 ? '' : 's'}`
+              : 'Cleared factoid cache — no encyclopedia trivia found',
+          );
+        }
+      }
+    } catch {
+      if (onToast) onToast('Failed to refetch Pop-Up Factoids');
     } finally {
       setBusyAction(null);
     }
@@ -576,6 +621,85 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
                     ? 'Pop-Up Factoids: Suppressed'
                     : 'Suppress Pop-Up Factoids on Track'}
                 </button>
+
+                <button
+                  data-focusable="true"
+                  disabled={busyAction === 'factoids'}
+                  onClick={handleRefetchFactoids}
+                  style={{
+                    padding: '7px 12px',
+                    borderRadius: 8,
+                    border: `1px solid ${theme.accentBorder}`,
+                    background: theme.accentMuted,
+                    color: theme.accent,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: busyAction === 'factoids' ? 'wait' : 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <ImpIcon name="refresh" size={14} />
+                  {busyAction === 'factoids' ? 'Refetching Factoids…' : 'Refetch Pop-Up Factoids'}
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8' }}>
+                  Preferred Visualizer Scene (Per-Track Override)
+                </span>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  <button
+                    data-focusable="true"
+                    onClick={() => applyPatch({ preferred_viz_mode: '' }, 'Cleared per-track visualizer override')}
+                    style={{
+                      padding: '5px 10px',
+                      borderRadius: 999,
+                      border: !propsData?.preferred_viz_mode
+                        ? `1px solid ${theme.accentBorder}`
+                        : '1px solid rgba(255,255,255,0.12)',
+                      background: !propsData?.preferred_viz_mode
+                        ? theme.accentMuted
+                        : 'rgba(255,255,255,0.04)',
+                      color: !propsData?.preferred_viz_mode ? theme.accent : '#cbd5e1',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Global Default
+                  </button>
+                  {VISUALIZER_SCENES.map((meta) => {
+                    const active = propsData?.preferred_viz_mode === meta.id;
+                    return (
+                      <button
+                        key={meta.id}
+                        data-focusable="true"
+                        onClick={() =>
+                          applyPatch(
+                            { preferred_viz_mode: meta.id },
+                            `Pinned visualizer "${meta.shortLabel}" to this track`,
+                          )
+                        }
+                        style={{
+                          padding: '5px 10px',
+                          borderRadius: 999,
+                          border: active
+                            ? `1px solid ${theme.accentBorder}`
+                            : '1px solid rgba(255,255,255,0.12)',
+                          background: active ? theme.accentMuted : 'rgba(255,255,255,0.04)',
+                          color: active ? theme.accent : '#cbd5e1',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {meta.shortLabel}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </>

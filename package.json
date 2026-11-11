@@ -1,7 +1,7 @@
 {
   "name": "simp-workspace",
   "private": true,
-  "version": "0.2.4",
+  "version": "0.3.0-alpha.1",
   "workspaces": [
     "packages/simp-client",
     "ui",

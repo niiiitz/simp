@@ -4,11 +4,12 @@ members = [
     "crates/simp-protocol",
     "crates/simp-core",
     "crates/simp-daemon",
+    "crates/simp-viz-engine",
     "src-tauri",
 ]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.3.0-alpha.1"
 edition = "2021"
 license = "LicenseRef-Proprietary"
 authors = ["niiiitz"]

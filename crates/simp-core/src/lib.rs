@@ -1,3 +1,4 @@
+pub mod factoids;
 pub mod gamepad;
 pub mod http_pool;
 pub mod library;

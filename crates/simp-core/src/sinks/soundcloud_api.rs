@@ -2927,9 +2927,19 @@ pub fn fetch_track_comments(
         let username = item
             .pointer("/user/username")
             .and_then(|v| v.as_str())
-            .unwrap_or("listener")
+            .or_else(|| item.pointer("/user/full_name").and_then(|v| v.as_str()))
+            .or_else(|| item.pointer("/user/permalink").and_then(|v| v.as_str()))
+            .unwrap_or("")
             .trim()
             .to_string();
+        if username.is_empty()
+            || username.eq_ignore_ascii_case("listener")
+            || username.eq_ignore_ascii_case("anonymous")
+            || username.eq_ignore_ascii_case("unknown")
+            || username.eq_ignore_ascii_case("deleted")
+        {
+            continue;
+        }
         let avatar_url = item
             .pointer("/user/avatar_url")
             .and_then(|v| v.as_str())
