@@ -14,6 +14,7 @@ import { isValidAttributedComment } from './visualizers/VisualizerOverlayHud';
 import {
   CANVAS_H,
   CANVAS_W,
+  drawMicroPartyCommentPill,
   RENDER_SCALE,
   type SceneRenderContext,
 } from './visualizers/scenes/types';
@@ -550,54 +551,14 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
     const artistUpper = (track.artists?.join(', ') || 'UNKNOWN ARTIST').toUpperCase();
     const bpmTag = bpm && bpm > 0 ? ` // ${Math.round(bpm)} BPM` : '';
     const chTag = activeChapterLabel ? ` // ${activeChapterLabel.toUpperCase()}` : '';
-    const activeCommentTag = activeComment
-      ? ` ★ @${activeComment.username.toUpperCase()}: "${activeComment.body.toUpperCase()}" ★ `
-      : '';
-
     glyphTextStripRef.current = activeLyricLine
       ? `>> ♪ ${activeLyricLine.toUpperCase()} ♪ <<      `
-      : activeComment
-        ? `>> @${activeComment.username.toUpperCase()}: ${activeComment.body.toUpperCase()} <<      `
-        : `// ${titleUpper} :: ${artistUpper}${bpmTag}${chTag} //      `;
+      : `// ${titleUpper} :: ${artistUpper}${bpmTag}${chTag} //      `;
 
-    const hasScComments = Boolean((comments && comments.length > 0) || activeComment);
-    const hasTrackLyrics = Boolean(
-      hasLyrics ||
-        activeLyricLine ||
-        (lyricsMarqueeFallback && lyricsMarqueeFallback.trim().length > 0)
-    );
-
-    const shoutoutsSample =
-      comments && comments.length > 0
-        ? comments
-            .slice(0, 15)
-            .map((c) => `@${c.username.toUpperCase()}: "${c.body.toUpperCase()}"`)
-            .join('   ///   ')
-        : '';
-
-    // DEMOSCENE & TRAPPER Marquee Priority Logic:
-    // 1. If Lyrics found AND SC comments found -> Marquee displays SC shoutouts (while Lyrics render in Vertigo-style hologram)
-    // 2. If Lyrics found AND NO SC comments -> Marquee displays Lyrics
-    // 3. If NO SC comments AND NO Lyrics found -> Marquee displays Track Title
-    // 4. If SC comments found AND NO Lyrics found -> Marquee displays SC shoutouts
-    if (hasScComments && hasTrackLyrics) {
-      scrollerTextRef.current = activeCommentTag
-        ? `   ${activeCommentTag.trim()}   ${shoutoutsSample ? `///   SHOUTOUTS: ${shoutoutsSample}   ` : ''}`
-        : `   SHOUTOUTS: ${shoutoutsSample}   `;
-    } else if (!hasScComments && hasTrackLyrics) {
-      const lyricMarqueeBody = activeLyricLine
-        ? nextLyricLine
-          ? `♪ ${activeLyricLine.toUpperCase()} ♪   //   ♪ ${nextLyricLine.toUpperCase()} ♪`
-          : `♪ ${activeLyricLine.toUpperCase()} ♪`
-        : `♪ ${(lyricsMarqueeFallback || titleUpper).toUpperCase()} ♪`;
-      scrollerTextRef.current = `   ${lyricMarqueeBody}   `;
-    } else if (!hasScComments && !hasTrackLyrics) {
-      scrollerTextRef.current = `   *** ${titleUpper} — ${artistUpper}${bpmTag}${chTag} ***   `;
-    } else {
-      scrollerTextRef.current = activeCommentTag
-        ? `   ${activeCommentTag.trim()}   ${shoutoutsSample ? `///   SHOUTOUTS: ${shoutoutsSample}   ` : ''}`
-        : `   SHOUTOUTS: ${shoutoutsSample}   ///   ${titleUpper} — ${artistUpper}   `;
-    }
+    // DEMOSCENE & TRAPPER Bottom Sine-Wave Marquee:
+    // Lyrics always render in the top AVS-style floating hologram and timed SoundCloud comments
+    // render in the bottom Micro-Party pop-over pill, so the sine scroller stays dedicated to track metadata.
+    scrollerTextRef.current = `   *** ${titleUpper} — ${artistUpper}${bpmTag}${chTag} ***   `;
   }, [
     track,
     bpm,
@@ -1173,11 +1134,9 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
 
         ctx.save();
         ctx.translate(holoX, holoY);
-        // Gentle, readable perspective float (never full camRoll spin!)
-        ctx.rotate(Math.sin(timeSec * 0.9) * 0.025);
 
-        // Translucent borderless backing pill (no hard border lines)
-        ctx.fillStyle = `rgba(6, 7, 12, ${(0.72 * reveal).toFixed(2)})`;
+        // Translucent borderless backing pill (matches AVS lyric style)
+        ctx.fillStyle = `rgba(6, 7, 12, ${(0.68 * reveal).toFixed(2)})`;
         ctx.beginPath();
         if (typeof ctx.roundRect === 'function') {
           ctx.roundRect(-boxW * 0.5, -boxH * 0.5, boxW, boxH, 10);
@@ -1190,16 +1149,43 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
+        // Subtle upper tunnel-echo ghost stamp (matches AVS tunnel echo depth)
+        ctx.fillStyle = rgbToCss(palette[5], (0.18 + beat * 0.12) * reveal);
+        for (let li = 0; li < lines.length; li++) {
+          const ly = (li - (lines.length - 1) * 0.5) * lineH;
+          ctx.fillText(lines[li], 0, ly - 5);
+        }
+
         for (let li = 0; li < lines.length; li++) {
           const ly = (li - (lines.length - 1) * 0.5) * lineH;
           // Subtle cyan/palette drop-shadow for crisp legibility over bright visualizer elements
           ctx.fillStyle = rgbToCss(palette[4], 0.85 * reveal);
           ctx.fillText(lines[li], 1.5, ly + 1.5);
-          ctx.fillStyle = rgbToCss(palette[7], 0.96 * reveal);
+          ctx.fillStyle = rgbToCss(palette[7], (0.92 + beat * 0.08) * reveal);
           ctx.fillText(lines[li], 0, ly);
         }
         ctx.restore();
       };
+
+      // Strictly use the temporal timed comment (`activeCommentRef.current`) so comments
+      // appear only during their timed window along the track and never loop endlessly.
+      const effectiveComment: SoundCloudComment | null = activeCommentRef.current || null;
+      let effectiveAvatarImg: HTMLImageElement | null = null;
+      if (effectiveComment?.avatar_url) {
+        const avUrl = effectiveComment.avatar_url;
+        const cachedAv = avatarImgCacheRef.current.get(avUrl);
+        if (cachedAv) {
+          effectiveAvatarImg = cachedAv.complete && cachedAv.naturalWidth > 0 ? cachedAv : null;
+        } else {
+          if (avatarImgCacheRef.current.size > 48) {
+            avatarImgCacheRef.current.clear();
+          }
+          const avImg = new Image();
+          avImg.crossOrigin = 'anonymous';
+          avatarImgCacheRef.current.set(avUrl, avImg);
+          avImg.src = avUrl;
+        }
+      }
 
       // =======================================================================
       // MODE 1: GLYPH MATRIX (Single-Shot Uint32Array + Unstretched Panning Art
@@ -1437,6 +1423,18 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           ctx.drawImage(blitCanvas, 0, 0, CANVAS_W, CANVAS_H);
           ctx.imageSmoothingEnabled = prevSmooth;
         }
+
+        // Micro-Party style SoundCloud timed comment pop-over pill on Glyph Matrix
+        drawMicroPartyCommentPill(
+          ctx,
+          effectiveComment,
+          effectiveAvatarImg || commentAvatarImgRef.current,
+          palette,
+          timeSec,
+          beat,
+          cropBottomY,
+          false
+        );
       }
 
       // =======================================================================
@@ -1610,6 +1608,18 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           }
           ctx.restore();
         }
+
+        // Micro-Party style SoundCloud timed comment pop-over pill on AVS (drawn after feedback capture)
+        drawMicroPartyCommentPill(
+          ctx,
+          effectiveComment,
+          effectiveAvatarImg || commentAvatarImgRef.current,
+          palette,
+          timeSec,
+          beat,
+          cropBottomY,
+          false
+        );
       }
 
       // =======================================================================
@@ -1725,9 +1735,9 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         }
         ctx.restore();
 
-        // 5. Classic DYCP Sine-Wave Scroller (with live synced lyrics!)
+        // 5. Classic DYCP Sine-Wave Scroller (track title/artist/BPM when no timed SC comment pop-over is active)
         const scroller = scrollerTextRef.current;
-        if (scroller.length > 0) {
+        if (scroller.length > 0 && !effectiveComment) {
           const charW = 13;
           const scrollPx = Math.floor(timeSec * 95);
           const firstCharIdx = Math.floor(scrollPx / charW);
@@ -1751,17 +1761,27 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           }
         }
 
-        // 6. Vertigo-Style Floating 3D Hologram Lyrics when BOTH Lyrics AND SC Comments are present
-        if (hasScCommentsRef.current && hasLyricsRef.current) {
-          const demoLyricText = (activeLyricRef.current || '').trim();
-          if (demoLyricText.length > 0) {
-            drawVertigoStyleHologram(
-              demoLyricText,
-              SIN_F32[Math.floor(timeSec * 22) & 255] * 8,
-              0
-            );
-          }
+        // 6. Preferred AVS-Style Floating 3D Hologram Lyrics (always used when lyrics are active)
+        const demoLyricText = (activeLyricRef.current || '').trim();
+        if (demoLyricText.length > 0) {
+          drawVertigoStyleHologram(
+            demoLyricText,
+            SIN_F32[Math.floor(timeSec * 22) & 255] * 4,
+            0
+          );
         }
+
+        // 7. Micro-Party style SoundCloud timed comment pop-over pill
+        drawMicroPartyCommentPill(
+          ctx,
+          effectiveComment,
+          effectiveAvatarImg || commentAvatarImgRef.current,
+          palette,
+          timeSec,
+          beat,
+          cropBottomY,
+          false
+        );
       }
 
       // =======================================================================
@@ -2055,6 +2075,18 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
             (ringCy[6] - CANVAS_H * 0.5) * 0.05
           );
         }
+
+        // 7. Micro-Party style SoundCloud timed comment pop-over pill
+        drawMicroPartyCommentPill(
+          ctx,
+          effectiveComment,
+          effectiveAvatarImg || commentAvatarImgRef.current,
+          palette,
+          timeSec,
+          beat,
+          cropBottomY,
+          false
+        );
       }
 
       // =======================================================================
@@ -2545,9 +2577,9 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           }
         }
 
-        // 4. 3D Sine-Wave Demoscene Lyric & Greetz Scroller near the floor level (matching Demoscene 64K)
+        // 4. 3D Sine-Wave Demoscene Greetz Scroller near the floor level (when no timed SC comment pop-over is active)
         const scroller = scrollerTextRef.current;
-        if (scroller.length > 0) {
+        if (scroller.length > 0 && !effectiveComment) {
           const charW = 14;
           const scrollPx = Math.floor(timeSec * 102);
           const firstCharIdx = Math.floor(scrollPx / charW);
@@ -2572,42 +2604,31 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           }
         }
 
-        // 5. Vertigo-Style Floating 3D Hologram Lyrics when BOTH Lyrics AND SC Comments are present
-        if (hasScCommentsRef.current && hasLyricsRef.current) {
-          const trapperLyricText = (activeLyricRef.current || '').trim();
-          if (trapperLyricText.length > 0) {
-            drawVertigoStyleHologram(
-              trapperLyricText,
-              Math.sin(timeSec * 0.52) * 7,
-              0
-            );
-          }
+        // 5. Preferred AVS-Style Floating 3D Hologram Lyrics (always used when lyrics are active)
+        const trapperLyricText = (activeLyricRef.current || '').trim();
+        if (trapperLyricText.length > 0) {
+          drawVertigoStyleHologram(
+            trapperLyricText,
+            Math.sin(timeSec * 0.52) * 4,
+            0
+          );
         }
+
+        // 6. Micro-Party style SoundCloud timed comment pop-over pill
+        drawMicroPartyCommentPill(
+          ctx,
+          effectiveComment,
+          effectiveAvatarImg || commentAvatarImgRef.current,
+          palette,
+          timeSec,
+          beat,
+          cropBottomY,
+          false
+        );
       } else {
         // =====================================================================
         // MODES 6–12: HIGH-DPI CANVAS2D MOODBOARD SCENES (a through h)
         // =====================================================================
-        // Strictly use the temporal timed comment (`activeCommentRef.current`) so comments
-        // appear only during their timed window along the track and never loop endlessly.
-        const effectiveComment: SoundCloudComment | null = activeCommentRef.current || null;
-
-        let effectiveAvatarImg: HTMLImageElement | null = null;
-        if (effectiveComment?.avatar_url) {
-          const avUrl = effectiveComment.avatar_url;
-          const cachedAv = avatarImgCacheRef.current.get(avUrl);
-          if (cachedAv) {
-            effectiveAvatarImg = cachedAv.complete && cachedAv.naturalWidth > 0 ? cachedAv : null;
-          } else {
-            if (avatarImgCacheRef.current.size > 48) {
-              avatarImgCacheRef.current.clear();
-            }
-            const avImg = new Image();
-            avImg.crossOrigin = 'anonymous';
-            avatarImgCacheRef.current.set(avUrl, avImg);
-            avImg.src = avUrl;
-          }
-        }
-
         const sceneCtx: SceneRenderContext = {
           ctx,
           timeSec,

@@ -1,9 +1,10 @@
 import {
   CANVAS_H,
   CANVAS_W,
+  drawAvsFloatingLyric,
+  drawMicroPartyCommentPill,
   lerpRgb,
   rgbToCss,
-  splitIntoBalancedLines,
   type SceneRenderContext,
 } from './types';
 
@@ -42,7 +43,6 @@ export function renderRhythmScene(s: SceneRenderContext): void {
     artCanvas,
     artReady,
     activeLyric,
-    nextLyric,
     activeComment,
     commentAvatarImg,
     cropTopY,
@@ -511,44 +511,10 @@ export function renderRhythmScene(s: SceneRenderContext): void {
     ctx.restore();
   }
 
-  // 7. Diegetic Concert Truss LED Lyric Banner OR WarioWare Beat Micro-Prompt
+  // 7. AVS-Style Floating 3D Chromatic Lyric Overlay OR WarioWare Beat Micro-Prompt
   const cleanLyric = (activeLyric || '').trim();
   if (cleanLyric.length > 0) {
-    const lines = splitIntoBalancedLines(cleanLyric.toUpperCase(), 38);
-    const bannerY = Math.max(cropTopY + 14, jumboY - 38);
-    const boxW = Math.min(CANVAS_W - 60, Math.max(220, lines[0].length * 8.6 + 34));
-    const boxH = lines.length > 1 ? 38 : 24;
-
-    ctx.save();
-    ctx.fillStyle = 'rgba(5, 8, 18, 0.88)';
-    ctx.strokeStyle = rgbToCss(palette[6], 0.92);
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.roundRect(cx - boxW * 0.5, bannerY, boxW, boxH, 7);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.font = '900 12.5px "JetBrains Mono", "Fira Code", monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#fef9c3';
-    for (let li = 0; li < lines.length; li++) {
-      ctx.fillText(
-        `♪ ${lines[li]} ♪`,
-        cx,
-        bannerY + (lines.length > 1 ? 11 + li * 15 : boxH * 0.5),
-      );
-    }
-    if (nextLyric && lines.length === 1) {
-      ctx.font = '700 9.5px "JetBrains Mono", monospace';
-      ctx.fillStyle = rgbToCss(palette[5], 0.82);
-      ctx.fillText(
-        nextLyric.trim().slice(0, 48).toUpperCase(),
-        cx,
-        bannerY + boxH + 10,
-      );
-    }
-    ctx.restore();
+    drawAvsFloatingLyric(ctx, cleanLyric, palette, timeSec, beat, cropTopY, 1, 0, 0);
   } else if (beat > 0.42 || drop > 0.3) {
     // Autonomous WarioWare / Arcade Fever callout on strong beats when no lyrics are active
     const promptIdx = Math.floor(timeSec * 0.75) % MICRO_PROMPTS.length;
@@ -569,58 +535,16 @@ export function renderRhythmScene(s: SceneRenderContext): void {
   }
 
   // 8. Diegetic Front-Row Crowd Fan Sign for Attributed `@username` Comments
-  if (activeComment && activeComment.username && activeComment.body) {
-    const signW = 250;
-    const signH = 38;
-    const signX = cx + Math.sin(timeSec * 1.8) * 14 - signW * 0.5;
-    const signY = Math.min(cropBottomY - 52, CANVAS_H - 64) - bounce * 5;
-
-    ctx.save();
-    // Wooden/neon sign posts held up by the crowd
-    ctx.strokeStyle = rgbToCss(palette[5], 0.85);
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.moveTo(signX + 36, signY + signH);
-    ctx.lineTo(signX + 32, signY + signH + 22);
-    ctx.moveTo(signX + signW - 36, signY + signH);
-    ctx.lineTo(signX + signW - 32, signY + signH + 22);
-    ctx.stroke();
-
-    ctx.fillStyle = 'rgba(8, 10, 22, 0.92)';
-    ctx.strokeStyle = rgbToCss(palette[7], 0.95);
-    ctx.lineWidth = 1.8;
-    ctx.beginPath();
-    ctx.roundRect(signX, signY, signW, signH, 9);
-    ctx.fill();
-    ctx.stroke();
-
-    let textStartX = signX + 12;
-    if (commentAvatarImg) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(signX + 21, signY + signH * 0.5, 12, 0, Math.PI * 2);
-      ctx.clip();
-      ctx.drawImage(commentAvatarImg, signX + 9, signY + signH * 0.5 - 12, 24, 24);
-      ctx.restore();
-      textStartX = signX + 39;
-    }
-
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.font = '800 9.5px "JetBrains Mono", monospace';
-    ctx.fillStyle = rgbToCss(palette[6], 0.98);
-    ctx.fillText(`@${activeComment.username}`, textStartX, signY + 12);
-
-    ctx.font = '700 10.5px sans-serif';
-    ctx.fillStyle = '#f8fafc';
-    const maxBody = activeComment.body.trim().slice(0, 34);
-    ctx.fillText(
-      `“${maxBody}${activeComment.body.length > 34 ? '…' : ''}”`,
-      textStartX,
-      signY + 26,
-    );
-    ctx.restore();
-  }
+  drawMicroPartyCommentPill(
+    ctx,
+    activeComment,
+    commentAvatarImg,
+    palette,
+    timeSec,
+    beat,
+    cropBottomY,
+    true,
+  );
 
   // 9. Arcade Strobe Curtain Transition Effect (`trans > 0.01`)
   if (trans > 0.01) {
