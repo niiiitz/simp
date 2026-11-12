@@ -128,6 +128,23 @@ fn resolve_tray_icon_path() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
+fn resolve_dock_icon_path() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("../Resources/SIMP.icns"));
+            candidates.push(exe_dir.join("../../dist/SIMP.app/Contents/Resources/SIMP.icns"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("dist/SIMP.app/Contents/Resources/SIMP.icns"));
+    }
+    if let Some(icns) = candidates.into_iter().find(|p| p.is_file()) {
+        return Some(icns);
+    }
+    resolve_tray_icon_path()
+}
+
 unsafe fn load_simp_nsimage(size_pt: f64) -> id {
     if let Some(path) = resolve_tray_icon_path() {
         if let Some(path_str) = path.to_str() {
@@ -136,6 +153,20 @@ unsafe fn load_simp_nsimage(size_pt: f64) -> id {
             let img: id = msg_send![img, initWithContentsOfFile: ns_path];
             if img != nil {
                 let _: () = msg_send![img, setSize: NSSize::new(size_pt, size_pt)];
+                return img;
+            }
+        }
+    }
+    nil
+}
+
+unsafe fn load_simp_dock_nsimage() -> id {
+    if let Some(path) = resolve_dock_icon_path() {
+        if let Some(path_str) = path.to_str() {
+            let ns_path = ns_string(path_str);
+            let img: id = msg_send![class!(NSImage), alloc];
+            let img: id = msg_send![img, initWithContentsOfFile: ns_path];
+            if img != nil {
                 return img;
             }
         }
@@ -540,8 +571,8 @@ pub fn run_macos_native_app(ui_url: &str) {
         let app = NSApp();
         app.setActivationPolicy_(NSApplicationActivationPolicyRegular);
 
-        // Set application Dock icon if running unbundled (e.g. `target/debug/simp`)
-        let dock_icon = load_simp_nsimage(256.0);
+        // Set application Dock icon from SIMP.icns (with proper macOS 824x824 squircle padding)
+        let dock_icon = load_simp_dock_nsimage();
         if dock_icon != nil {
             let _: () = msg_send![app, setApplicationIconImage: dock_icon];
         }

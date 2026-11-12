@@ -222,21 +222,102 @@ fi
 "${CARGO_BIN}" build --release -p simp --offline
 BUILT_BIN="${REPO_ROOT}/target/release/simp"
 
-echo "3/5 Generating macOS SIMP.icns icon set..."
+echo "3/5 Generating macOS SIMP.icns icon set (Apple HIG 824x824 squircle in 1024x1024 canvas)..."
 ICON_SRC="${REPO_ROOT}/ui/public/simp-icon-dark.png"
 ICONSET_DIR="${REPO_ROOT}/dist/SIMP.iconset"
-rm -rf "${ICONSET_DIR}" "${APP_BUNDLE}" "${ZIP_ARCHIVE}"
+PADDED_MASTER="${REPO_ROOT}/dist/.simp-macos-master-1024.png"
+rm -rf "${ICONSET_DIR}" "${PADDED_MASTER}" "${APP_BUNDLE}" "${ZIP_ARCHIVE}"
 mkdir -p "${ICONSET_DIR}" \
   "${APP_BUNDLE}/Contents/MacOS" \
   "${APP_BUNDLE}/Contents/Resources/ui"
 
+ICON_SRC="${ICON_SRC}" PADDED_MASTER="${PADDED_MASTER}" swift - <<'SWIFT'
+import AppKit
+import Foundation
+
+let srcPath = ProcessInfo.processInfo.environment["ICON_SRC"]!
+let outPath = ProcessInfo.processInfo.environment["PADDED_MASTER"]!
+
+guard let srcImage = NSImage(contentsOfFile: srcPath) else {
+    fputs("Failed to load ICON_SRC: \(srcPath)\n", stderr)
+    exit(1)
+}
+
+// Apple macOS Big Sur / Sonoma / Sequoia icon grid:
+// - Canvas: 1024 x 1024 transparent
+// - Squircle tile: 824 x 824 centered (100px margin on all 4 sides)
+// - Corner radius: 185px (~22.45% of 824)
+let canvasSize = 1024
+let tileSize: CGFloat = 824.0
+let margin: CGFloat = (CGFloat(canvasSize) - tileSize) / 2.0
+let radius: CGFloat = 185.0
+
+guard let rep = NSBitmapImageRep(
+    bitmapDataPlanes: nil,
+    pixelsWide: canvasSize,
+    pixelsHigh: canvasSize,
+    bitsPerSample: 8,
+    samplesPerPixel: 4,
+    hasAlpha: true,
+    isPlanar: false,
+    colorSpaceName: .deviceRGB,
+    bytesPerRow: 0,
+    bitsPerPixel: 0
+) else {
+    exit(1)
+}
+rep.size = NSSize(width: canvasSize, height: canvasSize)
+
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+NSGraphicsContext.current?.imageInterpolation = .high
+
+let tileRect = NSRect(x: margin, y: margin, width: tileSize, height: tileSize)
+let clipPath = NSBezierPath(roundedRect: tileRect, xRadius: radius, yRadius: radius)
+
+// 1. Subtle macOS Dock drop shadow behind the squircle
+NSGraphicsContext.saveGraphicsState()
+let shadow = NSShadow()
+shadow.shadowOffset = NSSize(width: 0, height: -10)
+shadow.shadowBlurRadius = 24
+shadow.shadowColor = NSColor(calibratedWhite: 0.0, alpha: 0.38)
+shadow.set()
+NSColor.black.setFill()
+clipPath.fill()
+NSGraphicsContext.restoreGraphicsState()
+
+// 2. Clip to the 824x824 squircle and draw the artwork
+NSGraphicsContext.saveGraphicsState()
+clipPath.addClip()
+srcImage.draw(
+    in: tileRect,
+    from: NSRect(origin: .zero, size: srcImage.size),
+    operation: .sourceOver,
+    fraction: 1.0
+)
+
+// 3. Subtle inner rim highlight (1.5px white @ 12% alpha)
+let rimPath = NSBezierPath(roundedRect: tileRect.insetBy(dx: 1.0, dy: 1.0), xRadius: radius - 1.0, yRadius: radius - 1.0)
+rimPath.lineWidth = 2.0
+NSColor(calibratedWhite: 1.0, alpha: 0.14).setStroke()
+rimPath.stroke()
+NSGraphicsContext.restoreGraphicsState()
+
+NSGraphicsContext.restoreGraphicsState()
+
+guard let pngData = rep.representation(using: .png, properties: [:]) else {
+    exit(1)
+}
+try pngData.write(to: URL(fileURLWithPath: outPath))
+SWIFT
+
 for sz in 16 32 128 256 512; do
-  sips -z "${sz}" "${sz}" "${ICON_SRC}" --out "${ICONSET_DIR}/icon_${sz}x${sz}.png" >/dev/null
+  sips -z "${sz}" "${sz}" "${PADDED_MASTER}" --out "${ICONSET_DIR}/icon_${sz}x${sz}.png" >/dev/null
   sz2=$((sz * 2))
-  sips -z "${sz2}" "${sz2}" "${ICON_SRC}" --out "${ICONSET_DIR}/icon_${sz}x${sz}@2x.png" >/dev/null
+  sips -z "${sz2}" "${sz2}" "${PADDED_MASTER}" --out "${ICONSET_DIR}/icon_${sz}x${sz}@2x.png" >/dev/null
 done
 iconutil -c icns "${ICONSET_DIR}" -o "${APP_BUNDLE}/Contents/Resources/SIMP.icns"
-rm -rf "${ICONSET_DIR}"
+rm -rf "${ICONSET_DIR}" "${PADDED_MASTER}"
 
 echo "4/5 Assembling dist/SIMP.app bundle..."
 sed "s/__SIMP_VERSION__/${SYNCED_VERSION}/g" \
