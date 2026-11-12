@@ -2217,18 +2217,6 @@ const ConsoleMainApp: React.FC = () => {
           >
             SELECT
           </span>
-          <img
-            src="/favicon.png?v=0.3.0-alpha.1"
-            alt="SIMP"
-            style={{
-              width: 26,
-              height: 26,
-              borderRadius: 7,
-              objectFit: 'cover',
-              border: '1px solid #2e2e3c',
-              flexShrink: 0,
-            }}
-          />
           <span style={{ display: 'inline-flex', alignItems: 'center', lineHeight: 1, flexShrink: 0 }}>
             {track?.source === 'apple_music' ? (
               <ImpIcon name="apple" size={14} color="#fda4af" />

@@ -71,10 +71,10 @@ export function formatPlaylistSourceBadge(pl: PlaylistRecord): string {
   return '★ SIMP';
 }
 
-// Responsive 4-Column-Max Tile Grid Style (~17px narrower min-width so 4 tiles fit cleanly on Steam Deck)
+// Responsive Tile Grid Style (4 columns on Steam Deck 1280x800, up to 6 columns on ultrawide displays)
 export const tileGridStyle: React.CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fill, minmax(max(158px, calc((100% - 30px) / 4)), 1fr))',
+  gridTemplateColumns: 'repeat(auto-fill, minmax(max(162px, calc((100% - 50px) / 6)), 1fr))',
   gap: 10,
   width: '100%',
   minWidth: 0,

@@ -276,6 +276,17 @@ export interface LibraryBrowserViewProps {
   favoritedUris?: string[];
 }
 
+function computeLibraryViewportScale(): number {
+  if (typeof window === 'undefined') return 1;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  // Steam Deck / 800p baseline (1280x800) stays at 1.0x
+  if (vw <= 1340 && vh <= 840) return 1;
+  const minRatio = Math.min(vw / 1280, vh / 800);
+  const scaled = 1 + (minRatio - 1) * 0.72;
+  return Math.round(Math.min(1.8, Math.max(1, scaled)) * 100) / 100;
+}
+
 export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   hidden = false,
   snap,
@@ -2489,17 +2500,30 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   );
   const libCssVars = getSourceThemeCssVars(libTheme);
 
+  const [libraryScale, setLibraryScale] = useState<number>(() =>
+    computeLibraryViewportScale()
+  );
+
+  useEffect(() => {
+    const onResize = () => {
+      setLibraryScale(computeLibraryViewportScale());
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   return (
     <main
       style={{
         flex: 1,
         display: hidden ? 'none' : 'grid',
-        gridTemplateColumns: 'minmax(250px, 32%) minmax(0, 68%)',
+        gridTemplateColumns: 'clamp(250px, 24%, 315px) minmax(0, 1fr)',
         gridTemplateRows: 'auto minmax(0, 1fr)',
         overflow: 'hidden',
         boxSizing: 'border-box',
         width: '100%',
         minWidth: 0,
+        zoom: libraryScale > 1.02 ? libraryScale : undefined,
         ...libCssVars,
       }}
     >
