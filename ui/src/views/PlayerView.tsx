@@ -1590,8 +1590,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             ? `calc((100vw - 120px) * 0.54 / ${effectiveScale})`
             : `calc((100vw - 96px) / ${effectiveScale})`,
           minWidth: 0,
-          opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
-          transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
           transform: effectiveScale > 1.02 ? `scale(${effectiveScale})` : undefined,
           transformOrigin: 'top left',
         }}
@@ -1610,6 +1608,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               !isVideoTrack && vizMode !== 'off'
                 ? 'radial-gradient(ellipse at 25% 50%, rgba(6, 7, 12, 0.72) 0%, rgba(6, 7, 12, 0.36) 65%, rgba(6, 7, 12, 0) 100%)'
                 : 'transparent',
+            opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
+            transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
           }}
         >
           <h1
@@ -1728,6 +1728,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             flexDirection: 'column',
             alignItems: 'flex-start',
             flexShrink: 0,
+            opacity:
+              isForegroundFaded && !(isVideoTrack && isPlaying)
+                ? Math.max(0, Math.min(0.95, idleOpacityPct / 100))
+                : 1,
+            transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
           }}
         >
           <div
