@@ -1057,7 +1057,7 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         }
       }
 
-      // Exact viewport crop calculation for `objectFit: 'cover'` on ultra-wide displays (21:9, 32:9, etc.)
+      // Exact viewport crop calculation for `objectFit: 'cover'` on ultra-wide (21:9, 32:9) and tall/16:10 (1280×800 Steam Deck) displays
       const clientW = canvas.clientWidth || CANVAS_W;
       const clientH = canvas.clientHeight || CANVAS_H;
       const visibleCanvasH =
@@ -1066,6 +1066,12 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           : CANVAS_H;
       const cropTopY = Math.max(0, (CANVAS_H - visibleCanvasH) * 0.5);
       const cropBottomY = CANVAS_H - cropTopY;
+      const visibleCanvasW =
+        clientW > 0 && clientH > 0
+          ? Math.min(CANVAS_W, CANVAS_H * (clientW / clientH))
+          : CANVAS_W;
+      const cropLeftX = Math.max(0, (CANVAS_W - visibleCanvasW) * 0.5);
+      const cropRightX = CANVAS_W - cropLeftX;
 
       // Shared Vertigo-Style Floating 3D Hologram Lyric Banner
       // Used by VERTIGO (for lyrics/comments) and by DEMOSCENE & TRAPPER when BOTH Lyrics and SC Comments exist
@@ -2658,6 +2664,8 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
           trackArtist: trackRef.current?.artists?.join(', ') || '',
           cropTopY,
           cropBottomY,
+          cropLeftX,
+          cropRightX,
         };
 
         if (activeMode === 'rhythm') {
@@ -2692,7 +2700,7 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
     <div
       aria-hidden="true"
       style={{
-        position: 'absolute',
+        position: 'fixed',
         inset: 0,
         pointerEvents: 'none',
         zIndex: 0,

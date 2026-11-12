@@ -1413,7 +1413,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           justifyContent: 'center',
           padding: 0,
           width: '100%',
-          overflow: 'hidden',
+          overflow: 'visible',
           position: 'relative',
           ...playerCssVars,
         }}
