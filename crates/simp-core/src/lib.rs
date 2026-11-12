@@ -1,3 +1,4 @@
+pub mod factoids;
 pub mod gamepad;
 pub mod http_pool;
 pub mod library;
@@ -298,18 +299,23 @@ mod win32_window_mgr {
         String::from_utf16_lossy(&buf[..len as usize])
     }
 
+    unsafe fn is_ui_window_title(title: &str) -> bool {
+        title.starts_with("IMP — Interactive Media Player")
+            || title.starts_with("IMP - Interactive Media Player")
+            || title.starts_with("SIMP — Simple Integrated Media Player")
+            || title.starts_with("SIMP - Simple Integrated Media Player")
+    }
+
     unsafe fn is_worker_hwnd(hwnd: Hwnd, title: &str) -> bool {
-        if title.starts_with("SIMP Headless Audio Worker")
+        if title.starts_with("IMP Headless Audio Worker")
+            || title.starts_with("SIMP Headless Audio Worker")
             || title.contains("apple-worker")
             || title.contains("worker=apple")
         {
             return true;
         }
         // Also catch any 320x240 worker window whose title is still the default index.html title
-        if (title.starts_with("SIMP — Simple Integrated Media Player")
-            || title.starts_with("SIMP - Simple Integrated Media Player"))
-            && IsIconic(hwnd) == 0
-        {
+        if is_ui_window_title(title) && IsIconic(hwnd) == 0 {
             let mut rect = Rect::default();
             if GetWindowRect(hwnd, &mut rect) != 0 {
                 let w = rect.right - rect.left;
@@ -333,9 +339,7 @@ mod win32_window_mgr {
         if is_worker_hwnd(hwnd, title) {
             return false;
         }
-        if title.starts_with("SIMP — Simple Integrated Media Player")
-            || title.starts_with("SIMP - Simple Integrated Media Player")
-        {
+        if is_ui_window_title(title) {
             if IsIconic(hwnd) == 0 {
                 let mut rect = Rect::default();
                 if GetWindowRect(hwnd, &mut rect) != 0 {
@@ -453,34 +457,145 @@ pub struct DaemonPerfSnapshot {
     pub portable_mode: bool,
 }
 
-/// Samples the SIMP background daemon's own process CPU usage (%) and Resident Set Size (MB & % of total RAM).
+/// Signals the OS kernel scheduler that the **current thread** prefers **Efficiency Cores (E-cores / little cores)**
+/// and power-throttled execution (`EcoQoS` on Windows 11, `QOS_CLASS_UTILITY` on Apple Silicon macOS,
+/// per-TID nice `+5` for EAS on Linux/SteamOS/Steam Frame).
+///
+/// > **Audio Safety**: This is intentionally applied per-thread on background workers (Tokio IPC/HTTP pool,
+/// > system tray/SMTC loop, storage indexer, OpenVR bridge, gamepad readers) rather than process-wide,
+/// > so the dedicated real-time audio output thread (`WASAPI` / `CoreAudio` / `PipeWire`) is never throttled.
+pub fn prefer_efficiency_core_for_current_thread() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        #[repr(C)]
+        struct ThreadPowerThrottlingState {
+            version: u32,
+            control_mask: u32,
+            state_mask: u32,
+        }
+        const THREAD_POWER_THROTTLING: u32 = 0;
+        const THREAD_POWER_THROTTLING_CURRENT_VERSION: u32 = 1;
+        const THREAD_POWER_THROTTLING_EXECUTION_SPEED: u32 = 0x1;
+        const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+
+        extern "system" {
+            fn GetCurrentThread() -> *mut std::ffi::c_void;
+            fn SetThreadInformation(
+                h_thread: *mut std::ffi::c_void,
+                thread_information_class: u32,
+                thread_information: *const std::ffi::c_void,
+                thread_information_size: u32,
+            ) -> i32;
+            fn SetThreadPriority(h_thread: *mut std::ffi::c_void, n_priority: i32) -> i32;
+        }
+
+        let h_thread = GetCurrentThread();
+        let state = ThreadPowerThrottlingState {
+            version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+            control_mask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+            state_mask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        };
+        let _ = SetThreadInformation(
+            h_thread,
+            THREAD_POWER_THROTTLING,
+            &state as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<ThreadPowerThrottlingState>() as u32,
+        );
+        let _ = SetThreadPriority(h_thread, THREAD_PRIORITY_BELOW_NORMAL);
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe {
+        // QOS_CLASS_UTILITY (0x11) steers threads onto Apple Silicon Efficiency (Icestorm/Sawtooth) cores
+        const QOS_CLASS_UTILITY: u32 = 0x11;
+        extern "C" {
+            fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: libc::c_int) -> libc::c_int;
+        }
+        let _ = pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe {
+        // On Linux NPTL, `setpriority(PRIO_PROCESS, 0, nice)` applies only to the calling thread (TID),
+        // signaling EAS (ARM64 big.LITTLE on Steam Frame & Intel Thread Director) to prefer efficiency cores.
+        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 5);
+    }
+}
+
+/// Samples the SIMP background daemon's own process CPU usage (% over a 10-second rolling window,
+/// normalized by logical CPU cores to match Task Manager) and Resident Set Size (MB & % of total RAM).
 pub fn sample_daemon_perf() -> DaemonPerfSnapshot {
+    use std::collections::VecDeque;
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
-    static LAST_SAMPLE: OnceLock<Mutex<(Instant, u64, f64)>> = OnceLock::new();
+    struct PerfRollingWindow {
+        samples: VecDeque<(Instant, u64)>,
+        last_cpu_percent: f64,
+    }
+
+    static PERF_WINDOW: OnceLock<Mutex<PerfRollingWindow>> = OnceLock::new();
     static TOTAL_RAM_MB: OnceLock<f64> = OnceLock::new();
+    static LOGICAL_CPUS: OnceLock<f64> = OnceLock::new();
 
     let (raw_ticks, ticks_per_sec, rss_mb) = read_process_ticks_and_rss();
     let total_ram_mb = *TOTAL_RAM_MB.get_or_init(read_total_system_ram_mb);
+    let logical_cpus = *LOGICAL_CPUS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get() as f64)
+            .unwrap_or(1.0)
+            .max(1.0)
+    });
     let ram_percent = if total_ram_mb > 0.0 {
         ((rss_mb / total_ram_mb) * 1000.0).round() / 10.0
     } else {
         0.0
     };
+
     let now = Instant::now();
-    let mutex = LAST_SAMPLE.get_or_init(|| Mutex::new((now, raw_ticks, 0.1)));
-    let cpu_percent = if let Ok(mut guard) = mutex.lock() {
-        let elapsed = now.duration_since(guard.0).as_secs_f64();
-        if elapsed >= 0.4 && ticks_per_sec > 0.0 {
-            let delta_ticks = raw_ticks.saturating_sub(guard.1) as f64;
-            let pct = ((delta_ticks / ticks_per_sec) / elapsed) * 100.0;
-            let clamped = (pct * 10.0).round() / 10.0;
-            *guard = (now, raw_ticks, clamped);
-            clamped
-        } else {
-            guard.2
+    let mutex = PERF_WINDOW.get_or_init(|| {
+        let mut samples = VecDeque::with_capacity(12);
+        samples.push_back((now, raw_ticks));
+        Mutex::new(PerfRollingWindow {
+            samples,
+            last_cpu_percent: 0.1,
+        })
+    });
+
+    let cpu_percent = if let Ok(mut win) = mutex.lock() {
+        // Record a new checkpoint at most once every 1.0s so rapid right-click menu polls
+        // never create sub-second 15.6ms Windows timer quantum spikes.
+        let should_push = win
+            .samples
+            .back()
+            .map(|(t, _)| now.duration_since(*t).as_secs_f64() >= 1.0)
+            .unwrap_or(true);
+        if should_push {
+            win.samples.push_back((now, raw_ticks));
+            // Keep checkpoints spanning up to the last ~10 seconds (always retaining at least 2 points)
+            while win.samples.len() > 2 {
+                if let Some((oldest_t, _)) = win.samples.front() {
+                    if now.duration_since(*oldest_t).as_secs_f64() > 10.0 {
+                        win.samples.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
+
+        if let Some((anchor_t, anchor_ticks)) = win.samples.front().copied() {
+            let elapsed = now.duration_since(anchor_t).as_secs_f64();
+            // Require at least a 1.0s baseline window before updating the displayed 10s rolling average
+            if elapsed >= 1.0 && ticks_per_sec > 0.0 {
+                let delta_ticks = raw_ticks.saturating_sub(anchor_ticks) as f64;
+                let cpu_cores_used = (delta_ticks / ticks_per_sec) / elapsed;
+                let pct = (cpu_cores_used / logical_cpus) * 100.0;
+                let clamped = ((pct * 10.0).round() / 10.0).clamp(0.0, 100.0);
+                win.last_cpu_percent = clamped;
+            }
+        }
+        win.last_cpu_percent
     } else {
         0.1
     };

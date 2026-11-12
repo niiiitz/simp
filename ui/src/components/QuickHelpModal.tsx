@@ -2,6 +2,7 @@ import React from 'react';
 import { SourceVisibilityPrefs } from '../views/SettingsModal';
 import { AppleMusicLogo } from './AppleMusicLogo';
 import { SoundCloudLogo } from './SoundCloudLogo';
+import { ImpIcon } from './icons/ImpIcon';
 
 export interface QuickHelpModalProps {
   onClose: () => void;
@@ -64,12 +65,15 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
           }}
         >
           <div>
-            <div style={{ fontSize: 16, fontWeight: 900, color: '#bfeaf5' }}>
-              ⚡ Welcome to SIMP • Quick Guide & Tips
+            <div style={{ fontSize: 16, fontWeight: 900, color: '#bfeaf5', display: 'flex', alignItems: 'center', gap: 7 }}>
+              <ImpIcon name="bolt" size={16} color="#fb923c" />
+              <span>Welcome to IMP • Quick Guide &amp; Tips</span>
             </div>
-            <div style={{ fontSize: 11.5, color: '#8e8e99', marginTop: 2 }}>
-              Console-first hybrid media player • Re-open anytime via{' '}
-              <span style={{ fontFamily: 'monospace', color: '#67e8f9' }}>START (☰) → ❓ Help</span>
+            <div style={{ fontSize: 11.5, color: '#8e8e99', marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span>Interactive Media Player • Re-open anytime via</span>
+              <span style={{ fontFamily: 'monospace', color: '#67e8f9', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                START (☰) → <ImpIcon name="help" size={12} color="#67e8f9" /> Help
+              </span>
             </div>
           </div>
           <button
@@ -120,7 +124,7 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
               onClick={() => onToggleSourceVisibility('apple_music')}
               style={sourceChipStyle(sourceVisibility.apple_music, '#f43f5e')}
             >
-              {sourceVisibility.apple_music ? <AppleMusicLogo size={14} /> : <span>🚫</span>}
+              {sourceVisibility.apple_music ? <AppleMusicLogo size={14} /> : <ImpIcon name="ban" size={13} color="#6b7280" />}
               <span>Apple Music</span>
             </button>
             <button
@@ -128,7 +132,7 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
               onClick={() => onToggleSourceVisibility('soundcloud')}
               style={sourceChipStyle(sourceVisibility.soundcloud, '#ea580c')}
             >
-              {sourceVisibility.soundcloud ? <SoundCloudLogo width={30} /> : <span>🚫</span>}
+              {sourceVisibility.soundcloud ? <SoundCloudLogo width={30} /> : <ImpIcon name="ban" size={13} color="#6b7280" />}
               <span>SoundCloud</span>
             </button>
             <button
@@ -136,7 +140,11 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
               onClick={() => onToggleSourceVisibility('internet_archive')}
               style={sourceChipStyle(sourceVisibility.internet_archive, '#34d399')}
             >
-              <span>{sourceVisibility.internet_archive ? '🏛️' : '🚫'}</span>
+              <ImpIcon
+                name={sourceVisibility.internet_archive ? 'archive' : 'ban'}
+                size={13}
+                color={sourceVisibility.internet_archive ? '#34d399' : '#6b7280'}
+              />
               <span>Internet Archive</span>
             </button>
             <button
@@ -144,7 +152,11 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
               onClick={() => onToggleSourceVisibility('optical_drive')}
               style={sourceChipStyle(sourceVisibility.optical_drive, '#f59e0b')}
             >
-              <span>{sourceVisibility.optical_drive ? '💿' : '🚫'}</span>
+              <ImpIcon
+                name={sourceVisibility.optical_drive ? 'disc' : 'ban'}
+                size={13}
+                color={sourceVisibility.optical_drive ? '#f59e0b' : '#6b7280'}
+              />
               <span>Optical Disc</span>
             </button>
           </div>
@@ -194,11 +206,13 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
 
           {/* 2. [SELECT] Context Actions */}
           <div style={tipCardStyle}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: '#fdba74' }}>
-              2. ⚙ [SELECT] Context Actions
+            <div style={{ fontSize: 13, fontWeight: 800, color: '#fdba74', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>2.</span>
+              <ImpIcon name="settings" size={13} color="#fdba74" />
+              <span>[SELECT] Context Actions</span>
             </div>
             <div style={tipBodyStyle}>
-              <strong>&ldquo;SELECT&rdquo; ⚙</strong> menu or right-click on library object for
+              <strong>&ldquo;SELECT&rdquo;</strong> menu or right-click on library object for
               contextual controls.
               <ul style={{ margin: '6px 0 0', paddingLeft: 18, lineHeight: 1.5 }}>
                 <li>
@@ -207,7 +221,8 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
                     width={30}
                     style={{ margin: '0 2px', verticalAlign: 'middle' }}
                   />{' '}
-                  Comments, Content Queue, <span style={{ color: '#f43f5e' }}>♥</span> Favorite
+                  Comments, Content Queue,{' '}
+                  <ImpIcon name="heart" size={12} color="#f43f5e" style={{ margin: '0 2px' }} /> Favorite
                   &amp; Discover more, etc.
                 </li>
               </ul>
@@ -216,8 +231,10 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
 
           {/* 3. Gamepad and Controls */}
           <div style={tipCardStyle}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: '#fda4af' }}>
-              3. 🎮 Gamepad and Controls
+            <div style={{ fontSize: 13, fontWeight: 800, color: '#fda4af', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>3.</span>
+              <ImpIcon name="gamepad" size={14} color="#fda4af" />
+              <span>Gamepad and Controls</span>
             </div>
             <div
               style={{
@@ -243,14 +260,16 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
 
           {/* 4. Library Management */}
           <div style={tipCardStyle}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: '#a7f3d0' }}>
-              4. 📚 Library Management
+            <div style={{ fontSize: 13, fontWeight: 800, color: '#a7f3d0', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>4.</span>
+              <ImpIcon name="folder" size={13} color="#a7f3d0" />
+              <span>Library Management</span>
             </div>
             <div style={tipBodyStyle}>
               Search across combinations of the selected sources, as found in the{' '}
               <strong>☰ START</strong> menu Folders &amp; Accounts. Create and Edit Hybrid
               Playlists that may span across sources. Drill down into sources to discover and
-              browse content. Manage 📌 pinned collections.
+              browse content. Manage <ImpIcon name="pin" size={12} color="#67e8f9" /> pinned collections.
             </div>
           </div>
         </div>

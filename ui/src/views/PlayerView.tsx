@@ -12,10 +12,19 @@ import {
 } from '@simp/client';
 import { ProgressBarRaf } from '../components/ProgressBarRaf';
 import {
+  loadEnabledVisualizerScenes,
   PlayerBackgroundVisualizer,
+  saveEnabledVisualizerScenes,
+  VISUALIZER_ENGINES,
   VISUALIZER_MODES,
+  type VisualizerEngine,
   type VisualizerMode,
 } from '../components/PlayerBackgroundVisualizer';
+import {
+  VisualizerOverlayHud,
+  type FactoidBubbleItem,
+} from '../components/visualizers/VisualizerOverlayHud';
+import { VisualizerDrawerModal } from '../components/visualizers/VisualizerDrawerModal';
 import {
   fetchSoundCloudTrackComments,
   fetchSoundCloudTrackWaveform,
@@ -26,6 +35,8 @@ import {
 import { SoundCloudAttributionLink, SoundCloudLogo } from '../components/SoundCloudLogo';
 import { AppleMusicAttributionLink } from '../components/AppleMusicLogo';
 import { fetchTrackLyrics, type TrackLyricsResponse } from '../drivers/appleApi';
+import { ImpIcon } from '../components/icons/ImpIcon';
+import { getSourceThemeForTrack, getSourceThemeCssVars } from '../theme/sourceTheme';
 
 export interface BrowserTarget {
   kind:
@@ -169,25 +180,36 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const [vizMode, setVizMode] = useState<VisualizerMode>(() => {
     try {
       const saved = window.localStorage.getItem('simp.visualizer_mode') as VisualizerMode | null;
-      if (
-        saved === 'glyph' ||
-        saved === 'avs' ||
-        saved === 'demoscene' ||
-        saved === 'vertigo' ||
-        saved === 'trapper' ||
-        saved === 'cycle' ||
-        saved === 'off'
-      ) {
+      if (saved && VISUALIZER_MODES.some((m) => m.id === saved)) {
         return saved;
       }
     } catch {}
     return 'cycle';
   });
+  const [enabledVizScenes, setEnabledVizScenes] = useState<VisualizerEngine[]>(() =>
+    loadEnabledVisualizerScenes(),
+  );
+  const [activeVizEngine, setActiveVizEngine] = useState<VisualizerEngine>('glyph');
+  const [vizDrawerOpen, setVizDrawerOpen] = useState<boolean>(false);
+  const [factoidBubbles, setFactoidBubbles] = useState<FactoidBubbleItem[]>([]);
+  const [trackPropsState, setTrackPropsState] = useState<{
+    suppress_lyrics?: boolean;
+    suppress_comments?: boolean;
+    suppress_factoids?: boolean;
+    preferred_viz_mode?: string | null;
+  }>({});
   const [lyricsEnabled, setLyricsEnabled] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem('simp_lyrics_enabled') !== '0';
     } catch {
       return true;
+    }
+  });
+  const [factoidsEnabled, setFactoidsEnabled] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('simp_factoids_enabled') === '1';
+    } catch {
+      return false;
     }
   });
   const [idleFadeEnabled, setIdleFadeEnabled] = useState<boolean>(() => {
@@ -207,7 +229,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         }
       }
     } catch {}
-    return 35;
+    return 0;
   });
   const [lyricsData, setLyricsData] = useState<TrackLyricsResponse | null>(null);
   const [activeLyricIdx, setActiveLyricIdx] = useState<number>(-1);
@@ -373,7 +395,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       togglePlayerFullscreen();
     };
     const onFullscreenChange = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement));
+      const fs = Boolean(document.fullscreenElement);
+      setIsFullscreen(fs);
+      if (!fs) {
+        setVideoTheatreExpanded(false);
+      }
     };
     const onSelectCategoryFocus = (ev: Event) => {
       const cat = (ev as CustomEvent<{ category?: string }>).detail?.category;
@@ -740,17 +766,37 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return () => window.clearTimeout(t);
   }, [playerActionsOpen, selectCategory, rightColMode]);
 
-  const cycleVisualizerMode = useCallback(() => {
-    setVizMode((prev) => {
-      const idx = VISUALIZER_MODES.findIndex((m) => m.id === prev);
-      const next = VISUALIZER_MODES[(idx + 1) % VISUALIZER_MODES.length];
+  const handleSelectVizMode = useCallback(
+    (nextMode: VisualizerMode) => {
+      setVizMode(nextMode);
       try {
-        window.localStorage.setItem('simp.visualizer_mode', next.id);
+        window.localStorage.setItem('simp.visualizer_mode', nextMode);
       } catch {}
-      showToast?.(`✨ Visualizer: ${next.label}`);
-      return next.id;
+      const found = VISUALIZER_MODES.find((m) => m.id === nextMode);
+      if (found) {
+        showToast?.(`Visualizer: ${found.label}`);
+      }
+    },
+    [showToast],
+  );
+
+  const handleToggleSceneInRotation = useCallback((engine: VisualizerEngine) => {
+    setEnabledVizScenes((prev) => {
+      const exists = prev.includes(engine);
+      if (exists && prev.length <= 1) {
+        return prev;
+      }
+      const next = exists ? prev.filter((e) => e !== engine) : [...prev, engine];
+      saveEnabledVisualizerScenes(next);
+      return next;
     });
-  }, [showToast]);
+  }, []);
+
+  const handleSetAllScenesInRotation = useCallback((engines: VisualizerEngine[]) => {
+    const next = engines.length > 0 ? engines : [...VISUALIZER_ENGINES];
+    setEnabledVizScenes(next);
+    saveEnabledVisualizerScenes(next);
+  }, []);
 
   const toggleLyrics = useCallback(() => {
     setLyricsEnabled((prev) => {
@@ -759,6 +805,17 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         window.localStorage.setItem('simp_lyrics_enabled', next ? '1' : '0');
       } catch {}
       showToast?.(next ? '🎤 Synced Lyrics overlay ON' : '🎤 Synced Lyrics overlay OFF');
+      return next;
+    });
+  }, [showToast]);
+
+  const toggleFactoids = useCallback(() => {
+    setFactoidsEnabled((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('simp_factoids_enabled', next ? '1' : '0');
+      } catch {}
+      showToast?.(next ? '💬 Pop-Up Factoid bubbles ON' : '💬 Pop-Up Factoid bubbles OFF');
       return next;
     });
   }, [showToast]);
@@ -803,12 +860,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   }, [showToast]);
 
   // Fetch synced lyrics from LRCLIB (v1 + v2 beta) or local .lrc sidecar on track change
-  useEffect(() => {
-    setLyricsData(null);
-    setActiveLyricIdx(-1);
-    activeLyricIdxRef.current = -1;
+  const loadLyricsForCurrentTrack = useCallback(() => {
     if (!track?.uri || !track?.title || isVideoTrack) {
-      return;
+      setLyricsData(null);
+      return () => {};
     }
     let cancelled = false;
     fetchTrackLyrics({
@@ -819,15 +874,101 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       duration_ms: track.duration_ms || 0,
     })
       .then((res) => {
-        if (!cancelled && res && res.source !== 'none') {
-          setLyricsData(res);
+        if (!cancelled) {
+          if (res && res.source !== 'none' && res.source !== 'suppressed') {
+            setLyricsData(res);
+          } else {
+            setLyricsData(null);
+          }
         }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [track?.uri, track?.title, isVideoTrack]);
+  }, [track?.uri, track?.title, track?.artists, track?.album, track?.duration_ms, isVideoTrack]);
+
+  useEffect(() => {
+    setLyricsData(null);
+    setActiveLyricIdx(-1);
+    activeLyricIdxRef.current = -1;
+    return loadLyricsForCurrentTrack();
+  }, [loadLyricsForCurrentTrack]);
+
+  // Fetch per-track properties (suppression flags, preferred_viz_mode) and Pop-Up Video Factoids (factoids.rs)
+  const loadFactoidsAndPropsForCurrentTrack = useCallback(() => {
+    if (!track?.uri || !track?.title || isVideoTrack) {
+      setFactoidBubbles([]);
+      setTrackPropsState({});
+      return () => {};
+    }
+    let cancelled = false;
+    fetch(`/api/library/track-properties?uri=${encodeURIComponent(track.uri)}`)
+      .then((r) => r.json())
+      .then((res) => {
+        if (!cancelled && res && res.ok && res.data) {
+          setTrackPropsState(res.data);
+        }
+      })
+      .catch(() => {});
+
+    const params = new URLSearchParams({
+      uri: track.uri,
+      title: track.title,
+      artist: track.artists?.[0] || '',
+      album: track.album || '',
+      duration_ms: String(track.duration_ms || 180000),
+    });
+    fetch(`/api/factoids?${params.toString()}`)
+      .then((r) => r.json())
+      .then((res) => {
+        if (!cancelled && res && res.ok && res.data && Array.isArray(res.data.bubbles)) {
+          setFactoidBubbles(res.data.bubbles);
+        } else if (!cancelled) {
+          setFactoidBubbles([]);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setFactoidBubbles([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [track?.uri, track?.title, track?.artists, track?.album, track?.duration_ms, isVideoTrack]);
+
+  useEffect(() => {
+    return loadFactoidsAndPropsForCurrentTrack();
+  }, [loadFactoidsAndPropsForCurrentTrack]);
+
+  useEffect(() => {
+    const onPropsUpdated = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail;
+      if (!detail || !track?.uri || detail.uri !== track.uri) return;
+      if (detail.properties) {
+        setTrackPropsState(detail.properties);
+      }
+      if (detail.properties?.suppress_comments) {
+        setActiveBubbles([]);
+      }
+      if (detail.properties?.suppress_factoids) {
+        setFactoidBubbles([]);
+      } else {
+        loadFactoidsAndPropsForCurrentTrack();
+      }
+      if (detail.lyrics) {
+        if (detail.lyrics.found && !detail.properties?.suppress_lyrics) {
+          setLyricsData(detail.lyrics);
+        } else {
+          setLyricsData(null);
+        }
+      } else {
+        loadLyricsForCurrentTrack();
+      }
+    };
+    window.addEventListener('simp-track-properties-updated', onPropsUpdated);
+    return () => window.removeEventListener('simp-track-properties-updated', onPropsUpdated);
+  }, [track?.uri, loadLyricsForCurrentTrack, loadFactoidsAndPropsForCurrentTrack]);
 
   useEffect(() => {
     shownCommentIdsRef.current.clear();
@@ -1257,6 +1398,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const hasUpNext = Boolean(snap?.up_next && snap.up_next.length > 0);
   const buttonsBottomPx = Math.round(18 + 60 * effectiveScale);
   const scrubBottomPx = Math.round(18 + (60 + 86 + 18) * effectiveScale);
+  const playerTheme = getSourceThemeForTrack(track?.uri, track?.source);
+  const playerCssVars = getSourceThemeCssVars(playerTheme);
 
   return (
     <>
@@ -1272,61 +1415,104 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           width: '100%',
           overflow: 'hidden',
           position: 'relative',
+          ...playerCssVars,
         }}
       >
       {!isVideoTrack && !hidden && (
-        <PlayerBackgroundVisualizer
-          mode={vizMode}
-          isPlaying={isPlaying}
-          track={track || null}
-          artUrl={track?.art_url || opticalDisc?.art_url || null}
-          bpm={scTrackBpm}
-          waveformBars={scWaveformBars}
-          activeComment={activeBubbles[activeBubbles.length - 1]?.comment || null}
-          comments={scComments}
-          activeChapterLabel={
-            chapterModalItems.find((c) => c.isCurrent)?.title || null
-          }
-          activeLyricLine={
-            activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx]
-              ? lyricsData.synced_lines[activeLyricIdx].text
-              : null
-          }
-          nextLyricLine={
-            activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx + 1]
-              ? lyricsData.synced_lines[activeLyricIdx + 1].text
-              : null
-          }
-          hasLyrics={Boolean(
-            lyricsData &&
-              !lyricsData.instrumental &&
-              (lyricsData.synced_lines.length > 0 ||
-                (lyricsData.plain_lyrics && lyricsData.plain_lyrics.trim().length > 0))
-          )}
-          lyricsMarqueeFallback={
-            lyricsData && !lyricsData.instrumental
-              ? lyricsData.synced_lines.length > 0
-                ? lyricsData.synced_lines
-                    .map((l) => l.text.trim())
-                    .filter(Boolean)
-                    .slice(0, 12)
-                    .join('   ♪   ')
-                : lyricsData.plain_lyrics
-                  ? lyricsData.plain_lyrics
-                      .split(/\r?\n/)
-                      .map((l) => l.trim())
+        <>
+          <PlayerBackgroundVisualizer
+            mode={vizMode}
+            enabledScenes={enabledVizScenes}
+            preferredScene={
+              (trackPropsState.preferred_viz_mode as VisualizerEngine | null | undefined) || null
+            }
+            onActiveEngineChange={setActiveVizEngine}
+            isPlaying={isPlaying}
+            track={track || null}
+            artUrl={track?.art_url || opticalDisc?.art_url || null}
+            bpm={scTrackBpm}
+            waveformBars={scWaveformBars}
+            activeComment={activeBubbles[activeBubbles.length - 1]?.comment || null}
+            comments={scComments}
+            activeChapterLabel={
+              chapterModalItems.find((c) => c.isCurrent)?.title || null
+            }
+            activeLyricLine={
+              activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx]
+                ? lyricsData.synced_lines[activeLyricIdx].text
+                : null
+            }
+            nextLyricLine={
+              activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx + 1]
+                ? lyricsData.synced_lines[activeLyricIdx + 1].text
+                : null
+            }
+            hasLyrics={Boolean(
+              lyricsData &&
+                !lyricsData.instrumental &&
+                (lyricsData.synced_lines.length > 0 ||
+                  (lyricsData.plain_lyrics && lyricsData.plain_lyrics.trim().length > 0))
+            )}
+            lyricsMarqueeFallback={
+              lyricsData && !lyricsData.instrumental
+                ? lyricsData.synced_lines.length > 0
+                  ? lyricsData.synced_lines
+                      .map((l) => l.text.trim())
                       .filter(Boolean)
                       .slice(0, 12)
                       .join('   ♪   ')
+                  : lyricsData.plain_lyrics
+                    ? lyricsData.plain_lyrics
+                        .split(/\r?\n/)
+                        .map((l) => l.trim())
+                        .filter(Boolean)
+                        .slice(0, 12)
+                        .join('   ♪   ')
+                    : null
+                : null
+            }
+            hidden={hidden}
+          />
+          {vizMode !== 'off' && (
+            <VisualizerOverlayHud
+              activeEngine={activeVizEngine}
+              track={track || null}
+              upNextTrack={snap?.up_next && snap.up_next.length > 0 ? snap.up_next[0] : null}
+              positionMs={snap?.position_ms || 0}
+              durationMs={track?.duration_ms || 0}
+              activeLyricLine={
+                lyricsEnabled &&
+                activeLyricIdx >= 0 &&
+                lyricsData?.synced_lines[activeLyricIdx]
+                  ? lyricsData.synced_lines[activeLyricIdx].text
                   : null
-              : null
-          }
-          hidden={hidden}
-        />
+              }
+              nextLyricLine={
+                lyricsEnabled &&
+                activeLyricIdx >= 0 &&
+                lyricsData?.synced_lines[activeLyricIdx + 1]
+                  ? lyricsData.synced_lines[activeLyricIdx + 1].text
+                  : null
+              }
+              activeComment={
+                scCommentsEnabled
+                  ? activeBubbles[activeBubbles.length - 1]?.comment || null
+                  : null
+              }
+              factoidBubbles={factoidBubbles}
+              suppressLyrics={Boolean(trackPropsState.suppress_lyrics)}
+              suppressComments={Boolean(trackPropsState.suppress_comments)}
+              suppressFactoids={!factoidsEnabled || Boolean(trackPropsState.suppress_factoids)}
+              isForegroundFaded={isForegroundFaded}
+              idleOpacityPct={idleOpacityPct}
+              oskOrModalOpen={Boolean(playerActionsOpen || vizDrawerOpen)}
+            />
+          )}
+        </>
       )}
 
       {/* Top-Right Up Next Readout Strip — Right-aligned & anchored just beneath the top Nav Bar */}
-      {hasUpNext && snap?.up_next ? (
+      {hasUpNext && snap?.up_next && !(isVideoTrack && videoTheatreExpanded) ? (
         <div
           style={{
             position: 'absolute',
@@ -1395,7 +1581,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           position: 'absolute',
           top: 14,
           left: 48,
-          zIndex: 2,
+          zIndex: isVideoTrack && videoTheatreExpanded ? 48 : 2,
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'flex-start',
@@ -1404,8 +1590,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             ? `calc((100vw - 120px) * 0.54 / ${effectiveScale})`
             : `calc((100vw - 96px) / ${effectiveScale})`,
           minWidth: 0,
-          opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
-          transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
           transform: effectiveScale > 1.02 ? `scale(${effectiveScale})` : undefined,
           transformOrigin: 'top left',
         }}
@@ -1413,6 +1597,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         {/* Track Title & Artist / Collection / Source Header at Top-Left */}
         <div
           style={{
+            display: isVideoTrack && videoTheatreExpanded ? 'none' : undefined,
             minWidth: 0,
             maxWidth: '100%',
             position: 'relative',
@@ -1423,6 +1608,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               !isVideoTrack && vizMode !== 'off'
                 ? 'radial-gradient(ellipse at 25% 50%, rgba(6, 7, 12, 0.72) 0%, rgba(6, 7, 12, 0.36) 65%, rgba(6, 7, 12, 0) 100%)'
                 : 'transparent',
+            opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
+            transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
           }}
         >
           <h1
@@ -1541,6 +1728,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             flexDirection: 'column',
             alignItems: 'flex-start',
             flexShrink: 0,
+            opacity:
+              isForegroundFaded && !(isVideoTrack && isPlaying)
+                ? Math.max(0, Math.min(0.95, idleOpacityPct / 100))
+                : 1,
+            transition: isForegroundFaded ? 'opacity 480ms ease' : 'opacity 60ms ease-out',
           }}
         >
           <div
@@ -1944,8 +2136,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               />
             ) : (
               <img
-                src="/simp-icon-dark.png"
-                alt="SIMP"
+                src="/simp-icon-dark.png?v=0.3.0-alpha.1"
+                alt="IMP"
                 style={{
                   width: '100%',
                   height: '100%',
@@ -1967,7 +2159,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           left: buttonsOffsetLeftPx !== null ? buttonsOffsetLeftPx : 48,
           right: 48,
           zIndex: 2,
-          display: 'flex',
+          display: isVideoTrack && videoTheatreExpanded ? 'none' : 'flex',
           justifyContent: 'center',
           pointerEvents: 'none',
           opacity: isForegroundFaded ? Math.max(0, Math.min(0.95, idleOpacityPct / 100)) : 1,
@@ -2015,11 +2207,12 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               width: 92,
               height: 86,
               borderRadius: 22,
-              background: isPlaying ? '#0f222a' : '#12121a',
-              color: isPlaying ? '#bfeaf5' : '#d4d4dc',
-              border: isPlaying ? '2px solid #2aa3c4' : '2px solid #3f3f4e',
-              boxShadow:
-                '0 12px 32px rgba(0, 0, 0, 0.94), 0 3px 10px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
+              background: isPlaying ? playerTheme.accentMuted : '#12121a',
+              color: isPlaying ? '#f8fafc' : '#d4d4dc',
+              border: isPlaying ? `2px solid ${playerTheme.accent}` : '2px solid #3f3f4e',
+              boxShadow: isPlaying
+                ? `0 12px 32px rgba(0, 0, 0, 0.94), 0 0 22px ${playerTheme.accentGlow}, 0 0 0 1px rgba(0, 0, 0, 0.85)`
+                : '0 12px 32px rgba(0, 0, 0, 0.94), 0 3px 10px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
@@ -2029,14 +2222,16 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               fontWeight: 900,
             }}
           >
-            <span style={{ fontSize: 28 }}>{isPlaying ? '⏸' : '▶'}</span>
+            <span style={{ fontSize: 28, color: isPlaying ? playerTheme.accent : '#d4d4dc' }}>
+              {isPlaying ? '⏸' : '▶'}
+            </span>
             <span
               className="simp-gp-badge"
               style={{
                 padding: '2px 10px',
                 borderRadius: 99,
-                background: isPlaying ? '#16313c' : '#1f1f2b',
-                color: isPlaying ? '#7dd3fc' : '#a1a1aa',
+                background: isPlaying ? 'rgba(0, 0, 0, 0.45)' : '#1f1f2b',
+                color: isPlaying ? playerTheme.accent : '#a1a1aa',
                 fontSize: 11,
                 fontFamily: 'monospace',
               }}
@@ -2091,7 +2286,12 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           left: scrubOffsetLeftPx !== null ? scrubOffsetLeftPx : 48,
           right: 48,
           zIndex: 8,
-          display: scrubOffsetLeftPx !== null ? 'block' : 'flex',
+          display:
+            isVideoTrack && videoTheatreExpanded
+              ? 'none'
+              : scrubOffsetLeftPx !== null
+              ? 'block'
+              : 'flex',
           justifyContent: scrubOffsetLeftPx !== null ? undefined : 'center',
           pointerEvents: 'none',
         }}
@@ -2130,7 +2330,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 isSoundCloudTrack && scCommentsEnabled ? commentTimestampsMs : undefined
               }
               onPlayheadTick={handlePlayheadTick}
-              hidden={hidden}
+              hidden={hidden || (isVideoTrack && videoTheatreExpanded)}
             />
           </div>
 
@@ -2614,7 +2814,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                       🖥️ Interface
                     </span>
                     <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
-                      Fullscreen, Visualizer
+                      Fullscreen, Visualizer, Lyrics, Factoids
                       {isSoundCloudTrack ? ', Comments' : ''}
                       {isVideoTrack ? ', Stream' : ''}
                     </span>
@@ -2875,6 +3075,52 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                             </span>
                           </button>
                         )}
+
+                        {/* 7. Track Properties & Local Curation */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPlayerActionsOpen(false);
+                            window.dispatchEvent(
+                              new CustomEvent('simp-open-track-properties', { detail: track }),
+                            );
+                          }}
+                          style={{
+                            ...actionRowBtnStyle,
+                            minHeight: 46,
+                            padding: '8px 12px',
+                            background: '#111a26',
+                            border: `1px solid ${playerTheme.accentBorder}`,
+                          }}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                            <span
+                              style={{
+                                fontSize: 12.5,
+                                fontWeight: 800,
+                                color: playerTheme.accent,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 6,
+                              }}
+                            >
+                              <ImpIcon name="sliders" size={14} color={playerTheme.accent} />
+                              Track Properties & Curation
+                            </span>
+                            <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                              Refetch/suppress lyrics, sync offset ±250ms, cover art & overlays
+                            </span>
+                          </div>
+                          <span
+                            style={{
+                              fontFamily: 'monospace',
+                              fontSize: 11,
+                              color: playerTheme.accent,
+                            }}
+                          >
+                            ▸
+                          </span>
+                        </button>
                       </>
                     ) : (
                       <div style={{ padding: 18, color: '#8e8e99', fontSize: 12 }}>
@@ -3082,11 +3328,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                       </span>
                     </button>
 
-                    {/* 2. Visualizer (Audio tracks) */}
+                    {/* 2. Visualizer Scene Queue & Rotation Drawer (Audio tracks) */}
                     {!isVideoTrack && (
                       <button
                         type="button"
-                        onClick={cycleVisualizerMode}
+                        onClick={() => setVizDrawerOpen(true)}
                         style={{
                           ...actionRowBtnStyle,
                           minHeight: 46,
@@ -3102,7 +3348,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                               'Glyph Matrix'}
                           </span>
                           <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
-                            Glyph • AVS • 64K • Vertigo • Trapper • Cycle • Off
+                            12 High-DPI Scenes • {enabledVizScenes.length}/12 in Cycle/Shuffle
                           </span>
                         </div>
                         <span
@@ -3113,7 +3359,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                             color: vizMode !== 'off' ? '#67e8f9' : '#71717a',
                           }}
                         >
-                          {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'}
+                          {VISUALIZER_MODES.find((m) => m.id === vizMode)?.shortLabel || 'GLYPH'} ▸
                         </span>
                       </button>
                     )}
@@ -3152,6 +3398,42 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                           }}
                         >
                           {lyricsEnabled ? 'ON' : 'OFF'}
+                        </span>
+                      </button>
+                    )}
+
+                    {/* 2b-ii. VH1 Pop-Up Factoid Speech Bubbles (Wikipedia / MusicBrainz) */}
+                    {!isVideoTrack && (
+                      <button
+                        type="button"
+                        onClick={toggleFactoids}
+                        style={{
+                          ...actionRowBtnStyle,
+                          minHeight: 46,
+                          padding: '8px 12px',
+                          background: factoidsEnabled ? '#241d0c' : '#101018',
+                          border: factoidsEnabled ? '1px solid #eab308' : '1px solid #222230',
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 800, color: '#fde047' }}>
+                            💬 Pop-Up Factoids (VH1 / Wikipedia)
+                          </span>
+                          <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                            {factoidBubbles.length > 0
+                              ? `${factoidBubbles.length} trivia bubble${factoidBubbles.length === 1 ? '' : 's'} queued for this track`
+                              : 'Timed song & artist trivia speech bubbles'}
+                          </span>
+                        </div>
+                        <span
+                          style={{
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: factoidsEnabled ? '#fde047' : '#71717a',
+                          }}
+                        >
+                          {factoidsEnabled ? 'ON' : 'OFF'}
                         </span>
                       </button>
                     )}
@@ -3406,6 +3688,17 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           </div>
         </div>
       )}
+
+      <VisualizerDrawerModal
+        open={vizDrawerOpen}
+        onClose={() => setVizDrawerOpen(false)}
+        vizMode={vizMode}
+        activeEngine={activeVizEngine}
+        enabledScenes={enabledVizScenes}
+        onSelectMode={handleSelectVizMode}
+        onToggleSceneInRotation={handleToggleSceneInRotation}
+        onSetAllScenesInRotation={handleSetAllScenesInRotation}
+      />
     </>
   );
 };
@@ -3450,8 +3743,8 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({
       width: 72,
       height: 72,
       borderRadius: 18,
-      background: active ? '#0d1b22' : '#0b0c12',
-      border: active ? '2px solid #2aa3c4' : '2px solid #2a2c3c',
+      background: active ? 'var(--imp-accent-muted, #0d1b22)' : '#0b0c12',
+      border: active ? '2px solid var(--imp-accent, #2aa3c4)' : '2px solid #2a2c3c',
       boxShadow:
         '0 10px 26px rgba(0, 0, 0, 0.94), 0 3px 8px rgba(0, 0, 0, 0.96), 0 0 0 1px rgba(0, 0, 0, 0.85)',
       color: '#d4d4dc',
@@ -3477,8 +3770,8 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({
             padding: '0 3px',
             borderRadius: 99,
             background: '#061820',
-            border: '1.5px solid #38bdf8',
-            color: '#7dd3fc',
+            border: '1.5px solid var(--imp-accent, #38bdf8)',
+            color: 'var(--imp-accent, #7dd3fc)',
             fontSize: 10.5,
             fontFamily: 'monospace',
             fontWeight: 900,
@@ -3502,7 +3795,7 @@ const TransportIconButton: React.FC<TransportBtnProps> = ({
         border: '1px solid #262632',
         fontSize: 12,
         fontFamily: 'monospace',
-        color: active ? '#7dd3fc' : '#8e8e99',
+        color: active ? 'var(--imp-accent, #7dd3fc)' : '#8e8e99',
         fontWeight: 700,
       }}
     >

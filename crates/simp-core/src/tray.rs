@@ -25,6 +25,7 @@ pub fn spawn_system_tray(
         let _ = std::thread::Builder::new()
             .name("simp-win32-tray".to_string())
             .spawn(move || {
+                crate::prefer_efficiency_core_for_current_thread();
                 win32_tray::run_win32_tray_and_smtc_loop(state, cmd_tx);
             });
         return;
@@ -43,6 +44,7 @@ pub fn spawn_system_tray(
         let _ = std::thread::Builder::new()
             .name("simp-kde-tray".to_string())
             .spawn(move || {
+                crate::prefer_efficiency_core_for_current_thread();
                 linux_sni::run_sni_tray_loop(state, cmd_tx);
             });
     }

@@ -1,18 +1,18 @@
 <div align="center">
-  <img src="https://repository-images.githubusercontent.com/1441133946/1558d7d2-9b3f-4982-999b-b26d67474fa9" width="100%" alt="SIMP — Simple Integrated Media Player" />
+  <img src="docs/open-graph-banner.png" width="100%" alt="IMP — Interactive Media Player (SIMP)" />
 
-  # SIMP — Simple Integrated Media Player
+  # IMP — Interactive Media Player (`SIMP`)
 
   **A lightweight, controller-first & desktop-native audio and video player for SteamOS, Linux, macOS, Windows, and SteamVR.**
 
-  [![Status: v0.2.4](https://img.shields.io/badge/status-v0.2.4-ff6a00?style=flat-square)](https://github.com/niiiitz/simp/releases)
+  [![Status: v0.4.0](https://img.shields.io/badge/status-v0.4.0-ff6a00?style=flat-square)](https://github.com/niiiitz/simp/releases)
   [![Platforms: SteamOS | Linux | macOS | Windows | SteamVR](https://img.shields.io/badge/platforms-SteamOS%20%7C%20Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20SteamVR-000000?style=flat-square)](#installation)
   [![Backend: 100% Native Rust](https://img.shields.io/badge/backend-Native%20Rust-dea584?style=flat-square)](#development--building-from-source)
 </div>
 
 ---
 
-## ⬇️ Download SIMP (`v0.2.4` Stable)
+## ⬇️ Download SIMP (`v0.4.0` Stable)
 
 Grab the ready-to-run installer or portable bundle for your platform directly below (or browse **[All Releases](https://github.com/niiiitz/simp/releases)**):
 
@@ -32,11 +32,9 @@ Playing your own music, soundtracks, and video across a Steam Deck, desktop, liv
 
 **SIMP** pairs a tiny native Rust media daemon with a high-contrast, OLED-friendly interface built for gamepads, VR pointers, and mouse & keyboard alike.
 
-| <a href="docs/screenshots/on_deck.jpg"><img src="docs/screenshots/on_deck.jpg" alt="SIMP on Steam Deck" width="100%" /></a> | <a href="docs/screenshots/spacial_computing_simp.jpg"><img src="docs/screenshots/spacial_computing_simp.jpg" alt="SIMP in SteamVR on Steam Frame" width="100%" /></a> |
-| :---: | :---: |
-| **Steam Deck & Handheld Mode**<br><sub>Spatial gamepad navigation with live controller button hints</sub> | **SteamVR Spatial Overlay (`aarch64` & `x86_64`)**<br><sub>Floating alongside your VR library in passthrough or 3D space</sub> |
 | <a href="docs/screenshots/library_queue.png"><img src="docs/screenshots/library_queue.png" alt="SIMP Unified Library and Hybrid Playlists" width="100%" /></a> | <a href="docs/screenshots/lyrics_viz.png"><img src="docs/screenshots/lyrics_viz.png" alt="SIMP Audio Visualizers and Live Synced Lyrics" width="100%" /></a> |
-| **Unified Library & Hybrid Playlists**<br><sub>Local media, Steam OSTs, Apple Music, SoundCloud, Internet Archive & Optical Discs</sub> | **Audio Visualizers & Synced Lyrics (`LRCLIB`)**<br><sub>5 built-in reactive visualizers (`Glyph`, `AVS`, `64K`, `Vertigo`, `Trapper`) with live synced lyrics</sub> |
+| :---: | :---: |
+| **Unified Library & Hybrid Playlists**<br><sub>Local media, Steam OSTs, Apple Music, SoundCloud, Internet Archive & Optical Discs</sub> | **Audio Visualizers & Synced Lyrics (`LRCLIB`)**<br><sub>12 built-in High-DPI reactive visualizers (`Glyph`, `AVS`, `64K`, `Vertigo`, `Trapper`, `Rhythm Stage`, `Midnight Mountain`, `Cosmic Warp`, `Coral Reef`, `Retro Arcade`, `Vaporwave`, `Dark Fantasy Sanctum`)</sub> |
 | <a href="docs/screenshots/video_theatre.png"><img src="docs/screenshots/video_theatre.png" alt="SIMP Video Theatre Mode" width="100%" /></a> | <a href="docs/screenshots/player_with_select_overlay.png"><img src="docs/screenshots/player_with_select_overlay.png" alt="SIMP SELECT Quick Menu and Track Actions" width="100%" /></a> |
 | **Card & Full-Viewport Video Theatre**<br><sub>Stream quality & subtitle switching with auto-hiding HUD</sub> | **`SELECT` Quick Menu & Track Actions**<br><sub>Queue next, route to Hybrid Playlists, jump to album/artist, and toggle visualizers & lyrics</sub> |
 
@@ -44,12 +42,16 @@ Playing your own music, soundtracks, and video across a Steam Deck, desktop, liv
 
 ## High-Level Features
 
+<img src="docs/imp-mascot-slouched.png" align="right" width="220" alt="IMP Mascot" />
+
 * **One Queue for Audio & Video (`★ Hybrid Playlists`):** Mix local music & video files, **Steam Soundtracks**, **Apple Music**, **SoundCloud** tracks & DJ mixes, **Internet Archive** films & live concerts, and physical **Audio CDs / DVDs** inside a single playlist.
-* **Reactive Visualizers & Live Synced Lyrics (`LRCLIB`):** Cycle through 5 built-in real-time visualizers (**`Glyph`**, **`AVS`**, **`64K`**, **`Vertigo`**, and **`Trapper`**) paired with automatic time-synced lyrics and interactive waveform scrubbing.
+* **12 Reactive High-DPI Visualizers & Live Synced Lyrics (`LRCLIB`):** Cycle through 12 built-in real-time visualizers (**`Glyph`**, **`AVS`**, **`64K`**, **`Vertigo`**, **`Trapper`**, **`Rhythm Stage`**, **`Midnight Mountain`**, **`Cosmic Warp`**, **`Coral Reef`**, **`Retro Arcade`**, **`Y2K Vaporwave`**, and **`Dark Fantasy Sanctum`**) paired with automatic time-synced lyrics, timed `@username` SoundCloud comments, retro VHS track chyrons, and interactive waveform scrubbing.
 * **Card & Theatre Video Player:** Watch video inside the Now Playing card or expand into full-viewport **Theatre Mode** (`F`) with stream quality and subtitle selection. Flip back to your library (`L1`/`R1`) and audio continues seamlessly.
 * **Pin Only What You Want (`📌`):** Browse cloud catalogs and local folders on demand, and pin individual albums, movies, or playlists into your **SIMP Library** for instant access.
 * **Controller-First, Mouse & Keyboard Ready:** Inspired by the PlayStation 3 XrossMediaBar (XMB) for effortless D-Pad navigation, while automatically switching to a clean pointer & keyboard UI (`Space` Play/Pause, `/` search, media keys) when you move a mouse.
 * **Tiny Native Rust Daemon:** Runs in the background (`~5 MB` binary) with native OS integration — **Linux `MPRIS2` & System Tray**, **macOS Menu Bar & Control Center (`MPNowPlayingInfoCenter`)**, **Windows System Tray**, and **SteamVR Dashboard Overlay**. Close the window and your media keeps playing.
+
+<br clear="right" />
 
 ---
 
@@ -64,7 +66,7 @@ Playing your own music, soundtracks, and video across a Steam Deck, desktop, liv
 
 ## Installation
 
-Grab the package for your platform from the **[latest GitHub Release (`v0.2.4`)](https://github.com/niiiitz/simp/releases/latest)**:
+Grab the package for your platform from the **[latest GitHub Release (`v0.4.0`)](https://github.com/niiiitz/simp/releases/latest)**:
 
 ### SteamOS / Bazzite / Linux (`x86_64` & `aarch64`)
 

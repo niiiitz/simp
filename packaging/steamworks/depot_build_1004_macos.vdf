@@ -1,0 +1,11 @@
+"DepotBuildConfig"
+{
+	"DepotID" "1004"
+	"ContentRoot" "."
+	"FileMapping"
+	{
+		"LocalPath" "SIMP.app/*"
+		"DepotPath" "SIMP.app"
+		"recursive" "1"
+	}
+}

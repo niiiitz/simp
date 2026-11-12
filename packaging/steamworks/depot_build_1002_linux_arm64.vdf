@@ -1,0 +1,12 @@
+"DepotBuildConfig"
+{
+	"DepotID" "1002"
+	"ContentRoot" "steamos-userland-aarch64"
+	"FileMapping"
+	{
+		"LocalPath" "*"
+		"DepotPath" "."
+		"recursive" "1"
+	}
+	"FileExclusion" "*.pdb"
+}

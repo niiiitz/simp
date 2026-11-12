@@ -414,6 +414,7 @@ pub fn spawn_openvr_overlay_bridge(
         let _ = std::thread::Builder::new()
             .name("simp-openvr-bridge".to_string())
             .spawn(move || {
+                crate::prefer_efficiency_core_for_current_thread();
                 openvr_bridge_loop(state);
             });
     }

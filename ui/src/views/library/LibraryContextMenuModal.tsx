@@ -10,6 +10,7 @@ import { AppleCloudAlbumSummary, AppleCloudPlaylistSummary } from '../../drivers
 import { SoundCloudPlaylistSummary } from '../../drivers/SoundCloudDriver';
 import { BrowserTarget } from '../PlayerView';
 import type { LibraryContextTarget } from '../LibraryBrowserView';
+import { ImpIcon } from '../../components/icons/ImpIcon';
 
 export interface LibraryContextMenuModalProps {
   target: LibraryContextTarget;
@@ -466,6 +467,34 @@ export const LibraryContextMenuModal: React.FC<LibraryContextMenuModalProps> = (
                     − Remove Track from Playlist
                   </button>
                 )}
+
+                <button
+                  data-focusable="true"
+                  onClick={() => {
+                    onClose();
+                    window.dispatchEvent(
+                      new CustomEvent('simp-open-track-properties', { detail: t }),
+                    );
+                  }}
+                  style={{
+                    minHeight: 40,
+                    padding: '8px 12px',
+                    borderRadius: 10,
+                    background: '#111b27',
+                    border: '1px solid #2aa3c4',
+                    color: '#bfeaf5',
+                    fontSize: 12,
+                    fontWeight: 800,
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                  }}
+                >
+                  <ImpIcon name="sliders" size={14} color="#38bdf8" />
+                  Track Properties & Local Curation (Lyrics / Art / Overlays)
+                </button>
               </div>
             );
           })()}
@@ -473,6 +502,53 @@ export const LibraryContextMenuModal: React.FC<LibraryContextMenuModalProps> = (
         {/* Collection Context Actions */}
         {libraryContextTarget.type === 'collection' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {libraryContextTarget.kind === 'simp_playlist' &&
+              libraryContextTarget.rawItem?.origin &&
+              libraryContextTarget.rawItem.origin !== 'simp_local' && (
+                <button
+                  data-focusable="true"
+                  onClick={async () => {
+                    const pl = libraryContextTarget.rawItem;
+                    onClose();
+                    try {
+                      const resp = await fetch(
+                        'http://127.0.0.1:18888/api/library/playlists/convert-to-hybrid',
+                        {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ playlist_id: pl.id }),
+                        },
+                      );
+                      const json = await resp.json();
+                      if (json?.ok) {
+                        showToast(`Converted "${cleanCollectionTitle(pl.name)}" to Editable Hybrid Playlist`);
+                      } else {
+                        showToast('Failed to convert playlist to Hybrid');
+                      }
+                    } catch {
+                      showToast('Failed to convert playlist to Hybrid');
+                    }
+                  }}
+                  style={{
+                    minHeight: 40,
+                    padding: '8px 12px',
+                    borderRadius: 10,
+                    background: 'rgba(52, 211, 153, 0.14)',
+                    border: '1px solid rgba(52, 211, 153, 0.5)',
+                    color: '#6ee7b7',
+                    fontSize: 12,
+                    fontWeight: 800,
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                  }}
+                >
+                  <ImpIcon name="fork" size={14} color="#34d399" />
+                  Fork / Convert Pinned Collection to Hybrid Playlist
+                </button>
+              )}
             <button
               data-focusable="true"
               data-default-focus="true"

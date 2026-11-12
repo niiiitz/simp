@@ -123,9 +123,14 @@ fn main() {
 
     // Mode 1: Headless systemd Daemon (`simp --daemon`)
     // Runs on a tight 2-thread Tokio runtime without initializing GTK or WebKitGTK.
+    // Worker threads opt into Efficiency Cores (Windows EcoQoS / Apple Silicon Utility QoS / Linux EAS nice +5)
+    // while the dedicated AudioOrchestrator / Rodio thread remains at full unthrottled priority.
     if args.iter().any(|arg| arg == "--daemon" || arg == "-d") {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
+            .on_thread_start(|| {
+                simp_core::prefer_efficiency_core_for_current_thread();
+            })
             .enable_all()
             .build()
             .expect("Failed to build Tokio runtime for SIMP daemon");

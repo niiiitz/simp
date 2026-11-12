@@ -234,10 +234,16 @@ export function useGamepadNavigation({
     (dir: 'up' | 'down' | 'left' | 'right') => {
       setIsDimmed(false);
       setIsSleeping(false);
+      window.dispatchEvent(new CustomEvent('simp-wake-idle'));
+      const hasFolderChooserModal = Boolean(
+        document.querySelector('[data-folder-chooser-modal="true"]')
+      );
       const hasDomModal = Boolean(document.querySelector('[data-modal-root="true"]'));
       const isModalOpen = sourceModalOpen || powerModalOpen || hasDomModal;
       const selector = oskTarget
         ? '[data-osk-root="true"] button:not([disabled])'
+        : hasFolderChooserModal
+        ? '[data-folder-chooser-modal="true"] button:not([disabled])'
         : isModalOpen
         ? '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled]), [data-modal-root="true"] select:not([disabled]), [data-modal-root="true"] a'
         : 'button:not([disabled]):not([data-tile-aux="true"]), input:not([disabled]), select:not([disabled]), [data-focusable="true"]';
@@ -364,6 +370,115 @@ export function useGamepadNavigation({
             );
           if (leftSettingTarget) {
             applyFocusMarker(leftSettingTarget);
+          }
+          return;
+        }
+      }
+
+      // Two-Column Folder Chooser Modal (`data-folder-chooser-modal="true"`):
+      // - `roots` (Left Drives & Places) <-> `dirs` (Right Subfolders)
+      // - Up from top of `roots`/`dirs` reaches `[< Up]` (if enabled) or `[Cancel]`
+      // - Down from bottom of `roots`/`dirs` reaches `[Select This Folder]`
+      const curFolderCol =
+        active.closest<HTMLElement>('[data-folder-col]')?.dataset.folderCol || null;
+      if (hasFolderChooserModal && curFolderCol && !oskTarget) {
+        const rootsBtns = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            '[data-folder-chooser-modal="true"] [data-folder-col="roots"] button:not([disabled])'
+          )
+        );
+        const dirsBtns = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            '[data-folder-chooser-modal="true"] [data-folder-col="dirs"] button:not([disabled])'
+          )
+        );
+        const upBtn = document.querySelector<HTMLElement>(
+          '[data-folder-chooser-modal="true"] [data-folder-up="true"]:not([disabled])'
+        );
+        const closeBtn = document.querySelector<HTMLElement>(
+          '[data-folder-chooser-modal="true"] [data-folder-chooser-close="true"]:not([disabled])'
+        );
+        const selectBtn = document.querySelector<HTMLElement>(
+          '[data-folder-chooser-modal="true"] [data-folder-select="true"]:not([disabled])'
+        );
+
+        if (curFolderCol === 'dirs' || curFolderCol === 'roots') {
+          const colList = curFolderCol === 'dirs' ? dirsBtns : rootsBtns;
+          const idx = colList.indexOf(active);
+          if (dir === 'up') {
+            if (idx > 0) {
+              applyFocusMarker(colList[idx - 1]);
+            } else if (upBtn) {
+              applyFocusMarker(upBtn);
+            } else if (closeBtn) {
+              applyFocusMarker(closeBtn);
+            }
+            return;
+          }
+          if (dir === 'down') {
+            if (idx >= 0 && idx < colList.length - 1) {
+              applyFocusMarker(colList[idx + 1]);
+            } else if (selectBtn) {
+              applyFocusMarker(selectBtn);
+            }
+            return;
+          }
+          if (curFolderCol === 'dirs' && dir === 'left') {
+            const activeRoot =
+              rootsBtns.find((b) => b.dataset.folderRootActive === 'true') || rootsBtns[0];
+            if (activeRoot) applyFocusMarker(activeRoot);
+            return;
+          }
+          if (curFolderCol === 'roots' && dir === 'right') {
+            const firstDir = dirsBtns[0] || selectBtn;
+            if (firstDir) applyFocusMarker(firstDir);
+            return;
+          }
+          return;
+        }
+
+        if (curFolderCol === 'header') {
+          if (dir === 'down') {
+            const target =
+              dirsBtns[0] ||
+              rootsBtns.find((b) => b.dataset.folderRootActive === 'true') ||
+              rootsBtns[0] ||
+              selectBtn;
+            if (target) applyFocusMarker(target);
+            return;
+          }
+          if (dir === 'right' && active === upBtn && closeBtn) {
+            applyFocusMarker(closeBtn);
+            return;
+          }
+          if (dir === 'left' && active === closeBtn && upBtn) {
+            applyFocusMarker(upBtn);
+            return;
+          }
+          if (dir === 'up' && active === upBtn && closeBtn) {
+            applyFocusMarker(closeBtn);
+            return;
+          }
+          return;
+        }
+
+        if (curFolderCol === 'footer') {
+          if (dir === 'up') {
+            const target =
+              dirsBtns[dirsBtns.length - 1] ||
+              rootsBtns.find((b) => b.dataset.folderRootActive === 'true') ||
+              rootsBtns[rootsBtns.length - 1] ||
+              upBtn ||
+              closeBtn;
+            if (target) applyFocusMarker(target);
+            return;
+          }
+          if (dir === 'left') {
+            const target =
+              rootsBtns.find((b) => b.dataset.folderRootActive === 'true') ||
+              rootsBtns[rootsBtns.length - 1];
+            if (target) applyFocusMarker(target);
+            return;
           }
           return;
         }
@@ -732,6 +847,7 @@ export function useGamepadNavigation({
         document.documentElement.dataset.simpInput = 'gamepad';
       }
       setIsDimmed(false);
+      window.dispatchEvent(new CustomEvent('simp-wake-idle'));
       if (isSleeping) {
         setIsSleeping(false);
         return;
@@ -953,6 +1069,13 @@ export function useGamepadNavigation({
               break;
             }
           }
+          const folderChooserClose = document.querySelector<HTMLElement>(
+            '[data-folder-chooser-close="true"]:not([disabled])'
+          );
+          if (folderChooserClose) {
+            folderChooserClose.click();
+            break;
+          }
           const quickHelpClose = document.querySelector<HTMLElement>(
             '[data-quick-help-close="true"]'
           );
@@ -1068,10 +1191,25 @@ export function useGamepadNavigation({
           }
           break;
         }
-        case 'shuffle':
+        case 'shuffle': {
+          const folderSelectBtn = document.querySelector<HTMLElement>(
+            '[data-folder-chooser-modal="true"] [data-folder-select="true"]:not([disabled])'
+          );
+          if (folderSelectBtn) {
+            folderSelectBtn.click();
+            break;
+          }
           defaultSimpClient.setShuffle(!shuffle);
           break;
-        case 'repeat':
+        }
+        case 'repeat': {
+          const folderUpBtn = document.querySelector<HTMLElement>(
+            '[data-folder-chooser-modal="true"] [data-folder-up="true"]:not([disabled])'
+          );
+          if (folderUpBtn) {
+            folderUpBtn.click();
+            break;
+          }
           if (view === 'browser' && !sourceModalOpen && !powerModalOpen && !oskTarget) {
             window.dispatchEvent(
               new CustomEvent('simp-browser-gamepad-op', { detail: { op: 'y' } })
@@ -1080,6 +1218,7 @@ export function useGamepadNavigation({
             defaultSimpClient.cycleRepeat();
           }
           break;
+        }
         case 'l1':
           setOskTarget(null);
           setView('lock');
@@ -1542,6 +1681,7 @@ export function useGamepadNavigation({
         if (isSleeping && anyButtonPressed) {
           setIsSleeping(false);
           setIsDimmed(false);
+          window.dispatchEvent(new CustomEvent('simp-wake-idle'));
           lastWebGamepadTsRef.current = performance.now();
           prevButtonsByPad.set(
             pad.index,

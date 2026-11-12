@@ -182,6 +182,23 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         .route("/api/apple/native-probe", get(apple_native_probe_handler))
         .route("/api/apple/open", get(apple_open_handler))
         .route("/api/lyrics", get(lyrics_handler))
+        .route("/api/lyrics/refetch", post(lyrics_refetch_handler))
+        .route("/api/factoids", get(factoids_handler))
+        .route("/api/factoids/refetch", post(factoids_refetch_handler))
+        .route(
+            "/api/library/track-properties",
+            get(track_properties_get_handler).post(track_properties_post_handler),
+        )
+        .route("/api/library/facets", get(library_facets_handler))
+        .route(
+            "/api/library/playlists/convert-to-hybrid",
+            post(convert_playlist_to_hybrid_handler),
+        )
+        .route("/api/library/purge-source", post(purge_source_handler))
+        .route("/api/auth/probe", get(auth_probe_handler))
+        .route("/api/fs/roots", get(fs_roots_handler))
+        .route("/api/fs/list", get(fs_list_handler))
+        .route("/api/fs/resolve-drop", post(fs_resolve_drop_handler))
         .route("/api/soundcloud/auth/start", get(soundcloud_auth_start_handler))
         .route("/api/soundcloud/callback", get(soundcloud_callback_handler))
         .route("/api/soundcloud/client-auth", post(soundcloud_client_auth_handler))
@@ -299,15 +316,20 @@ async fn apple_worker_html_handler() -> impl IntoResponse {
     if let Some(ui_dir) = resolve_ui_dir() {
         let index_path = ui_dir.join("index.html");
         if let Ok(raw) = std::fs::read_to_string(&index_path) {
-            let worker_html = raw.replace(
-                "<title>SIMP — Simple Integrated Media Player</title>",
-                "<title>SIMP Headless Audio Worker</title>",
-            );
+            let worker_html = raw
+                .replace(
+                    "<title>IMP — Interactive Media Player</title>",
+                    "<title>IMP Headless Audio Worker</title>",
+                )
+                .replace(
+                    "<title>SIMP — Simple Integrated Media Player</title>",
+                    "<title>IMP Headless Audio Worker</title>",
+                );
             return axum::response::Html(worker_html);
         }
     }
     axum::response::Html(
-        "<!DOCTYPE html><html><head><title>SIMP Headless Audio Worker</title></head><body></body></html>"
+        "<!DOCTYPE html><html><head><title>IMP Headless Audio Worker</title></head><body></body></html>"
             .to_string(),
     )
 }
@@ -1053,8 +1075,25 @@ async fn soundcloud_comments_handler(
 ) -> impl IntoResponse {
     let cfg = state.settings.lock().unwrap().clone();
     let id = params.get("id").cloned().unwrap_or_default();
+    let db = state.db.clone();
+    let id_for_db = id.clone();
     let res = tokio::task::spawn_blocking(move || {
-        simp_core::sinks::soundcloud_api::fetch_track_comments(&cfg, &id)
+        let res = simp_core::sinks::soundcloud_api::fetch_track_comments(&cfg, &id);
+        if let Ok(ref list) = res {
+            let uri_key = if id_for_db.starts_with("soundcloud://") {
+                id_for_db
+            } else {
+                format!("soundcloud://track/{}", id_for_db.trim())
+            };
+            let _ = db.upsert_track_properties_patch(
+                &uri_key,
+                &simp_core::library::db::TrackPropertiesPatch {
+                    has_comments: Some(!list.is_empty()),
+                    ..Default::default()
+                },
+            );
+        }
+        res
     })
     .await;
     match res {
@@ -1242,6 +1281,7 @@ async fn apple_open_handler(
 }
 
 async fn lyrics_handler(
+    State(state): State<DaemonIpcState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let uri = params.get("uri").cloned();
@@ -1253,21 +1293,782 @@ async fn lyrics_handler(
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0);
 
+    let db = state.db.clone();
     let res = tokio::task::spawn_blocking(move || {
-        simp_core::lyrics::fetch_track_lyrics(
+        let props = uri
+            .as_deref()
+            .and_then(|u| db.get_track_properties(u).ok())
+            .unwrap_or_default();
+        if props.suppress_lyrics {
+            let suppressed = simp_core::lyrics::TrackLyricsResponse {
+                found: false,
+                source: "suppressed".to_string(),
+                ..Default::default()
+            };
+            return (suppressed, props);
+        }
+
+        let mut lyrics = simp_core::lyrics::fetch_track_lyrics(
             uri.as_deref(),
             &title,
             &artist,
             album.as_deref(),
             duration_ms,
-        )
+        );
+        if lyrics.found {
+            if let Some(u) = uri.as_deref().filter(|s| !s.trim().is_empty()) {
+                let has_synced = !lyrics.synced_lines.is_empty();
+                let _ = db.record_indexed_track_capabilities(u, props.has_art, true, has_synced);
+            }
+            if props.lyrics_offset_ms != 0 && !lyrics.synced_lines.is_empty() {
+                for line in &mut lyrics.synced_lines {
+                    let shifted = (line.timestamp_ms as i64 + props.lyrics_offset_ms).max(0);
+                    line.timestamp_ms = shifted as u32;
+                }
+            }
+        }
+        let updated_props = uri
+            .as_deref()
+            .and_then(|u| db.get_track_properties(u).ok())
+            .unwrap_or(props);
+        (lyrics, updated_props)
     })
     .await;
 
     match res {
-        Ok(lyrics) => Json(serde_json::json!({ "ok": true, "data": lyrics })),
+        Ok((lyrics, props)) => Json(serde_json::json!({
+            "ok": true,
+            "data": lyrics,
+            "properties": props,
+        })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct LyricsRefetchBody {
+    uri: Option<String>,
+    title: String,
+    artist: String,
+    album: Option<String>,
+    duration_ms: Option<u32>,
+}
+
+async fn lyrics_refetch_handler(
+    State(state): State<DaemonIpcState>,
+    Json(body): Json<LyricsRefetchBody>,
+) -> impl IntoResponse {
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let uri_ref = body.uri.as_deref().filter(|s| !s.trim().is_empty());
+        let duration_ms = body.duration_ms.unwrap_or(0);
+        // Clear any suppression flag when the user explicitly clicks [Refetch Lyrics]
+        if let Some(u) = uri_ref {
+            let _ = db.upsert_track_properties_patch(
+                u,
+                &simp_core::library::db::TrackPropertiesPatch {
+                    suppress_lyrics: Some(false),
+                    has_lyrics: Some(false),
+                    has_synced_lyrics: Some(false),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut lyrics = simp_core::lyrics::refetch_track_lyrics(
+            uri_ref,
+            &body.title,
+            &body.artist,
+            body.album.as_deref(),
+            duration_ms,
+        );
+        let props = if let Some(u) = uri_ref {
+            let has_synced = !lyrics.synced_lines.is_empty();
+            let patched = db
+                .upsert_track_properties_patch(
+                    u,
+                    &simp_core::library::db::TrackPropertiesPatch {
+                        has_lyrics: Some(lyrics.found),
+                        has_synced_lyrics: Some(lyrics.found && has_synced),
+                        suppress_lyrics: Some(false),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_or_default();
+            if patched.lyrics_offset_ms != 0 && !lyrics.synced_lines.is_empty() {
+                for line in &mut lyrics.synced_lines {
+                    let shifted = (line.timestamp_ms as i64 + patched.lyrics_offset_ms).max(0);
+                    line.timestamp_ms = shifted as u32;
+                }
+            }
+            patched
+        } else {
+            Default::default()
+        };
+        (lyrics, props)
+    })
+    .await;
+
+    match res {
+        Ok((lyrics, props)) => Json(serde_json::json!({
+            "ok": true,
+            "data": lyrics,
+            "properties": props,
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn factoids_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let uri = params.get("uri").cloned().unwrap_or_default();
+    let title = params.get("title").cloned().unwrap_or_default();
+    let artist = params.get("artist").cloned().unwrap_or_default();
+    let album = params.get("album").cloned().filter(|s| !s.trim().is_empty());
+    let duration_ms: u32 = params
+        .get("duration_ms")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(180_000);
+    let db = state.db.clone();
+
+    let res = tokio::task::spawn_blocking(move || {
+        let uri_ref = if uri.trim().is_empty() {
+            None
+        } else {
+            Some(uri.as_str())
+        };
+        if let Some(u) = uri_ref {
+            if let Ok(props) = db.get_track_properties(u) {
+                if props.suppress_factoids {
+                    return simp_core::factoids::TrackFactoidsResponse {
+                        found: false,
+                        provider: "suppressed".to_string(),
+                        bubbles: Vec::new(),
+                    };
+                }
+            }
+        }
+        let factoids = simp_core::factoids::fetch_track_factoids(
+            uri_ref,
+            &title,
+            &artist,
+            album.as_deref(),
+            duration_ms,
+        );
+        if let Some(u) = uri_ref {
+            let _ = db.upsert_track_properties_patch(
+                u,
+                &simp_core::library::db::TrackPropertiesPatch {
+                    has_factoids: Some(factoids.found),
+                    ..Default::default()
+                },
+            );
+        }
+        factoids
+    })
+    .await;
+
+    match res {
+        Ok(data) => Json(serde_json::json!({ "ok": true, "data": data })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FactoidsRefetchBody {
+    uri: Option<String>,
+    title: String,
+    artist: String,
+    album: Option<String>,
+    duration_ms: Option<u32>,
+}
+
+async fn factoids_refetch_handler(
+    State(state): State<DaemonIpcState>,
+    Json(body): Json<FactoidsRefetchBody>,
+) -> impl IntoResponse {
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let uri_ref = body.uri.as_deref().filter(|s| !s.trim().is_empty());
+        simp_core::factoids::clear_cached_factoids_for_track(
+            uri_ref,
+            &body.title,
+            &body.artist,
+            body.album.as_deref(),
+        );
+        let factoids = simp_core::factoids::fetch_track_factoids(
+            uri_ref,
+            &body.title,
+            &body.artist,
+            body.album.as_deref(),
+            body.duration_ms.unwrap_or(180_000),
+        );
+        if let Some(u) = uri_ref {
+            let _ = db.upsert_track_properties_patch(
+                u,
+                &simp_core::library::db::TrackPropertiesPatch {
+                    has_factoids: Some(factoids.found),
+                    suppress_factoids: Some(false),
+                    ..Default::default()
+                },
+            );
+        }
+        factoids
+    })
+    .await;
+
+    match res {
+        Ok(data) => Json(serde_json::json!({ "ok": true, "data": data })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn track_properties_get_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let uri = params.get("uri").cloned().unwrap_or_default();
+    if uri.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "Missing uri parameter" }));
+    }
+    match state.db.get_track_properties(&uri) {
+        Ok(props) => Json(serde_json::json!({ "ok": true, "data": props })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TrackPropertiesPostBody {
+    uri: String,
+    #[serde(flatten)]
+    patch: simp_core::library::db::TrackPropertiesPatch,
+}
+
+async fn track_properties_post_handler(
+    State(state): State<DaemonIpcState>,
+    Json(body): Json<TrackPropertiesPostBody>,
+) -> impl IntoResponse {
+    if body.uri.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "error": "Missing uri" }));
+    }
+    match state.db.upsert_track_properties_patch(&body.uri, &body.patch) {
+        Ok(props) => Json(serde_json::json!({ "ok": true, "data": props })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn library_facets_handler(
+    State(state): State<DaemonIpcState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let facet = params.get("facet").cloned().unwrap_or_default();
+    let uris = state.db.get_facet_matching_uris(&facet).unwrap_or_default();
+    let tracks = state.db.get_facet_matching_tracks(&facet).unwrap_or_default();
+    Json(serde_json::json!({
+        "ok": true,
+        "facet": facet,
+        "uris": uris,
+        "tracks": tracks,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct ConvertToHybridBody {
+    playlist_id: String,
+}
+
+async fn convert_playlist_to_hybrid_handler(
+    State(state): State<DaemonIpcState>,
+    Json(body): Json<ConvertToHybridBody>,
+) -> impl IntoResponse {
+    match state.db.convert_playlist_to_hybrid(&body.playlist_id) {
+        Ok(converted) => {
+            let (total_albums, total_tracks) = state.db.get_library_counts().unwrap_or((0, 0));
+            let _ = state
+                .broadcast_tx
+                .send(simp_protocol::PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            Json(serde_json::json!({ "ok": true, "converted": converted }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PurgeSourceBody {
+    source: String,
+}
+
+async fn purge_source_handler(
+    State(state): State<DaemonIpcState>,
+    Json(body): Json<PurgeSourceBody>,
+) -> impl IntoResponse {
+    match state.db.purge_source_data(&body.source) {
+        Ok(removed) => {
+            let (total_albums, total_tracks) = state.db.get_library_counts().unwrap_or((0, 0));
+            let _ = state
+                .broadcast_tx
+                .send(simp_protocol::PlaybackEvent::LibraryUpdated {
+                    total_albums,
+                    total_tracks,
+                });
+            Json(serde_json::json!({ "ok": true, "removed": removed }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn auth_probe_handler(State(state): State<DaemonIpcState>) -> impl IntoResponse {
+    let cfg = state.settings.lock().unwrap().clone();
+    let res = tokio::task::spawn_blocking(move || {
+        // 1. Apple Music check: only probe if user previously connected an Apple Music account
+        let creds = simp_core::sinks::apple::AppleMusicSink::resolve_credentials(&cfg);
+        let apple_configured = cfg.services.apple_music_enabled && creds.music_user_token.is_some();
+        let mut apple_expired = false;
+        let mut apple_reason: Option<String> = None;
+        if apple_configured {
+            let dev_tok = simp_core::sinks::apple::AppleMusicSink::get_or_sign_developer_token(&cfg)
+                .unwrap_or_default();
+            let mut_tok = creds.music_user_token.as_deref().unwrap_or("");
+            if dev_tok.is_empty() {
+                apple_expired = true;
+                apple_reason = Some("Missing Apple Music developer token".to_string());
+            } else {
+                let auth_header = format!("Bearer {}", dev_tok);
+                let headers = [
+                    ("Authorization", auth_header.as_str()),
+                    ("Music-User-Token", mut_tok),
+                    ("Origin", "https://music.apple.com"),
+                ];
+                if let Err(e) = simp_core::http_pool::http_get_bytes(
+                    "https://api.music.apple.com/v1/me/storefront",
+                    &headers,
+                    None,
+                    6,
+                ) {
+                    let msg = e.to_string();
+                    if msg.contains("401") || msg.contains("403") {
+                        apple_expired = true;
+                        apple_reason = Some(
+                            "Apple Music user session token expired (HTTP 401/403)".to_string(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // 2. SoundCloud check: if user had an OAuth session (`auth_mode == "user"` or non-empty refresh/access token),
+        // `ensure_valid_access_token` attempts silent refresh first before reporting failure.
+        let sc_user_mode = cfg.services.soundcloud_auth_mode == "user"
+            || !cfg.services.soundcloud_username.trim().is_empty();
+        let mut sc_expired = false;
+        let mut sc_reason: Option<String> = None;
+        if sc_user_mode {
+            match simp_core::sinks::soundcloud_api::ensure_valid_access_token(&cfg) {
+                Ok(_) => {}
+                Err(e) => {
+                    sc_expired = true;
+                    sc_reason = Some(format!("SoundCloud session expired: {e}"));
+                }
+            }
+        }
+
+        // 3. Internet Archive check
+        let ia_configured = cfg.services.internet_archive_enabled
+            && !cfg.services.internet_archive_access_key.trim().is_empty()
+            && !cfg.services.internet_archive_secret_key.trim().is_empty();
+        let ia_expired = false;
+
+        serde_json::json!({
+            "apple": {
+                "was_connected": apple_configured,
+                "expired": apple_expired,
+                "reason": apple_reason,
+            },
+            "soundcloud": {
+                "was_connected": sc_user_mode,
+                "expired": sc_expired,
+                "reason": sc_reason,
+                "username": cfg.services.soundcloud_username,
+            },
+            "ia": {
+                "was_connected": ia_configured,
+                "expired": ia_expired,
+                "username": cfg.services.internet_archive_username,
+            }
+        })
+    })
+    .await;
+
+    match res {
+        Ok(data) => Json(serde_json::json!({ "ok": true, "data": data })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+async fn fs_roots_handler() -> impl IntoResponse {
+    let roots = tokio::task::spawn_blocking(|| {
+        let mut list = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            list.push(serde_json::json!({
+                "label": "Home Directory",
+                "path": home.to_string_lossy().to_string(),
+                "kind": "home"
+            }));
+            for (sub, label) in [("Music", "Music"), ("Downloads", "Downloads"), ("Videos", "Videos")] {
+                let candidate = home.join(sub);
+                if candidate.is_dir() {
+                    list.push(serde_json::json!({
+                        "label": label,
+                        "path": candidate.to_string_lossy().to_string(),
+                        "kind": "shortcut"
+                    }));
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            for letter in b'C'..=b'Z' {
+                let drive = format!("{}:\\", letter as char);
+                if std::path::Path::new(&drive).is_dir() {
+                    list.push(serde_json::json!({
+                        "label": format!("Local Disk ({}:)", letter as char),
+                        "path": drive,
+                        "kind": "drive"
+                    }));
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if std::path::Path::new("/Volumes").is_dir() {
+                list.push(serde_json::json!({
+                    "label": "Volumes (/Volumes)",
+                    "path": "/Volumes",
+                    "kind": "drive"
+                }));
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            for mount_base in ["/run/media", "/media", "/mnt"] {
+                let p = std::path::Path::new(mount_base);
+                if p.is_dir() {
+                    list.push(serde_json::json!({
+                        "label": format!("Removable / Mounts ({mount_base})"),
+                        "path": mount_base,
+                        "kind": "drive"
+                    }));
+                }
+            }
+            list.push(serde_json::json!({
+                "label": "Filesystem Root (/)",
+                "path": "/",
+                "kind": "root"
+            }));
+        }
+
+        list
+    })
+    .await
+    .unwrap_or_default();
+
+    Json(serde_json::json!({ "ok": true, "roots": roots }))
+}
+
+fn clean_fs_path(p: &std::path::Path) -> std::path::PathBuf {
+    let raw = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let cleaned = simp_core::library::vdf::strip_windows_verbatim_prefix(&raw.to_string_lossy());
+    std::path::PathBuf::from(cleaned)
+}
+
+async fn fs_list_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let requested = params.get("path").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+        let cleaned_req = simp_core::library::vdf::strip_windows_verbatim_prefix(&requested);
+        let target_path = if cleaned_req.trim().is_empty() {
+            dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"))
+        } else {
+            std::path::PathBuf::from(cleaned_req.trim())
+        };
+        if !target_path.is_dir() {
+            anyhow::bail!("Directory does not exist: {}", target_path.display());
+        }
+        let canonical = clean_fs_path(&target_path);
+        let parent_path = canonical.parent().and_then(|p| {
+            let s = simp_core::library::vdf::strip_windows_verbatim_prefix(&p.to_string_lossy());
+            if s.is_empty() || s == canonical.to_string_lossy() {
+                None
+            } else {
+                Some(s)
+            }
+        });
+
+        let audio_exts = [
+            "flac", "mp3", "wav", "m4a", "aac", "ogg", "opus", "aiff", "aif", "wma", "alac",
+        ];
+        let video_exts = ["mp4", "mkv", "webm", "mov", "avi", "m4v"];
+
+        let mut directories = Vec::new();
+        let mut media_file_count = 0usize;
+
+        if let Ok(entries) = std::fs::read_dir(&canonical) {
+            for entry in entries.flatten() {
+                let path = clean_fs_path(&entry.path());
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if path.is_dir() {
+                    // Quick shallow count of media files directly inside the child directory
+                    let mut child_media_count = 0usize;
+                    if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                        for sub in sub_entries.flatten().take(250) {
+                            if let Some(ext) = sub.path().extension().and_then(|e| e.to_str()) {
+                                let lower = ext.to_ascii_lowercase();
+                                if audio_exts.contains(&lower.as_str())
+                                    || video_exts.contains(&lower.as_str())
+                                {
+                                    child_media_count += 1;
+                                }
+                            }
+                        }
+                    }
+                    directories.push(serde_json::json!({
+                        "name": name,
+                        "path": path.to_string_lossy().to_string(),
+                        "media_count": child_media_count,
+                    }));
+                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    let lower = ext.to_ascii_lowercase();
+                    if audio_exts.contains(&lower.as_str()) || video_exts.contains(&lower.as_str()) {
+                        media_file_count += 1;
+                    }
+                }
+            }
+        }
+
+        directories.sort_by(|a, b| {
+            let na = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let nb = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            na.to_lowercase().cmp(&nb.to_lowercase())
+        });
+
+        Ok(serde_json::json!({
+            "current_path": canonical.to_string_lossy().to_string(),
+            "parent_path": parent_path,
+            "media_file_count": media_file_count,
+            "directories": directories,
+        }))
+    })
+    .await;
+
+    match res {
+        Ok(Ok(data)) => Json(serde_json::json!({ "ok": true, "data": data })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FsResolveDropPayload {
+    #[serde(default)]
+    folder_name: Option<String>,
+    #[serde(default)]
+    child_name: Option<String>,
+    #[serde(default)]
+    file_name: Option<String>,
+    #[serde(default)]
+    file_size: Option<u64>,
+    #[serde(default)]
+    uri_hint: Option<String>,
+}
+
+async fn fs_resolve_drop_handler(
+    State(state): State<DaemonIpcState>,
+    Json(payload): Json<FsResolveDropPayload>,
+) -> impl IntoResponse {
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || -> Option<String> {
+        let mounted_paths: Vec<std::path::PathBuf> = db
+            .get_mounts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| clean_fs_path(std::path::Path::new(&m.mount_root)))
+            .collect();
+        // 1. Check direct uri_hint first
+        if let Some(hint) = payload
+            .uri_hint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let stripped_uri = hint
+                .strip_prefix("file:///")
+                .or_else(|| hint.strip_prefix("file://"))
+                .unwrap_or(hint);
+            let cleaned = simp_core::library::vdf::strip_windows_verbatim_prefix(stripped_uri);
+            let p = std::path::Path::new(&cleaned);
+            if p.is_dir() {
+                return Some(clean_fs_path(p).to_string_lossy().to_string());
+            } else if p.is_file() {
+                if let Some(parent) = p.parent() {
+                    return Some(clean_fs_path(parent).to_string_lossy().to_string());
+                }
+            }
+        }
+
+        // 2. Build candidate search roots
+        let mut roots = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            for sub in ["Music", "Downloads", "Videos", "Desktop", "Documents"] {
+                let p = clean_fs_path(&home.join(sub));
+                if p.is_dir() && !roots.contains(&p) {
+                    roots.push(p);
+                }
+            }
+            let clean_home = clean_fs_path(&home);
+            if clean_home.is_dir() && !roots.contains(&clean_home) {
+                roots.push(clean_home);
+            }
+        }
+        for mp in mounted_paths {
+            if mp.is_dir() && !roots.contains(&mp) {
+                roots.push(mp);
+            }
+        }
+        for extra in ["/run/media", "/media", "/Volumes"] {
+            let p = std::path::PathBuf::from(extra);
+            if p.is_dir() {
+                roots.push(p);
+            }
+        }
+
+        let target_folder = payload
+            .folder_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let target_child = payload
+            .child_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let target_file = payload
+            .file_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let target_size = payload.file_size;
+
+        fn search_dir(
+            dir: &std::path::Path,
+            depth: usize,
+            max_depth: usize,
+            target_folder: Option<&str>,
+            target_child: Option<&str>,
+            target_file: Option<&str>,
+            target_size: Option<u64>,
+        ) -> Option<std::path::PathBuf> {
+            if depth > max_depth {
+                return None;
+            }
+            let entries = std::fs::read_dir(dir).ok()?;
+            for entry in entries.flatten().take(400) {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with('.') {
+                    continue;
+                }
+                if path.is_dir() {
+                    if let Some(tf) = target_folder {
+                        if name_str.eq_ignore_ascii_case(tf) {
+                            let child_ok = target_child
+                                .map(|tc| path.join(tc).exists())
+                                .unwrap_or(true);
+                            let file_ok = target_file
+                                .map(|sf| path.join(sf).exists())
+                                .unwrap_or(true);
+                            if child_ok && file_ok {
+                                return Some(path);
+                            }
+                        }
+                    }
+                    if let Some(found) = search_dir(
+                        &path,
+                        depth + 1,
+                        max_depth,
+                        target_folder,
+                        target_child,
+                        target_file,
+                        target_size,
+                    ) {
+                        return Some(found);
+                    }
+                } else if target_folder.is_none() {
+                    if let Some(tfile) = target_file {
+                        if name_str.eq_ignore_ascii_case(tfile) {
+                            let size_ok = match target_size {
+                                Some(sz) if sz > 0 => entry
+                                    .metadata()
+                                    .map(|m| m.len() == sz)
+                                    .unwrap_or(true),
+                                _ => true,
+                            };
+                            if size_ok {
+                                if let Some(parent) = path.parent() {
+                                    return Some(parent.to_path_buf());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+
+        // First pass: strict match with child_name / file_name verification
+        for root in &roots {
+            if let Some(found) = search_dir(
+                root,
+                0,
+                6,
+                target_folder,
+                target_child,
+                target_file,
+                target_size,
+            ) {
+                return Some(clean_fs_path(&found).to_string_lossy().to_string());
+            }
+        }
+        // Second pass fallback if child_name was not matched directly
+        if target_child.is_some() && target_folder.is_some() {
+            for root in &roots {
+                if let Some(found) = search_dir(root, 0, 6, target_folder, None, None, None) {
+                    return Some(clean_fs_path(&found).to_string_lossy().to_string());
+                }
+            }
+        }
+
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+
+    Json(serde_json::json!({
+        "ok": res.is_some(),
+        "resolved_folder": res,
+    }))
 }
 
 async fn dvd_stream_handler(

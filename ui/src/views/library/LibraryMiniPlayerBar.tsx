@@ -5,9 +5,11 @@ import {
   TrackMetadata,
 } from '@simp/client';
 import { ProgressBarRaf } from '../../components/ProgressBarRaf';
+import { getSourceThemeForTrack } from '../../theme/sourceTheme';
+import { ImpIcon } from '../../components/icons/ImpIcon';
 
 export interface LibraryMiniPlayerBarProps {
-  track: TrackMetadata;
+  track: TrackMetadata | null;
   snap: SimpStateSnapshot | null;
   hidden?: boolean;
   onReturnToPlayer: () => void;
@@ -19,18 +21,45 @@ export const LibraryMiniPlayerBar: React.FC<LibraryMiniPlayerBarProps> = ({
   hidden = false,
   onReturnToPlayer,
 }) => {
+  const theme = getSourceThemeForTrack(track?.uri, track?.source);
+
+  if (!track) {
+    return (
+      <div
+        data-mini-player-bar="true"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 14,
+          minHeight: 53,
+          padding: '7px 14px',
+          background: '#06070b',
+          borderBottom: '1px solid #181a24',
+          boxSizing: 'border-box',
+          minWidth: 0,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: '#64748b', fontSize: 12 }}>
+          <ImpIcon name="disc" size={16} color="#38bdf8" />
+          <span>No track playing — select any album, playlist, or song below</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       data-mini-player-bar="true"
       style={{
-        gridColumn: '1 / -1',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
         gap: 14,
+        minHeight: 53,
         padding: '7px 14px',
         background: '#06070b',
-        borderBottom: '1px solid #181a24',
+        borderBottom: `1px solid ${theme.accentBorder}`,
         boxSizing: 'border-box',
         minWidth: 0,
       }}
@@ -68,7 +97,7 @@ export const LibraryMiniPlayerBar: React.FC<LibraryMiniPlayerBarProps> = ({
                 height: 38,
                 borderRadius: 8,
                 objectFit: 'cover',
-                border: '1px solid #2aa3c4',
+                border: `1px solid ${theme.accent}`,
               }}
             />
           ) : (
@@ -78,20 +107,22 @@ export const LibraryMiniPlayerBar: React.FC<LibraryMiniPlayerBarProps> = ({
                 height: 38,
                 borderRadius: 8,
                 background: '#11141e',
-                border: '1px solid #2aa3c4',
+                border: `1px solid ${theme.accent}`,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 fontSize: 16,
               }}
             >
-              {track.source === 'apple_music'
-                ? '🍎'
-                : track.source === 'soundcloud'
-                ? '☁️'
-                : track.source === 'internet_archive' || track.source === 'ia_video'
-                ? '🏛️'
-                : '🎵'}
+              {track.source === 'apple_music' ? (
+                <ImpIcon name="apple" size={16} color="#fda4af" />
+              ) : track.source === 'soundcloud' ? (
+                <ImpIcon name="soundcloud" size={13} color="#ffffff" />
+              ) : track.source === 'internet_archive' || track.source === 'ia_video' ? (
+                <ImpIcon name="archive" size={15} color="#6ee7b7" />
+              ) : (
+                <ImpIcon name="music" size={15} color="#67e8f9" />
+              )}
             </div>
           )}
         </button>
@@ -109,7 +140,7 @@ export const LibraryMiniPlayerBar: React.FC<LibraryMiniPlayerBarProps> = ({
               gap: 6,
             }}
           >
-            <span style={{ color: snap?.is_playing ? '#2aa3c4' : '#94a3b8' }}>
+            <span style={{ color: snap?.is_playing ? theme.accent : '#94a3b8' }}>
               {snap?.is_playing ? '▶' : '⏸'}
             </span>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -133,7 +164,12 @@ export const LibraryMiniPlayerBar: React.FC<LibraryMiniPlayerBarProps> = ({
 
       {/* Center: Compact Progress Scrubber */}
       <div style={{ flex: '1 1 320px', minWidth: 160, maxWidth: 460 }}>
-        <ProgressBarRaf durationMs={track.duration_ms || 0} compact hidden={hidden} />
+        <ProgressBarRaf
+          durationMs={track.duration_ms || 0}
+          trackUri={track.uri}
+          compact
+          hidden={hidden}
+        />
       </div>
 
       {/* Right: Transport Controls + Repeat Mode Overlay + Return to Player */}
@@ -163,9 +199,9 @@ export const LibraryMiniPlayerBar: React.FC<LibraryMiniPlayerBarProps> = ({
             minHeight: 32,
             padding: '0 11px',
             borderRadius: 8,
-            background: snap?.is_playing ? '#0f222a' : '#141622',
-            border: snap?.is_playing ? '1px solid #2aa3c4' : '1px solid #2a2e3e',
-            color: snap?.is_playing ? '#67e8f9' : '#f1f5f9',
+            background: snap?.is_playing ? theme.accentMuted : '#141622',
+            border: snap?.is_playing ? `1px solid ${theme.accent}` : '1px solid #2a2e3e',
+            color: snap?.is_playing ? theme.accent : '#f1f5f9',
             fontSize: 12,
             fontWeight: 800,
             cursor: 'pointer',
@@ -247,24 +283,6 @@ export const LibraryMiniPlayerBar: React.FC<LibraryMiniPlayerBarProps> = ({
               {snap.repeat_mode === 'track' ? '1' : '∞'}
             </span>
           )}
-        </button>
-        <button
-          data-row-aux="true"
-          onClick={onReturnToPlayer}
-          title="Switch to Full Player View"
-          style={{
-            minHeight: 32,
-            padding: '0 10px',
-            borderRadius: 8,
-            background: '#121822',
-            border: '1px solid #2aa3c4',
-            color: '#bfeaf5',
-            fontSize: 11,
-            fontWeight: 800,
-            cursor: 'pointer',
-          }}
-        >
-          ↗ Player
         </button>
       </div>
     </div>

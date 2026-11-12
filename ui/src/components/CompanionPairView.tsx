@@ -13,6 +13,7 @@ import {
   enableSoundCloudPublicMode,
   startSoundCloudOAuthLogin,
 } from '../drivers/SoundCloudDriver';
+import { ImpIcon } from './icons/ImpIcon';
 
 /**
  * Console-Style LAN QR Companion Pairing Page (`/pair` or `?pair=1`).
@@ -258,7 +259,7 @@ export const CompanionPairView: React.FC = () => {
             gap: 10,
           }}
         >
-          <span>🍎</span>
+          <ImpIcon name="apple" size={16} color="#ffffff" />
           <span>
             {busy
               ? 'Authorizing & Syncing...'
