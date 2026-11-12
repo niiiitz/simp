@@ -316,15 +316,20 @@ async fn apple_worker_html_handler() -> impl IntoResponse {
     if let Some(ui_dir) = resolve_ui_dir() {
         let index_path = ui_dir.join("index.html");
         if let Ok(raw) = std::fs::read_to_string(&index_path) {
-            let worker_html = raw.replace(
-                "<title>SIMP — Simple Integrated Media Player</title>",
-                "<title>SIMP Headless Audio Worker</title>",
-            );
+            let worker_html = raw
+                .replace(
+                    "<title>IMP — Interactive Media Player</title>",
+                    "<title>IMP Headless Audio Worker</title>",
+                )
+                .replace(
+                    "<title>SIMP — Simple Integrated Media Player</title>",
+                    "<title>IMP Headless Audio Worker</title>",
+                );
             return axum::response::Html(worker_html);
         }
     }
     axum::response::Html(
-        "<!DOCTYPE html><html><head><title>SIMP Headless Audio Worker</title></head><body></body></html>"
+        "<!DOCTYPE html><html><head><title>IMP Headless Audio Worker</title></head><body></body></html>"
             .to_string(),
     )
 }

@@ -255,12 +255,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const scheduleFoldersAutoDismiss = () => {
     clearFoldersDismissTimer();
     dismissTimerRef.current = window.setTimeout(() => {
-      if (triggerHoverRef.current || subPanelHoverRef.current) {
+      if (
+        triggerHoverRef.current ||
+        subPanelHoverRef.current ||
+        folderChooserOpen ||
+        document.querySelector('[data-folder-chooser-modal="true"]')
+      ) {
         return;
       }
       const subEl = document.querySelector<HTMLElement>('[data-settings-col="sub"]');
       const trigEl = document.querySelector<HTMLElement>('[data-settings-folders-trigger="true"]');
-      const gpFocused = document.querySelector<HTMLElement>('[data-gp-focused="true"]');
+      const gpFocused =
+        document.querySelector<HTMLElement>('[data-simp-active-focus="true"]') ||
+        document.querySelector<HTMLElement>('[data-gp-focused="true"]');
       const activeEl = document.activeElement as HTMLElement | null;
       const gpInside =
         (gpFocused && ((subEl && subEl.contains(gpFocused)) || (trigEl && trigEl.contains(gpFocused)))) ||
@@ -877,6 +884,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   <button
                     type="button"
+                    data-folder-browse-trigger="true"
                     onClick={() => setFolderChooserOpen(true)}
                     style={pillToggleStyle(folderChooserOpen, '#34d399')}
                   >
@@ -1612,11 +1620,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       <FolderChooserModal
         open={folderChooserOpen}
         initialPath={customFolderPath}
+        applyFocusMarker={applyFocusMarker}
         onSelectFolder={(folderPath) => {
           setCustomFolderPath(folderPath);
           handleAddFolder(folderPath);
         }}
-        onClose={() => setFolderChooserOpen(false)}
+        onClose={() => {
+          setFolderChooserOpen(false);
+          window.setTimeout(() => {
+            const browseTrigger =
+              document.querySelector<HTMLElement>(
+                '[data-folder-browse-trigger="true"]:not([disabled])'
+              ) ||
+              document.querySelector<HTMLElement>(
+                '[data-settings-col="sub"] button:not([disabled])'
+              );
+            if (browseTrigger && applyFocusMarker) {
+              applyFocusMarker(browseTrigger);
+            }
+          }, 30);
+        }}
       />
     </div>
   );

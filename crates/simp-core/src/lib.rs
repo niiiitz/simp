@@ -299,18 +299,23 @@ mod win32_window_mgr {
         String::from_utf16_lossy(&buf[..len as usize])
     }
 
+    unsafe fn is_ui_window_title(title: &str) -> bool {
+        title.starts_with("IMP — Interactive Media Player")
+            || title.starts_with("IMP - Interactive Media Player")
+            || title.starts_with("SIMP — Simple Integrated Media Player")
+            || title.starts_with("SIMP - Simple Integrated Media Player")
+    }
+
     unsafe fn is_worker_hwnd(hwnd: Hwnd, title: &str) -> bool {
-        if title.starts_with("SIMP Headless Audio Worker")
+        if title.starts_with("IMP Headless Audio Worker")
+            || title.starts_with("SIMP Headless Audio Worker")
             || title.contains("apple-worker")
             || title.contains("worker=apple")
         {
             return true;
         }
         // Also catch any 320x240 worker window whose title is still the default index.html title
-        if (title.starts_with("SIMP — Simple Integrated Media Player")
-            || title.starts_with("SIMP - Simple Integrated Media Player"))
-            && IsIconic(hwnd) == 0
-        {
+        if is_ui_window_title(title) && IsIconic(hwnd) == 0 {
             let mut rect = Rect::default();
             if GetWindowRect(hwnd, &mut rect) != 0 {
                 let w = rect.right - rect.left;
@@ -334,9 +339,7 @@ mod win32_window_mgr {
         if is_worker_hwnd(hwnd, title) {
             return false;
         }
-        if title.starts_with("SIMP — Simple Integrated Media Player")
-            || title.starts_with("SIMP - Simple Integrated Media Player")
-        {
+        if is_ui_window_title(title) {
             if IsIconic(hwnd) == 0 {
                 let mut rect = Rect::default();
                 if GetWindowRect(hwnd, &mut rect) != 0 {

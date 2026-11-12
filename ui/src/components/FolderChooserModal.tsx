@@ -18,6 +18,7 @@ interface FolderChooserModalProps {
   initialPath?: string;
   onSelectFolder: (folderPath: string, suggestedLabel: string) => void;
   onClose: () => void;
+  applyFocusMarker?: (el: HTMLElement | null) => void;
 }
 
 export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
@@ -25,6 +26,7 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
   initialPath,
   onSelectFolder,
   onClose,
+  applyFocusMarker,
 }) => {
   const [roots, setRoots] = useState<FsRootItem[]>([]);
   const [currentPath, setCurrentPath] = useState<string>('');
@@ -69,6 +71,41 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
     loadDirectory(initialPath?.trim() || undefined);
   }, [open]);
 
+  // Whenever directory contents finish loading while open, place gamepad focus on the first subfolder
+  // (or on `Select This Folder` if this directory has no subfolders).
+  useEffect(() => {
+    if (!open || loading) return;
+    const t = window.setTimeout(() => {
+      const firstDir = document.querySelector<HTMLElement>(
+        '[data-folder-chooser-modal="true"] [data-folder-col="dirs"] button:not([disabled])'
+      );
+      const selectBtn = document.querySelector<HTMLElement>(
+        '[data-folder-chooser-modal="true"] [data-folder-select="true"]:not([disabled])'
+      );
+      const activeRoot = document.querySelector<HTMLElement>(
+        '[data-folder-chooser-modal="true"] [data-folder-root-active="true"]:not([disabled])'
+      );
+      const target = firstDir || selectBtn || activeRoot;
+      if (!target) return;
+      if (applyFocusMarker) {
+        applyFocusMarker(target);
+      } else {
+        document
+          .querySelectorAll<HTMLElement>('[data-simp-active-focus="true"], .simp-gpfocus')
+          .forEach((node) => {
+            if (node !== target) {
+              node.removeAttribute('data-simp-active-focus');
+              node.classList.remove('simp-gpfocus');
+            }
+          });
+        target.setAttribute('data-simp-active-focus', 'true');
+        target.classList.add('simp-gpfocus');
+        target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+    }, 30);
+    return () => window.clearTimeout(t);
+  }, [open, loading, currentPath, directories.length, applyFocusMarker]);
+
   if (!open) return null;
 
   const suggestedLabel = (() => {
@@ -80,6 +117,7 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
   return (
     <div
       data-modal-root="true"
+      data-folder-chooser-modal="true"
       onClick={onClose}
       style={{
         position: 'fixed',
@@ -110,6 +148,7 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
       >
         {/* Top Bar */}
         <div
+          data-folder-col="header"
           style={{
             padding: '14px 18px',
             borderBottom: '1px solid rgba(255,255,255,0.08)',
@@ -138,13 +177,14 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
             <div>
               <div style={{ fontSize: 14, fontWeight: 800 }}>Browse Local Media Folders</div>
               <div style={{ fontSize: 11, color: '#94a3b8' }}>
-                Navigate with D-Pad or mouse and choose a folder to index
+                Navigate with D-Pad or mouse · A Open · Y Up · X Select · B Cancel
               </div>
             </div>
           </div>
 
           <button
             data-focusable="true"
+            data-folder-chooser-close="true"
             onClick={onClose}
             style={{
               padding: '6px 11px',
@@ -162,11 +202,15 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
           >
             <ImpIcon name="close" size={13} />
             Cancel
+            <span className="simp-gp-badge" style={{ fontSize: 10, opacity: 0.8 }}>
+              B
+            </span>
           </button>
         </div>
 
         {/* Breadcrumb / Current Path Bar */}
         <div
+          data-folder-col="header"
           style={{
             padding: '10px 18px',
             background: 'rgba(0, 0, 0, 0.28)',
@@ -180,6 +224,7 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
             <button
               data-focusable="true"
+              data-folder-up="true"
               disabled={!parentPath || parentPath === currentPath}
               onClick={() => parentPath && loadDirectory(parentPath)}
               style={{
@@ -199,6 +244,9 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
             >
               <ImpIcon name="chevron-left" size={13} />
               Up
+              <span className="simp-gp-badge" style={{ fontSize: 10, opacity: 0.8 }}>
+                Y
+              </span>
             </button>
             <div
               style={{
@@ -236,6 +284,7 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
         <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
           {/* Left Quick Places / Drives */}
           <div
+            data-folder-col="roots"
             style={{
               width: '30%',
               borderRight: '1px solid rgba(255,255,255,0.08)',
@@ -260,11 +309,15 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
               Drives & Places
             </div>
             {roots.map((r) => {
-              const active = currentPath === r.path;
+              const active =
+                currentPath === r.path ||
+                (r.path !== '/' && currentPath.startsWith(r.path.replace(/\/+$/, '') + '/'));
               return (
                 <button
                   key={r.path}
                   data-focusable="true"
+                  data-folder-root="true"
+                  data-folder-root-active={active ? 'true' : undefined}
                   onClick={() => loadDirectory(r.path)}
                   style={{
                     textAlign: 'left',
@@ -300,6 +353,7 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
 
           {/* Right Directory Contents */}
           <div
+            data-folder-col="dirs"
             style={{
               flex: 1,
               padding: 12,
@@ -320,10 +374,12 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
                 No subdirectories inside this folder.
               </div>
             ) : (
-              directories.map((dir) => (
+              directories.map((dir, idx) => (
                 <button
                   key={dir.path}
                   data-focusable="true"
+                  data-folder-dir="true"
+                  data-default-focus={idx === 0 ? 'true' : undefined}
                   onClick={() => loadDirectory(dir.path)}
                   style={{
                     padding: '9px 12px',
@@ -367,6 +423,9 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
                         {dir.media_count} media
                       </span>
                     )}
+                    <span className="simp-gp-badge" style={{ fontSize: 10, opacity: 0.75 }}>
+                      A
+                    </span>
                     <ImpIcon name="chevron-right" size={14} color="#64748b" />
                   </div>
                 </button>
@@ -377,6 +436,7 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
 
         {/* Footer Confirm Action */}
         <div
+          data-folder-col="footer"
           style={{
             padding: '12px 18px',
             borderTop: '1px solid rgba(255,255,255,0.08)',
@@ -392,6 +452,8 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
           </div>
           <button
             data-focusable="true"
+            data-folder-select="true"
+            data-default-focus={directories.length === 0 ? 'true' : undefined}
             disabled={!currentPath}
             onClick={() => {
               if (currentPath) {
@@ -415,6 +477,9 @@ export const FolderChooserModal: React.FC<FolderChooserModalProps> = ({
           >
             <ImpIcon name="folder-plus" size={15} color="#34d399" />
             Select This Folder
+            <span className="simp-gp-badge" style={{ fontSize: 10.5, opacity: 0.9 }}>
+              X
+            </span>
           </button>
         </div>
       </div>
