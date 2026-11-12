@@ -43,6 +43,8 @@ export interface SceneRenderContext {
   trackArtist: string;
   cropTopY: number;
   cropBottomY: number;
+  cropLeftX?: number;
+  cropRightX?: number;
 }
 
 export function rgbToCss(rgb: RgbTuple | undefined, alpha = 1): string {

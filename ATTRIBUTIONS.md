@@ -51,7 +51,7 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
   * *Midnight Mountain (`VIZ: MIDNIGHT`, `midnightScene.ts`)* & *Dark Fantasy Sanctum (`VIZ: SANCTUM`, `sanctumScene.ts`)*: Homage to Konami's *Castlevania: Symphony of the Night* & *Rondo of Blood*, FromSoftware's *Dark Souls* soapstone messages, and 16-bit SNES multi-layer raster parallax & water-reflection scanline engines.
   * *Cosmic Warp & 50s Saucer (`VIZ: COSMOS`, `cosmosScene.ts`)*: Homage to 1950s sci-fi practical-effect flying saucers (*Plan 9 from Outer Space*) and volumetric gravitational-lensing space odysseys.
   * *Coral Reef (`VIZ: REEF`, `reefScene.ts`)* & *Y2K Vaporwave Odyssey (`VIZ: VAPORWAVE`, `vaporwaveScene.ts`)*: Homage to Novotrade/Sega's *Ecco the Dolphin*, Sega AM2's *OutRun* & *Space Harrier* super-scaler horizons, Windows 95 *Solitaire* (Wes Cherry) bouncing card cascades, classic *AOL Instant Messenger* chat windows, and Macintosh Plus *Floral Shoppe* vaporwave aesthetics.
-  * *Retro Arcade Remix (`VIZ: ARCADE`, `arcadeScene.ts`)*: Homage to Namco (*Pac-Man*), Williams Electronics (*Joust*), Atari (*Pong*, *Missile Command*), Nintendo (*Donkey Kong*), and Taito (*Space Invaders*).
+  * *Retro Arcade Remix (`VIZ: ARCADE`, `arcadeScene.ts`)*: Homage to Namco (*Pac-Man*), Williams Electronics (*Joust*), Atari (*Pong*, *Breakout*, *Missile Command*), Nintendo (*Donkey Kong*), and Taito (*Space Invaders*, *Arkanoid*).
 
 ---
 
