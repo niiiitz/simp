@@ -64,7 +64,69 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
     };
   }, [track?.uri]);
 
+  useEffect(() => {
+    if (!track?.uri) return;
+    const t = window.setTimeout(() => {
+      const existingFocused = document.querySelector<HTMLElement>(
+        '[data-track-properties-modal="true"] button[data-simp-active-focus="true"]:not([disabled]):not([data-track-properties-close="true"])',
+      );
+      if (existingFocused) return;
+      const target =
+        document.querySelector<HTMLElement>(
+          '[data-track-properties-modal="true"] button[data-default-focus="true"]:not([disabled])',
+        ) ||
+        document.querySelector<HTMLElement>(
+          '[data-track-properties-modal="true"] button:not([disabled]):not([data-track-properties-close="true"])',
+        ) ||
+        document.querySelector<HTMLElement>(
+          '[data-track-properties-modal="true"] button:not([disabled])',
+        );
+      if (!target) return;
+      document
+        .querySelectorAll<HTMLElement>('[data-simp-active-focus="true"], .simp-gpfocus')
+        .forEach((node) => {
+          if (node !== target) {
+            node.removeAttribute('data-simp-active-focus');
+            node.classList.remove('simp-gpfocus');
+          }
+        });
+      target.setAttribute('data-simp-active-focus', 'true');
+      target.classList.add('simp-gpfocus');
+      target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }, 25);
+    return () => window.clearTimeout(t);
+  }, [track?.uri, loading, Boolean(propsData)]);
+
   if (!track) return null;
+
+  const handleCloseModal = () => {
+    onClose();
+    window.setTimeout(() => {
+      const restoreTarget =
+        document.querySelector<HTMLElement>(
+          '[data-player-actions-modal="true"] [data-track-properties-trigger="true"]:not([disabled])',
+        ) ||
+        document.querySelector<HTMLElement>(
+          '[data-modal-root="true"] button[data-default-focus="true"]:not([disabled])',
+        ) ||
+        document.querySelector<HTMLElement>(
+          '[data-modal-root="true"] button:not([disabled])',
+        );
+      if (restoreTarget) {
+        document
+          .querySelectorAll<HTMLElement>('[data-simp-active-focus="true"], .simp-gpfocus')
+          .forEach((node) => {
+            if (node !== restoreTarget) {
+              node.removeAttribute('data-simp-active-focus');
+              node.classList.remove('simp-gpfocus');
+            }
+          });
+        restoreTarget.setAttribute('data-simp-active-focus', 'true');
+        restoreTarget.classList.add('simp-gpfocus');
+        restoreTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+    }, 25);
+  };
 
   const theme = getSourceThemeForTrack(track.uri, track.source);
   const cssVars = getSourceThemeCssVars(theme);
@@ -190,7 +252,8 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
   return (
     <div
       data-modal-root="true"
-      onClick={onClose}
+      data-track-properties-modal="true"
+      onClick={handleCloseModal}
       style={{
         position: 'fixed',
         inset: 0,
@@ -258,8 +321,9 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
             </div>
           </div>
           <button
-            data-focusable="true"
-            onClick={onClose}
+            type="button"
+            data-track-properties-close="true"
+            onClick={handleCloseModal}
             style={{
               background: 'rgba(255,255,255,0.06)',
               border: '1px solid rgba(255,255,255,0.14)',
@@ -275,7 +339,8 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
             }}
           >
             <ImpIcon name="close" size={14} />
-            Close
+            <span>Close</span>
+            <span className="simp-gp-badge">B</span>
           </button>
         </div>
 
@@ -332,7 +397,8 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 <button
-                  data-focusable="true"
+                  type="button"
+                  data-default-focus="true"
                   disabled={busyAction === 'lyrics'}
                   onClick={handleRefetchLyrics}
                   style={{
@@ -354,7 +420,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
                 </button>
 
                 <button
-                  data-focusable="true"
+                  type="button"
                   onClick={() =>
                     applyPatch(
                       { suppress_lyrics: !propsData?.suppress_lyrics },
@@ -407,7 +473,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <button
-                    data-focusable="true"
+                    type="button"
                     onClick={() => applyPatch({ lyrics_offset_ms: offsetMs - 250 })}
                     style={{
                       padding: '5px 10px',
@@ -423,7 +489,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
                     -250ms
                   </button>
                   <button
-                    data-focusable="true"
+                    type="button"
                     disabled={offsetMs === 0}
                     onClick={() => applyPatch({ lyrics_offset_ms: 0 }, 'Reset lyric sync offset to 0ms')}
                     style={{
@@ -440,7 +506,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
                     0ms
                   </button>
                   <button
-                    data-focusable="true"
+                    type="button"
                     onClick={() => applyPatch({ lyrics_offset_ms: offsetMs + 250 })}
                     style={{
                       padding: '5px 10px',
@@ -483,7 +549,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 <button
-                  data-focusable="true"
+                  type="button"
                   onClick={() =>
                     applyPatch(
                       { has_art: Boolean(track.art_url), custom_art_url: '' },
@@ -509,7 +575,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
                 </button>
 
                 <button
-                  data-focusable="true"
+                  type="button"
                   onClick={() =>
                     applyPatch(
                       { has_art: false, custom_art_url: '' },
@@ -555,7 +621,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 <button
-                  data-focusable="true"
+                  type="button"
                   onClick={() =>
                     applyPatch(
                       { suppress_comments: !propsData?.suppress_comments },
@@ -589,7 +655,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
                 </button>
 
                 <button
-                  data-focusable="true"
+                  type="button"
                   onClick={() =>
                     applyPatch(
                       { suppress_factoids: !propsData?.suppress_factoids },
@@ -623,7 +689,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
                 </button>
 
                 <button
-                  data-focusable="true"
+                  type="button"
                   disabled={busyAction === 'factoids'}
                   onClick={handleRefetchFactoids}
                   style={{
@@ -651,7 +717,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
                 </span>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                   <button
-                    data-focusable="true"
+                    type="button"
                     onClick={() => applyPatch({ preferred_viz_mode: '' }, 'Cleared per-track visualizer override')}
                     style={{
                       padding: '5px 10px',
@@ -675,7 +741,7 @@ export const TrackPropertiesModal: React.FC<TrackPropertiesModalProps> = ({
                     return (
                       <button
                         key={meta.id}
-                        data-focusable="true"
+                        type="button"
                         onClick={() =>
                           applyPatch(
                             { preferred_viz_mode: meta.id },

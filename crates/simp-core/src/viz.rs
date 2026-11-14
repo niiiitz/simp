@@ -172,14 +172,20 @@ impl AudioTapBuffer {
     }
 }
 
-pub trait TapSample: rodio::Sample {
+pub trait TapSample: rodio::Sample + Copy {
     fn to_norm_f32(self) -> f32;
+    fn from_norm_f32(val: f32) -> Self;
 }
 
 impl TapSample for f32 {
     #[inline]
     fn to_norm_f32(self) -> f32 {
         self
+    }
+
+    #[inline]
+    fn from_norm_f32(val: f32) -> Self {
+        val
     }
 }
 
@@ -188,6 +194,11 @@ impl TapSample for i16 {
     fn to_norm_f32(self) -> f32 {
         (self as f32) / 32768.0
     }
+
+    #[inline]
+    fn from_norm_f32(val: f32) -> Self {
+        (val.clamp(-1.0, 0.9999695) * 32768.0).round() as i16
+    }
 }
 
 impl TapSample for u16 {
@@ -195,13 +206,27 @@ impl TapSample for u16 {
     fn to_norm_f32(self) -> f32 {
         ((self as f32) - 32768.0) / 32768.0
     }
+
+    #[inline]
+    fn from_norm_f32(val: f32) -> Self {
+        ((val.clamp(-1.0, 0.9999695) * 32768.0) + 32768.0).round() as u16
+    }
 }
 
-/// Zero-allocation `rodio::Source` wrapper that taps mono-mixed PCM samples into an `AudioTapBuffer`.
-pub struct AudioTapSource<S> {
+/// Zero-allocation `rodio::Source` wrapper that applies SIMP's real-time 10-band Stereo Biquad EQ
+/// + Band-Limited Mid/Side Vocal Isolation (`StreamDspProcessor`) and taps post-DSP mono-mixed PCM
+/// samples into `AudioTapBuffer`.
+pub struct AudioTapSource<S>
+where
+    S: Source,
+    S::Item: TapSample,
+{
     inner: S,
     tap: Arc<AudioTapBuffer>,
+    dsp: crate::dsp::StreamDspProcessor,
     channels: u16,
+    sample_rate: u32,
+    pending_right: Option<S::Item>,
     ch_counter: u16,
     ch_accum: f32,
 }
@@ -213,11 +238,16 @@ where
 {
     pub fn new(inner: S, tap: Arc<AudioTapBuffer>) -> Self {
         let channels = inner.channels().max(1);
-        tap.set_sample_rate(inner.sample_rate());
+        let sample_rate = inner.sample_rate().max(8_000);
+        tap.set_sample_rate(sample_rate);
+        let dsp = crate::dsp::StreamDspProcessor::new(crate::dsp::global_dsp_state(), sample_rate);
         Self {
             inner,
             tap,
+            dsp,
             channels,
+            sample_rate,
+            pending_right: None,
             ch_counter: 0,
             ch_accum: 0.0,
         }
@@ -233,8 +263,38 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
+        if self.channels == 2 {
+            if let Some(right_item) = self.pending_right.take() {
+                return Some(right_item);
+            }
+            let left_raw = self.inner.next()?;
+            let right_raw = match self.inner.next() {
+                Some(r) => r,
+                None => {
+                    let s = self.dsp.process_mono(left_raw.to_norm_f32(), self.sample_rate);
+                    self.tap.push_mono_sample(s);
+                    return Some(S::Item::from_norm_f32(s));
+                }
+            };
+            let (l_out, r_out) = self.dsp.process_stereo(
+                left_raw.to_norm_f32(),
+                right_raw.to_norm_f32(),
+                self.sample_rate,
+            );
+            let mono = 0.5 * (l_out + r_out);
+            self.tap.push_mono_sample(mono);
+            self.pending_right = Some(S::Item::from_norm_f32(r_out));
+            return Some(S::Item::from_norm_f32(l_out));
+        }
+
         let sample = self.inner.next()?;
-        self.ch_accum += sample.to_norm_f32();
+        let norm = sample.to_norm_f32();
+        let processed = if self.channels == 1 {
+            self.dsp.process_mono(norm, self.sample_rate)
+        } else {
+            norm
+        };
+        self.ch_accum += processed;
         self.ch_counter += 1;
         if self.ch_counter >= self.channels {
             let mono = self.ch_accum / (self.channels as f32);
@@ -242,7 +302,7 @@ where
             self.ch_counter = 0;
             self.ch_accum = 0.0;
         }
-        Some(sample)
+        Some(S::Item::from_norm_f32(processed))
     }
 
     #[inline]
@@ -278,8 +338,10 @@ where
 
     #[inline]
     fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        self.pending_right = None;
         self.ch_counter = 0;
         self.ch_accum = 0.0;
+        self.dsp.reset_filter_states();
         self.inner.try_seek(pos)
     }
 }

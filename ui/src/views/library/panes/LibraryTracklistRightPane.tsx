@@ -41,8 +41,11 @@ import {
   CLOUD_PAGE_SIZE,
   extractAudioFormat,
   formatPlaylistSourceBadge,
+  getTrackLyricsBadge,
   tileGridStyle,
+  useLibraryLyricsStatus,
 } from "../libraryHelpers";
+import { ImpIcon } from "../../../components/icons/ImpIcon";
 import { ResilientTileArtwork } from "../ResilientTileArtwork";
 
 export interface LibraryTracklistRightPaneProps {
@@ -128,6 +131,23 @@ export const LibraryTracklistRightPane: React.FC<LibraryTracklistRightPaneProps>
   snap,
   track,
 }) => {
+  const { allLyricsUris } = useLibraryLyricsStatus();
+  const [filterHasLyricsOnly, setFilterHasLyricsOnly] = React.useState(false);
+
+  React.useEffect(() => {
+    setFilterHasLyricsOnly(false);
+  }, [browserTarget?.kind, browserTarget?.id]);
+
+  const lyricsMatchedTracks = React.useMemo(
+    () => browserTracks.filter((tr) => allLyricsUris.has(tr.uri)),
+    [browserTracks, allLyricsUris]
+  );
+
+  const displayedBrowserTracks = React.useMemo(
+    () => (filterHasLyricsOnly ? lyricsMatchedTracks : browserTracks),
+    [filterHasLyricsOnly, lyricsMatchedTracks, browserTracks]
+  );
+
   return (
           /* =================================================================
              STATE B: 🎵 SELECTED COLLECTION TRACKLIST & MANAGEMENT VIEW
@@ -755,7 +775,103 @@ export const LibraryTracklistRightPane: React.FC<LibraryTracklistRightPaneProps>
               </div>
             )}
 
-            {browserTracks.map((t, i) => {
+            {browserTracks.length > 0 && lyricsMatchedTracks.length > 0 && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 8,
+                  padding: '6px 10px',
+                  borderRadius: 10,
+                  background: 'rgba(12, 18, 28, 0.72)',
+                  border: filterHasLyricsOnly
+                    ? '1px solid rgba(52, 211, 153, 0.45)'
+                    : '1px solid rgba(255, 255, 255, 0.08)',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <button
+                    data-right-filter-pill="true"
+                    onClick={() => setFilterHasLyricsOnly(false)}
+                    style={{
+                      padding: '4px 10px',
+                      borderRadius: 6,
+                      background: !filterHasLyricsOnly ? 'rgba(56, 189, 248, 0.16)' : '#090d16',
+                      border: !filterHasLyricsOnly
+                        ? '1px solid #38bdf8'
+                        : '1px solid rgba(255,255,255,0.1)',
+                      color: !filterHasLyricsOnly ? '#7dd3fc' : '#94a3b8',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    All Tracks ({browserTracks.length})
+                  </button>
+                  <button
+                    data-right-filter-pill="true"
+                    onClick={() => setFilterHasLyricsOnly((prev) => !prev)}
+                    style={{
+                      padding: '4px 10px',
+                      borderRadius: 6,
+                      background: filterHasLyricsOnly ? 'rgba(16, 185, 129, 0.18)' : '#090d16',
+                      border: filterHasLyricsOnly
+                        ? '1px solid #34d399'
+                        : '1px solid rgba(255,255,255,0.1)',
+                      color: filterHasLyricsOnly ? '#6ee7b7' : '#94a3b8',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 5,
+                    }}
+                  >
+                    <ImpIcon
+                      name="lyrics"
+                      size={12}
+                      color={filterHasLyricsOnly ? '#34d399' : '#64748b'}
+                    />
+                    <span>Has Lyrics ({lyricsMatchedTracks.length})</span>
+                  </button>
+                </div>
+
+                <button
+                  data-right-filter-pill="true"
+                  onClick={() => {
+                    const queueTracks =
+                      lyricsMatchedTracks.length > 0 ? lyricsMatchedTracks : browserTracks;
+                    defaultSimpClient.loadQueue(
+                      queueTracks.map((tr) => tr.uri),
+                      0,
+                      queueTracks
+                    );
+                    window.dispatchEvent(new CustomEvent('simp-engage-karaoke-mode'));
+                    setView('lock');
+                  }}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: 6,
+                    background: 'rgba(16, 185, 129, 0.2)',
+                    border: '1px solid #34d399',
+                    color: '#6ee7b7',
+                    fontSize: 11,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 5,
+                  }}
+                >
+                  <ImpIcon name="play" size={11} color="#34d399" />
+                  <span>Play Lyrics Queue in Karaoke Mode</span>
+                </button>
+              </div>
+            )}
+
+            {displayedBrowserTracks.map((t, i) => {
               const currentCtxKey = browserTarget
                 ? `${browserTarget.kind}:${browserTarget.id}`
                 : '';
@@ -801,7 +917,7 @@ export const LibraryTracklistRightPane: React.FC<LibraryTracklistRightPaneProps>
                     }
                     const queueAlreadyMatches =
                       snap?.queue &&
-                      snap.queue.length === browserTracks.length &&
+                      snap.queue.length === displayedBrowserTracks.length &&
                       snap.queue_index === i &&
                       snap.queue[i]?.uri === t.uri;
                     setPlayingContextId(currentCtxKey);
@@ -812,9 +928,9 @@ export const LibraryTracklistRightPane: React.FC<LibraryTracklistRightPaneProps>
                       setView('lock');
                     } else {
                       defaultSimpClient.loadQueue(
-                        browserTracks.map((tr) => tr.uri),
+                        displayedBrowserTracks.map((tr) => tr.uri),
                         i,
-                        browserTracks
+                        displayedBrowserTracks
                       );
                       setView('lock');
                     }
@@ -855,6 +971,37 @@ export const LibraryTracklistRightPane: React.FC<LibraryTracklistRightPaneProps>
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {t.title}
                         </span>
+                        {(() => {
+                          const lyrBadge = getTrackLyricsBadge(t.uri);
+                          if (!lyrBadge) return null;
+                          const isSynced = lyrBadge === 'LRC';
+                          return (
+                            <span
+                              title={
+                                isSynced
+                                  ? 'Synced timed lyrics available (Karaoke Ready)'
+                                  : 'Retrieved plain lyrics available'
+                              }
+                              style={{
+                                fontSize: 9,
+                                fontFamily: 'monospace',
+                                fontWeight: 800,
+                                padding: '1px 5px',
+                                borderRadius: 4,
+                                background: isSynced
+                                  ? 'rgba(16, 185, 129, 0.16)'
+                                  : 'rgba(56, 189, 248, 0.14)',
+                                border: isSynced
+                                  ? '1px solid rgba(52, 211, 153, 0.5)'
+                                  : '1px solid rgba(56, 189, 248, 0.45)',
+                                color: isSynced ? '#6ee7b7' : '#7dd3fc',
+                                flexShrink: 0,
+                              }}
+                            >
+                              {lyrBadge}
+                            </span>
+                          );
+                        })()}
                         {t.source === 'soundcloud' &&
                           Boolean(
                             t.album?.includes('• Preview') || t.title.toLowerCase().includes('[preview]')

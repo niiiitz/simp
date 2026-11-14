@@ -1631,12 +1631,115 @@ impl LibraryDatabase {
         Ok(())
     }
 
-    /// Returns track URIs matching a Smart Facet (`"synced_lyrics"`, `"has_art"`, `"missing_art"`, `"has_factoids"`, `"has_comments"`).
-    pub fn get_facet_matching_uris(&self, facet: &str) -> Result<Vec<String>> {
+    /// Synchronizes retrieved entries from `lyrics.db` (`lyrics_entries`) into `library.db` (`track_properties`),
+    /// matching both direct `track_uri` and normalized `(title, artist)` across `tracks`, `play_history`, and `local_favorites`.
+    pub fn sync_lyrics_properties_from_cache(&self) -> Result<()> {
+        let cached = crate::lyrics::list_cached_lyrics_summaries();
+        if cached.is_empty() {
+            return Ok(());
+        }
+
+        let mut by_title_artist: std::collections::HashMap<(String, String), (bool, bool)> =
+            std::collections::HashMap::new();
+        for item in &cached {
+            if !item.track_uri.is_empty() {
+                let _ = self.record_indexed_track_capabilities(
+                    &item.track_uri,
+                    false,
+                    item.has_lyrics,
+                    item.has_synced_lyrics,
+                );
+            }
+            if !item.title_lower.is_empty() {
+                let entry = by_title_artist
+                    .entry((item.title_lower.clone(), item.artist_lower.clone()))
+                    .or_insert((false, false));
+                entry.0 |= item.has_lyrics;
+                entry.1 |= item.has_synced_lyrics;
+            }
+        }
+
+        if by_title_artist.is_empty() {
+            return Ok(());
+        }
+
+        let mut matched_uris: Vec<(String, bool, bool)> = Vec::new();
+        {
+            let conn = self.conn.lock().unwrap();
+            if let Ok(mut stmt) = conn.prepare("SELECT uri, title, artists_json FROM tracks") {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                }) {
+                    for (uri, title, artists_json) in rows.flatten() {
+                        let t_low = title.trim().to_lowercase();
+                        let artists: Vec<String> =
+                            serde_json::from_str(&artists_json).unwrap_or_default();
+                        let a_low = artists
+                            .first()
+                            .map(|s| s.trim().to_lowercase())
+                            .unwrap_or_default();
+                        if let Some(&(has_l, has_s)) =
+                            by_title_artist.get(&(t_low.clone(), a_low))
+                        {
+                            matched_uris.push((uri, has_l, has_s));
+                        }
+                    }
+                }
+            };
+        }
+
+        for (uri, has_l, has_s) in matched_uris {
+            let _ = self.record_indexed_track_capabilities(&uri, false, has_l, has_s);
+        }
+        Ok(())
+    }
+
+    /// Returns `(synced_lyrics_uris, all_lyrics_uris)` for fast UI track badge & filter lookups.
+    pub fn get_lyrics_uri_sets(&self) -> Result<(Vec<String>, Vec<String>)> {
+        let _ = self.sync_lyrics_properties_from_cache();
         let conn = self.conn.lock().unwrap();
-        let sql = match facet.trim() {
+        let mut synced_uris = Vec::new();
+        let mut all_lyrics_uris = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT uri, has_lyrics, has_synced_lyrics
+             FROM track_properties
+             WHERE (has_lyrics = 1 OR has_synced_lyrics = 1) AND suppress_lyrics = 0",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? != 0,
+                r.get::<_, i64>(2)? != 0,
+            ))
+        })?;
+        for (uri, has_lyrics, has_synced) in rows.flatten() {
+            if has_synced {
+                synced_uris.push(uri.clone());
+            }
+            if has_lyrics || has_synced {
+                all_lyrics_uris.push(uri);
+            }
+        }
+        Ok((synced_uris, all_lyrics_uris))
+    }
+
+    /// Returns track URIs matching a Smart Facet (`"synced_lyrics"`, `"has_lyrics"`, `"has_art"`, `"missing_art"`, `"has_factoids"`, `"has_comments"`).
+    pub fn get_facet_matching_uris(&self, facet: &str) -> Result<Vec<String>> {
+        let trimmed = facet.trim();
+        if trimmed == "synced_lyrics" || trimmed == "has_lyrics" {
+            let _ = self.sync_lyrics_properties_from_cache();
+        }
+        let conn = self.conn.lock().unwrap();
+        let sql = match trimmed {
             "synced_lyrics" => {
                 "SELECT uri FROM track_properties WHERE has_synced_lyrics = 1 AND suppress_lyrics = 0"
+            }
+            "has_lyrics" => {
+                "SELECT uri FROM track_properties WHERE (has_lyrics = 1 OR has_synced_lyrics = 1) AND suppress_lyrics = 0"
             }
             "has_art" => {
                 "SELECT t.uri FROM tracks t
@@ -1671,9 +1774,49 @@ impl LibraryDatabase {
         if uris.is_empty() {
             return Ok(Vec::new());
         }
-        let uri_set: std::collections::HashSet<String> = uris.into_iter().collect();
-        let all = self.get_tracks_filtered(None, None, None, 1000, 0)?;
-        Ok(all.into_iter().filter(|t| uri_set.contains(&t.uri)).collect())
+        let mut results: Vec<TrackMetadata> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // 1. Resolve tracks stored in `tracks` (local files, Steam OSTs, and pinned playlists/albums)
+        for uri in &uris {
+            if let Ok(Some(track)) = self.get_track_by_uri(uri) {
+                if seen.insert(track.uri.clone()) {
+                    results.push(track);
+                }
+            }
+        }
+
+        // 2. Resolve any remaining URIs from `play_history` or `local_favorites` (e.g. cloud tracks)
+        if seen.len() < uris.len() {
+            let conn = self.conn.lock().unwrap();
+            for uri in &uris {
+                if seen.contains(uri) {
+                    continue;
+                }
+                let json_opt: Option<String> = conn
+                    .query_row(
+                        "SELECT track_json FROM play_history WHERE uri = ?1
+                         UNION ALL
+                         SELECT track_json FROM local_favorites WHERE uri = ?1
+                         LIMIT 1",
+                        params![uri],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten();
+                if let Some(raw_json) = json_opt {
+                    if let Ok(track) = serde_json::from_str::<TrackMetadata>(&raw_json) {
+                        if seen.insert(track.uri.clone()) {
+                            results.push(track);
+                        }
+                    }
+                }
+            }
+        }
+
+        results.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        Ok(results)
     }
 
     /// Upgrades a pinned cloud playlist (`apple_pinned`, `soundcloud_pinned`, `ia_pinned`, etc.)

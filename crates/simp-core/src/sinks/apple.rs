@@ -63,6 +63,9 @@ pub struct AppleMusicSink {
     pub is_authenticated: bool,
     pub native_engine: Arc<Mutex<Option<LocalAudioEngine>>>,
     pub using_native_engine: bool,
+    pub restored_uri: Option<String>,
+    pub restored_position_ms: u32,
+    pub worker_has_active_track: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -82,6 +85,9 @@ impl AppleMusicSink {
             is_authenticated: false,
             native_engine: Arc::new(Mutex::new(None)),
             using_native_engine: false,
+            restored_uri: None,
+            restored_position_ms: 0,
+            worker_has_active_track: false,
         }
     }
 
@@ -95,6 +101,9 @@ impl AppleMusicSink {
     }
 
     pub fn prime_restored_session(&mut self, uri: String, position_ms: u32) {
+        self.restored_uri = Some(uri.clone());
+        self.restored_position_ms = position_ms;
+        self.worker_has_active_track = false;
         if !uri.starts_with("applemusic:station:")
             && is_native_apple_cdm_preferred()
             && crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library().is_some()
@@ -464,6 +473,9 @@ impl crate::sinks::AudioSink for AppleMusicSink {
         internal_event_tx: &tokio::sync::mpsc::UnboundedSender<PlaybackEvent>,
         broadcast_tx: &broadcast::Sender<PlaybackEvent>,
     ) -> Result<()> {
+        self.restored_uri = Some(uri.to_string());
+        self.restored_position_ms = start_pos_ms;
+
         if !uri.starts_with("applemusic:station:") && is_native_apple_cdm_preferred() {
             if let Some(cdm_info) =
                 crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library()
@@ -480,6 +492,7 @@ impl crate::sinks::AudioSink for AppleMusicSink {
                     match eng.load_and_play(uri, start_pos_ms, epoch, internal_event_tx.clone()) {
                         Ok(()) => {
                             self.using_native_engine = true;
+                            self.worker_has_active_track = false;
                             Self::kill_headless_widevine_worker();
                             return Ok(());
                         }
@@ -517,6 +530,7 @@ impl crate::sinks::AudioSink for AppleMusicSink {
             self.using_native_engine = false;
         }
 
+        self.worker_has_active_track = true;
         self.emit_load_and_play(broadcast_tx, uri, start_pos_ms);
         Ok(())
     }
@@ -532,6 +546,13 @@ impl crate::sinks::AudioSink for AppleMusicSink {
                 if let Some(ref mut eng) = *guard {
                     return eng.play(epoch, internal_event_tx.clone());
                 }
+            }
+        }
+        if !self.worker_has_active_track {
+            if let Some(uri) = self.restored_uri.clone() {
+                self.worker_has_active_track = true;
+                self.emit_load_and_play(broadcast_tx, &uri, self.restored_position_ms);
+                return Ok(());
             }
         }
         self.emit_play(broadcast_tx);

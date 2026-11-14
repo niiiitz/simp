@@ -116,6 +116,7 @@ export const LibraryContextMenuModal: React.FC<LibraryContextMenuModalProps> = (
       }}
     >
       <div
+        data-modal-root="true"
         data-library-context-modal="true"
         onClick={(e) => e.stopPropagation()}
         style={{

@@ -1,18 +1,20 @@
 export type VisualizerEngine =
   | 'glyph'
-  | 'avs'
   | 'demoscene'
   | 'vertigo'
   | 'trapper'
-  | 'rhythm'
   | 'midnight'
   | 'cosmos'
-  | 'reef'
-  | 'arcade'
-  | 'vaporwave'
-  | 'sanctum';
+  | 'reef3d'
+  | 'sanctum_odyssey'
+  | 'vaporwave3d'
+  | 'rhythm_hologram'
+  | 'arcade_crossfire'
+  | 'avs_v2';
 
 export type VisualizerMode = VisualizerEngine | 'cycle' | 'shuffle' | 'off';
+
+export type VisualizerCohort = 'original' | 'wave2';
 
 export type SafeAnchorPosition =
   | 'top-left'
@@ -37,11 +39,14 @@ export interface VisualizerSceneDescriptor {
   subtitle: string;
   eraBadge: string;
   transitionLabel: string;
-  wasmSceneId: number | null; // null = existing TS engine (0..4), 0..6 = Rust/WASM Smol Engine scene
+  cohort: VisualizerCohort;
   safeZones: SceneSafeZones;
 }
 
 export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
+  // =========================================================================
+  // COHORT 1: ORIGINAL 12 SCENES
+  // =========================================================================
   {
     id: 'glyph',
     label: 'Glyph Matrix',
@@ -49,7 +54,7 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     subtitle: '80×45 ASCII optical density grid & Ken-Burns art sampler',
     eraBadge: 'ASCII • 80×45',
     transitionLabel: 'Bayer Dither Dissolve',
-    wasmSceneId: null,
+    cohort: 'original',
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -59,29 +64,13 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     },
   },
   {
-    id: 'avs',
-    label: 'Winamp AVS',
-    shortLabel: 'AVS',
-    subtitle: 'Superscope Lissajous ribbons & radial spectrum rings',
-    eraBadge: 'WINAMP • 1999',
-    transitionLabel: 'Radial Scope Wipe',
-    wasmSceneId: null,
-    safeZones: {
-      lyricAnchor: 'bottom-center',
-      commentAnchor: 'top-right',
-      factoidAnchor: 'top-left',
-      chyronAnchor: 'bottom-left',
-      allowsTickerText: false,
-    },
-  },
-  {
     id: 'demoscene',
     label: 'Demoscene 64K',
     shortLabel: '64K',
     subtitle: 'Amiga copper bars, vectorballs & 3D sine scroller',
     eraBadge: 'AMIGA • 64K',
     transitionLabel: 'Copper Raster Curtain',
-    wasmSceneId: null,
+    cohort: 'original',
     safeZones: {
       lyricAnchor: 'top-center',
       commentAnchor: 'top-right',
@@ -97,7 +86,7 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     subtitle: '60fps octagonal warp tunnel & HUD targeting reticle',
     eraBadge: 'WARP • 3D',
     transitionLabel: 'Tunnel Depth Iris',
-    wasmSceneId: null,
+    cohort: 'original',
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -113,7 +102,7 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     subtitle: 'Mead 3-ring binder chrome & receding neon horizon',
     eraBadge: 'BRYCE • 1995',
     transitionLabel: 'Horizon Raster Sweep',
-    wasmSceneId: null,
+    cohort: 'original',
     safeZones: {
       lyricAnchor: 'top-center',
       commentAnchor: 'top-right',
@@ -123,29 +112,13 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     },
   },
   {
-    id: 'rhythm',
-    label: 'Rhythm Stage & Micro-Party',
-    shortLabel: 'RHYTHM',
-    subtitle: 'DDR step arrows, Miku lasers, Mode-7 crowd & Jumbotron art',
-    eraBadge: 'STAGE • 720P',
-    transitionLabel: 'Arcade Strobe Curtain',
-    wasmSceneId: null,
-    safeZones: {
-      lyricAnchor: 'bottom-center',
-      commentAnchor: 'top-left',
-      factoidAnchor: 'bottom-right',
-      chyronAnchor: 'bottom-left',
-      allowsTickerText: false,
-    },
-  },
-  {
     id: 'midnight',
     label: 'Midnight Mountain Parallax',
     shortLabel: 'MIDNIGHT',
     subtitle: 'Moonlit aurora, branching lightning, pine ridges & mirror lake',
     eraBadge: 'NATURE • 720P',
     transitionLabel: 'Rolling Mist & Sleet Wipe',
-    wasmSceneId: null,
+    cohort: 'original',
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -161,7 +134,7 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     subtitle: 'Big Bang nebula, black hole & 1950s tin UFO on a pendulum string',
     eraBadge: 'COSMOS • 720P',
     transitionLabel: 'Hyperspace Event-Horizon Zoom',
-    wasmSceneId: null,
+    cohort: 'original',
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -170,14 +143,18 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
       allowsTickerText: false,
     },
   },
+
+  // =========================================================================
+  // COHORT 2: WAVE 2 LOW-POLY / CYBER SCENES (6 CURATED SCENES)
+  // =========================================================================
   {
-    id: 'reef',
-    label: 'Coral Reef & Water Caustics',
-    shortLabel: 'REEF',
-    subtitle: 'Volumetric water caustics, kelp, jellyfish, bubbles & snapping crab',
-    eraBadge: 'ABYSS • 720P',
-    transitionLabel: 'Rising Bubble Wall & Ripple',
-    wasmSceneId: null,
+    id: 'reef3d',
+    label: 'Coral Reef 3D [Low-Poly]',
+    shortLabel: 'REEF 3D',
+    subtitle: 'PS1 seabed, patrolling seahorses, 3D starfish, crab rave & lyric bubbles',
+    eraBadge: 'PS1 • 320×180',
+    transitionLabel: 'Caustic Raster Wipe',
+    cohort: 'wave2',
     safeZones: {
       lyricAnchor: 'top-center',
       commentAnchor: 'top-right',
@@ -187,13 +164,13 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     },
   },
   {
-    id: 'arcade',
-    label: 'Retro Arcade Remix',
-    shortLabel: 'ARCADE',
-    subtitle: 'Pac-Man neon maze, Pong waveform, Space Invaders & Missile Command',
-    eraBadge: 'COIN-OP • 720P',
-    transitionLabel: 'CRT Degauss Collapse',
-    wasmSceneId: null,
+    id: 'sanctum_odyssey',
+    label: '16-Bit Dark Fantasy [Crypt Coffin]',
+    shortLabel: 'SANCTUM 3D',
+    subtitle: 'Clockwork stained-glass rose cog, rotating 3D coffin & river skiff',
+    eraBadge: 'PS1 • SANCTUM',
+    transitionLabel: '16-Bit RPG Battle Swirl',
+    cohort: 'wave2',
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -203,13 +180,45 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     },
   },
   {
-    id: 'vaporwave',
-    label: 'Y2K / Vaporwave Odyssey',
-    shortLabel: 'VAPOR',
-    subtitle: 'Marble Helios bust, Fiji bottle, Tron lightcycles, dolphins & Solitaire',
-    eraBadge: 'Y2K • 720P',
-    transitionLabel: 'Win95 Card Cascade & VHS Wipe',
-    wasmSceneId: null,
+    id: 'vaporwave3d',
+    label: 'Vaporwave 3D [Poseidon / CRT]',
+    shortLabel: 'VAPOR 3D',
+    subtitle: 'Poseidon, spinning CRT computer, iBook G3 mice, Y2K windows & Strudel REPL',
+    eraBadge: 'Y2K • 3D',
+    transitionLabel: 'Solitaire & VHS Tear',
+    cohort: 'wave2',
+    safeZones: {
+      lyricAnchor: 'top-center',
+      commentAnchor: 'top-right',
+      factoidAnchor: 'top-left',
+      chyronAnchor: 'bottom-left',
+      allowsTickerText: false,
+    },
+  },
+  {
+    id: 'rhythm_hologram',
+    label: 'Rhythm Stage [Hologram Band]',
+    shortLabel: 'HOLO BAND',
+    subtitle: 'Vestaboard split-flap jumbotron, hologram band & crowd hands-up',
+    eraBadge: 'STAGE • 3D',
+    transitionLabel: 'Laser Strobe Sweep',
+    cohort: 'wave2',
+    safeZones: {
+      lyricAnchor: 'top-center',
+      commentAnchor: 'top-left',
+      factoidAnchor: 'bottom-right',
+      chyronAnchor: 'bottom-left',
+      allowsTickerText: false,
+    },
+  },
+  {
+    id: 'arcade_crossfire',
+    label: 'Arcade Crossfire [Silos vs. Joust]',
+    shortLabel: 'CROSSFIRE',
+    subtitle: 'Pac-Man maze, art brickbreaker, 3 Missile Command silos & Joust knights',
+    eraBadge: 'COIN-OP • 3D',
+    transitionLabel: 'Flak Shrapnel Burst',
+    cohort: 'wave2',
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -219,13 +228,13 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
     },
   },
   {
-    id: 'sanctum',
-    label: '16-Bit Dark Fantasy Sanctum',
-    shortLabel: 'SANCTUM',
-    subtitle: 'Gothic stained-glass rose window, river boat, torchlight & Arcane Orb',
-    eraBadge: 'SNES RPG • 720P',
-    transitionLabel: 'SNES RPG Battle Swirl',
-    wasmSceneId: null,
+    id: 'avs_v2',
+    label: 'Winamp AVS V2 [3D Superscope]',
+    shortLabel: 'AVS V2',
+    subtitle: 'Feedback zoom tunnel, spinning album art inside 3D icosahedron & scope',
+    eraBadge: 'AVS • 3D',
+    transitionLabel: 'Geodesic Scope Iris',
+    cohort: 'wave2',
     safeZones: {
       lyricAnchor: 'bottom-center',
       commentAnchor: 'top-right',
@@ -237,6 +246,14 @@ export const VISUALIZER_SCENES: VisualizerSceneDescriptor[] = [
 ];
 
 export const VISUALIZER_ENGINES: VisualizerEngine[] = VISUALIZER_SCENES.map((s) => s.id);
+
+export const ORIGINAL_COHORT_SCENES: VisualizerEngine[] = VISUALIZER_SCENES.filter(
+  (s) => s.cohort === 'original',
+).map((s) => s.id);
+
+export const WAVE2_COHORT_SCENES: VisualizerEngine[] = VISUALIZER_SCENES.filter(
+  (s) => s.cohort === 'wave2',
+).map((s) => s.id);
 
 export const CORE_POLISHED_SCENES: VisualizerEngine[] = [...VISUALIZER_ENGINES];
 
@@ -251,7 +268,7 @@ export const VISUALIZER_MODES: { id: VisualizerMode; label: string; shortLabel: 
   { id: 'off', label: 'Off', shortLabel: 'OFF' },
 ];
 
-const ENABLED_SCENES_STORAGE_KEY = 'simp_viz_enabled_scenes_v3';
+const ENABLED_SCENES_STORAGE_KEY = 'simp_viz_enabled_scenes_v4';
 
 export function loadEnabledVisualizerScenes(): VisualizerEngine[] {
   try {

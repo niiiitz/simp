@@ -76,6 +76,7 @@ impl AudioOrchestrator {
         apple_sink.set_volume(initial_vol);
         let (initial_apple_auth, initial_soundcloud_auth, initial_ia_auth) = {
             let cfg = settings.lock().unwrap();
+            crate::dsp::global_dsp_state().load_from_audio_settings(&cfg.audio);
             let apple_ok = AppleMusicSink::resolve_credentials(&cfg)
                 .music_user_token
                 .is_some();
@@ -137,6 +138,7 @@ impl AudioOrchestrator {
         };
 
         orchestrator.restore_session_from_vdf();
+        orchestrator.spawn_boot_and_idle_prewarmer();
         orchestrator
     }
 
@@ -353,6 +355,10 @@ impl AudioOrchestrator {
                 }
             }
             AudioCommand::Play => {
+                if self.transition_epoch == 0 {
+                    self.transition_epoch = 1;
+                }
+                self.spawn_boot_and_idle_prewarmer();
                 let (engine, is_ui_video, has_queue, idx) = {
                     let st = self.state.lock().unwrap();
                     let ui_vid = st
@@ -365,9 +371,21 @@ impl AudioOrchestrator {
                 if let Some((sink, internal_tx, broadcast_tx, epoch)) =
                     self.sink_and_channels_mut(engine)
                 {
-                    let _ = sink.resume_playback(epoch, internal_tx, broadcast_tx);
-                    let pos = self.get_live_position_ms();
-                    self.set_playing_state(true, pos);
+                    match sink.resume_playback(epoch, internal_tx, broadcast_tx) {
+                        Ok(()) => {
+                            let pos = self.get_live_position_ms();
+                            self.set_playing_state(true, pos);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "resume_playback failed for {:?} ({e}); falling back to transition_to_index({idx})",
+                                engine
+                            );
+                            if has_queue {
+                                self.transition_to_index(idx);
+                            }
+                        }
+                    }
                 } else if is_ui_video {
                     let pos = self.get_live_position_ms();
                     self.set_playing_state(true, pos);
@@ -1738,6 +1756,78 @@ impl AudioOrchestrator {
         crate::sinks::apple_api::spawn_queue_catalog_prewarmer(cfg, queue.to_vec());
     }
 
+    /// Proactively warms Apple Music and SoundCloud authentication, Storefront ID, OAuth tokens,
+    /// Widevine CDM standby session, and prefetches the current + next queue track at daemon boot
+    /// and upon waking from an idle pause so the very first play starts without cold-start stalls.
+    pub fn spawn_boot_and_idle_prewarmer(&self) {
+        static LAST_PREWARM_SECS: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let prev = LAST_PREWARM_SECS.load(std::sync::atomic::Ordering::Relaxed);
+        if prev > 0 && now_secs.saturating_sub(prev) < 30 {
+            return;
+        }
+        LAST_PREWARM_SECS.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+
+        let cfg = self.settings.lock().unwrap().clone();
+        let (apple_authed, sc_authed, candidate_uris) = {
+            let st = self.state.lock().unwrap();
+            let mut uris = Vec::with_capacity(2);
+            if let Some(ref cur) = st.current_track {
+                uris.push(cur.uri.clone());
+            } else if let Some(first) = st.queue.get(st.queue_index) {
+                uris.push(first.uri.clone());
+            }
+            if st.queue_index + 1 < st.queue.len() {
+                let next_u = st.queue[st.queue_index + 1].uri.clone();
+                if !uris.contains(&next_u) {
+                    uris.push(next_u);
+                }
+            }
+            (st.apple_authenticated, st.soundcloud_authenticated, uris)
+        };
+
+        let _ = std::thread::Builder::new()
+            .name("simp-auth-prewarm".to_string())
+            .spawn(move || {
+                if apple_authed {
+                    if let Some(cdm) =
+                        crate::sinks::apple_native::cdm_host::discover_widevine_cdm_library()
+                    {
+                        crate::sinks::apple_native::cdm_host::prewarm_standby_cdm_session(
+                            &cdm.library_path,
+                        );
+                    }
+                    crate::sinks::apple_api::prewarm_apple_auth_and_storefront(&cfg);
+                    for uri in &candidate_uris {
+                        if uri.starts_with("applemusic:") && !uri.starts_with("applemusic:station:")
+                        {
+                            crate::sinks::apple_native::source::prefetch_apple_music_track(
+                                cfg.clone(),
+                                uri.clone(),
+                            );
+                        }
+                    }
+                }
+                if sc_authed {
+                    let _ = crate::sinks::soundcloud_api::ensure_valid_access_token(&cfg);
+                    let _ = crate::sinks::soundcloud_api::resolve_soundcloud_v2_client_id();
+                    for uri in &candidate_uris {
+                        if uri.starts_with("soundcloud:") && !uri.starts_with("soundcloud:station:")
+                        {
+                            crate::sinks::soundcloud::prefetch_soundcloud_track(
+                                cfg.clone(),
+                                uri.clone(),
+                            );
+                        }
+                    }
+                }
+            });
+    }
+
     /// Restores the last active queue, current track, and paused playback position from
     /// `~/.local/share/simp/session_state.vdf` when `simp --daemon` starts up.
     fn restore_session_from_vdf(&mut self) {
@@ -1754,6 +1844,8 @@ impl AudioOrchestrator {
         if uris.is_empty() {
             return;
         }
+
+        self.transition_epoch = self.transition_epoch.max(1);
 
         let mut queue: Vec<TrackMetadata> = uris
             .iter()

@@ -238,16 +238,44 @@ export function useGamepadNavigation({
       const hasFolderChooserModal = Boolean(
         document.querySelector('[data-folder-chooser-modal="true"]')
       );
-      const hasDomModal = Boolean(document.querySelector('[data-modal-root="true"]'));
+      const modalRoots = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-modal-root="true"]')
+      );
+      const topModalRoot =
+        document.querySelector<HTMLElement>('[data-dropped-folder-modal="true"]') ||
+        document.querySelector<HTMLElement>('[data-equalizer-modal="true"]') ||
+        document.querySelector<HTMLElement>('[data-track-properties-modal="true"]') ||
+        document.querySelector<HTMLElement>('[data-viz-drawer-modal="true"]') ||
+        document.querySelector<HTMLElement>('[data-quick-help-modal="true"]') ||
+        document.querySelector<HTMLElement>('[data-hybrid-picker-modal="true"]') ||
+        document.querySelector<HTMLElement>('[data-library-context-modal="true"]') ||
+        (modalRoots.length > 0 ? modalRoots[modalRoots.length - 1] : null);
+      const hasDomModal = Boolean(topModalRoot);
       const isModalOpen = sourceModalOpen || powerModalOpen || hasDomModal;
-      const selector = oskTarget
-        ? '[data-osk-root="true"] button:not([disabled])'
+      const rawNodes = oskTarget
+        ? Array.from(document.querySelectorAll<HTMLElement>('[data-osk-root="true"] button:not([disabled])'))
         : hasFolderChooserModal
-        ? '[data-folder-chooser-modal="true"] button:not([disabled])'
+        ? Array.from(
+            document.querySelectorAll<HTMLElement>('[data-folder-chooser-modal="true"] button:not([disabled])')
+          )
+        : topModalRoot
+        ? Array.from(
+            topModalRoot.querySelectorAll<HTMLElement>(
+              'button:not([disabled]), input:not([disabled]), select:not([disabled]), a'
+            )
+          )
         : isModalOpen
-        ? '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled]), [data-modal-root="true"] select:not([disabled]), [data-modal-root="true"] a'
-        : 'button:not([disabled]):not([data-tile-aux="true"]), input:not([disabled]), select:not([disabled]), [data-focusable="true"]';
-      const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter((el) => {
+        ? Array.from(
+            document.querySelectorAll<HTMLElement>(
+              '[data-modal-root="true"] button:not([disabled]), [data-modal-root="true"] input:not([disabled]), [data-modal-root="true"] select:not([disabled]), [data-modal-root="true"] a'
+            )
+          )
+        : Array.from(
+            document.querySelectorAll<HTMLElement>(
+              'button:not([disabled]):not([data-tile-aux="true"]), input:not([disabled]), select:not([disabled]), [data-focusable="true"]'
+            )
+          );
+      const nodes = rawNodes.filter((el) => {
         const rect = el.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       });
@@ -770,7 +798,7 @@ export function useGamepadNavigation({
 
       for (const candidate of nodes) {
         if (candidate === active) continue;
-        if (!oskTarget && (dir === 'up' || dir === 'down') && isAuxRowElement(candidate)) continue;
+        if (!oskTarget && !isModalOpen && (dir === 'up' || dir === 'down') && isAuxRowElement(candidate)) continue;
         const r = candidate.getBoundingClientRect();
         const tx = r.left + r.width / 2;
         const ty = r.top + r.height / 2;
@@ -781,6 +809,11 @@ export function useGamepadNavigation({
         if (dir === 'left' && dx >= -6) continue;
         if (dir === 'down' && dy <= 6) continue;
         if (dir === 'up' && dy >= -6) continue;
+
+        if (isModalOpen && !oskTarget && (dir === 'left' || dir === 'right')) {
+          const overlapsY = r.bottom > cur.top + 4 && r.top < cur.bottom - 4;
+          if (!overlapsY && Math.abs(dy) > 26) continue;
+        }
 
         const primary = dir === 'left' || dir === 'right' ? Math.abs(dx) : Math.abs(dy);
         // Use bounding-box interval overlap for cross-axis distance so wide full-width rows
@@ -800,7 +833,10 @@ export function useGamepadNavigation({
             ? Math.abs(dy)
             : Math.abs(dx)
           : boxCross + centerTieBreak;
-        const score = primary + cross * (oskTarget ? 1.8 : 2.2);
+        const score =
+          isModalOpen && !oskTarget && (dir === 'up' || dir === 'down')
+            ? primary * 2.4 + boxCross * 0.45 + centerTieBreak
+            : primary + cross * (oskTarget ? 1.8 : 2.2);
 
         if (score < bestScore) {
           bestScore = score;
@@ -860,6 +896,9 @@ export function useGamepadNavigation({
       const isQuickHelpModalOpen = Boolean(
         document.querySelector('[data-quick-help-modal="true"]')
       );
+      const hasAnyDomModal = Boolean(
+        document.querySelector('[data-modal-root="true"], [data-folder-chooser-modal="true"]')
+      );
 
       // In the `🎵 Player` (`lock`) view (when modals and OSK are closed), D-Pad maps directly
       // to the on-screen transport badges (`◄` Previous, `►` Next, `▲/▼` Volume, `A` Play/Pause)!
@@ -870,7 +909,8 @@ export function useGamepadNavigation({
         !oskTarget &&
         !isDvdModalOpen &&
         !isPlayerActionsModalOpen &&
-        !isQuickHelpModalOpen;
+        !isQuickHelpModalOpen &&
+        !hasAnyDomModal;
 
       if (isDvdModalOpen) {
         window.dispatchEvent(
@@ -1047,6 +1087,62 @@ export function useGamepadNavigation({
             }, 30);
             break;
           }
+          const droppedFolderClose = document.querySelector<HTMLElement>(
+            '[data-dropped-folder-close="true"]:not([disabled])'
+          );
+          if (droppedFolderClose) {
+            droppedFolderClose.click();
+            break;
+          }
+          const equalizerClose = document.querySelector<HTMLElement>(
+            '[data-equalizer-close="true"]:not([disabled])'
+          );
+          if (equalizerClose) {
+            equalizerClose.click();
+            break;
+          }
+          const trackPropertiesClose = document.querySelector<HTMLElement>(
+            '[data-track-properties-close="true"]:not([disabled])'
+          );
+          if (trackPropertiesClose) {
+            trackPropertiesClose.click();
+            break;
+          }
+          const vizDrawerClose = document.querySelector<HTMLElement>(
+            '[data-viz-drawer-close="true"]:not([disabled])'
+          );
+          if (vizDrawerClose) {
+            vizDrawerClose.click();
+            break;
+          }
+          const folderChooserClose = document.querySelector<HTMLElement>(
+            '[data-folder-chooser-close="true"]:not([disabled])'
+          );
+          if (folderChooserClose) {
+            folderChooserClose.click();
+            break;
+          }
+          const quickHelpClose = document.querySelector<HTMLElement>(
+            '[data-quick-help-close="true"]'
+          );
+          if (quickHelpClose) {
+            quickHelpClose.click();
+            break;
+          }
+          const hybridPickerClose = document.querySelector<HTMLElement>(
+            '[data-hybrid-picker-close="true"]'
+          );
+          if (hybridPickerClose) {
+            hybridPickerClose.click();
+            break;
+          }
+          const libraryContextClose = document.querySelector<HTMLElement>(
+            '[data-library-context-close="true"]'
+          );
+          if (libraryContextClose) {
+            libraryContextClose.click();
+            break;
+          }
           // In the Two-Column `SELECT` Player Actions modal, pressing `B` while in the Right Column
           // returns focus to the Left Column settings first; pressing `B` in the Left Column closes the modal.
           const activeModalEl =
@@ -1068,20 +1164,6 @@ export function useGamepadNavigation({
               applyFocusMarker(leftSettingBtn);
               break;
             }
-          }
-          const folderChooserClose = document.querySelector<HTMLElement>(
-            '[data-folder-chooser-close="true"]:not([disabled])'
-          );
-          if (folderChooserClose) {
-            folderChooserClose.click();
-            break;
-          }
-          const quickHelpClose = document.querySelector<HTMLElement>(
-            '[data-quick-help-close="true"]'
-          );
-          if (quickHelpClose) {
-            quickHelpClose.click();
-            break;
           }
           const playerActionsClose = document.querySelector<HTMLElement>(
             '[data-player-actions-close="true"]'
@@ -1111,20 +1193,6 @@ export function useGamepadNavigation({
               applyFocusMarker(foldersTrigger);
               break;
             }
-          }
-          const libraryContextClose = document.querySelector<HTMLElement>(
-            '[data-library-context-close="true"]'
-          );
-          if (libraryContextClose) {
-            libraryContextClose.click();
-            break;
-          }
-          const hybridPickerClose = document.querySelector<HTMLElement>(
-            '[data-hybrid-picker-close="true"]'
-          );
-          if (hybridPickerClose) {
-            hybridPickerClose.click();
-            break;
           }
           if (volumePopoverOpen || brightnessPopoverOpen) {
             setVolumePopoverOpen(false);
@@ -1380,7 +1448,7 @@ export function useGamepadNavigation({
           sourceModalOpen ||
           powerModalOpen ||
           !!oskTarget ||
-          !!document.querySelector('[data-player-actions-modal="true"]');
+          !!document.querySelector('[data-modal-root="true"], [data-folder-chooser-modal="true"]');
         // 100% Play/Pause in the Player tab (`view === 'lock'`, both Card and Fullscreen/Expanded Video)
         // and whenever using desktop pointer mode (`data-simp-input !== 'gamepad'`).
         // Only preserve the Steam KDE Lizard Mode `Y` alias (`repeat`) when browsing in gamepad mode.

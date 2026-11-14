@@ -353,6 +353,14 @@ pub fn clear_cached_storefront() {
     *storefront_cache().lock().unwrap() = None;
 }
 
+/// Pre-warms the Apple Music Developer JWT, User Token, and Storefront ID (`GET /v1/me/storefront`)
+/// so the TLS connection pool and storefront cache are hot before the first track is played.
+pub fn prewarm_apple_auth_and_storefront(settings: &SimpSettings) {
+    if let Ok((dev_token, user_token)) = resolve_tokens(settings) {
+        let _ = get_storefront(&dev_token, &user_token);
+    }
+}
+
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for b in s.bytes() {
@@ -2947,9 +2955,8 @@ pub fn spawn_queue_catalog_prewarmer(settings: SimpSettings, tracks: Vec<TrackMe
     let _ = std::thread::Builder::new()
         .name("simp-catalog-prewarm".to_string())
         .spawn(move || {
-            // Yield 750ms so the active track's manifest + HLS + Widevine license handshake
-            // gets 100% network & CPU priority before background queue resolution begins.
-            std::thread::sleep(std::time::Duration::from_millis(750));
+            // Yield 150ms so any immediate foreground request starts first before background queue resolution.
+            std::thread::sleep(std::time::Duration::from_millis(150));
             for t in uncached {
                 let artist = t.artists.first().map(|s| s.as_str());
                 let _ = resolve_replacement_catalog_song_id(

@@ -265,8 +265,9 @@ impl LocalAudioEngine {
         event_tx: mpsc::UnboundedSender<PlaybackEvent>,
     ) -> Result<()> {
         self.user_paused.store(false, Ordering::SeqCst);
-        // If PipeWire stream was idle-suspended while paused, transparently reload at saved position
-        if self.sink.is_none() {
+        // If PipeWire stream was idle-suspended while paused or the rodio Sink became empty,
+        // transparently reload at the saved position.
+        if self.sink.as_ref().map(|s| s.empty()).unwrap_or(true) {
             if let Some(uri) = self.current_uri.clone() {
                 let saved_pos = self.tracker.lock().unwrap().get_position_ms();
                 return self.load_and_play(&uri, saved_pos, epoch, event_tx);

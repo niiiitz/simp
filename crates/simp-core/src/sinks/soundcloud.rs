@@ -722,8 +722,13 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                 return;
             }
 
-            if start_pos_ms == 0 {
-                if let Some(pf) = take_prefetched_sc_track(&track_id) {
+            let target_initial_sample =
+                (((start_pos_ms as f64 / 1000.0) * 44_100.0).round() as usize) * 2;
+            if let Some(pf) = take_prefetched_sc_track(&track_id) {
+                if start_pos_ms == 0
+                    || pf.is_complete
+                    || pf.initial_pcm.len() > target_initial_sample
+                {
                     let total_expected = if let Some(ref pl) = pf.playlist {
                         let dur: f64 = pl.segments.iter().map(|s| s.duration_secs).sum();
                         ((dur * 44_100.0).round() as usize) * 2
@@ -776,7 +781,10 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                 }
             }
 
-            let token = match ensure_valid_access_token(&settings) {
+            let token = match ensure_valid_access_token(&settings).or_else(|_| {
+                std::thread::sleep(Duration::from_millis(120));
+                ensure_valid_access_token(&settings)
+            }) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!("SoundCloud auth failed for {track_uri}: {e}");
@@ -785,7 +793,10 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                 }
             };
 
-            let streams = match fetch_track_streams(&settings, &track_id) {
+            let streams = match fetch_track_streams(&settings, &track_id).or_else(|_| {
+                std::thread::sleep(Duration::from_millis(120));
+                fetch_track_streams(&settings, &track_id)
+            }) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!("SoundCloud streams lookup failed for {track_uri}: {e}");
@@ -805,7 +816,11 @@ pub fn spawn_progressive_soundcloud_rodio_source(
                 start_pos_ms,
                 epoch,
                 &active_epoch,
-            ) {
+            )
+            .or_else(|_| {
+                std::thread::sleep(Duration::from_millis(120));
+                prepare_initial_soundcloud_stream(&streams, &token, start_pos_ms, epoch, &active_epoch)
+            }) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!("SoundCloud initial stream decode failed for {track_uri}: {e}");

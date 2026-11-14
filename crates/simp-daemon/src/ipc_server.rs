@@ -191,6 +191,11 @@ pub async fn run_ipc_server(ipc_state: DaemonIpcState) -> anyhow::Result<()> {
         )
         .route("/api/library/facets", get(library_facets_handler))
         .route(
+            "/api/library/lyrics-status",
+            get(library_lyrics_status_handler),
+        )
+        .route("/api/dsp", get(dsp_get_handler).post(dsp_post_handler))
+        .route(
             "/api/library/playlists/convert-to-hybrid",
             post(convert_playlist_to_hybrid_handler),
         )
@@ -1565,11 +1570,116 @@ async fn library_facets_handler(
     let facet = params.get("facet").cloned().unwrap_or_default();
     let uris = state.db.get_facet_matching_uris(&facet).unwrap_or_default();
     let tracks = state.db.get_facet_matching_tracks(&facet).unwrap_or_default();
+    let (synced_uris, all_lyrics_uris) = if facet == "synced_lyrics" || facet == "has_lyrics" {
+        state.db.get_lyrics_uri_sets().unwrap_or_default()
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Json(serde_json::json!({
         "ok": true,
         "facet": facet,
         "uris": uris,
         "tracks": tracks,
+        "synced_uris": synced_uris,
+        "all_lyrics_uris": all_lyrics_uris,
+    }))
+}
+
+async fn library_lyrics_status_handler(
+    State(state): State<DaemonIpcState>,
+) -> impl IntoResponse {
+    let (synced_uris, all_lyrics_uris) = state.db.get_lyrics_uri_sets().unwrap_or_default();
+    Json(serde_json::json!({
+        "ok": true,
+        "synced_uris": synced_uris,
+        "all_lyrics_uris": all_lyrics_uris,
+    }))
+}
+
+async fn dsp_get_handler() -> impl IntoResponse {
+    let snap = simp_core::dsp::global_dsp_state().snapshot();
+    Json(serde_json::json!({
+        "ok": true,
+        "data": snap,
+        "presets": simp_core::dsp::BUILTIN_EQ_PRESETS,
+        "band_freqs_hz": simp_core::dsp::EQ_BAND_FREQS_HZ,
+        "band_labels": simp_core::dsp::EQ_BAND_LABELS,
+    }))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct DspPostBody {
+    eq_enabled: Option<bool>,
+    eq_preset: Option<String>,
+    preamp_db: Option<f32>,
+    bands_db: Option<Vec<f32>>,
+    vocal_mode: Option<String>,
+    vocal_strength: Option<f32>,
+}
+
+async fn dsp_post_handler(
+    State(state): State<DaemonIpcState>,
+    Json(body): Json<DspPostBody>,
+) -> impl IntoResponse {
+    let dsp_state = simp_core::dsp::global_dsp_state();
+    let mut next = dsp_state.snapshot();
+
+    if let Some(en) = body.eq_enabled {
+        next.eq_enabled = en;
+    }
+    if let Some(ref preset_id) = body.eq_preset {
+        let norm = preset_id.trim().to_ascii_lowercase();
+        next.eq_preset = norm.clone();
+        if let Some(preset) = simp_core::dsp::lookup_eq_preset(&norm) {
+            next.bands_db = preset.bands_db;
+            if body.preamp_db.is_none() {
+                next.preamp_db = preset.preamp_db;
+            }
+        }
+    }
+    if let Some(preamp) = body.preamp_db {
+        if preamp.is_finite() {
+            next.preamp_db = preamp.clamp(-12.0, 12.0);
+        }
+    }
+    if let Some(ref bands) = body.bands_db {
+        for (i, &v) in bands.iter().take(10).enumerate() {
+            if v.is_finite() {
+                next.bands_db[i] = v.clamp(-12.0, 12.0);
+            }
+        }
+        if body.eq_preset.is_none() {
+            next.eq_preset = "custom".to_string();
+        }
+    }
+    if let Some(ref v_mode) = body.vocal_mode {
+        next.vocal_mode = simp_core::dsp::VocalDspMode::from_str_id(v_mode)
+            .as_str_id()
+            .to_string();
+    }
+    if let Some(v_str) = body.vocal_strength {
+        if v_str.is_finite() {
+            next.vocal_strength = v_str.clamp(0.0, 1.0);
+        }
+    }
+
+    dsp_state.apply_snapshot(&next);
+
+    // Persist DSP state to `~/.config/simp/settings.vdf`
+    {
+        let mut cfg = state.settings.lock().unwrap();
+        cfg.audio.eq_enabled = next.eq_enabled;
+        cfg.audio.eq_preset = next.eq_preset.clone();
+        cfg.audio.eq_preamp_db = next.preamp_db as f64;
+        cfg.audio.eq_bands_csv = simp_core::dsp::format_eq_bands_csv(&next.bands_db);
+        cfg.audio.vocal_mode = next.vocal_mode.clone();
+        cfg.audio.vocal_strength = next.vocal_strength as f64;
+        let _ = crate::config::save_settings(&cfg);
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "data": next,
     }))
 }
 

@@ -26,6 +26,11 @@ import {
 } from '../components/visualizers/VisualizerOverlayHud';
 import { VisualizerDrawerModal } from '../components/visualizers/VisualizerDrawerModal';
 import {
+  DEFAULT_DSP_STATE,
+  EqualizerModal,
+  type DspConfigState,
+} from '../components/EqualizerModal';
+import {
   fetchSoundCloudTrackComments,
   fetchSoundCloudTrackWaveform,
   likeSoundCloudTrack,
@@ -191,6 +196,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   );
   const [activeVizEngine, setActiveVizEngine] = useState<VisualizerEngine>('glyph');
   const [vizDrawerOpen, setVizDrawerOpen] = useState<boolean>(false);
+  const [equalizerOpen, setEqualizerOpen] = useState<boolean>(false);
+  const [dspState, setDspState] = useState<DspConfigState>(DEFAULT_DSP_STATE);
   const [factoidBubbles, setFactoidBubbles] = useState<FactoidBubbleItem[]>([]);
   const [trackPropsState, setTrackPropsState] = useState<{
     suppress_lyrics?: boolean;
@@ -198,13 +205,25 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     suppress_factoids?: boolean;
     preferred_viz_mode?: string | null;
   }>({});
-  const [lyricsEnabled, setLyricsEnabled] = useState<boolean>(() => {
+  const [lyricsKaraokeEnabled, setLyricsKaraokeEnabled] = useState<boolean>(() => {
     try {
+      const explicit = window.localStorage.getItem('simp_lyrics_karaoke_enabled');
+      if (explicit !== null) return explicit !== '0';
       return window.localStorage.getItem('simp_lyrics_enabled') !== '0';
     } catch {
       return true;
     }
   });
+  const [lyricsVizEnabled, setLyricsVizEnabled] = useState<boolean>(() => {
+    try {
+      const explicit = window.localStorage.getItem('simp_lyrics_viz_enabled');
+      if (explicit !== null) return explicit !== '0';
+      return window.localStorage.getItem('simp_lyrics_enabled') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const shouldFetchLyrics = lyricsKaraokeEnabled || lyricsVizEnabled;
   const [factoidsEnabled, setFactoidsEnabled] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem('simp_factoids_enabled') === '1';
@@ -798,16 +817,96 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     saveEnabledVisualizerScenes(next);
   }, []);
 
-  const toggleLyrics = useCallback(() => {
-    setLyricsEnabled((prev) => {
+  const toggleLyricsKaraoke = useCallback(() => {
+    setLyricsKaraokeEnabled((prev) => {
       const next = !prev;
       try {
-        window.localStorage.setItem('simp_lyrics_enabled', next ? '1' : '0');
+        window.localStorage.setItem('simp_lyrics_karaoke_enabled', next ? '1' : '0');
       } catch {}
-      showToast?.(next ? '🎤 Synced Lyrics overlay ON' : '🎤 Synced Lyrics overlay OFF');
+      showToast?.(
+        next ? 'Karaoke / Foreground Lyrics: ON' : 'Karaoke / Foreground Lyrics: OFF'
+      );
       return next;
     });
   }, [showToast]);
+
+  const toggleLyricsViz = useCallback(() => {
+    setLyricsVizEnabled((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('simp_lyrics_viz_enabled', next ? '1' : '0');
+      } catch {}
+      showToast?.(
+        next
+          ? 'Visualizer Lyrics Data Element: ON'
+          : 'Visualizer Lyrics Data Element: OFF'
+      );
+      return next;
+    });
+  }, [showToast]);
+
+  const handleUpdateDsp = useCallback(
+    (patch: Partial<DspConfigState>) => {
+      setDspState((prev) => {
+        const next: DspConfigState = { ...prev, ...patch };
+        fetch('http://127.0.0.1:18888/api/dsp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        })
+          .then((r) => r.json())
+          .then((res) => {
+            if (res?.ok && res?.data) {
+              setDspState(res.data as DspConfigState);
+            }
+          })
+          .catch(() => {});
+        return next;
+      });
+    },
+    []
+  );
+
+  const handleToggleKaraokeMode = useCallback(
+    (enable: boolean) => {
+      if (enable) {
+        setLyricsKaraokeEnabled(true);
+        try {
+          window.localStorage.setItem('simp_lyrics_karaoke_enabled', '1');
+        } catch {}
+        handleUpdateDsp({ vocal_mode: 'vocal_remover' });
+        showToast?.('Karaoke Mode ON (Vocal Remover + Synced Lyrics)');
+      } else {
+        handleUpdateDsp({ vocal_mode: 'off' });
+        showToast?.('Karaoke Vocal Remover OFF');
+      }
+    },
+    [handleUpdateDsp, showToast]
+  );
+
+  useEffect(() => {
+    fetch('http://127.0.0.1:18888/api/dsp')
+      .then((r) => r.json())
+      .then((res) => {
+        if (res?.ok && res?.data) {
+          setDspState(res.data as DspConfigState);
+        }
+      })
+      .catch(() => {});
+
+    const onEngageKaraoke = () => {
+      handleToggleKaraokeMode(true);
+    };
+    const onOpenEqualizer = () => {
+      setEqualizerOpen(true);
+    };
+    window.addEventListener('simp-engage-karaoke-mode', onEngageKaraoke);
+    window.addEventListener('simp-open-equalizer', onOpenEqualizer);
+    return () => {
+      window.removeEventListener('simp-engage-karaoke-mode', onEngageKaraoke);
+      window.removeEventListener('simp-open-equalizer', onOpenEqualizer);
+    };
+  }, [handleToggleKaraokeMode]);
 
   const toggleFactoids = useCallback(() => {
     setFactoidsEnabled((prev) => {
@@ -859,9 +958,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     });
   }, [showToast]);
 
-  // Fetch synced lyrics from LRCLIB (v1 + v2 beta) or local .lrc sidecar on track change
+  // Fetch synced lyrics from LRCLIB (v1 + v2 beta) or local .lrc sidecar on track change,
+  // skipping network/DB retrieval completely when both Karaoke Lyrics and Visualizer Lyrics are disabled.
   const loadLyricsForCurrentTrack = useCallback(() => {
-    if (!track?.uri || !track?.title || isVideoTrack) {
+    if (!shouldFetchLyrics || !track?.uri || !track?.title || isVideoTrack) {
       setLyricsData(null);
       return () => {};
     }
@@ -886,7 +986,15 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [track?.uri, track?.title, track?.artists, track?.album, track?.duration_ms, isVideoTrack]);
+  }, [
+    shouldFetchLyrics,
+    track?.uri,
+    track?.title,
+    track?.artists,
+    track?.album,
+    track?.duration_ms,
+    isVideoTrack,
+  ]);
 
   useEffect(() => {
     setLyricsData(null);
@@ -897,9 +1005,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 
   // Fetch per-track properties (suppression flags, preferred_viz_mode) and Pop-Up Video Factoids (factoids.rs)
   const loadFactoidsAndPropsForCurrentTrack = useCallback(() => {
+    setTrackPropsState({});
+    setFactoidBubbles([]);
     if (!track?.uri || !track?.title || isVideoTrack) {
-      setFactoidBubbles([]);
-      setTrackPropsState({});
       return () => {};
     }
     let cancelled = false;
@@ -912,30 +1020,40 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       })
       .catch(() => {});
 
-    const params = new URLSearchParams({
-      uri: track.uri,
-      title: track.title,
-      artist: track.artists?.[0] || '',
-      album: track.album || '',
-      duration_ms: String(track.duration_ms || 180000),
-    });
-    fetch(`/api/factoids?${params.toString()}`)
-      .then((r) => r.json())
-      .then((res) => {
-        if (!cancelled && res && res.ok && res.data && Array.isArray(res.data.bubbles)) {
-          setFactoidBubbles(res.data.bubbles);
-        } else if (!cancelled) {
-          setFactoidBubbles([]);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setFactoidBubbles([]);
+    if (factoidsEnabled) {
+      const params = new URLSearchParams({
+        uri: track.uri,
+        title: track.title,
+        artist: track.artists?.[0] || '',
+        album: track.album || '',
+        duration_ms: String(track.duration_ms || 180000),
       });
+      fetch(`/api/factoids?${params.toString()}`)
+        .then((r) => r.json())
+        .then((res) => {
+          if (!cancelled && res && res.ok && res.data && Array.isArray(res.data.bubbles)) {
+            setFactoidBubbles(res.data.bubbles);
+          } else if (!cancelled) {
+            setFactoidBubbles([]);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setFactoidBubbles([]);
+        });
+    }
 
     return () => {
       cancelled = true;
     };
-  }, [track?.uri, track?.title, track?.artists, track?.album, track?.duration_ms, isVideoTrack]);
+  }, [
+    track?.uri,
+    track?.title,
+    track?.artists,
+    track?.album,
+    track?.duration_ms,
+    isVideoTrack,
+    factoidsEnabled,
+  ]);
 
   useEffect(() => {
     return loadFactoidsAndPropsForCurrentTrack();
@@ -1438,23 +1556,34 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               chapterModalItems.find((c) => c.isCurrent)?.title || null
             }
             activeLyricLine={
-              activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx]
+              lyricsVizEnabled &&
+              !trackPropsState.suppress_lyrics &&
+              activeLyricIdx >= 0 &&
+              lyricsData?.synced_lines[activeLyricIdx]
                 ? lyricsData.synced_lines[activeLyricIdx].text
                 : null
             }
             nextLyricLine={
-              activeLyricIdx >= 0 && lyricsData?.synced_lines[activeLyricIdx + 1]
+              lyricsVizEnabled &&
+              !trackPropsState.suppress_lyrics &&
+              activeLyricIdx >= 0 &&
+              lyricsData?.synced_lines[activeLyricIdx + 1]
                 ? lyricsData.synced_lines[activeLyricIdx + 1].text
                 : null
             }
             hasLyrics={Boolean(
-              lyricsData &&
+              lyricsVizEnabled &&
+                !trackPropsState.suppress_lyrics &&
+                lyricsData &&
                 !lyricsData.instrumental &&
                 (lyricsData.synced_lines.length > 0 ||
                   (lyricsData.plain_lyrics && lyricsData.plain_lyrics.trim().length > 0))
             )}
             lyricsMarqueeFallback={
-              lyricsData && !lyricsData.instrumental
+              lyricsVizEnabled &&
+              !trackPropsState.suppress_lyrics &&
+              lyricsData &&
+              !lyricsData.instrumental
                 ? lyricsData.synced_lines.length > 0
                   ? lyricsData.synced_lines
                       .map((l) => l.text.trim())
@@ -1481,14 +1610,14 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               positionMs={snap?.position_ms || 0}
               durationMs={track?.duration_ms || 0}
               activeLyricLine={
-                lyricsEnabled &&
+                lyricsKaraokeEnabled &&
                 activeLyricIdx >= 0 &&
                 lyricsData?.synced_lines[activeLyricIdx]
                   ? lyricsData.synced_lines[activeLyricIdx].text
                   : null
               }
               nextLyricLine={
-                lyricsEnabled &&
+                lyricsKaraokeEnabled &&
                 activeLyricIdx >= 0 &&
                 lyricsData?.synced_lines[activeLyricIdx + 1]
                   ? lyricsData.synced_lines[activeLyricIdx + 1].text
@@ -2473,7 +2602,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       {/* Bottom-Edge Synced Lyrics Pill — Anchored near bottom screen edge & centered to the page */}
       {!isVideoTrack && (() => {
         const showLyricsBubble = Boolean(
-          lyricsEnabled &&
+          lyricsKaraokeEnabled &&
+            !trackPropsState.suppress_lyrics &&
             lyricsData &&
             (lyricsData.synced_lines.length > 0 || lyricsData.instrumental)
         );
@@ -3079,8 +3209,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         {/* 7. Track Properties & Local Curation */}
                         <button
                           type="button"
+                          data-track-properties-trigger="true"
                           onClick={() => {
-                            setPlayerActionsOpen(false);
                             window.dispatchEvent(
                               new CustomEvent('simp-open-track-properties', { detail: track }),
                             );
@@ -3332,6 +3462,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                     {!isVideoTrack && (
                       <button
                         type="button"
+                        data-viz-drawer-trigger="true"
                         onClick={() => setVizDrawerOpen(true)}
                         style={{
                           ...actionRowBtnStyle,
@@ -3364,29 +3495,48 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                       </button>
                     )}
 
-                    {/* 2b. Synced Lyrics Overlay (LRCLIB v1/v2 + Local .lrc) */}
+                    {/* 2a. 10-Band Audio Equalizer & Vocal Stage Drawer */}
                     {!isVideoTrack && (
                       <button
                         type="button"
-                        onClick={toggleLyrics}
+                        data-equalizer-trigger="true"
+                        onClick={() => setEqualizerOpen(true)}
                         style={{
                           ...actionRowBtnStyle,
                           minHeight: 46,
                           padding: '8px 12px',
-                          background: lyricsEnabled ? '#0f222a' : '#101018',
-                          border: lyricsEnabled ? '1px solid #2aa3c4' : '1px solid #222230',
+                          background:
+                            dspState.eq_enabled || dspState.vocal_mode !== 'off'
+                              ? '#0f222a'
+                              : '#101018',
+                          border:
+                            dspState.eq_enabled || dspState.vocal_mode !== 'off'
+                              ? '1px solid #38bdf8'
+                              : '1px solid #222230',
                         }}
                       >
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                          <span style={{ fontSize: 12.5, fontWeight: 800, color: '#67e8f9' }}>
-                            🎤 Synced Lyrics (LRCLIB)
+                          <span
+                            style={{
+                              fontSize: 12.5,
+                              fontWeight: 800,
+                              color: '#7dd3fc',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 6,
+                            }}
+                          >
+                            <ImpIcon name="sliders" size={14} color="#38bdf8" />
+                            10-Band Equalizer & Vocal Stage
                           </span>
                           <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
-                            {lyricsData?.synced_lines?.length
-                              ? `${lyricsData.synced_lines.length} synced lines (${lyricsData.source})`
-                              : lyricsData?.instrumental
-                                ? 'Instrumental track detected'
-                                : 'Live teleprompter & visualizer reactivity'}
+                            EQ: {dspState.eq_enabled ? dspState.eq_preset.toUpperCase() : 'Flat (Bypass)'}{' '}
+                            • Vocal:{' '}
+                            {dspState.vocal_mode === 'vocal_remover'
+                              ? 'Karaoke Remover'
+                              : dspState.vocal_mode === 'vocal_isolate'
+                                ? 'Vocal Isolate'
+                                : 'Original'}
                           </span>
                         </div>
                         <span
@@ -3394,10 +3544,172 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                             fontFamily: 'monospace',
                             fontSize: 11,
                             fontWeight: 800,
-                            color: lyricsEnabled ? '#67e8f9' : '#71717a',
+                            color:
+                              dspState.eq_enabled || dspState.vocal_mode !== 'off'
+                                ? '#38bdf8'
+                                : '#71717a',
                           }}
                         >
-                          {lyricsEnabled ? 'ON' : 'OFF'}
+                          {dspState.eq_enabled || dspState.vocal_mode !== 'off' ? 'ACTIVE ▸' : 'OPEN ▸'}
+                        </span>
+                      </button>
+                    )}
+
+                    {/* 2a-ii. 1-Click Karaoke Mode (Vocal Remover + Synced Lyrics) */}
+                    {!isVideoTrack && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleToggleKaraokeMode(
+                            !(dspState.vocal_mode === 'vocal_remover' && lyricsKaraokeEnabled)
+                          )
+                        }
+                        style={{
+                          ...actionRowBtnStyle,
+                          minHeight: 46,
+                          padding: '8px 12px',
+                          background:
+                            dspState.vocal_mode === 'vocal_remover' && lyricsKaraokeEnabled
+                              ? '#0d261f'
+                              : '#101018',
+                          border:
+                            dspState.vocal_mode === 'vocal_remover' && lyricsKaraokeEnabled
+                              ? '1px solid #34d399'
+                              : '1px solid #222230',
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                          <span
+                            style={{
+                              fontSize: 12.5,
+                              fontWeight: 800,
+                              color: '#6ee7b7',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 6,
+                            }}
+                          >
+                            <ImpIcon
+                              name={
+                                dspState.vocal_mode === 'vocal_remover' ? 'mic-off' : 'mic'
+                              }
+                              size={14}
+                              color="#34d399"
+                            />
+                            Karaoke Mode (Vocal Remover + Synced Lyrics)
+                          </span>
+                          <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                            Band-limited 130 Hz – 4.5 kHz center vocal suppression + foreground lyrics
+                          </span>
+                        </div>
+                        <span
+                          style={{
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color:
+                              dspState.vocal_mode === 'vocal_remover' && lyricsKaraokeEnabled
+                                ? '#34d399'
+                                : '#71717a',
+                          }}
+                        >
+                          {dspState.vocal_mode === 'vocal_remover' && lyricsKaraokeEnabled
+                            ? 'ON'
+                            : 'OFF'}
+                        </span>
+                      </button>
+                    )}
+
+                    {/* 2b. Karaoke / Foreground Synced Lyrics Overlay (LRCLIB v1/v2 + Local .lrc) */}
+                    {!isVideoTrack && (
+                      <button
+                        type="button"
+                        onClick={toggleLyricsKaraoke}
+                        style={{
+                          ...actionRowBtnStyle,
+                          minHeight: 46,
+                          padding: '8px 12px',
+                          background: lyricsKaraokeEnabled ? '#0f222a' : '#101018',
+                          border: lyricsKaraokeEnabled ? '1px solid #2aa3c4' : '1px solid #222230',
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                          <span
+                            style={{
+                              fontSize: 12.5,
+                              fontWeight: 800,
+                              color: '#67e8f9',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 6,
+                            }}
+                          >
+                            <ImpIcon name="lyrics" size={14} color="#67e8f9" />
+                            Foreground Synced Lyrics
+                          </span>
+                          <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                            {lyricsData?.synced_lines?.length
+                              ? `${lyricsData.synced_lines.length} synced lines (${lyricsData.source})`
+                              : lyricsData?.instrumental
+                                ? 'Instrumental track detected'
+                                : 'Synced teleprompter lyrics pill for Karaoke & sing-along'}
+                          </span>
+                        </div>
+                        <span
+                          style={{
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: lyricsKaraokeEnabled ? '#67e8f9' : '#71717a',
+                          }}
+                        >
+                          {lyricsKaraokeEnabled ? 'ON' : 'OFF'}
+                        </span>
+                      </button>
+                    )}
+
+                    {/* 2b-i. Visualizer Lyrics Data Element Toggle */}
+                    {!isVideoTrack && (
+                      <button
+                        type="button"
+                        onClick={toggleLyricsViz}
+                        style={{
+                          ...actionRowBtnStyle,
+                          minHeight: 46,
+                          padding: '8px 12px',
+                          background: lyricsVizEnabled ? '#121f2b' : '#101018',
+                          border: lyricsVizEnabled ? '1px solid #38bdf8' : '1px solid #222230',
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                          <span
+                            style={{
+                              fontSize: 12.5,
+                              fontWeight: 800,
+                              color: '#7dd3fc',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 6,
+                            }}
+                          >
+                            <ImpIcon name="sparkles" size={14} color="#7dd3fc" />
+                            Visualizer Lyrics Data Element
+                          </span>
+                          <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
+                            {!lyricsKaraokeEnabled && !lyricsVizEnabled
+                              ? 'Both lyrics modes OFF — lyrics network/DB lookup disabled'
+                              : 'Pass synced lyrics into visualizer scenes (CRT/marquee/reactive text)'}
+                          </span>
+                        </div>
+                        <span
+                          style={{
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: lyricsVizEnabled ? '#7dd3fc' : '#71717a',
+                          }}
+                        >
+                          {lyricsVizEnabled ? 'ON' : 'OFF'}
                         </span>
                       </button>
                     )}
@@ -3691,13 +4003,50 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 
       <VisualizerDrawerModal
         open={vizDrawerOpen}
-        onClose={() => setVizDrawerOpen(false)}
+        onClose={() => {
+          setVizDrawerOpen(false);
+          window.setTimeout(() => {
+            const trigger =
+              document.querySelector<HTMLElement>(
+                '[data-player-actions-modal="true"] [data-viz-drawer-trigger="true"]:not([disabled])',
+              ) ||
+              document.querySelector<HTMLElement>(
+                '[data-player-actions-modal="true"] button:not([disabled])',
+              );
+            if (trigger && applyFocusMarker) {
+              applyFocusMarker(trigger);
+            }
+          }, 25);
+        }}
         vizMode={vizMode}
         activeEngine={activeVizEngine}
         enabledScenes={enabledVizScenes}
         onSelectMode={handleSelectVizMode}
         onToggleSceneInRotation={handleToggleSceneInRotation}
         onSetAllScenesInRotation={handleSetAllScenesInRotation}
+      />
+
+      <EqualizerModal
+        open={equalizerOpen}
+        onClose={() => {
+          setEqualizerOpen(false);
+          window.setTimeout(() => {
+            const trigger =
+              document.querySelector<HTMLElement>(
+                '[data-player-actions-modal="true"] [data-equalizer-trigger="true"]:not([disabled])',
+              ) ||
+              document.querySelector<HTMLElement>(
+                '[data-player-actions-modal="true"] button:not([disabled])',
+              );
+            if (trigger && applyFocusMarker) {
+              applyFocusMarker(trigger);
+            }
+          }, 25);
+        }}
+        dspState={dspState}
+        onUpdateDsp={handleUpdateDsp}
+        karaokeLyricsEnabled={lyricsKaraokeEnabled}
+        onToggleKaraokeMode={handleToggleKaraokeMode}
       />
     </>
   );

@@ -311,6 +311,22 @@ fn default_battery_dim_opacity() -> f64 {
     0.15
 }
 
+fn default_eq_preset() -> String {
+    "flat".to_string()
+}
+
+fn default_eq_bands_csv() -> String {
+    "0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0".to_string()
+}
+
+fn default_vocal_mode() -> String {
+    "off".to_string()
+}
+
+fn default_vocal_strength() -> f64 {
+    0.90
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AudioSettings {
     #[serde(default = "default_master_volume")]
@@ -321,6 +337,18 @@ pub struct AudioSettings {
     pub steam_ost_arbitration: bool,
     #[serde(default = "default_true")]
     pub pause_on_headphone_disconnect: bool,
+    #[serde(default)]
+    pub eq_enabled: bool,
+    #[serde(default = "default_eq_preset")]
+    pub eq_preset: String,
+    #[serde(default)]
+    pub eq_preamp_db: f64,
+    #[serde(default = "default_eq_bands_csv")]
+    pub eq_bands_csv: String,
+    #[serde(default = "default_vocal_mode")]
+    pub vocal_mode: String,
+    #[serde(default = "default_vocal_strength")]
+    pub vocal_strength: f64,
 }
 
 fn default_brightness_pct() -> u8 {
@@ -420,6 +448,12 @@ impl Default for SimpSettings {
                 normalize_volume: true,
                 steam_ost_arbitration: true,
                 pause_on_headphone_disconnect: true,
+                eq_enabled: false,
+                eq_preset: default_eq_preset(),
+                eq_preamp_db: 0.0,
+                eq_bands_csv: default_eq_bands_csv(),
+                vocal_mode: default_vocal_mode(),
+                vocal_strength: default_vocal_strength(),
             },
             ui: UiSettings {
                 modality: "oled_console".to_string(),

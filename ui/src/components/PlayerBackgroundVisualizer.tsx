@@ -3,7 +3,7 @@ import { defaultSimpClient, type SoundCloudComment, type TrackMetadata } from '@
 import {
   getSceneDescriptor,
   loadEnabledVisualizerScenes,
-   saveEnabledVisualizerScenes,
+  saveEnabledVisualizerScenes,
   VISUALIZER_ENGINES,
   VISUALIZER_MODES,
   VISUALIZER_SCENES,
@@ -14,17 +14,40 @@ import { isValidAttributedComment } from './visualizers/VisualizerOverlayHud';
 import {
   CANVAS_H,
   CANVAS_W,
-  drawMicroPartyCommentPill,
   RENDER_SCALE,
   type SceneRenderContext,
 } from './visualizers/scenes/types';
-import { renderRhythmScene } from './visualizers/scenes/rhythmScene';
+import {
+  ART_BUF_PIXELS,
+  ART_BUF_SIZE,
+  type ClassicSceneRuntimeRefs,
+  DEFAULT_PALETTE_RGB,
+  getGlyphBitmaps,
+  GLYPH_RAMP,
+  type GlyphMutationPatch,
+  GRID_CELLS,
+  GRID_COLS,
+  GRID_ROWS,
+  MAX_MUTATION_PATCHES,
+  NUM_PALETTE,
+  packAbgr,
+  rgbToCss,
+  SIN_F32,
+  SOUNDCLOUD_PALETTE_RGB,
+  type TrapperArenaState,
+} from './visualizers/scenes/classicShared';
+import { renderGlyphScene } from './visualizers/scenes/glyphScene';
+import { renderDemosceneScene } from './visualizers/scenes/demosceneScene';
+import { renderVertigoScene } from './visualizers/scenes/vertigoScene';
+import { renderTrapperScene } from './visualizers/scenes/trapperScene';
 import { renderMidnightScene } from './visualizers/scenes/midnightScene';
 import { renderCosmosScene } from './visualizers/scenes/cosmosScene';
-import { renderReefScene } from './visualizers/scenes/reefScene';
-import { renderArcadeScene } from './visualizers/scenes/arcadeScene';
-import { renderVaporwaveScene } from './visualizers/scenes/vaporwaveScene';
-import { renderSanctumScene } from './visualizers/scenes/sanctumScene';
+import { renderReef3dScene } from './visualizers/scenes/reef3dScene';
+import { renderSanctumOdysseyScene } from './visualizers/scenes/sanctumOdysseyScene';
+import { renderVaporwave3dScene } from './visualizers/scenes/vaporwave3dScene';
+import { renderRhythmHologramScene } from './visualizers/scenes/rhythmHologramScene';
+import { renderArcadeCrossfireScene } from './visualizers/scenes/arcadeCrossfireScene';
+import { renderAvsV2Scene } from './visualizers/scenes/avsV2Scene';
 
 export {
   getSceneDescriptor,
@@ -35,6 +58,24 @@ export {
   VISUALIZER_SCENES,
   type VisualizerEngine,
   type VisualizerMode,
+};
+
+const UNIFIED_SCENE_RENDERERS: Record<
+  VisualizerEngine,
+  (sceneCtx: SceneRenderContext, rt: ClassicSceneRuntimeRefs) => void
+> = {
+  glyph: renderGlyphScene,
+  demoscene: renderDemosceneScene,
+  vertigo: renderVertigoScene,
+  trapper: renderTrapperScene,
+  midnight: (sceneCtx) => renderMidnightScene(sceneCtx),
+  cosmos: (sceneCtx) => renderCosmosScene(sceneCtx),
+  reef3d: (sceneCtx) => renderReef3dScene(sceneCtx),
+  sanctum_odyssey: (sceneCtx) => renderSanctumOdysseyScene(sceneCtx),
+  vaporwave3d: (sceneCtx) => renderVaporwave3dScene(sceneCtx),
+  rhythm_hologram: (sceneCtx) => renderRhythmHologramScene(sceneCtx),
+  arcade_crossfire: (sceneCtx) => renderArcadeCrossfireScene(sceneCtx),
+  avs_v2: renderAvsV2Scene,
 };
 
 interface Props {
@@ -55,211 +96,6 @@ interface Props {
   hasLyrics?: boolean;
   lyricsMarqueeFallback?: string | null;
   hidden?: boolean;
-}
-
-// High-density 80x45 micro-glyph grid (3,600 cells, 8x8px per cell on 640x360 canvas)
-const GRID_COLS = 80;
-const GRID_ROWS = 45;
-const GRID_CELLS = GRID_COLS * GRID_ROWS; // 3,600 cells
-const CELL_W = 8;
-const CELL_H = 8;
-
-// Unstretched square artwork sampling buffer (128x128) for slow Ken-Burns panning
-const ART_BUF_SIZE = 128;
-const ART_BUF_PIXELS = ART_BUF_SIZE * ART_BUF_SIZE;
-
-// 16 typographic ASCII ramp glyphs ordered by optical density
-const GLYPH_RAMP = [' ', '·', '.', ':', '-', '~', '=', '+', '*', 'x', 'z', '#', '%', '&', '@', '$'];
-const NUM_GLYPHS = GLYPH_RAMP.length; // 16
-const NUM_PALETTE = 8;
-
-// Printable ASCII strip (charCode 32..95) baked into the 8x8 bitmap LUT (indices 16..79)
-const ASCII_MIN = 32;
-const ASCII_MAX = 95;
-const ASCII_COUNT = ASCII_MAX - ASCII_MIN + 1; // 64 chars
-const TOTAL_LUT_GLYPHS = NUM_GLYPHS + ASCII_COUNT; // 80 glyphs total, 64 bytes each = 5,120 bytes
-
-// Pre-computed 256-entry Sine Lookup Table (-1.0 .. +1.0) & Uint8 (0 .. 255)
-const SIN_F32 = new Float32Array(256);
-const COS_F32 = new Float32Array(256);
-const SIN_U8 = new Uint8Array(256);
-for (let i = 0; i < 256; i++) {
-  const rad = (i / 256) * Math.PI * 2;
-  const s = Math.sin(rad);
-  SIN_F32[i] = s;
-  COS_F32[i] = Math.cos(rad);
-  SIN_U8[i] = Math.max(0, Math.min(255, Math.round((s * 0.5 + 0.5) * 255)));
-}
-
-// Pre-computed 4x4 Bayer Ordered Dithering Matrix normalized to (-0.10 .. +0.10)
-const BAYER_4X4 = new Float32Array([
-   0 / 16 - 0.5,  8 / 16 - 0.5,  2 / 16 - 0.5, 10 / 16 - 0.5,
-  12 / 16 - 0.5,  4 / 16 - 0.5, 14 / 16 - 0.5,  6 / 16 - 0.5,
-   3 / 16 - 0.5, 11 / 16 - 0.5,  1 / 16 - 0.5,  9 / 16 - 0.5,
-  15 / 16 - 0.5,  7 / 16 - 0.5, 13 / 16 - 0.5,  5 / 16 - 0.5,
-]).map((v) => v * 0.20);
-
-// Pre-computed cell coordinates and base polar distance/angle LUTs for the 80x45 grid
-const CELL_X = new Int16Array(GRID_CELLS);
-const CELL_Y = new Int16Array(GRID_CELLS);
-const CELL_ROW = new Uint8Array(GRID_CELLS);
-const CELL_COL = new Uint8Array(GRID_CELLS);
-const CELL_NORM_X = new Float32Array(GRID_CELLS);
-const CELL_NORM_Y = new Float32Array(GRID_CELLS);
-const CELL_BAYER = new Float32Array(GRID_CELLS);
-const CELL_RADIAL_DIST = new Float32Array(GRID_CELLS);
-const CELL_RADIAL_ANGLE = new Uint8Array(GRID_CELLS);
-
-for (let r = 0; r < GRID_ROWS; r++) {
-  for (let c = 0; c < GRID_COLS; c++) {
-    const idx = r * GRID_COLS + c;
-    CELL_X[idx] = c * CELL_W;
-    CELL_Y[idx] = r * CELL_H;
-    CELL_ROW[idx] = r;
-    CELL_COL[idx] = c;
-    const nx = (c + 0.5) / GRID_COLS - 0.5;
-    const ny = (r + 0.5) / GRID_ROWS - 0.5;
-    CELL_NORM_X[idx] = nx;
-    CELL_NORM_Y[idx] = ny;
-    CELL_BAYER[idx] = BAYER_4X4[(r & 3) * 4 + (c & 3)];
-    const dist = Math.sqrt(nx * nx * 1.77 + ny * ny);
-    CELL_RADIAL_DIST[idx] = dist;
-    const ang = Math.atan2(ny, nx);
-    CELL_RADIAL_ANGLE[idx] = Math.round(((ang + Math.PI) / (Math.PI * 2)) * 255) & 255;
-  }
-}
-
-// True OLED Black Floor Palettes (Slot 0 is always pure #000000)
-const DEFAULT_PALETTE_RGB: [number, number, number][] = [
-  [0, 0, 0],
-  [12, 28, 48],
-  [20, 78, 110],
-  [42, 163, 196],
-  [56, 189, 248],
-  [168, 85, 247],
-  [251, 146, 60],
-  [240, 249, 255],
-];
-
-const SOUNDCLOUD_PALETTE_RGB: [number, number, number][] = [
-  [0, 0, 0],
-  [44, 16, 6],
-  [124, 45, 18],
-  [194, 65, 12],
-  [234, 88, 12],
-  [251, 146, 60],
-  [253, 186, 116],
-  [255, 247, 237],
-];
-
-function rgbToCss(rgb: [number, number, number], alpha = 1): string {
-  if (alpha >= 0.999) {
-    return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-  }
-  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha.toFixed(2)})`;
-}
-
-function packAbgr(r: number, g: number, b: number): number {
-  return (0xff000000 | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff)) >>> 0;
-}
-
-// Pre-bake 80 glyphs (16 ramp + 64 ASCII) as 8x8 1-bit pixel masks once at startup
-let cachedGlyphBitmaps: Uint8Array | null = null;
-function getGlyphBitmaps(): Uint8Array {
-  if (cachedGlyphBitmaps) return cachedGlyphBitmaps;
-  const buf = new Uint8Array(TOTAL_LUT_GLYPHS * 64);
-  if (typeof document === 'undefined') {
-    cachedGlyphBitmaps = buf;
-    return buf;
-  }
-  const c = document.createElement('canvas');
-  c.width = TOTAL_LUT_GLYPHS * 8;
-  c.height = 8;
-  const ctx = c.getContext('2d', { willReadFrequently: true });
-  if (!ctx) {
-    cachedGlyphBitmaps = buf;
-    return buf;
-  }
-  ctx.fillStyle = '#000000';
-  ctx.fillRect(0, 0, c.width, c.height);
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 7.5px "JetBrains Mono", "Fira Code", monospace';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-
-  for (let g = 1; g < NUM_GLYPHS; g++) {
-    ctx.fillText(GLYPH_RAMP[g], g * 8 + 4, 4.5);
-  }
-  for (let a = 1; a < ASCII_COUNT; a++) {
-    ctx.fillText(String.fromCharCode(ASCII_MIN + a), (NUM_GLYPHS + a) * 8 + 4, 4.5);
-  }
-
-  const imgData = ctx.getImageData(0, 0, c.width, 8).data;
-  for (let idx = 0; idx < TOTAL_LUT_GLYPHS; idx++) {
-    const baseOffset = idx * 64;
-    const startX = idx * 8;
-    for (let py = 0; py < 8; py++) {
-      for (let px = 0; px < 8; px++) {
-        const p = (py * c.width + (startX + px)) * 4;
-        buf[baseOffset + py * 8 + px] = imgData[p + 1] > 76 ? 1 : 0;
-      }
-    }
-  }
-  cachedGlyphBitmaps = buf;
-  return buf;
-}
-
-interface GlyphMutationPatch {
-  active: boolean;
-  col: number;
-  row: number;
-  scale: 2 | 3;
-  text: string;
-  ttl: number;
-  maxTtl: number;
-  palIdx: number;
-  vertical: boolean;
-}
-
-const MAX_MUTATION_PATCHES = 10;
-
-// 0 = Chrome Sphere (Rock), 1 = Neon Pyramid/Triangle (Scissors), 2 = Bryce 3D Cube/Square (Paper)
-// RPS Rules: Sphere (0) crushes Pyramid (1); Pyramid (1) slices Cube (2); Cube (2) traps Sphere (0)
-type TrapperShapeKind = 0 | 1 | 2;
-const TRAPPER_SHAPE_NAMES: Record<TrapperShapeKind, string> = {
-  0: 'CHROME SPHERE',
-  1: 'NEON PYRAMID',
-  2: 'BRYCE CUBE',
-};
-
-interface TrapperShard {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  rot: number;
-  vrot: number;
-  size: number;
-  palIdx: number;
-}
-
-interface TrapperArenaState {
-  leftShape: TrapperShapeKind;
-  rightShape: TrapperShapeKind;
-  phase: 'float' | 'charge' | 'clash' | 'challenger';
-  timer: number;
-  loserSide: 'left' | 'right';
-  incomingShape: TrapperShapeKind;
-  challengerBannerCount: number;
-  shards: TrapperShard[];
-}
-
-function getRpsLoserSide(left: TrapperShapeKind, right: TrapperShapeKind): 'left' | 'right' {
-  // 0 beats 1, 1 beats 2, 2 beats 0
-  if ((left === 0 && right === 1) || (left === 1 && right === 2) || (left === 2 && right === 0)) {
-    return 'right';
-  }
-  return 'left';
 }
 
 export const PlayerBackgroundVisualizer: React.FC<Props> = ({
@@ -379,6 +215,7 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
 
   // Track transition impulse (1.0 -> 0.0 over ~1.25s when track.uri or mode changes)
   const prevTrackUriRef = useRef<string | undefined>(track?.uri);
+  const prevTrackLogicalKeyRef = useRef<string>("");
   const prevModeRef = useRef<VisualizerMode>(mode);
   const cycleIndexRef = useRef<number>(0);
   const transitionImpulseRef = useRef<number>(0);
@@ -573,17 +410,34 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
 
   // Trigger bespoke Track Transition Choreography on URI change OR visualizer mode switch
   useEffect(() => {
-    const uriChanged = Boolean(track?.uri && track.uri !== prevTrackUriRef.current);
+    const normalizeTrackLogicalKey = (t: TrackMetadata | null): string => {
+      if (!t?.uri) return '';
+      const titleKey = (t.title || '').trim().toLowerCase();
+      const artistKey = (t.artists?.[0] || '').trim().toLowerCase();
+      if (titleKey && artistKey) {
+        return `${titleKey}::${artistKey}`;
+      }
+      return t.uri;
+    };
+    const nextLogicalKey = normalizeTrackLogicalKey(track);
+    const hadPreviousTrack = Boolean(prevTrackUriRef.current);
+    const uriChanged = Boolean(
+      track?.uri &&
+        track.uri !== prevTrackUriRef.current &&
+        (!hadPreviousTrack || nextLogicalKey !== prevTrackLogicalKeyRef.current)
+    );
     const modeChanged = mode !== prevModeRef.current && mode !== 'off';
-    if (uriChanged) {
+    if (track?.uri) {
+      prevTrackUriRef.current = track.uri;
+      prevTrackLogicalKeyRef.current = nextLogicalKey;
+    }
+    if (uriChanged && hadPreviousTrack) {
       const pool =
         enabledScenesRef.current.length > 0 ? enabledScenesRef.current : VISUALIZER_ENGINES;
       if (mode === 'shuffle' && pool.length > 1) {
-        let nextIdx = Math.floor(Math.random() * pool.length);
-        if (nextIdx === cycleIndexRef.current % pool.length) {
-          nextIdx = (nextIdx + 1) % pool.length;
-        }
-        cycleIndexRef.current = nextIdx;
+        const currentIdx = cycleIndexRef.current % pool.length;
+        const offset = 1 + Math.floor(Math.random() * (pool.length - 1));
+        cycleIndexRef.current = (currentIdx + offset) % pool.length;
       } else {
         cycleIndexRef.current = (cycleIndexRef.current + 1) % pool.length;
       }
@@ -595,15 +449,14 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
       vertigoLyricRevealRef.current = 0;
       trapperArenaRef.current.challengerBannerCount = 0;
     }
-    if (uriChanged || modeChanged) {
-      prevTrackUriRef.current = track?.uri;
+    if ((uriChanged && hadPreviousTrack) || modeChanged) {
       prevModeRef.current = mode;
       transitionImpulseRef.current = 1.0;
       lastRenderedModeRef.current = null;
       triggerGlitchBurst(0.95);
       spawnGlyphMutation(true, 3);
     }
-  }, [track?.uri, mode]);
+  }, [track?.uri, track?.title, mode]);
 
   // Sample Album Artwork into an UNSTRETCHED 128x128 Square Relief + Sobel Edge Map + 8-Color Palette
   useEffect(() => {
@@ -1031,7 +884,7 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
       if (transitionImpulseRef.current > 0) {
         transitionImpulseRef.current = Math.max(0, transitionImpulseRef.current - dt * 0.80);
       }
-      if (avatarBlendRef.current > 0 && !activeComment) {
+      if (avatarBlendRef.current > 0 && !activeCommentRef.current) {
         avatarBlendRef.current = Math.max(0, avatarBlendRef.current - dt * 0.5);
       }
 
@@ -1193,1504 +1046,93 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         }
       }
 
-      // =======================================================================
-      // MODE 1: GLYPH MATRIX (Single-Shot Uint32Array + Unstretched Panning Art
-      //         + Unstable Multi-Scale 2x2 / 3x3 Font & Lyric Mutations)
-      // =======================================================================
-      if (activeMode === 'glyph') {
-        if (!imageDataRef.current) {
-          imageDataRef.current = ctx.createImageData(CANVAS_W, CANVAS_H);
-          u32FrameRef.current = new Uint32Array(imageDataRef.current.data.buffer);
-        }
-        const imgData = imageDataRef.current;
-        const u32 = u32FrameRef.current!;
-        // Fill entire 640x360 canvas with TRUE OLED BLACK (#000000 -> 0xFF000000)
-        u32.fill(0xff000000);
 
-        const artSqLuma = artSquareLumaRef.current;
-        const artSqEdge = artSquareEdgeRef.current;
-        const avLuma = avatarLumaGridRef.current;
-        const avWeight = avatarBlendRef.current;
-        const rowTearPx = rowTearPxRef.current;
-        const rowCorrupt = rowCorruptMaskRef.current;
-        const gSeed = glitchSeedRef.current;
-        const skipMask = cellSkipMaskRef.current;
-        skipMask.fill(0);
-
-        // Slow, hypnotic unstretched artwork panning (80x45 window gliding over 128x128 square art)
-        // Never hits a hard corner bounce; drifts organically along a slow Lissajous path
-        const maxPanX = ART_BUF_SIZE - GRID_COLS; // 48
-        const maxPanY = ART_BUF_SIZE - GRID_ROWS; // 83
-        const panX = Math.round(maxPanX * (0.5 + 0.46 * Math.sin(timeSec * 0.085)));
-        const panY = Math.round(maxPanY * (0.5 + 0.46 * Math.cos(timeSec * 0.062)));
-
-        // Step & render unstable multi-scale (2x2 and 3x3) font/lyric mutation patches first
-        const patches = mutationPatchesRef.current;
-        for (let pIdx = 0; pIdx < patches.length; pIdx++) {
-          const patch = patches[pIdx];
-          if (!patch.active) continue;
-          patch.ttl -= dt;
-          if (patch.ttl <= 0) {
-            patch.active = false;
-            continue;
-          }
-          // Unstable adaptation: jitter character or scale slightly near expiration or on beat spikes
-          const scale = patch.scale;
-          const charPixels = scale * 8;
-          const colorAbgr = palAbgr[Math.min(7, patch.palIdx)];
-          const len = patch.text.length;
-
-          for (let cIdx = 0; cIdx < len; cIdx++) {
-            const cellCol = patch.vertical ? patch.col : patch.col + cIdx * scale;
-            const cellRow = patch.vertical ? patch.row + cIdx * scale : patch.row;
-            if (cellCol + scale >= GRID_COLS || cellRow + scale >= GRID_ROWS) break;
-
-            // Mark covered 1x1 cells so background matrix doesn't overwrite the macro-glyph
-            for (let sr = 0; sr < scale; sr++) {
-              const rOff = (cellRow + sr) * GRID_COLS;
-              for (let sc = 0; sc < scale; sc++) {
-                skipMask[rOff + cellCol + sc] = 1;
-              }
-            }
-
-            let code = patch.text.charCodeAt(cIdx);
-            if (glitch > 0.3 && ((cIdx + frameCount) & 3) === 0) {
-              code = 35 + ((cIdx * 13 + frameCount) & 31);
-            }
-            if (code < ASCII_MIN || code > ASCII_MAX) continue;
-            const lutIdx = NUM_GLYPHS + (code - ASCII_MIN);
-            const bmpBase = lutIdx * 64;
-            const screenX = cellCol * 8 + (glitch > 0.1 ? rowTearPx[cellRow] : 0);
-            const screenY = cellRow * 8;
-
-            for (let gy = 0; gy < 8; gy++) {
-              for (let gx = 0; gx < 8; gx++) {
-                if (glyphBitmaps[bmpBase + gy * 8 + gx] === 0) continue;
-                for (let sy = 0; sy < scale; sy++) {
-                  const py = screenY + gy * scale + sy;
-                  if (py < 0 || py >= CANVAS_H) continue;
-                  const rowBase = py * CANVAS_W;
-                  for (let sx = 0; sx < scale; sx++) {
-                    const px = (screenX + gx * scale + sx + CANVAS_W) % CANVAS_W;
-                    u32[rowBase + px] = colorAbgr;
-                  }
-                }
-              }
-            }
-            // Subtle unstable outline frame on 3x3 mutations
-            if (scale === 3 && cIdx === 0 && patch.ttl > patch.maxTtl * 0.7) {
-              const topY = Math.max(0, screenY - 1);
-              const botY = Math.min(CANVAS_H - 1, screenY + charPixels);
-              for (let x = 0; x < charPixels * len; x++) {
-                const px = (screenX + x + CANVAS_W) % CANVAS_W;
-                u32[topY * CANVAS_W + px] = palAbgr[4];
-                u32[botY * CANVAS_W + px] = palAbgr[4];
-              }
-            }
-          }
-        }
-
-        // Slower, hypnotic plasma attractors
-        const tByte1 = Math.floor(timeSec * 13) & 255;
-        const tByte2 = Math.floor(timeSec * 19) & 255;
-        const cx1 = SIN_F32[tByte1] * 0.30;
-        const cy1 = SIN_F32[(tByte1 + 64) & 255] * 0.24;
-        const cx2 = SIN_F32[(256 - tByte2) & 255] * 0.34;
-        const cy2 = SIN_F32[(tByte2 + 110) & 255] * 0.26;
-
-        const ripplePhase = Math.floor(phaseAccumRef.current) & 255;
-        const palCycle = paletteCycleOffsetRef.current;
-        const strip = glyphTextStripRef.current;
-        const stripLen = strip.length || 1;
-        const scrollColShift = Math.floor(timeSec * 4.5);
-
-        for (let i = 0; i < GRID_CELLS; i++) {
-          if (skipMask[i] === 1) continue;
-
-          const row = CELL_ROW[i];
-          const col = CELL_COL[i];
-          const nx = CELL_NORM_X[i];
-          const ny = CELL_NORM_Y[i];
-          const rDist = CELL_RADIAL_DIST[i];
-          const rAng = CELL_RADIAL_ANGLE[i];
-
-          const bandIdx = ((rAng >>> 4) + (col >>> 1)) & 15;
-          const bandVal = sb[bandIdx];
-
-          // 1. Sample from unstretched 128x128 square artwork at slow pan offset (panX, panY)
-          const artIdx = (row + panY) * ART_BUF_SIZE + (col + panX);
-          const baseArt = artSqLuma[artIdx] * (1 - avWeight) + avLuma[i] * avWeight;
-          const artEdgeVal = artSqEdge[artIdx];
-          const relief = baseArt * 0.38 + artEdgeVal * (0.50 + midEnergy * 0.42 + drop * 0.25);
-
-          // 2. Dual-center LUT Moiré plasma + music-coupled radial wave
-          const d1 = Math.sqrt((nx - cx1) * (nx - cx1) + (ny - cy1) * (ny - cy1));
-          const d2 = Math.sqrt((nx - cx2) * (nx - cx2) + (ny - cy2) * (ny - cy2));
-          const lut1 = SIN_U8[(Math.floor(d1 * 240) - ripplePhase) & 255];
-          const lut2 = SIN_U8[(Math.floor(d2 * 190) + (ripplePhase >>> 1)) & 255];
-          const plasma = ((lut1 + lut2) * 0.00196) * (0.16 + subBass * 0.40 + beat * 0.25);
-
-          // 3. Combine with 4x4 Bayer Ordered Dither and shape contrast curve for true OLED negative space
-          const rawEnergy =
-            relief +
-            plasma +
-            bandVal * 0.22 +
-            (1 - Math.min(1, rDist * 1.45)) * (beat * 0.22 + drop * 0.20) +
-            CELL_BAYER[i] -
-            0.12;
-
-          const clamped = Math.pow(Math.max(0, Math.min(0.999, rawEnergy)), 1.45);
-          let glyphIdx = Math.floor(clamped * NUM_GLYPHS);
-          const isCorruptRow = rowCorrupt[row] === 1 && glitch > 0.12;
-
-          if (glyphIdx <= 0 && !isCorruptRow) continue;
-
-          // Palette index with beat-onset cycling
-          const basePal = Math.min(NUM_PALETTE - 1, Math.max(1, Math.floor(clamped * NUM_PALETTE)));
-          let palIdx =
-            basePal >= 2 ? 2 + ((basePal - 2 + (beat > 0.38 || drop > 0.4 ? palCycle : 0)) % 6) : basePal;
-
-          const isTextRow = row === 8 || row === 22 || row === 36;
-          let lutGlyphIdx = glyphIdx;
-
-          if (isTextRow && glyphIdx >= 4 && stripLen > 0) {
-            const rowShift = row * 11;
-            const rawCode = strip.charCodeAt((col + scrollColShift + rowShift) % stripLen);
-            const code =
-              glitch > 0.25 && ((col + gSeed) & 3) === 0
-                ? 33 + ((col * 17 + gSeed) & 31)
-                : rawCode;
-            if (code >= ASCII_MIN && code <= ASCII_MAX) {
-              lutGlyphIdx = NUM_GLYPHS + (code - ASCII_MIN);
-              palIdx = clamped > 0.65 || beat > 0.4 ? 7 : 5;
-            }
-          } else if (isCorruptRow && ((col + (gSeed >>> 3)) & 3) === 0) {
-            lutGlyphIdx = 7 + ((i ^ gSeed) & 8);
-            palIdx = 6 + (col & 1);
-          }
-
-          const zLift = (clamped - 0.35) * (6 + subBass * 11 + beat * 8);
-          const tearOffset = glitch > 0.05 ? Math.round(rowTearPx[row] * glitch) : 0;
-          let dx = CELL_X[i] + nx * zLift + tearOffset;
-          let dy = CELL_Y[i] + ny * zLift;
-
-          if (trans > 0.005) {
-            const p = 1 - trans;
-            const colSpeed = 1 + ((col * 37 + 13) & 7) * 0.28;
-            if (trans > 0.45) {
-              const swirl = Math.sin(((trans - 0.45) / 0.55) * Math.PI);
-              const curlAngle = rAng * 0.0245 + trans * 7.5;
-              dx += (nx * 140 + Math.cos(curlAngle) * 64) * swirl;
-              dy += ((ny * 90 + Math.sin(curlAngle) * 48) * swirl + p * colSpeed * 180) % CANVAS_H;
-            } else {
-              const snapEase = trans / 0.45;
-              const shockRadius = (1 - snapEase) * 0.95;
-              if (Math.abs(rDist - shockRadius) < 0.09) {
-                palIdx = 7;
-                lutGlyphIdx = Math.min(NUM_GLYPHS - 1, glyphIdx + 5);
-              }
-              dy -= snapEase * snapEase * colSpeed * 75;
-            }
-          }
-
-          const rx = (Math.round(dx) + CANVAS_W) % CANVAS_W;
-          const ry = (Math.round(dy) + CANVAS_H) % CANVAS_H;
-          const colorAbgr = palAbgr[palIdx];
-          const bmpOffset = lutGlyphIdx * 64;
-
-          for (let gy = 0; gy < 8; gy++) {
-            const py = ry + gy;
-            if (py >= CANVAS_H) continue;
-            const rowBase = py * CANVAS_W;
-            const bmpRow = bmpOffset + gy * 8;
-            for (let gx = 0; gx < 8; gx++) {
-              if (glyphBitmaps[bmpRow + gx] === 1) {
-                const px = rx + gx;
-                if (px < CANVAS_W) {
-                  u32[rowBase + px] = colorAbgr;
-                }
-              }
-            }
-          }
-        }
-
-        // Single-shot flush of all 3,600 cells + multi-scale mutations onto 1280×720 via crisp 2× nearest-neighbor blit!
-        if (!lowResBlitCanvasRef.current) {
-          lowResBlitCanvasRef.current = document.createElement('canvas');
-          lowResBlitCanvasRef.current.width = CANVAS_W;
-          lowResBlitCanvasRef.current.height = CANVAS_H;
-        }
-        const blitCanvas = lowResBlitCanvasRef.current;
-        const blitCtx = blitCanvas.getContext('2d');
-        if (blitCtx) {
-          blitCtx.putImageData(imgData, 0, 0);
-          const prevSmooth = ctx.imageSmoothingEnabled;
-          ctx.imageSmoothingEnabled = false;
-          ctx.drawImage(blitCanvas, 0, 0, CANVAS_W, CANVAS_H);
-          ctx.imageSmoothingEnabled = prevSmooth;
-        }
-
-        // Micro-Party style SoundCloud timed comment pop-over pill on Glyph Matrix
-        drawMicroPartyCommentPill(
-          ctx,
-          effectiveComment,
-          effectiveAvatarImg || commentAvatarImgRef.current,
-          palette,
-          timeSec,
-          beat,
-          cropBottomY,
-          false
-        );
-      }
-
-      // =======================================================================
-      // MODE 2: WINAMP AVS (True OLED Black Floor Tunnel + Rez Wireframe + Lyrics)
-      // =======================================================================
-      else if (activeMode === 'avs') {
-        if (!feedbackCanvasRef.current) {
-          feedbackCanvasRef.current = document.createElement('canvas');
-          feedbackCanvasRef.current.width = CANVAS_W * RENDER_SCALE;
-          feedbackCanvasRef.current.height = CANVAS_H * RENDER_SCALE;
-        }
-        const fb = feedbackCanvasRef.current;
-        const fbCtx = fb.getContext('2d');
-
-        // Pure #000000 OLED floor clear
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-        let zoom = 1.016 + subBass * 0.030 + beat * 0.024 + drop * 0.035;
-        let rot = SIN_F32[Math.floor(timeSec * 19) & 255] * (0.012 + midEnergy * 0.018);
-
-        if (trans > 0.55) {
-          const imp = (trans - 0.55) / 0.45;
-          zoom = 0.91 - imp * 0.05;
-          rot += imp * 0.16;
-        } else if (trans > 0.005) {
-          const burst = trans / 0.55;
-          zoom = 1.02 + burst * 0.085;
-          rot -= burst * 0.09;
-        }
-
-        ctx.save();
-        ctx.translate(CANVAS_W * 0.5, CANVAS_H * 0.5);
-        ctx.rotate(rot);
-        ctx.scale(zoom, zoom);
-        ctx.globalAlpha = 0.84;
-        ctx.drawImage(fb, -CANVAS_W * 0.5, -CANVAS_H * 0.5, CANVAS_W, CANVAS_H);
-        ctx.restore();
-        ctx.globalAlpha = 1.0;
-
-        // Black-floor crush pass so old trails snap cleanly to pure #000000
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.14)';
-        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-        // Rez / Vectrex Beat-Locked Concentric Wireframe Polygons
-        const cx = CANVAS_W * 0.5;
-        const cy = CANVAS_H * 0.5;
-        const sides = drop > 0.3 ? 6 : 8;
-        const baseRadius = 38 + subBass * 65 + beat * 35 + drop * 28;
-
-        for (let ring = 0; ring < 3; ring++) {
-          const r = baseRadius * (0.55 + ring * 0.45);
-          const palColor = palette[Math.min(7, 3 + ring * 2)];
-          ctx.strokeStyle = rgbToCss(palColor, 0.62 - ring * 0.12);
-          ctx.lineWidth = ring === 0 ? 2.2 : 1.3;
-          ctx.beginPath();
-          for (let s = 0; s <= sides; s++) {
-            const bandMod = sb[(s * 2 + ring) & 15] * 26;
-            const theta = (s / sides) * Math.PI * 2 + timeSec * (ring % 2 === 0 ? 0.45 : -0.35);
-            const px = cx + Math.cos(theta) * (r + bandMod);
-            const py = cy + Math.sin(theta) * (r + bandMod) * 0.72;
-            if (s === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-          }
-          ctx.stroke();
-        }
-
-        // Classic Winamp Dual-Trace Oscilloscope Ribbon
-        const scopePal = palette[6] || [56, 189, 248];
-        ctx.strokeStyle = rgbToCss(scopePal, 0.88);
-        ctx.lineWidth = 2.0;
-        ctx.beginPath();
-        const points = 64;
-        for (let p = 0; p < points; p++) {
-          const x = (p / (points - 1)) * CANVAS_W;
-          const bVal = sb[p & 15];
-          const wave1 = SIN_F32[(Math.floor(timeSec * 90) + p * 9) & 255];
-          const wave2 = SIN_F32[(Math.floor(timeSec * 145) + p * 17) & 255];
-          const yOffset = (wave1 * 0.6 + wave2 * 0.4) * (18 + bVal * 75 + beat * 30);
-          const y = cy + yOffset;
-          if (p === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-
-        // Stable Synced Lyric Rendering for AVS:
-        // 1. Subtle low-alpha echo stamp at a steady Y position BEFORE feedback capture so the tunnel trails softly without strobing
-        // 2. Crisp, steady foreground lyric banner drawn AFTER feedback capture so it never flickers between beats or jitters with subBass
-        const lyricText = (activeLyricRef.current || '').trim();
-        let avsLines: string[] = [];
-        let avsFontPx = 15;
-        let avsLineH = 19;
-        let avsBoxW = 0;
-        let avsBoxH = 0;
-        let avsLyricY = 0;
-
-        if (lyricText.length > 0) {
-          vertigoLyricRevealRef.current = Math.min(1, vertigoLyricRevealRef.current + dt * 3.6);
-          const upperLyric = lyricText.toUpperCase();
-          if (upperLyric.length <= 36) {
-            avsLines.push(upperLyric);
-          } else {
-            const mid = Math.floor(upperLyric.length * 0.5);
-            let splitAt = upperLyric.lastIndexOf(' ', mid + 8);
-            if (splitAt <= 6) splitAt = upperLyric.indexOf(' ', mid);
-            if (splitAt > 0) {
-              avsLines.push(upperLyric.slice(0, splitAt).trim());
-              avsLines.push(upperLyric.slice(splitAt + 1).trim());
-            } else {
-              avsLines.push(upperLyric);
-            }
-          }
-          const maxLineChars = Math.max(...avsLines.map((l) => l.length), 1);
-          const maxFontPx = avsLines.length > 1 ? 14 : 16;
-          avsFontPx = Math.max(
-            11,
-            Math.min(maxFontPx, Math.floor((CANVAS_W * 0.82) / (maxLineChars * 0.62)))
-          );
-          avsLineH = avsFontPx + 4;
-          avsBoxW = Math.min(CANVAS_W - 28, Math.round(maxLineChars * avsFontPx * 0.62 + 26));
-          avsBoxH = avsLines.length * avsLineH + 10;
-
-          const safeTopY = Math.max(28, cropTopY + 18);
-          const minCenterY = safeTopY + avsBoxH * 0.5;
-          avsLyricY = Math.max(
-            minCenterY,
-            Math.min(cy - 64, minCenterY + 10) + Math.cos(timeSec * 1.1) * 2.0
-          );
-
-          // Soft tunnel-echo stamp into feedback buffer (steady position, gentle alpha)
-          ctx.font = `bold ${avsFontPx}px "JetBrains Mono", "Fira Code", monospace`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillStyle = rgbToCss(palette[5], 0.16 + beat * 0.14);
-          for (let li = 0; li < avsLines.length; li++) {
-            const ly = avsLyricY + (li - (avsLines.length - 1) * 0.5) * avsLineH;
-            ctx.fillText(avsLines[li], cx, ly);
-          }
-        }
-
-        if (fbCtx) {
-          fbCtx.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
-          fbCtx.fillStyle = '#000000';
-          fbCtx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-          fbCtx.drawImage(canvas, 0, 0, CANVAS_W, CANVAS_H);
-        }
-
-        // Crisp, flicker-free foreground AVS lyric overlay (drawn after feedback capture)
-        if (avsLines.length > 0) {
-          const reveal = vertigoLyricRevealRef.current;
-          ctx.save();
-          ctx.translate(cx + Math.sin(timeSec * 0.95) * 4, avsLyricY);
-          ctx.fillStyle = `rgba(6, 7, 12, ${(0.68 * reveal).toFixed(2)})`;
-          ctx.beginPath();
-          if (typeof ctx.roundRect === 'function') {
-            ctx.roundRect(-avsBoxW * 0.5, -avsBoxH * 0.5, avsBoxW, avsBoxH, 10);
-          } else {
-            ctx.rect(-avsBoxW * 0.5, -avsBoxH * 0.5, avsBoxW, avsBoxH);
-          }
-          ctx.fill();
-
-          ctx.font = `bold ${avsFontPx}px "JetBrains Mono", "Fira Code", monospace`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          for (let li = 0; li < avsLines.length; li++) {
-            const ly = (li - (avsLines.length - 1) * 0.5) * avsLineH;
-            ctx.fillStyle = rgbToCss(palette[4], 0.85 * reveal);
-            ctx.fillText(avsLines[li], 1.5, ly + 1.5);
-            ctx.fillStyle = rgbToCss(palette[7], (0.92 + beat * 0.08) * reveal);
-            ctx.fillText(avsLines[li], 0, ly);
-          }
-          ctx.restore();
-        }
-
-        // Micro-Party style SoundCloud timed comment pop-over pill on AVS (drawn after feedback capture)
-        drawMicroPartyCommentPill(
-          ctx,
-          effectiveComment,
-          effectiveAvatarImg || commentAvatarImgRef.current,
-          palette,
-          timeSec,
-          beat,
-          cropBottomY,
-          false
-        );
-      }
-
-      // =======================================================================
-      // MODE 3: DEMOSCENE 64K (Amiga Copper Bars + 3D Synth Grid + DYCP Scroller)
-      // =======================================================================
-      else if (activeMode === 'demoscene') {
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-        const transWave = trans > 0.005 ? Math.sin(trans * Math.PI) : 0;
-        const horizonY = Math.round(
-          CANVAS_H * 0.46 + (trans > 0.005 ? Math.sin(trans * Math.PI * 2) * 28 * transWave : 0)
-        );
-
-        // 1. 3D Warp Starfield over pure #000000 sky
-        const sx = starXRef.current;
-        const sy = starYRef.current;
-        const sz = starZRef.current;
-        const warpSpeed = dt * (0.45 + subBass * 1.6 + drop * 2.2 + transWave * 5.2);
-        ctx.fillStyle = rgbToCss(palette[7], 0.82);
-        ctx.strokeStyle = rgbToCss(palette[6], 0.78);
-        ctx.lineWidth = 1.4;
-
-        for (let i = 0; i < starCount; i++) {
-          const prevZ = sz[i];
-          sz[i] -= warpSpeed;
-          if (sz[i] <= 0.08) {
-            sx[i] = (Math.random() - 0.5) * 2.4;
-            sy[i] = (Math.random() - 0.5) * 1.4;
-            sz[i] = 1.9;
-            continue;
-          }
-          const projX = Math.round(CANVAS_W * 0.5 + (sx[i] / sz[i]) * 260);
-          const projY = Math.round(horizonY * 0.75 + (sy[i] / sz[i]) * 140);
-          if (projX >= 0 && projX < CANVAS_W && projY >= 0 && projY < horizonY + 30) {
-            if (transWave > 0.15 || drop > 0.35) {
-              const tailZ = Math.min(2.2, prevZ + (transWave + drop * 0.5) * 0.35);
-              const tailX = Math.round(CANVAS_W * 0.5 + (sx[i] / tailZ) * 260);
-              const tailY = Math.round(horizonY * 0.75 + (sy[i] / tailZ) * 140);
-              ctx.beginPath();
-              ctx.moveTo(tailX, tailY);
-              ctx.lineTo(projX, projY);
-              ctx.stroke();
-            } else {
-              const szPx = sz[i] < 0.6 ? 3 : sz[i] < 1.2 ? 2 : 1;
-              ctx.fillRect(projX, projY, szPx, szPx);
-            }
-          }
-        }
-
-        // 2. Amiga-style Horizontal Copper Raster Spectrum Bars
-        const rasterCount = transWave > 0.05 ? 16 : 10;
-        for (let b = 0; b < rasterCount; b++) {
-          const bandAmp = sb[b & 15];
-          const wipeOffset =
-            transWave > 0.05
-              ? Math.sin(trans * Math.PI * 2 + b * 0.45) * 95 * transWave
-              : 0;
-          const yBase =
-            24 +
-            b * (transWave > 0.05 ? 20 : 12) +
-            SIN_F32[(Math.floor(timeSec * 48) + b * 19) & 255] * (6 + subBass * 10) +
-            wipeOffset;
-          const barW = Math.round(
-            Math.min(1, 0.18 + bandAmp * 0.78 + transWave * 0.45) * CANVAS_W
-          );
-          const barX = Math.round((CANVAS_W - barW) * 0.5);
-          const palC = palette[2 + (b % 6)];
-          const barH = transWave > 0.05 ? Math.round(4 + transWave * 8) : 4;
-          ctx.fillStyle = rgbToCss(palC, 0.32 + bandAmp * 0.45 + transWave * 0.22);
-          ctx.fillRect(barX, Math.round(yBase), barW, barH);
-        }
-
-        // 3. 3D Perspective Scrolling Vector Synth Grid
-        const gridPal = palette[4] || [42, 163, 196];
-        ctx.save();
-        if (transWave > 0.01 || drop > 0.1) {
-          const bankAngle = Math.sin((trans + drop * 0.3) * Math.PI * 2) * 0.14 * (transWave + drop * 0.4);
-          ctx.translate(CANVAS_W * 0.5, horizonY);
-          ctx.rotate(bankAngle);
-          ctx.translate(-CANVAS_W * 0.5, -horizonY);
-        }
-        ctx.strokeStyle = rgbToCss(gridPal, 0.40 + subBass * 0.32 + transWave * 0.25);
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-
-        const vpx = CANVAS_W * 0.5 + SIN_F32[Math.floor(timeSec * 22) & 255] * 36;
-        for (let v = -8; v <= 8; v++) {
-          ctx.moveTo(vpx + v * 12, horizonY);
-          ctx.lineTo(CANVAS_W * 0.5 + v * 78, CANVAS_H + 30);
-        }
-
-        const zScroll = (timeSec * (1.8 + subBass * 2.2 + transWave * 5.0)) % 1;
-        for (let h = 0; h < 8; h++) {
-          const normD = (h + zScroll) / 8;
-          const y = horizonY + Math.pow(normD, 1.85) * (CANVAS_H - horizonY);
-          ctx.moveTo(-40, y);
-          ctx.lineTo(CANVAS_W + 40, y);
-        }
-        ctx.stroke();
-
-        // 4. 16-Band Spectrum Pillars on the Horizon
-        const pillarZoneW = CANVAS_W * 0.64;
-        const pillarStartX = (CANVAS_W - pillarZoneW) * 0.5;
-        const pillarStep = pillarZoneW / 16;
-        for (let b = 0; b < 16; b++) {
-          const h = Math.round(sb[b] * 68 + beat * 14 + transWave * 28);
-          if (h <= 1) continue;
-          const px = Math.round(pillarStartX + b * pillarStep);
-          const pw = Math.max(4, Math.round(pillarStep - 4));
-          ctx.fillStyle = rgbToCss(palette[Math.min(7, 3 + (b >>> 2))], 0.72);
-          ctx.fillRect(px, horizonY - h, pw, h);
-        }
-        ctx.restore();
-
-        // 5. Classic DYCP Sine-Wave Scroller (track title/artist/BPM when no timed SC comment pop-over is active)
-        const scroller = scrollerTextRef.current;
-        if (scroller.length > 0 && !effectiveComment) {
-          const charW = 13;
-          const scrollPx = Math.floor(timeSec * 95);
-          const firstCharIdx = Math.floor(scrollPx / charW);
-          const pixelRem = scrollPx % charW;
-          const visibleChars = Math.ceil(CANVAS_W / charW) + 2;
-
-          ctx.font = 'bold 15px "JetBrains Mono", "Fira Code", monospace';
-          ctx.textBaseline = 'middle';
-
-          const bounceAmp = 12 + subBass * 18 + beat * 8 + transWave * 34;
-          const baseScrollerY = Math.min(CANVAS_H - 48, cropBottomY - 36);
-          for (let c = 0; c < visibleChars; c++) {
-            const ch = scroller[(firstCharIdx + c) % scroller.length];
-            if (ch === ' ') continue;
-            const x = c * charW - pixelRem;
-            const sineIdx = (Math.floor(timeSec * 85) + (firstCharIdx + c) * 11) & 255;
-            const y = baseScrollerY + SIN_F32[sineIdx] * bounceAmp;
-            const cPal = palette[4 + ((firstCharIdx + c) & 3)];
-            ctx.fillStyle = rgbToCss(cPal, 0.92);
-            ctx.fillText(ch, Math.round(x), Math.round(y));
-          }
-        }
-
-        // 6. Preferred AVS-Style Floating 3D Hologram Lyrics (always used when lyrics are active)
-        const demoLyricText = (activeLyricRef.current || '').trim();
-        if (demoLyricText.length > 0) {
-          drawVertigoStyleHologram(
-            demoLyricText,
-            SIN_F32[Math.floor(timeSec * 22) & 255] * 4,
-            0
-          );
-        }
-
-        // 7. Micro-Party style SoundCloud timed comment pop-over pill
-        drawMicroPartyCommentPill(
-          ctx,
-          effectiveComment,
-          effectiveAvatarImg || commentAvatarImgRef.current,
-          palette,
-          timeSec,
-          beat,
-          cropBottomY,
-          false
-        );
-      }
-
-      // =======================================================================
-      // MODE 4: VERTIGO CORRIDOR (Descent / Win95 3D Maze / Thumper / Ladytron "Runaway")
-      // =======================================================================
-      else if (activeMode === 'vertigo') {
-        // Pure #000000 OLED abyss
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-        const transWave = trans > 0.005 ? Math.sin(trans * Math.PI) : 0;
-        const transCorkscrew =
-          trans > 0.45
-            ? Math.sin(((trans - 0.45) / 0.55) * Math.PI) * Math.PI * 0.95
-            : 0;
-        const transShockZ =
-          trans > 0.005 && trans <= 0.45 ? (1 - trans / 0.45) * 3.4 : -1;
-
-        // Advance corridor travel speed: glides smoothly during breakdowns ("Runaway"),
-        // surges into hyper-velocity on the Beat Drop or Track Transition ("Thumper" / "Descent")
-        const speed =
-          0.90 + subBass * 1.9 + drop * 2.8 + transWave * 3.4 - buildup * 0.30;
-        vertigoTravelZRef.current += dt * speed;
-        const travelZ = vertigoTravelZRef.current;
-
-        // Forward-chasing tunnel pulse wave (moves strictly forward into the tunnel!)
-        vertigoPulseZRef.current += dt * (4.8 + subBass * 3.8 + drop * 4.5 + transWave * 6.0);
-        const pulseZ = vertigoPulseZRef.current;
-
-        // Smoothly bank camera roll toward 90-degree corner turns on beat drops ("Maze 3D" / "Descent")
-        vertigoRollCurrentRef.current +=
-          (vertigoRollTargetRef.current - vertigoRollCurrentRef.current) * Math.min(1, dt * 4.5);
-        const camRoll =
-          vertigoRollCurrentRef.current +
-          transCorkscrew +
-          Math.sin(timeSec * 0.85) * (0.14 + subBass * 0.16) +
-          (drop > 0.1 ? Math.sin(timeSec * 6.5) * drop * 0.22 : 0);
-        const cosR = Math.cos(camRoll);
-        const sinR = Math.sin(camRoll);
-
-        const numRings = 20;
-        const maxDepth = 3.4;
-        const stepZ = maxDepth / numRings;
-        const fracZ = travelZ % stepZ;
-        const isMonochromeStrobe = buildup > 0.25 && drop < 0.15;
-
-        // Precompute projected ring centers and vertices (Octagonal Descent corridor)
-        const ringCx = new Float32Array(numRings);
-        const ringCy = new Float32Array(numRings);
-        const ringScale = new Float32Array(numRings);
-        const ringZArr = new Float32Array(numRings);
-
-        const fov = 268 + drop * 72 + transWave * 65 - buildup * 26;
-        for (let r = 0; r < numRings; r++) {
-          const z = Math.max(0.11, maxDepth - r * stepZ - fracZ);
-          ringZArr[r] = z;
-          const worldZ = travelZ + z;
-          // Winding subterranean corridor spine
-          const spineX =
-            Math.sin(worldZ * 1.12) * (0.40 + drop * 0.24 + transWave * 0.30) +
-            Math.cos(worldZ * 0.52) * 0.20;
-          const spineY =
-            Math.cos(worldZ * 0.92) * 0.26 +
-            Math.sin(worldZ * 1.55) * (0.12 + subBass * 0.14);
-
-          const irisPinch =
-            trans > 0.45
-              ? Math.max(0.35, 1 - Math.sin(((trans - 0.45) / 0.55) * Math.PI) * 0.42 * (z / maxDepth))
-              : 1.0;
-          const invZ = (fov / z) * irisPinch;
-          ringCx[r] = CANVAS_W * 0.5 + (spineX * cosR - spineY * sinR) * invZ;
-          ringCy[r] = CANVAS_H * 0.5 + (spineX * sinR + spineY * cosR) * invZ;
-          ringScale[r] = invZ;
-        }
-
-        // 8 primary octagonal vertices + 8 mid-face structural ribs (16 rails total)
-        const corners: [number, number][] = [
-          [-1.0, -0.68],
-          [-0.44, -0.90],
-          [0.44, -0.90],
-          [1.0, -0.68],
-          [1.0, 0.68],
-          [0.44, 0.90],
-          [-0.44, 0.90],
-          [-1.0, 0.68],
-        ];
-
-        for (let r = 0; r < numRings - 1; r++) {
-          const z0 = ringZArr[r];
-          const z1 = ringZArr[r + 1];
-          const s0 = ringScale[r];
-          const s1 = ringScale[r + 1];
-          const cx0 = ringCx[r];
-          const cy0 = ringCy[r];
-          const cx1 = ringCx[r + 1];
-          const cy1 = ringCy[r + 1];
-
-          const worldRingIdx = Math.floor((travelZ + z0) / stepZ);
-          const bandAmp = sb[Math.abs(worldRingIdx) & 15];
-          const depthFade = Math.pow(Math.max(0, Math.min(1, 1 - z0 / maxDepth)), 0.72);
-
-          // Forward-travelling tunnel chaser light wave (races from foreground z=0.1 deep into z=maxDepth!)
-          const wavePhase = z0 * 3.1 - pulseZ;
-          const forwardPulse = Math.pow(0.5 + 0.5 * Math.cos(wavePhase), 5);
-          const shockHit =
-            transShockZ > 0 && Math.abs(z0 - transShockZ) < 0.38
-              ? 1 - Math.abs(z0 - transShockZ) / 0.38
-              : 0;
-          const ringBoost = Math.min(1, forwardPulse * 0.85 + shockHit * 1.1 + drop * 0.35);
-
-          // 1. Strobe & Pulse-Wave Wall Bays (Left & Right walls + Ceiling/Floor panels on pulse crests)
-          if (((worldRingIdx & 1) === 0 || ringBoost > 0.35) && depthFade > 0.08) {
-            const wallColor: [number, number, number] = isMonochromeStrobe
-              ? [215, 225, 240]
-              : shockHit > 0.2
-                ? palette[7]
-                : ringBoost > 0.45
-                  ? palette[6]
-                  : palette[2 + (Math.abs(worldRingIdx) % 4)];
-            const panelAlpha =
-              depthFade *
-              (0.11 + bandAmp * 0.20 + ringBoost * 0.28 + (isMonochromeStrobe ? 0.14 : 0));
-            ctx.fillStyle = rgbToCss(wallColor, Math.min(0.65, panelAlpha));
-
-            for (const side of [0, 3, 4, 7]) {
-              if ((side === 0 || side === 4) && ringBoost < 0.3) continue;
-              const cA = corners[side];
-              const cB = corners[(side + 1) & 7];
-              const x0a = cx0 + (cA[0] * cosR - cA[1] * sinR) * s0;
-              const y0a = cy0 + (cA[0] * sinR + cA[1] * cosR) * s0;
-              const x0b = cx0 + (cB[0] * cosR - cB[1] * sinR) * s0;
-              const y0b = cy0 + (cB[0] * sinR + cB[1] * cosR) * s0;
-              const x1b = cx1 + (cB[0] * cosR - cB[1] * sinR) * s1;
-              const y1b = cy1 + (cB[0] * sinR + cB[1] * cosR) * s1;
-              const x1a = cx1 + (cA[0] * cosR - cA[1] * sinR) * s1;
-              const y1a = cy1 + (cA[0] * sinR + cA[1] * cosR) * s1;
-              ctx.beginPath();
-              ctx.moveTo(x0a, y0a);
-              ctx.lineTo(x0b, y0b);
-              ctx.lineTo(x1b, y1b);
-              ctx.lineTo(x1a, y1a);
-              ctx.closePath();
-              ctx.fill();
-            }
-          }
-
-          // 2. Longitudinal Rails (8 primary corner rails + 8 mid-wall structural ribs + diagonal trusses)
-          for (let c = 0; c < 8; c++) {
-            const ptA = corners[c];
-            const ptB = corners[(c + 1) & 7];
-            const midPt: [number, number] = [(ptA[0] + ptB[0]) * 0.5, (ptA[1] + ptB[1]) * 0.5];
-
-            const x0 = cx0 + (ptA[0] * cosR - ptA[1] * sinR) * s0;
-            const y0 = cy0 + (ptA[0] * sinR + ptA[1] * cosR) * s0;
-            const x1 = cx1 + (ptA[0] * cosR - ptA[1] * sinR) * s1;
-            const y1 = cy1 + (ptA[0] * sinR + ptA[1] * cosR) * s1;
-
-            const isThumperRail = c === 5 || c === 6;
-            const railCol: [number, number, number] = isMonochromeStrobe
-              ? [240, 245, 255]
-              : isThumperRail || ringBoost > 0.55
-                ? palette[7]
-                : palette[5];
-
-            // Outer neon halo stroke
-            ctx.strokeStyle = rgbToCss(
-              palette[4],
-              depthFade * (0.22 + ringBoost * 0.35 + subBass * 0.2)
-            );
-            ctx.lineWidth = isThumperRail ? 4.8 : 3.4;
-            ctx.beginPath();
-            ctx.moveTo(x0, y0);
-            ctx.lineTo(x1, y1);
-            ctx.stroke();
-
-            // Crisp bright core rail stroke
-            ctx.strokeStyle = rgbToCss(
-              railCol,
-              Math.min(1, depthFade * (isThumperRail ? 0.94 : 0.62 + bandAmp * 0.32 + ringBoost * 0.35))
-            );
-            ctx.lineWidth = isThumperRail ? 2.4 : 1.6;
-            ctx.beginPath();
-            ctx.moveTo(x0, y0);
-            ctx.lineTo(x1, y1);
-            ctx.stroke();
-
-            // Secondary mid-face longitudinal rib
-            const mx0 = cx0 + (midPt[0] * cosR - midPt[1] * sinR) * s0;
-            const my0 = cy0 + (midPt[0] * sinR + midPt[1] * cosR) * s0;
-            const mx1 = cx1 + (midPt[0] * cosR - midPt[1] * sinR) * s1;
-            const my1 = cy1 + (midPt[0] * sinR + midPt[1] * cosR) * s1;
-            ctx.strokeStyle = rgbToCss(
-              palette[3 + (c & 3)],
-              depthFade * (0.30 + ringBoost * 0.40)
-            );
-            ctx.lineWidth = 1.1;
-            ctx.beginPath();
-            ctx.moveTo(mx0, my0);
-            ctx.lineTo(mx1, my1);
-            ctx.stroke();
-          }
-
-          // 3. Thumper Forward-Chasing Floor Chevron (`^`) on the bottom track
-          const flL = corners[6];
-          const flR = corners[5];
-          const flMidX = (cx0 + cx1) * 0.5;
-          const flMidY = (cy0 + cy1) * 0.5;
-          const flMidS = (s0 + s1) * 0.5;
-          const chvLx = cx1 + (flL[0] * cosR - flL[1] * sinR) * s1;
-          const chvLy = cy1 + (flL[0] * sinR + flL[1] * cosR) * s1;
-          const chvRx = cx1 + (flR[0] * cosR - flR[1] * sinR) * s1;
-          const chvRy = cy1 + (flR[0] * sinR + flR[1] * cosR) * s1;
-          const chvTipX = flMidX + (0 * cosR - 0.92 * sinR) * flMidS;
-          const chvTipY = flMidY + (0 * sinR + 0.92 * cosR) * flMidS;
-          ctx.strokeStyle = rgbToCss(
-            ringBoost > 0.4 ? palette[7] : palette[6],
-            depthFade * (0.45 + ringBoost * 0.52)
-          );
-          ctx.lineWidth = 1.5 + ringBoost * 1.8;
-          ctx.beginPath();
-          ctx.moveTo(chvLx, chvLy);
-          ctx.lineTo(chvTipX, chvTipY);
-          ctx.lineTo(chvRx, chvRy);
-          ctx.stroke();
-
-          // 4. Draw Octagonal Descent / Thumper Gate Frame (Dual-Pass Glow + Crisp Core)
-          const isMajorGate = (worldRingIdx & 3) === 0 || ringBoost > 0.5;
-          const gateCol: [number, number, number] = isMonochromeStrobe
-            ? [230, 240, 255]
-            : shockHit > 0.2 || ringBoost > 0.55
-              ? palette[7]
-              : palette[4 + (Math.abs(worldRingIdx) % 4)];
-
-          // Outer glow pass
-          ctx.strokeStyle = rgbToCss(
-            palette[5],
-            depthFade * (0.24 + bandAmp * 0.25 + ringBoost * 0.42)
-          );
-          ctx.lineWidth = isMajorGate ? 4.8 + ringBoost * 2.2 : 2.8;
-          ctx.beginPath();
-          for (let c = 0; c <= 8; c++) {
-            const pt = corners[c & 7];
-            const gx = cx1 + (pt[0] * cosR - pt[1] * sinR) * s1;
-            const gy = cy1 + (pt[0] * sinR + pt[1] * cosR) * s1;
-            if (c === 0) ctx.moveTo(gx, gy);
-            else ctx.lineTo(gx, gy);
-          }
-          ctx.stroke();
-
-          // Crisp inner core pass
-          ctx.strokeStyle = rgbToCss(
-            gateCol,
-            Math.min(1, depthFade * (0.64 + bandAmp * 0.36 + ringBoost * 0.40))
-          );
-          ctx.lineWidth = isMajorGate ? 2.5 : 1.4;
-          ctx.stroke();
-        }
-
-        // 5. Vanishing-Point Descent Vector Target Reticle (always active, pulses on beat & chaser waves)
-        const vpX = ringCx[0];
-        const vpY = ringCy[0];
-        const retR = 14 + subBass * 16 + beat * 12 + transWave * 28;
-        ctx.save();
-        ctx.translate(vpX, vpY);
-        ctx.rotate(-camRoll * 1.2 + timeSec * 0.8);
-        ctx.strokeStyle = rgbToCss(palette[7], 0.72 + beat * 0.25);
-        ctx.lineWidth = 1.6;
-        ctx.beginPath();
-        ctx.moveTo(-retR, 0);
-        ctx.lineTo(-retR * 0.4, 0);
-        ctx.moveTo(retR * 0.4, 0);
-        ctx.lineTo(retR, 0);
-        ctx.moveTo(0, -retR);
-        ctx.lineTo(0, -retR * 0.4);
-        ctx.moveTo(0, retR * 0.4);
-        ctx.lineTo(0, retR);
-        ctx.stroke();
-        ctx.strokeStyle = rgbToCss(palette[6], 0.65);
-        ctx.beginPath();
-        ctx.arc(0, 0, retR * 0.65, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
-
-        // 6. Stable, Un-Clipped Floating 3D Hologram Lyric Banner (ONLY when synced lyrics exist — never unattributed comments!)
-        const rawOverlayText = (activeLyricRef.current || '').trim();
-
-        if (rawOverlayText.length > 0) {
-          drawVertigoStyleHologram(
-            rawOverlayText,
-            (ringCx[6] - CANVAS_W * 0.5) * 0.24,
-            (ringCy[6] - CANVAS_H * 0.5) * 0.05
-          );
-        }
-
-        // 7. Micro-Party style SoundCloud timed comment pop-over pill
-        drawMicroPartyCommentPill(
-          ctx,
-          effectiveComment,
-          effectiveAvatarImg || commentAvatarImgRef.current,
-          palette,
-          timeSec,
-          beat,
-          cropBottomY,
-          false
-        );
-      }
-
-      // =======================================================================
-      // MODE 5: 90s BRYCE TRAPPER (Mead 3-Ring Binder / Bryce-3D Chrome &
-      //         2-of-3 Rock-Paper-Scissors Arena + Steady Receding Floor + Sine Scroller)
-      // =======================================================================
-      else if (activeMode === 'trapper') {
-        // Pure #000000 OLED deep-space backdrop
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-        const transWave = trans > 0.005 ? Math.sin(trans * Math.PI) : 0;
-        const horizonY = Math.round(
-          CANVAS_H * 0.54 + (trans > 0.005 ? Math.sin(trans * Math.PI * 2) * 24 * transWave : 0)
-        );
-
-        // 1. Interleaved Amiga Copper Raster Horizon Lines (ultra-fine 1px scanlines, with curtain wipe on track transition!)
-        const numRasters = transWave > 0.05 ? 18 : 12;
-        for (let b = 0; b < numRasters; b++) {
-          const bandAmp = sb[b & 15];
-          const phase = timeSec * 2.2 + b * 0.38;
-          const transCurtain =
-            transWave > 0.05
-              ? Math.sin(trans * Math.PI * 2 + b * 0.42) * 85 * transWave
-              : 0;
-          const ry = Math.round(
-            horizonY -
-              96 +
-              b * 12 +
-              Math.sin(phase) * (13 + subBass * 20 + drop * 16) +
-              transCurtain
-          );
-          const barW = Math.round(
-            CANVAS_W * Math.min(1, 0.32 + bandAmp * 0.58 + transWave * 0.38)
-          );
-          const barX = Math.round((CANVAS_W - barW) * 0.5);
-          const palC = palette[2 + (b % 6)];
-          const barH = transWave > 0.05 ? Math.round(1 + transWave * 3) : 1;
-          ctx.fillStyle = rgbToCss(palC, 0.28 + bandAmp * 0.36 + transWave * 0.20);
-          ctx.fillRect(barX, ry, barW, barH);
-        }
-
-        // 2. Bryce-3D Perspective Neon-Checkerboard Floor
-        //    Moves strictly BACKWARD toward the horizon at a smooth integrated rate (never front-to-back!)
-        //    with a gentle lateral camera sway.
-        trapperFloorZRef.current += dt * (0.92 + subBass * 0.42 + transWave * 2.6);
-        const floorScroll = trapperFloorZRef.current;
-        // `frac` descends smoothly from 1.0 -> 0.0 so every tile row recedes backward toward horizonY!
-        const frac = 1 - (floorScroll % 1);
-        const rowParityBase = Math.floor(floorScroll) & 1;
-        const floorSwayX = Math.sin(timeSec * 0.52) * 28;
-
-        ctx.save();
-        if (transWave > 0.01) {
-          const bankAngle = Math.sin(trans * Math.PI * 2) * 0.14 * transWave;
-          ctx.translate(CANVAS_W * 0.5, horizonY);
-          ctx.rotate(bankAngle);
-          ctx.translate(-CANVAS_W * 0.5, -horizonY);
-        }
-
-        const numFloorRows = 10;
-        const numFloorCols = 12;
-        for (let r = 0; r < numFloorRows; r++) {
-          const d0 = Math.max(0, (r + frac) / numFloorRows);
-          const d1 = Math.min(1, (r + 1 + frac) / numFloorRows);
-          const y0 = horizonY + Math.pow(d0, 1.8) * (CANVAS_H - horizonY);
-          const y1 = horizonY + Math.pow(d1, 1.8) * (CANVAS_H - horizonY);
-          const span0 = 86 + Math.pow(d0, 1.45) * 620;
-          const span1 = 86 + Math.pow(d1, 1.45) * 620;
-          const sway0 = floorSwayX * (1 - d0 * 0.65);
-          const sway1 = floorSwayX * (1 - d1 * 0.65);
-          const rowParity = (r - rowParityBase) & 1;
-
-          for (let c = -numFloorCols / 2; c < numFloorCols / 2; c++) {
-            const isCheck = ((c + rowParity) & 1) === 0;
-            if (!isCheck) continue; // Leave alternating tiles pure #000000 OLED black!
-            const u0 = c / (numFloorCols * 0.5);
-            const u1 = (c + 1) / (numFloorCols * 0.5);
-            const x0a = CANVAS_W * 0.5 + sway0 + u0 * span0;
-            const x0b = CANVAS_W * 0.5 + sway0 + u1 * span0;
-            const x1b = CANVAS_W * 0.5 + sway1 + u1 * span1;
-            const x1a = CANVAS_W * 0.5 + sway1 + u0 * span1;
-
-            const tilePal = palette[3 + (Math.abs(c + r - rowParityBase) % 4)];
-            const tileAlpha =
-              (0.16 + d0 * 0.44) * (0.72 + subBass * 0.28 + transWave * 0.25);
-            ctx.fillStyle = rgbToCss(tilePal, Math.min(0.85, tileAlpha));
-            ctx.beginPath();
-            ctx.moveTo(x0a, y0);
-            ctx.lineTo(x0b, y0);
-            ctx.lineTo(x1b, y1);
-            ctx.lineTo(x1a, y1);
-            ctx.closePath();
-            ctx.fill();
-          }
-        }
-        ctx.restore();
-
-        // 3. 90s Bryce-3D Geometric Arena:
-        //    3 Shapes (0 = Chrome Sphere, 1 = Neon Pyramid, 2 = Bryce 3D Cube)
-        //    Only 2 are active at once! They periodically clash in Rock-Paper-Scissors combat,
-        //    shattering the loser into 3D wireframe shards before the missing 3rd shape warps in!
-        const arena = trapperArenaRef.current;
-        arena.timer += dt;
-
-        if (arena.phase === 'float') {
-          // Collisions occur ~25% as often (~27s cadence, or after 14s on a major beat drop)
-          if (arena.timer >= 27.0 || (drop > 0.72 && arena.timer >= 14.0)) {
-            arena.phase = 'charge';
-            arena.timer = 0;
-            arena.loserSide = getRpsLoserSide(arena.leftShape, arena.rightShape);
-            arena.incomingShape = ((3 - arena.leftShape - arena.rightShape) % 3) as TrapperShapeKind;
-          }
-        } else if (arena.phase === 'charge') {
-          if (arena.timer >= 1.05) {
-            arena.phase = 'clash';
-            arena.timer = 0;
-            // Spawn 16 3D wireframe shards from the defeated shape at center stage!
-            const impactX = CANVAS_W * 0.5 + (arena.loserSide === 'left' ? -24 : 24);
-            const impactY = CANVAS_H * 0.36;
-            const newShards: TrapperShard[] = [];
-            for (let s = 0; s < 16; s++) {
-              const ang = (s / 16) * Math.PI * 2 + (s & 1) * 0.2;
-              const spd = 95 + (s % 5) * 42;
-              newShards.push({
-                x: impactX,
-                y: impactY,
-                vx: Math.cos(ang) * spd + (arena.loserSide === 'left' ? -55 : 55),
-                vy: Math.sin(ang) * spd - 45,
-                rot: s * 0.5,
-                vrot: (s & 1 ? 1 : -1) * (5 + (s % 4) * 2),
-                size: 8 + (s % 4) * 4,
-                palIdx: 4 + (s & 3),
-              });
-            }
-            arena.shards = newShards;
-          }
-        } else if (arena.phase === 'clash') {
-          if (arena.timer >= 1.1) {
-            arena.phase = 'challenger';
-            arena.timer = 0;
-            arena.challengerBannerCount += 1;
-          }
-        } else if (arena.phase === 'challenger') {
-          if (arena.timer >= 1.55) {
-            if (arena.loserSide === 'left') {
-              arena.leftShape = arena.incomingShape;
-            } else {
-              arena.rightShape = arena.incomingShape;
-            }
-            arena.phase = 'float';
-            arena.timer = 0;
-            arena.shards = [];
-          }
-        }
-
-        // Helper to draw any of the 3 Bryce-3D primitives:
-        // 0 = Chrome Sphere, 1 = Neon Pyramid + Torus, 2 = Rotating 3D Bryce Cube
-        const drawBrycePrimitive = (
-          kind: TrapperShapeKind,
-          cx: number,
-          cy: number,
-          scaleFactor: number,
-          spinMult: number
-        ) => {
-          if (scaleFactor <= 0.02) return;
-          const baseR = (42 + subBass * 15 + beat * 9) * scaleFactor;
-
-          // Ground shadow on the receding checkerboard floor
-          ctx.fillStyle = `rgba(0, 0, 0, ${(0.72 * Math.min(1, scaleFactor)).toFixed(2)})`;
-          ctx.beginPath();
-          ctx.ellipse(cx, horizonY + 26, baseR * 0.85, baseR * 0.22, 0, 0, Math.PI * 2);
-          ctx.fill();
-
-          if (kind === 0) {
-            // --- SHAPE 0: BRYCE-3D RAYTRACED CHROME & LAT/LON SPHERE ---
-            ctx.save();
-            ctx.beginPath();
-            ctx.arc(cx, cy, baseR, 0, Math.PI * 2);
-            ctx.clip();
-
-            const sGrad = ctx.createRadialGradient(
-              cx - baseR * 0.35,
-              cy - baseR * 0.35,
-              baseR * 0.08,
-              cx,
-              cy,
-              baseR
-            );
-            sGrad.addColorStop(0, rgbToCss(palette[7], 0.98));
-            sGrad.addColorStop(0.45, rgbToCss(palette[5], 0.88));
-            sGrad.addColorStop(0.78, rgbToCss(palette[2], 0.92));
-            sGrad.addColorStop(1, '#000000');
-            ctx.fillStyle = sGrad;
-            ctx.fillRect(cx - baseR, cy - baseR, baseR * 2, baseR * 2);
-
-            ctx.strokeStyle = rgbToCss(palette[7], 0.54);
-            ctx.lineWidth = 0.9;
-            const rotLon = timeSec * 1.45 * spinMult;
-            for (let lat = -2; lat <= 2; lat++) {
-              const latY = cy + (lat / 3) * baseR;
-              const latRx = Math.sqrt(Math.max(0, baseR * baseR - (latY - cy) ** 2));
-              ctx.beginPath();
-              ctx.ellipse(cx, latY, latRx, latRx * 0.22, 0, 0, Math.PI * 2);
-              ctx.stroke();
-            }
-            for (let lon = 0; lon < 4; lon++) {
-              const a = rotLon + (lon * Math.PI) / 4;
-              const rx = Math.abs(Math.cos(a)) * baseR;
-              ctx.beginPath();
-              ctx.ellipse(cx, cy, Math.max(2, rx), baseR, 0, 0, Math.PI * 2);
-              ctx.stroke();
-            }
-            ctx.restore();
-          } else if (kind === 1) {
-            // --- SHAPE 1: BRYCE-3D SHADED PYRAMID / TRIANGLE & ORBITING TORUS ---
-            const coneH = (52 + midEnergy * 20) * scaleFactor;
-            const coneW = (40 + subBass * 14) * scaleFactor;
-            const spin = timeSec * 1.3 * spinMult;
-
-            const basePts: [number, number][] = [];
-            for (let k = 0; k < 4; k++) {
-              const ang = spin + k * (Math.PI * 0.5);
-              basePts.push([
-                cx + Math.cos(ang) * coneW,
-                cy + coneH * 0.48 + Math.sin(ang) * coneW * 0.35,
-              ]);
-            }
-            const apexX = cx + Math.sin(timeSec * 1.8) * 8 * scaleFactor;
-            const apexY = cy - coneH * 0.65;
-
-            for (let k = 0; k < 4; k++) {
-              const p0 = basePts[k];
-              const p1 = basePts[(k + 1) & 3];
-              const facePal = palette[3 + ((k + Math.floor(timeSec * 2)) & 3)];
-              ctx.fillStyle = rgbToCss(facePal, 0.46 + (k & 1) * 0.26);
-              ctx.strokeStyle = rgbToCss(palette[7], 0.78);
-              ctx.lineWidth = 1.0;
-              ctx.beginPath();
-              ctx.moveTo(apexX, apexY);
-              ctx.lineTo(p0[0], p0[1]);
-              ctx.lineTo(p1[0], p1[1]);
-              ctx.closePath();
-              ctx.fill();
-              ctx.stroke();
-            }
-
-            ctx.save();
-            ctx.translate(cx, cy + 5 * scaleFactor);
-            ctx.rotate(Math.sin(timeSec * 1.15) * 0.45);
-            ctx.strokeStyle = rgbToCss(palette[6], 0.80);
-            ctx.lineWidth = (2.2 + beat * 1.5) * scaleFactor;
-            ctx.beginPath();
-            ctx.ellipse(0, 0, coneW * 1.42, coneW * 0.40, 0, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.strokeStyle = rgbToCss(palette[7], 0.88);
-            ctx.lineWidth = 0.9;
-            ctx.stroke();
-            ctx.restore();
-          } else {
-            // --- SHAPE 2: BRYCE-3D ROTATING ISOMETRIC CUBE / SQUARE & INNER HYPERCUBE ---
-            const cubeR = (36 + subBass * 14 + beat * 8) * scaleFactor;
-            const ax = timeSec * 1.05 * spinMult;
-            const ay = timeSec * 1.38 * spinMult;
-            const az = timeSec * 0.72 * spinMult;
-            const cxA = Math.cos(ax), sxA = Math.sin(ax);
-            const cyA = Math.cos(ay), syA = Math.sin(ay);
-            const czA = Math.cos(az), szA = Math.sin(az);
-
-            const rawVerts: [number, number, number][] = [
-              [-1, -1, -1],
-              [1, -1, -1],
-              [1, 1, -1],
-              [-1, 1, -1],
-              [-1, -1, 1],
-              [1, -1, 1],
-              [1, 1, 1],
-              [-1, 1, 1],
-            ];
-            const projVerts: [number, number, number][] = rawVerts.map(([vx, vy, vz]) => {
-              // Rotate X
-              const y1 = vy * cxA - vz * sxA;
-              const z1 = vy * sxA + vz * cxA;
-              // Rotate Y
-              const x2 = vx * cyA + z1 * syA;
-              const z2 = -vx * syA + z1 * cyA;
-              // Rotate Z
-              const x3 = x2 * czA - y1 * szA;
-              const y3 = x2 * szA + y1 * czA;
-              const persp = 3.2 / (3.2 - z2 * 0.45);
-              return [cx + x3 * cubeR * persp * 0.68, cy + y3 * cubeR * persp * 0.68, z2];
-            });
-
-            const faces: [number, number, number, number, number][] = [
-              [0, 1, 2, 3, 3],
-              [4, 5, 6, 7, 6],
-              [0, 1, 5, 4, 4],
-              [2, 3, 7, 6, 5],
-              [0, 3, 7, 4, 2],
-              [1, 2, 6, 5, 7],
-            ];
-            // Depth-sort faces back-to-front (Painter's Algorithm)
-            faces.sort((fa, fb) => {
-              const za =
-                projVerts[fa[0]][2] +
-                projVerts[fa[1]][2] +
-                projVerts[fa[2]][2] +
-                projVerts[fa[3]][2];
-              const zb =
-                projVerts[fb[0]][2] +
-                projVerts[fb[1]][2] +
-                projVerts[fb[2]][2] +
-                projVerts[fb[3]][2];
-              return za - zb;
-            });
-
-            for (let f = 0; f < faces.length; f++) {
-              const [i0, i1, i2, i3, palSlot] = faces[f];
-              const v0 = projVerts[i0];
-              const v1 = projVerts[i1];
-              const v2 = projVerts[i2];
-              const v3 = projVerts[i3];
-              const faceColor = palette[Math.min(7, palSlot)];
-              ctx.fillStyle = rgbToCss(faceColor, f >= 3 ? 0.56 : 0.24);
-              ctx.strokeStyle = rgbToCss(palette[7], f >= 3 ? 0.85 : 0.42);
-              ctx.lineWidth = f >= 3 ? 1.1 : 0.8;
-              ctx.beginPath();
-              ctx.moveTo(v0[0], v0[1]);
-              ctx.lineTo(v1[0], v1[1]);
-              ctx.lineTo(v2[0], v2[1]);
-              ctx.lineTo(v3[0], v3[1]);
-              ctx.closePath();
-              ctx.fill();
-              ctx.stroke();
-            }
-          }
-        };
-
-        // Compute Left & Right arena slot positions based on Rock-Paper-Scissors combat phase
-        const homeLeftX = CANVAS_W * 0.27 + Math.sin(timeSec * 0.95) * 44;
-        const homeRightX = CANVAS_W * 0.73 + Math.cos(timeSec * 0.85) * 44;
-        const dropLift = trans > 0.005 ? Math.pow(trans, 2) * 95 : 0;
-        const baseLeftY =
-          CANVAS_H * 0.36 +
-          Math.cos(timeSec * 1.35) * 18 -
-          Math.abs(Math.sin(timeSec * 2.6)) * (14 + subBass * 26) -
-          dropLift;
-        const baseRightY =
-          CANVAS_H * 0.36 +
-          Math.sin(timeSec * 1.45) * 18 -
-          Math.abs(Math.cos(timeSec * 2.4)) * (14 + subBass * 26) -
-          dropLift;
-
-        let leftX = homeLeftX;
-        let rightX = homeRightX;
-        let leftScale = 1.0;
-        let rightScale = 1.0;
-        let spinBoost = 1.0 + transWave * 2.5;
-
-        if (arena.phase === 'charge') {
-          const p = Math.min(1, arena.timer / 1.05);
-          const ease = p * p;
-          leftX = homeLeftX + (CANVAS_W * 0.43 - homeLeftX) * ease;
-          rightX = homeRightX + (CANVAS_W * 0.57 - homeRightX) * ease;
-          spinBoost = 1.0 + ease * 2.8;
-
-          // Crackling RPS Duel Laser Tether between the two charging shapes
-          ctx.strokeStyle = rgbToCss(palette[7], 0.65 + ease * 0.35);
-          ctx.lineWidth = 1.8 + ease * 2.2;
-          ctx.beginPath();
-          const segs = 12;
-          for (let s = 0; s <= segs; s++) {
-            const u = s / segs;
-            const lx = leftX + (rightX - leftX) * u;
-            const ly =
-              baseLeftY +
-              (baseRightY - baseLeftY) * u +
-              Math.sin(u * Math.PI) * Math.sin(timeSec * 38 + s * 2) * (14 * ease);
-            if (s === 0) ctx.moveTo(lx, ly);
-            else ctx.lineTo(lx, ly);
-          }
-          ctx.stroke();
-        } else if (arena.phase === 'clash') {
-          const p = Math.min(1, arena.timer / 1.1);
-          spinBoost = 2.6 - p * 1.4;
-          if (arena.loserSide === 'left') {
-            leftScale = 0; // Left shape shattered!
-            rightX = CANVAS_W * 0.48 + (homeRightX - CANVAS_W * 0.48) * p;
-            rightScale = 1.18 - p * 0.18;
-          } else {
-            rightScale = 0; // Right shape shattered!
-            leftX = CANVAS_W * 0.52 + (homeLeftX - CANVAS_W * 0.52) * p;
-            leftScale = 1.18 - p * 0.18;
-          }
-
-          // Impact Shockwave Ring at center stage
-          if (p < 0.65) {
-            const shockP = p / 0.65;
-            ctx.strokeStyle = rgbToCss(palette[7], (1 - shockP) * 0.9);
-            ctx.lineWidth = 3.2 * (1 - shockP);
-            ctx.beginPath();
-            ctx.arc(CANVAS_W * 0.5, CANVAS_H * 0.36, 18 + shockP * 115, 0, Math.PI * 2);
-            ctx.stroke();
-          }
-        } else if (arena.phase === 'challenger') {
-          const p = Math.min(1, arena.timer / 1.55);
-          const warpScale = Math.min(1, p * 1.25);
-          if (arena.loserSide === 'left') {
-            drawBrycePrimitive(arena.incomingShape, homeLeftX, baseLeftY, warpScale, 2.4);
-            leftScale = 0;
-          } else {
-            drawBrycePrimitive(arena.incomingShape, homeRightX, baseRightY, warpScale, 2.4);
-            rightScale = 0;
-          }
-
-          // Teleportation Warp Rings & "A CHALLENGER APPROACHES!" Banner
-          const spawnX = arena.loserSide === 'left' ? homeLeftX : homeRightX;
-          const spawnY = arena.loserSide === 'left' ? baseLeftY : baseRightY;
-          ctx.strokeStyle = rgbToCss(palette[6], (1 - p * 0.7) * 0.85);
-          ctx.lineWidth = 2.0;
-          ctx.beginPath();
-          ctx.ellipse(
-            spawnX,
-            spawnY,
-            54 * (1.2 - p * 0.4),
-            18 * (1.2 - p * 0.4),
-            timeSec * 3,
-            0,
-            Math.PI * 2
-          );
-          ctx.stroke();
-
-          // Show the "CHALLENGER APPROACHES" text banner at most 3 times per track (unless Vertigo-style lyric hologram is currently active)
-          const trpLyricActive =
-            hasScCommentsRef.current &&
-            hasLyricsRef.current &&
-            Boolean(activeLyricRef.current && activeLyricRef.current.trim().length > 0);
-          if (arena.challengerBannerCount <= 3 && !trpLyricActive) {
-            const bannerAlpha = Math.sin(p * Math.PI);
-            const bannerTopY = Math.round(Math.max(22, cropTopY + 18));
-            ctx.save();
-            ctx.font = 'bold 13px "JetBrains Mono", "Fira Code", monospace';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            const bannerText = `⚡ CHALLENGER APPROACHES: ${TRAPPER_SHAPE_NAMES[arena.incomingShape]} ⚡`;
-            ctx.fillStyle = `rgba(0, 0, 0, ${(0.72 * bannerAlpha).toFixed(2)})`;
-            ctx.fillRect(CANVAS_W * 0.5 - 175, bannerTopY, 350, 24);
-            ctx.strokeStyle = rgbToCss(palette[6], 0.85 * bannerAlpha);
-            ctx.lineWidth = 1.4;
-            ctx.strokeRect(CANVAS_W * 0.5 - 175, bannerTopY, 350, 24);
-            ctx.fillStyle = rgbToCss(palette[7], 0.96 * bannerAlpha);
-            ctx.fillText(bannerText, CANVAS_W * 0.5, bannerTopY + 12);
-            ctx.restore();
-          }
-        }
-
-        // Render the 2 active Bryce-3D shapes
-        if (leftScale > 0.01) {
-          drawBrycePrimitive(arena.leftShape, leftX, baseLeftY, leftScale, spinBoost);
-        }
-        if (rightScale > 0.01) {
-          drawBrycePrimitive(arena.rightShape, rightX, baseRightY, rightScale, spinBoost);
-        }
-
-        // Step & render 3D Wireframe Shards when a shape is destroyed in RPS combat!
-        if (arena.shards.length > 0) {
-          for (let s = 0; s < arena.shards.length; s++) {
-            const sh = arena.shards[s];
-            sh.x += sh.vx * dt;
-            sh.y += sh.vy * dt;
-            sh.vy += 210 * dt; // Gravity toward checkerboard floor
-            sh.rot += sh.vrot * dt;
-            const sz = sh.size;
-            ctx.save();
-            ctx.translate(sh.x, sh.y);
-            ctx.rotate(sh.rot);
-            ctx.fillStyle = rgbToCss(palette[sh.palIdx], 0.65);
-            ctx.strokeStyle = rgbToCss(palette[7], 0.92);
-            ctx.lineWidth = 1.3;
-            ctx.beginPath();
-            ctx.moveTo(0, -sz);
-            ctx.lineTo(sz * 0.86, sz * 0.6);
-            ctx.lineTo(-sz * 0.86, sz * 0.6);
-            ctx.closePath();
-            ctx.fill();
-            ctx.stroke();
-            ctx.restore();
-          }
-        }
-
-        // 4. 3D Sine-Wave Demoscene Greetz Scroller near the floor level (when no timed SC comment pop-over is active)
-        const scroller = scrollerTextRef.current;
-        if (scroller.length > 0 && !effectiveComment) {
-          const charW = 14;
-          const scrollPx = Math.floor(timeSec * 102);
-          const firstCharIdx = Math.floor(scrollPx / charW);
-          const pixelRem = scrollPx % charW;
-          const visibleChars = Math.ceil(CANVAS_W / charW) + 2;
-
-          ctx.font = 'bold 16px "JetBrains Mono", "Fira Code", monospace';
-          ctx.textBaseline = 'middle';
-
-          const waveAmp = 11 + subBass * 16 + beat * 8 + drop * 12 + transWave * 26;
-          const baseScrollerY = Math.min(CANVAS_H - 46, cropBottomY - 34);
-          for (let c = 0; c < visibleChars; c++) {
-            const ch = scroller[(firstCharIdx + c) % scroller.length];
-            if (ch === ' ') continue;
-            const x = c * charW - pixelRem;
-            const sineIdx = (Math.floor(timeSec * 78) + (firstCharIdx + c) * 10) & 255;
-            const zWave = COS_F32[sineIdx];
-            const y = baseScrollerY + SIN_F32[sineIdx] * waveAmp;
-            const cPal = palette[4 + ((firstCharIdx + c) & 3)];
-            ctx.fillStyle = rgbToCss(cPal, 0.72 + (zWave * 0.5 + 0.5) * 0.28);
-            ctx.fillText(ch, Math.round(x), Math.round(y));
-          }
-        }
-
-        // 5. Preferred AVS-Style Floating 3D Hologram Lyrics (always used when lyrics are active)
-        const trapperLyricText = (activeLyricRef.current || '').trim();
-        if (trapperLyricText.length > 0) {
-          drawVertigoStyleHologram(
-            trapperLyricText,
-            Math.sin(timeSec * 0.52) * 4,
-            0
-          );
-        }
-
-        // 6. Micro-Party style SoundCloud timed comment pop-over pill
-        drawMicroPartyCommentPill(
-          ctx,
-          effectiveComment,
-          effectiveAvatarImg || commentAvatarImgRef.current,
-          palette,
-          timeSec,
-          beat,
-          cropBottomY,
-          false
-        );
-      } else {
-        // =====================================================================
-        // MODES 6–12: HIGH-DPI CANVAS2D MOODBOARD SCENES (a through h)
-        // =====================================================================
-        const sceneCtx: SceneRenderContext = {
-          ctx,
-          timeSec,
-          dt,
-          playheadRatio: playheadRatioRef.current,
-          bpm: bpmRef.current || 120,
-          rms: rmsRef.current,
-          peak: peakRef.current,
-          beat,
-          subBass,
-          midEnergy,
-          highEnergy,
-          drop,
-          buildup,
-          trans,
-          sb,
-          palette,
-          artCanvas: artCanvasRef.current,
-          artReady: artReadyRef.current,
-          artLuma: artSquareLumaRef.current,
-          artRgb: artSquareRgbRef.current,
-          activeLyric: activeLyricRef.current || null,
-          nextLyric: nextLyricRef.current || null,
-          activeComment: effectiveComment,
-          commentAvatarImg: effectiveAvatarImg || commentAvatarImgRef.current,
-          trackTitle: trackRef.current?.title || '',
-          trackArtist: trackRef.current?.artists?.join(', ') || '',
-          cropTopY,
-          cropBottomY,
-          cropLeftX,
-          cropRightX,
-        };
-
-        if (activeMode === 'rhythm') {
-          renderRhythmScene(sceneCtx);
-        } else if (activeMode === 'midnight') {
-          renderMidnightScene(sceneCtx);
-        } else if (activeMode === 'cosmos') {
-          renderCosmosScene(sceneCtx);
-        } else if (activeMode === 'reef') {
-          renderReefScene(sceneCtx);
-        } else if (activeMode === 'arcade') {
-          renderArcadeScene(sceneCtx);
-        } else if (activeMode === 'vaporwave') {
-          renderVaporwaveScene(sceneCtx);
-        } else if (activeMode === 'sanctum') {
-          renderSanctumScene(sceneCtx);
-        }
-      }
+      // =====================================================================
+      // UNIFIED 12-SCENE RENDER PIPELINE (Modes 1–12)
+      // =====================================================================
+      const sceneCtx: SceneRenderContext = {
+        ctx,
+        timeSec,
+        dt,
+        playheadRatio: playheadRatioRef.current,
+        bpm: bpmRef.current || 120,
+        rms: rmsRef.current,
+        peak: peakRef.current,
+        beat,
+        subBass,
+        midEnergy,
+        highEnergy,
+        drop,
+        buildup,
+        trans,
+        sb,
+        palette,
+        artCanvas: artCanvasRef.current,
+        artReady: artReadyRef.current,
+        artLuma: artSquareLumaRef.current,
+        artRgb: artSquareRgbRef.current,
+        activeLyric: activeLyricRef.current || null,
+        nextLyric: nextLyricRef.current || null,
+        activeComment: effectiveComment,
+        commentAvatarImg: effectiveAvatarImg || commentAvatarImgRef.current,
+        trackTitle: trackRef.current?.title || '',
+        trackArtist: trackRef.current?.artists?.join(', ') || '',
+        cropTopY,
+        cropBottomY,
+        cropLeftX,
+        cropRightX,
+      };
+
+      const rtCtx: ClassicSceneRuntimeRefs = {
+        activeLyricRef,
+        artSquareEdgeRef,
+        artSquareLumaRef,
+        avatarBlendRef,
+        avatarLumaGridRef,
+        cellSkipMaskRef,
+        commentAvatarImgRef,
+        feedbackCanvasRef,
+        glitchSeedRef,
+        glyphTextStripRef,
+        hasLyricsRef,
+        hasScCommentsRef,
+        imageDataRef,
+        lowResBlitCanvasRef,
+        mutationPatchesRef,
+        paletteCycleOffsetRef,
+        phaseAccumRef,
+        rowCorruptMaskRef,
+        rowTearPxRef,
+        scrollerTextRef,
+        starXRef,
+        starYRef,
+        starZRef,
+        trapperArenaRef,
+        trapperFloorZRef,
+        u32FrameRef,
+        vertigoLyricRevealRef,
+        vertigoPulseZRef,
+        vertigoRollCurrentRef,
+        vertigoRollTargetRef,
+        vertigoTravelZRef,
+        glitch,
+        palAbgr,
+        glyphBitmaps,
+        frameCount,
+        effectiveComment,
+        effectiveAvatarImg: effectiveAvatarImg || commentAvatarImgRef.current,
+        drawVertigoStyleHologram,
+      };
+
+      const renderScene = UNIFIED_SCENE_RENDERERS[activeMode] || renderGlyphScene;
+      renderScene(sceneCtx, rtCtx);
     };
 
     rafId = requestAnimationFrame(renderFrame);
     return () => {
       cancelAnimationFrame(rafId);
     };
-  }, [mode, isPlaying, activeComment, hidden]);
+  }, [mode, isPlaying, hidden]);
 
   if (mode === 'off') {
     return null;
@@ -2713,10 +1155,10 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
         width={CANVAS_W * RENDER_SCALE}
         height={CANVAS_H * RENDER_SCALE}
         style={{
-          position: 'absolute',
+          position: 'fixed',
           inset: 0,
-          width: '100%',
-          height: '100%',
+          width: '100vw',
+          height: '100vh',
           objectFit: 'cover',
           opacity: isPlaying ? 0.88 : 0.34,
           transition: 'opacity 320ms ease',
@@ -2725,7 +1167,7 @@ export const PlayerBackgroundVisualizer: React.FC<Props> = ({
       {/* Static Zero-CPU True OLED #000000 Center Cushion & Outer Vignette */}
       <div
         style={{
-          position: 'absolute',
+          position: 'fixed',
           inset: 0,
           background:
             'radial-gradient(ellipse 52% 48% at 56% 52%, rgba(0, 0, 0, 0.58) 0%, rgba(0, 0, 0, 0.28) 55%, rgba(0, 0, 0, 0.82) 100%)',

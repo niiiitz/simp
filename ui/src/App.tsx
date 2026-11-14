@@ -3316,7 +3316,7 @@ const ConsoleMainApp: React.FC = () => {
       {/* Proactive Auth Probe Banner */}
       {expiredAuthAlert && (
         <div
-          data-modal-root="true"
+          data-expired-auth-banner="true"
           style={{
             position: 'fixed',
             top: 14,
@@ -3340,6 +3340,7 @@ const ConsoleMainApp: React.FC = () => {
               <span>{expiredAuthAlert.label} Session Needs Re-Sign-In</span>
             </div>
             <button
+              data-expired-auth-close="true"
               onClick={() => setExpiredAuthAlert(null)}
               style={{
                 background: 'transparent',
@@ -3431,6 +3432,7 @@ const ConsoleMainApp: React.FC = () => {
       {pendingDroppedFolder && (
         <div
           data-modal-root="true"
+          data-dropped-folder-modal="true"
           onClick={() => setPendingDroppedFolder(null)}
           style={{
             position: 'fixed',
@@ -3483,6 +3485,7 @@ const ConsoleMainApp: React.FC = () => {
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
               <button
                 data-focusable="true"
+                data-dropped-folder-close="true"
                 onClick={() => setPendingDroppedFolder(null)}
                 style={{
                   padding: '8px 14px',
@@ -3499,6 +3502,25 @@ const ConsoleMainApp: React.FC = () => {
               </button>
               <button
                 data-focusable="true"
+                data-default-focus="true"
+                ref={(el) => {
+                  if (el && !el.hasAttribute('data-simp-active-focus')) {
+                    window.setTimeout(() => {
+                      if (!el.isConnected) return;
+                      document
+                        .querySelectorAll<HTMLElement>('[data-simp-active-focus="true"], .simp-gpfocus')
+                        .forEach((node) => {
+                          if (node !== el) {
+                            node.removeAttribute('data-simp-active-focus');
+                            node.classList.remove('simp-gpfocus');
+                          }
+                        });
+                      el.setAttribute('data-simp-active-focus', 'true');
+                      el.classList.add('simp-gpfocus');
+                      el.focus({ preventScroll: true });
+                    }, 30);
+                  }
+                }}
                 onClick={() => {
                   const pathToAdd = pendingDroppedFolder;
                   setPendingDroppedFolder(null);

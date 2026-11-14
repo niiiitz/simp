@@ -2,6 +2,68 @@ use crate::http_pool::http_get_bytes;
 use crate::lyrics::with_lyrics_db;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
+
+const SESSION_RING_CAPACITY: usize = 128;
+
+fn session_factoid_ring() -> &'static Mutex<VecDeque<u64>> {
+    static RING: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
+    RING.get_or_init(|| Mutex::new(VecDeque::with_capacity(SESSION_RING_CAPACITY)))
+}
+
+fn hash_factoid_body(text: &str) -> u64 {
+    let norm: String = text
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    norm.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Checks whether a factoid sentence has already been shown during this listening session.
+pub fn was_factoid_shown_in_session(text: &str) -> bool {
+    let h = hash_factoid_body(text);
+    if let Ok(guard) = session_factoid_ring().lock() {
+        guard.contains(&h)
+    } else {
+        false
+    }
+}
+
+/// Marks a factoid sentence as shown in the current session ring buffer.
+pub fn mark_factoid_shown_in_session(text: &str) {
+    let h = hash_factoid_body(text);
+    if let Ok(mut guard) = session_factoid_ring().lock() {
+        if !guard.contains(&h) {
+            if guard.len() >= SESSION_RING_CAPACITY {
+                guard.pop_front();
+            }
+            guard.push_back(h);
+        }
+    }
+}
+
+/// Rejects robotic / low-signal metadata filler (such as bare MusicBrainz region codes like `Region: XW`
+/// or trivial catalog dates with no editorial context) so only genuinely interesting trivia is shown.
+pub fn is_high_signal_factoid_body(body: &str) -> bool {
+    let trimmed = body.trim();
+    if trimmed.chars().count() < 28 {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    if lower.contains("region: xw")
+        || lower.contains("region: xe")
+        || lower.starts_with("first release date recorded as")
+        || (lower.starts_with("first cataloged on") && !lower.contains("•"))
+    {
+        return false;
+    }
+    true
+}
 
 fn http_get_text(url: &str, headers: &[(&str, &str)], timeout_secs: u64) -> anyhow::Result<String> {
     let bytes = http_get_bytes(url, headers, None, timeout_secs)?;
@@ -262,7 +324,7 @@ fn split_extract_into_sentences(extract: &str, max_sentences: usize) -> Vec<Stri
     let mut results = Vec::new();
     for raw in extract.split(". ") {
         let trimmed = raw.trim();
-        if trimmed.len() < 24 {
+        if trimmed.len() < 28 {
             continue;
         }
         let with_dot = if trimmed.ends_with('.') {
@@ -270,7 +332,11 @@ fn split_extract_into_sentences(extract: &str, max_sentences: usize) -> Vec<Stri
         } else {
             format!("{trimmed}.")
         };
-        results.push(truncate_factoid_sentence(&with_dot, 184));
+        let candidate = truncate_factoid_sentence(&with_dot, 184);
+        if !is_high_signal_factoid_body(&candidate) || was_factoid_shown_in_session(&candidate) {
+            continue;
+        }
+        results.push(candidate);
         if results.len() >= max_sentences {
             break;
         }
@@ -424,29 +490,34 @@ fn query_musicbrainz_recording_factoid(title: &str, artist: &str) -> Option<Stri
         })
         .unwrap_or_default();
 
-    let mut parts = Vec::new();
-    if !first_release.is_empty() {
-        if !release_title.is_empty() {
-            parts.push(format!(
-                "First cataloged on \"{release_title}\" ({first_release})"
-            ));
-        } else {
-            parts.push(format!("First release date recorded as {first_release}"));
-        }
+    // Require genuine editorial/curatorial signal (disambiguation note or >= 2 genre/style tags)
+    // so bare catalog dates or robotic "Region: XW" codes never clutter the visualizer.
+    if disambig.is_empty() && tags.len() < 2 {
+        return None;
     }
-    if !country.is_empty() {
-        parts.push(format!("Region: {country}"));
+
+    let mut parts = Vec::new();
+    if !first_release.is_empty() && !release_title.is_empty() {
+        parts.push(format!(
+            "First cataloged on \"{release_title}\" ({first_release})"
+        ));
     }
     if !disambig.is_empty() {
         parts.push(disambig.to_string());
     }
     if !tags.is_empty() {
-        parts.push(format!("Genres/Tags: {}", tags.join(", ")));
+        parts.push(format!("Styles: {}", tags.join(", ")));
     }
-    if parts.is_empty() {
+    let _ = country;
+    if parts.len() < 2 {
         None
     } else {
-        Some(truncate_factoid_sentence(&parts.join(" • "), 180))
+        let combined = truncate_factoid_sentence(&parts.join(" • "), 180);
+        if is_high_signal_factoid_body(&combined) && !was_factoid_shown_in_session(&combined) {
+            Some(combined)
+        } else {
+            None
+        }
     }
 }
 
@@ -536,20 +607,21 @@ pub fn fetch_track_factoids(
     let key = normalize_key(clean_title, clean_artist, clean_album);
 
     if let Some(mut cached) = load_factoids_from_db(&key, track_uri) {
-        // Automatically upgrade any pre-Wave-6 cached single-bubble row (`> 92` chars without `part_total`)
-        let needs_resplit = cached
+        // Filter out any legacy low-signal boilerplate or bubbles already shown in this session
+        let filtered_raw: Vec<(String, String, String, String)> = cached
             .bubbles
-            .iter()
-            .any(|b| b.part_total.is_none() && b.body.chars().count() > 92);
-        if needs_resplit {
-            let raw_items: Vec<(String, String, String, String)> = cached
-                .bubbles
-                .into_iter()
-                .map(|b| (b.category, b.headline, b.body, b.source))
-                .collect();
-            cached.bubbles = schedule_factoid_bubbles(raw_items, duration_ms);
+            .into_iter()
+            .filter(|b| is_high_signal_factoid_body(&b.body) && !was_factoid_shown_in_session(&b.body))
+            .map(|b| (b.category, b.headline, b.body, b.source))
+            .collect();
+        if !filtered_raw.is_empty() {
+            for (_, _, body, _) in &filtered_raw {
+                mark_factoid_shown_in_session(body);
+            }
+            cached.bubbles = schedule_factoid_bubbles(filtered_raw, duration_ms);
+            cached.found = !cached.bubbles.is_empty();
+            return cached;
         }
-        return cached;
     }
 
     let primary_artist = clean_artist
@@ -653,6 +725,9 @@ pub fn fetch_track_factoids(
         }
     }
 
+    for (_, _, body, _) in &raw_items {
+        mark_factoid_shown_in_session(body);
+    }
     let bubbles = schedule_factoid_bubbles(raw_items, duration_ms);
     let provider_str = if providers.is_empty() {
         "none".to_string()
@@ -717,5 +792,25 @@ mod tests {
         assert_eq!(bubbles[2].part_total, Some(2));
         assert_eq!(bubbles[2].start_sec, bubbles[1].start_sec + 5);
         assert!(bubbles[3].start_sec + bubbles[3].duration_sec <= 188);
+    }
+
+    #[test]
+    fn test_high_signal_filter_and_session_deduplication() {
+        assert!(!is_high_signal_factoid_body("First cataloged on \"Track 01\" (2021) • Region: XW"));
+        assert!(!is_high_signal_factoid_body("First release date recorded as 2019"));
+        assert!(!is_high_signal_factoid_body("Too short."));
+        assert!(is_high_signal_factoid_body(
+            "Recorded at Abbey Road Studios using vintage analog synthesizers and tape loops."
+        ));
+
+        let extract = "Sentence alpha describes the studio recording process in detail. Sentence beta explains how the synthesizer patch was programmed on a classic modular rig. Sentence gamma covers the international chart reception.";
+        let first_pass = split_extract_into_sentences(extract, 1);
+        assert_eq!(first_pass.len(), 1);
+        assert!(first_pass[0].starts_with("Sentence alpha"));
+        mark_factoid_shown_in_session(&first_pass[0]);
+
+        let second_pass = split_extract_into_sentences(extract, 1);
+        assert_eq!(second_pass.len(), 1);
+        assert!(second_pass[0].starts_with("Sentence beta"));
     }
 }

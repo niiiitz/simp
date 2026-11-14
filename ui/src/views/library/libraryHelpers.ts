@@ -79,3 +79,67 @@ export const tileGridStyle: React.CSSProperties = {
   width: '100%',
   minWidth: 0,
 };
+
+let cachedSyncedLyricsUris = new Set<string>();
+let cachedAllLyricsUris = new Set<string>();
+let lastLyricsStatusFetchMs = 0;
+let pendingLyricsStatusPromise: Promise<void> | null = null;
+const lyricsStatusListeners = new Set<() => void>();
+
+export function refreshLibraryLyricsStatus(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && now - lastLyricsStatusFetchMs < 8_000 && cachedAllLyricsUris.size > 0) {
+    return Promise.resolve();
+  }
+  if (pendingLyricsStatusPromise) {
+    return pendingLyricsStatusPromise;
+  }
+  lastLyricsStatusFetchMs = now;
+  pendingLyricsStatusPromise = fetch('http://127.0.0.1:18888/api/library/lyrics-status')
+    .then((r) => r.json())
+    .then((json) => {
+      if (json?.ok) {
+        cachedSyncedLyricsUris = new Set(Array.isArray(json.synced_uris) ? json.synced_uris : []);
+        cachedAllLyricsUris = new Set(
+          Array.isArray(json.all_lyrics_uris) ? json.all_lyrics_uris : []
+        );
+        lyricsStatusListeners.forEach((cb) => cb());
+      }
+    })
+    .catch(() => {})
+    .finally(() => {
+      pendingLyricsStatusPromise = null;
+    });
+  return pendingLyricsStatusPromise;
+}
+
+export function getTrackLyricsBadge(uri?: string | null): 'LRC' | 'LYR' | null {
+  if (!uri) return null;
+  if (cachedSyncedLyricsUris.has(uri)) return 'LRC';
+  if (cachedAllLyricsUris.has(uri)) return 'LYR';
+  return null;
+}
+
+export function useLibraryLyricsStatus(): {
+  syncedUris: Set<string>;
+  allLyricsUris: Set<string>;
+  refresh: () => void;
+} {
+  const [, setTick] = React.useState(0);
+  React.useEffect(() => {
+    const listener = () => setTick((t) => t + 1);
+    lyricsStatusListeners.add(listener);
+    refreshLibraryLyricsStatus(false);
+    const onPropsUpdated = () => refreshLibraryLyricsStatus(true);
+    window.addEventListener('simp-track-properties-updated', onPropsUpdated);
+    return () => {
+      lyricsStatusListeners.delete(listener);
+      window.removeEventListener('simp-track-properties-updated', onPropsUpdated);
+    };
+  }, []);
+  return {
+    syncedUris: cachedSyncedLyricsUris,
+    allLyricsUris: cachedAllLyricsUris,
+    refresh: () => refreshLibraryLyricsStatus(true),
+  };
+}

@@ -2,7 +2,7 @@ import React from 'react';
 import { defaultSimpClient, SimpStateSnapshot, TrackMetadata } from '@simp/client';
 import { AppleMusicAttributionLink } from '../../../components/AppleMusicLogo';
 import { LibraryContextTarget } from '../../LibraryBrowserView';
-import { extractAudioFormat } from '../libraryHelpers';
+import { extractAudioFormat, getTrackLyricsBadge } from '../libraryHelpers';
 
 export interface SingleSongRowProps {
   song: TrackMetadata;
@@ -187,6 +187,37 @@ export const SingleSongRow: React.FC<SingleSongRowProps> = ({
             }}
           >
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>▶ {s.title}</span>
+            {(() => {
+              const lyrBadge = getTrackLyricsBadge(s.uri);
+              if (!lyrBadge) return null;
+              const isSynced = lyrBadge === 'LRC';
+              return (
+                <span
+                  title={
+                    isSynced
+                      ? 'Synced timed lyrics available (Karaoke Ready)'
+                      : 'Retrieved plain lyrics available'
+                  }
+                  style={{
+                    fontSize: 9,
+                    fontFamily: 'monospace',
+                    fontWeight: 800,
+                    padding: '1px 5px',
+                    borderRadius: 4,
+                    background: isSynced
+                      ? 'rgba(16, 185, 129, 0.16)'
+                      : 'rgba(56, 189, 248, 0.14)',
+                    border: isSynced
+                      ? '1px solid rgba(52, 211, 153, 0.5)'
+                      : '1px solid rgba(56, 189, 248, 0.45)',
+                    color: isSynced ? '#6ee7b7' : '#7dd3fc',
+                    flexShrink: 0,
+                  }}
+                >
+                  {lyrBadge}
+                </span>
+              );
+            })()}
             {isScPreview && (
               <span
                 style={{

@@ -887,6 +887,58 @@ pub fn fetch_track_lyrics(
     empty
 }
 
+#[derive(Debug, Clone)]
+pub struct CachedLyricsSummary {
+    pub track_uri: String,
+    pub title_lower: String,
+    pub artist_lower: String,
+    pub has_lyrics: bool,
+    pub has_synced_lyrics: bool,
+}
+
+/// Returns all non-instrumental, successfully retrieved entries from `lyrics_entries` in `lyrics.db`
+/// so `library.db` can backfill `track_properties` and filter tracks for Karaoke Mode.
+pub fn list_cached_lyrics_summaries() -> Vec<CachedLyricsSummary> {
+    with_lyrics_db(|conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT track_uri, title, artist, synced_lrc, plain_lyrics
+                 FROM lyrics_entries
+                 WHERE provider != 'none' AND instrumental = 0",
+            )
+            .ok()?;
+        let rows = stmt
+            .query_map([], |row| {
+                let track_uri: String = row.get(0)?;
+                let title: String = row.get(1)?;
+                let artist: String = row.get(2)?;
+                let synced_lrc: Option<String> = row.get(3)?;
+                let plain_lyrics: Option<String> = row.get(4)?;
+                let has_synced = synced_lrc
+                    .as_deref()
+                    .map(|s| {
+                        let t = s.trim();
+                        !t.is_empty() && t != "[]" && t != "null"
+                    })
+                    .unwrap_or(false);
+                let has_plain = plain_lyrics
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                Ok(CachedLyricsSummary {
+                    track_uri: track_uri.trim().to_string(),
+                    title_lower: title.trim().to_lowercase(),
+                    artist_lower: artist.trim().to_lowercase(),
+                    has_lyrics: has_synced || has_plain,
+                    has_synced_lyrics: has_synced,
+                })
+            })
+            .ok()?;
+        Some(rows.flatten().filter(|r| r.has_lyrics).collect())
+    })
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

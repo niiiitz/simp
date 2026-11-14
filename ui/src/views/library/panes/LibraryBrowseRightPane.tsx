@@ -42,6 +42,7 @@ import {
   extractAudioFormat,
   formatPlaylistSourceBadge,
   tileGridStyle,
+  useLibraryLyricsStatus,
 } from "../libraryHelpers";
 import { ResilientTileArtwork } from "../ResilientTileArtwork";
 import { UniversalSearchResultsPane } from "./UniversalSearchResultsPane";
@@ -349,8 +350,9 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
   soundCloudSubTab,
   totalCloudPages,
 }) => {
+  useLibraryLyricsStatus();
   const [activeSmartFacet, setActiveSmartFacet] = React.useState<
-    'synced_lyrics' | 'has_art' | 'missing_art' | 'has_factoids' | 'has_comments' | null
+    'synced_lyrics' | 'has_lyrics' | 'has_art' | 'missing_art' | 'has_factoids' | 'has_comments' | null
   >(null);
   const [facetTracks, setFacetTracks] = React.useState<TrackMetadata[]>([]);
   const [facetLoading, setFacetLoading] = React.useState(false);
@@ -806,7 +808,7 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                               {
                                 id: 'synced_lyrics' as const,
                                 icon: 'lyrics' as const,
-                                label: 'Synced Lyrics',
+                                label: 'Karaoke / Has Lyrics',
                                 accent: '#34d399',
                               },
                               {
@@ -835,14 +837,19 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                               },
                             ] as const
                           ).map((facet) => {
-                            const active = activeSmartFacet === facet.id;
+                            const active =
+                              activeSmartFacet === facet.id ||
+                              (facet.id === 'synced_lyrics' && activeSmartFacet === 'has_lyrics');
                             return (
                               <button
                                 key={facet.id}
                                 data-right-filter-pill="true"
                                 onClick={() =>
                                   setActiveSmartFacet((prev) =>
-                                    prev === facet.id ? null : facet.id,
+                                    prev === facet.id ||
+                                    (facet.id === 'synced_lyrics' && prev === 'has_lyrics')
+                                      ? null
+                                      : facet.id,
                                   )
                                 }
                                 style={{
@@ -882,11 +889,11 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                           border: '1px solid rgba(56, 189, 248, 0.28)',
                         }}
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, fontWeight: 800, color: '#e2e8f0' }}>
                             <ImpIcon
                               name={
-                                activeSmartFacet === 'synced_lyrics'
+                                activeSmartFacet === 'synced_lyrics' || activeSmartFacet === 'has_lyrics'
                                   ? 'lyrics'
                                   : activeSmartFacet === 'has_factoids'
                                   ? 'factoid'
@@ -902,7 +909,9 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                             <span>
                               Smart Facet:{' '}
                               {activeSmartFacet === 'synced_lyrics'
-                                ? 'Synced Lyrics (Karaoke Ready)'
+                                ? 'Karaoke Ready — Synced Timed Lyrics'
+                                : activeSmartFacet === 'has_lyrics'
+                                ? 'All Tracks with Retrieved Lyrics'
                                 : activeSmartFacet === 'has_factoids'
                                 ? 'Tracks with Pop-Up Video Factoids'
                                 : activeSmartFacet === 'has_comments'
@@ -913,22 +922,99 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                               ({facetTracks.length})
                             </span>
                           </div>
-                          <button
-                            data-right-filter-pill="true"
-                            onClick={() => setActiveSmartFacet(null)}
-                            style={{
-                              padding: '3px 9px',
-                              borderRadius: 6,
-                              background: 'rgba(255,255,255,0.06)',
-                              border: '1px solid rgba(255,255,255,0.14)',
-                              color: '#cbd5e1',
-                              fontSize: 11,
-                              fontWeight: 700,
-                              cursor: 'pointer',
-                            }}
-                          >
-                            Clear Facet
-                          </button>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            {(activeSmartFacet === 'synced_lyrics' || activeSmartFacet === 'has_lyrics') && (
+                              <>
+                                <button
+                                  data-right-filter-pill="true"
+                                  onClick={() => setActiveSmartFacet('synced_lyrics')}
+                                  style={{
+                                    padding: '3px 9px',
+                                    borderRadius: 6,
+                                    background:
+                                      activeSmartFacet === 'synced_lyrics'
+                                        ? 'rgba(52, 211, 153, 0.2)'
+                                        : 'rgba(255,255,255,0.05)',
+                                    border:
+                                      activeSmartFacet === 'synced_lyrics'
+                                        ? '1px solid #34d399'
+                                        : '1px solid rgba(255,255,255,0.12)',
+                                    color: activeSmartFacet === 'synced_lyrics' ? '#6ee7b7' : '#94a3b8',
+                                    fontSize: 11,
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  Synced LRC Only
+                                </button>
+                                <button
+                                  data-right-filter-pill="true"
+                                  onClick={() => setActiveSmartFacet('has_lyrics')}
+                                  style={{
+                                    padding: '3px 9px',
+                                    borderRadius: 6,
+                                    background:
+                                      activeSmartFacet === 'has_lyrics'
+                                        ? 'rgba(56, 189, 248, 0.2)'
+                                        : 'rgba(255,255,255,0.05)',
+                                    border:
+                                      activeSmartFacet === 'has_lyrics'
+                                        ? '1px solid #38bdf8'
+                                        : '1px solid rgba(255,255,255,0.12)',
+                                    color: activeSmartFacet === 'has_lyrics' ? '#7dd3fc' : '#94a3b8',
+                                    fontSize: 11,
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  All Lyrics
+                                </button>
+                                {facetTracks.length > 0 && (
+                                  <button
+                                    data-right-filter-pill="true"
+                                    onClick={() => {
+                                      const uris = facetTracks.map((t) => t.uri);
+                                      defaultSimpClient.loadQueue(uris, 0, facetTracks);
+                                      window.dispatchEvent(new CustomEvent('simp-engage-karaoke-mode'));
+                                      setView('lock');
+                                    }}
+                                    style={{
+                                      padding: '3px 10px',
+                                      borderRadius: 6,
+                                      background: 'rgba(16, 185, 129, 0.22)',
+                                      border: '1px solid #34d399',
+                                      color: '#6ee7b7',
+                                      fontSize: 11,
+                                      fontWeight: 800,
+                                      cursor: 'pointer',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: 5,
+                                    }}
+                                  >
+                                    <ImpIcon name="play" size={11} color="#34d399" />
+                                    <span>Play All in Karaoke Mode</span>
+                                  </button>
+                                )}
+                              </>
+                            )}
+                            <button
+                              data-right-filter-pill="true"
+                              onClick={() => setActiveSmartFacet(null)}
+                              style={{
+                                padding: '3px 9px',
+                                borderRadius: 6,
+                                background: 'rgba(255,255,255,0.06)',
+                                border: '1px solid rgba(255,255,255,0.14)',
+                                color: '#cbd5e1',
+                                fontSize: 11,
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              Clear Facet
+                            </button>
+                          </div>
                         </div>
                         {facetLoading ? (
                           <div style={{ fontSize: 12, color: '#94a3b8', padding: '10px 4px' }}>

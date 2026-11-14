@@ -24,6 +24,7 @@ mod libcurl_ffi {
     pub const CURLOPT_POSTFIELDSIZE: c_int = 60;
     pub const CURLOPT_NOSIGNAL: c_int = 99;
     pub const CURLOPT_TCP_KEEPALIVE: c_int = 213;
+    pub const CURLOPT_MAXAGE_CONN: c_int = 288;
 
     pub const CURLINFO_RESPONSE_CODE: c_int = 0x200000 + 2;
 
@@ -103,18 +104,21 @@ mod libcurl_ffi {
             .as_ref()
     }
 
-    pub struct PooledCurlHandle(pub *mut c_void);
+    pub struct PooledCurlHandle {
+        pub raw: *mut c_void,
+        pub last_used: std::time::Instant,
+    }
     unsafe impl Send for PooledCurlHandle {}
 
     impl Drop for PooledCurlHandle {
         fn drop(&mut self) {
-            if !self.0.is_null() {
+            if !self.raw.is_null() {
                 if let Some(api) = api() {
                     unsafe {
-                        (api.easy_cleanup)(self.0);
+                        (api.easy_cleanup)(self.raw);
                     }
                 }
-                self.0 = std::ptr::null_mut();
+                self.raw = std::ptr::null_mut();
             }
         }
     }
@@ -125,24 +129,38 @@ mod libcurl_ffi {
         HANDLE_POOL.get_or_init(|| Mutex::new(Vec::with_capacity(8)))
     }
 
-    pub fn checkout_handle(api: &LibCurlApi) -> Option<PooledCurlHandle> {
-        if let Ok(mut guard) = pool().lock() {
-            if let Some(h) = guard.pop() {
-                unsafe {
-                    (api.easy_reset)(h.0);
+    pub fn checkout_handle(api: &LibCurlApi, allow_pooled: bool) -> Option<(PooledCurlHandle, bool)> {
+        if allow_pooled {
+            if let Ok(mut guard) = pool().lock() {
+                while let Some(mut h) = guard.pop() {
+                    if h.last_used.elapsed() <= std::time::Duration::from_secs(75) {
+                        unsafe {
+                            (api.easy_reset)(h.raw);
+                        }
+                        h.last_used = std::time::Instant::now();
+                        return Some((h, true));
+                    }
+                    // Drop expired handle (>75s idle) so stale half-closed CDN sockets are never reused
+                    drop(h);
                 }
-                return Some(h);
             }
         }
         let raw = unsafe { (api.easy_init)() };
         if raw.is_null() {
             None
         } else {
-            Some(PooledCurlHandle(raw))
+            Some((
+                PooledCurlHandle {
+                    raw,
+                    last_used: std::time::Instant::now(),
+                },
+                false,
+            ))
         }
     }
 
-    pub fn checkin_handle(handle: PooledCurlHandle) {
+    pub fn checkin_handle(mut handle: PooledCurlHandle) {
+        handle.last_used = std::time::Instant::now();
         if let Ok(mut guard) = pool().lock() {
             if guard.len() < 8 {
                 guard.push(handle);
@@ -175,13 +193,9 @@ mod libcurl_ffi {
         timeout_secs: u64,
     ) -> Option<Result<Vec<u8>>> {
         let api = api()?;
-        let handle = checkout_handle(api)?;
-        let raw = handle.0;
-
         let c_url = match CString::new(url) {
             Ok(c) => c,
             Err(e) => {
-                checkin_handle(handle);
                 return Some(Err(anyhow!("Invalid URL passed to http_pool: {e}")));
             }
         };
@@ -190,97 +204,120 @@ mod libcurl_ffi {
         )
         .unwrap();
 
-        let mut response_buf: Vec<u8> = Vec::with_capacity(16 * 1024);
-        let mut slist: *mut CurlSlist = std::ptr::null_mut();
+        for attempt in 0..2 {
+            let allow_pooled = attempt == 0;
+            let (handle, was_pooled) = checkout_handle(api, allow_pooled)?;
+            let raw = handle.raw;
 
-        let res = unsafe {
-            for (k, v) in headers {
-                let line = format!("{}: {}", k.trim(), v.trim());
-                if let Ok(c_line) = CString::new(line) {
-                    slist = (api.slist_append)(slist, c_line.as_ptr());
+            let mut response_buf: Vec<u8> = Vec::with_capacity(16 * 1024);
+            let mut slist: *mut CurlSlist = std::ptr::null_mut();
+
+            let (code, status_code) = unsafe {
+                for (k, v) in headers {
+                    let line = format!("{}: {}", k.trim(), v.trim());
+                    if let Ok(c_line) = CString::new(line) {
+                        slist = (api.slist_append)(slist, c_line.as_ptr());
+                    }
                 }
-            }
 
-            (api.easy_setopt)(raw, CURLOPT_URL, c_url.as_ptr());
-            (api.easy_setopt)(raw, CURLOPT_USERAGENT, c_ua.as_ptr());
-            (api.easy_setopt)(raw, CURLOPT_FOLLOWLOCATION, 1 as c_long);
-            (api.easy_setopt)(raw, CURLOPT_NOSIGNAL, 1 as c_long);
-            (api.easy_setopt)(raw, CURLOPT_TCP_KEEPALIVE, 1 as c_long);
-            (api.easy_setopt)(raw, CURLOPT_TIMEOUT, timeout_secs.max(5) as c_long);
-            (api.easy_setopt)(
-                raw,
-                CURLOPT_WRITEFUNCTION,
-                write_vec_callback as unsafe extern "C" fn(*const c_char, usize, usize, *mut c_void) -> usize,
-            );
-            (api.easy_setopt)(
-                raw,
-                CURLOPT_WRITEDATA,
-                (&mut response_buf as *mut Vec<u8>) as *mut c_void,
-            );
+                (api.easy_setopt)(raw, CURLOPT_URL, c_url.as_ptr());
+                (api.easy_setopt)(raw, CURLOPT_USERAGENT, c_ua.as_ptr());
+                (api.easy_setopt)(raw, CURLOPT_FOLLOWLOCATION, 1 as c_long);
+                (api.easy_setopt)(raw, CURLOPT_NOSIGNAL, 1 as c_long);
+                (api.easy_setopt)(raw, CURLOPT_TCP_KEEPALIVE, 1 as c_long);
+                (api.easy_setopt)(raw, CURLOPT_MAXAGE_CONN, 75 as c_long);
+                (api.easy_setopt)(raw, CURLOPT_TIMEOUT, timeout_secs.max(5) as c_long);
+                (api.easy_setopt)(
+                    raw,
+                    CURLOPT_WRITEFUNCTION,
+                    write_vec_callback
+                        as unsafe extern "C" fn(*const c_char, usize, usize, *mut c_void) -> usize,
+                );
+                (api.easy_setopt)(
+                    raw,
+                    CURLOPT_WRITEDATA,
+                    (&mut response_buf as *mut Vec<u8>) as *mut c_void,
+                );
 
-            if !slist.is_null() {
-                (api.easy_setopt)(raw, CURLOPT_HTTPHEADER, slist);
-            }
-
-            let c_range_opt = byte_range.and_then(|(start, end)| {
-                CString::new(format!("{start}-{end}")).ok()
-            });
-            if let Some(ref c_range) = c_range_opt {
-                (api.easy_setopt)(raw, CURLOPT_RANGE, c_range.as_ptr());
-            }
-
-            let c_method_opt = custom_method.and_then(|m| CString::new(m.trim()).ok());
-            if let Some(ref c_method) = c_method_opt {
-                (api.easy_setopt)(raw, CURLOPT_CUSTOMREQUEST, c_method.as_ptr());
-            }
-
-            if let Some(body) = post_body {
-                if c_method_opt.is_none() {
-                    (api.easy_setopt)(raw, CURLOPT_POST, 1 as c_long);
+                if !slist.is_null() {
+                    (api.easy_setopt)(raw, CURLOPT_HTTPHEADER, slist);
                 }
-                (api.easy_setopt)(raw, CURLOPT_POSTFIELDSIZE, body.len() as c_long);
-                (api.easy_setopt)(raw, CURLOPT_POSTFIELDS, body.as_ptr() as *const c_char);
-            }
 
-            let code = (api.easy_perform)(raw);
-            let mut status_code: c_long = 0;
-            if code == 0 {
-                (api.easy_getinfo)(raw, CURLINFO_RESPONSE_CODE, &mut status_code as *mut c_long);
-            }
+                let c_range_opt =
+                    byte_range.and_then(|(start, end)| CString::new(format!("{start}-{end}")).ok());
+                if let Some(ref c_range) = c_range_opt {
+                    (api.easy_setopt)(raw, CURLOPT_RANGE, c_range.as_ptr());
+                }
 
-            if !slist.is_null() {
-                (api.slist_free_all)(slist);
-            }
+                let c_method_opt = custom_method.and_then(|m| CString::new(m.trim()).ok());
+                if let Some(ref c_method) = c_method_opt {
+                    (api.easy_setopt)(raw, CURLOPT_CUSTOMREQUEST, c_method.as_ptr());
+                }
+
+                if let Some(body) = post_body {
+                    if c_method_opt.is_none() {
+                        (api.easy_setopt)(raw, CURLOPT_POST, 1 as c_long);
+                    }
+                    (api.easy_setopt)(raw, CURLOPT_POSTFIELDSIZE, body.len() as c_long);
+                    (api.easy_setopt)(raw, CURLOPT_POSTFIELDS, body.as_ptr() as *const c_char);
+                }
+
+                let code = (api.easy_perform)(raw);
+                let mut status_code: c_long = 0;
+                if code == 0 {
+                    (api.easy_getinfo)(
+                        raw,
+                        CURLINFO_RESPONSE_CODE,
+                        &mut status_code as *mut c_long,
+                    );
+                }
+
+                if !slist.is_null() {
+                    (api.slist_free_all)(slist);
+                }
+
+                (code, status_code)
+            };
 
             if code != 0 {
-                let err_ptr = (api.easy_strerror)(code);
-                let err_msg = if err_ptr.is_null() {
-                    format!("curl error code {code}")
-                } else {
-                    CStr::from_ptr(err_ptr).to_string_lossy().to_string()
+                // Never return a broken handle to the pool; if this was a reused handle (or first attempt),
+                // immediately retry once on a fresh `curl_easy_init()` connection.
+                drop(handle);
+                if attempt == 0 && (was_pooled || post_body.is_none()) {
+                    continue;
+                }
+                let err_msg = unsafe {
+                    let err_ptr = (api.easy_strerror)(code);
+                    if err_ptr.is_null() {
+                        format!("curl error code {code}")
+                    } else {
+                        CStr::from_ptr(err_ptr).to_string_lossy().to_string()
+                    }
                 };
-                Err(anyhow!("HTTP request failed ({url}): {err_msg}"))
-            } else if status_code >= 400 {
-                let snippet = String::from_utf8_lossy(
-                    &response_buf[..response_buf.len().min(240)],
-                )
-                .trim()
-                .to_string();
-                Err(anyhow!(
+                return Some(Err(anyhow!("HTTP request failed ({url}): {err_msg}")));
+            }
+
+            checkin_handle(handle);
+
+            if status_code >= 400 {
+                let snippet =
+                    String::from_utf8_lossy(&response_buf[..response_buf.len().min(240)])
+                        .trim()
+                        .to_string();
+                return Some(Err(anyhow!(
                     "HTTP {status_code} for {url}{}",
                     if snippet.is_empty() {
                         String::new()
                     } else {
                         format!(": {snippet}")
                     }
-                ))
-            } else {
-                Ok(response_buf)
+                )));
             }
-        };
 
-        checkin_handle(handle);
-        Some(res)
+            return Some(Ok(response_buf));
+        }
+
+        None
     }
 
     pub fn pooled_handle_count() -> usize {

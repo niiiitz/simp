@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { ImpIcon } from '../icons/ImpIcon';
 import {
   VISUALIZER_ENGINES,
@@ -28,6 +28,32 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
   onToggleSceneInRotation,
   onSetAllScenesInRotation,
 }) => {
+  useEffect(() => {
+    if (!open) return;
+    const t = window.setTimeout(() => {
+      const target =
+        document.querySelector<HTMLElement>(
+          '[data-viz-drawer-modal="true"] button[data-default-focus="true"]:not([disabled])',
+        ) ||
+        document.querySelector<HTMLElement>(
+          '[data-viz-drawer-modal="true"] button:not([disabled])',
+        );
+      if (!target) return;
+      document
+        .querySelectorAll<HTMLElement>('[data-simp-active-focus="true"], .simp-gpfocus')
+        .forEach((node) => {
+          if (node !== target) {
+            node.removeAttribute('data-simp-active-focus');
+            node.classList.remove('simp-gpfocus');
+          }
+        });
+      target.setAttribute('data-simp-active-focus', 'true');
+      target.classList.add('simp-gpfocus');
+      target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }, 25);
+    return () => window.clearTimeout(t);
+  }, [open]);
+
   if (!open) return null;
 
   return (
@@ -50,8 +76,8 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%',
-          maxWidth: 620,
-          maxHeight: '86vh',
+          maxWidth: 650,
+          maxHeight: '88vh',
           background: '#0a0b10',
           border: '2px solid var(--imp-accent, #2aa3c4)',
           borderRadius: 18,
@@ -59,7 +85,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
           boxSizing: 'border-box',
           display: 'flex',
           flexDirection: 'column',
-          gap: 14,
+          gap: 12,
           boxShadow: '0 20px 50px rgba(0, 0, 0, 0.92)',
           color: '#f1f5f9',
         }}
@@ -80,12 +106,13 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                 Visualizer Scene Queue & Rotation
               </div>
               <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
-                Toggle scenes on the left for Cycle/Shuffle, or click a scene to lock onto it
+                Lock a single scene or toggle which scenes cycle/shuffle on track change
               </div>
             </div>
           </div>
           <button
             type="button"
+            data-viz-drawer-close="true"
             onClick={onClose}
             style={{
               minHeight: 38,
@@ -120,7 +147,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
             data-default-focus={vizMode === 'cycle' ? 'true' : undefined}
             onClick={() => onSelectMode('cycle')}
             style={{
-              minHeight: 42,
+              minHeight: 40,
               padding: '8px 10px',
               borderRadius: 10,
               background: vizMode === 'cycle' ? 'rgba(42, 163, 196, 0.22)' : '#12141e',
@@ -147,7 +174,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
             data-default-focus={vizMode === 'shuffle' ? 'true' : undefined}
             onClick={() => onSelectMode('shuffle')}
             style={{
-              minHeight: 42,
+              minHeight: 40,
               padding: '8px 10px',
               borderRadius: 10,
               background: vizMode === 'shuffle' ? 'rgba(42, 163, 196, 0.22)' : '#12141e',
@@ -178,7 +205,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
             data-default-focus={vizMode === 'off' ? 'true' : undefined}
             onClick={() => onSelectMode('off')}
             style={{
-              minHeight: 42,
+              minHeight: 40,
               padding: '8px 10px',
               borderRadius: 10,
               background: vizMode === 'off' ? 'rgba(244, 63, 94, 0.2)' : '#12141e',
@@ -208,19 +235,20 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
             padding: '0 2px',
             fontSize: 11,
             color: '#94a3b8',
+            flexWrap: 'wrap',
           }}
         >
           <span>
-            <strong>Left toggle</strong> = include in rotation • <strong>Scene row</strong> = lock now
+            <strong>Left toggle</strong> = rotation • <strong>Row</strong> = lock scene
           </span>
-          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+          <div style={{ display: 'flex', gap: 5, flexShrink: 0, flexWrap: 'wrap' }}>
             <button
               type="button"
               onClick={() =>
-                onSetAllScenesInRotation(['glyph', 'avs', 'demoscene', 'vertigo', 'trapper'])
+                onSetAllScenesInRotation(['glyph', 'avs_v2', 'demoscene', 'vertigo', 'trapper'])
               }
               style={{
-                padding: '4px 9px',
+                padding: '4px 8px',
                 borderRadius: 7,
                 background: '#161926',
                 border: '1px solid #2a2f45',
@@ -236,7 +264,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
               type="button"
               onClick={() => onSetAllScenesInRotation([...VISUALIZER_ENGINES])}
               style={{
-                padding: '4px 9px',
+                padding: '4px 8px',
                 borderRadius: 7,
                 background: '#161926',
                 border: '1px solid #2a2f45',
@@ -246,12 +274,12 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                 cursor: 'pointer',
               }}
             >
-              All (12)
+              All ({VISUALIZER_ENGINES.length})
             </button>
           </div>
         </div>
 
-        {/* Scrollable 12-Scene Roster */}
+        {/* Scrollable Scene Roster */}
         <div
           style={{
             overflowY: 'auto',
@@ -359,15 +387,9 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                           padding: '1px 6px',
                           borderRadius: 5,
                           flexShrink: 0,
-                          background:
-                            scene.wasmSceneId !== null
-                              ? 'rgba(16, 185, 129, 0.18)'
-                              : 'rgba(56, 189, 248, 0.14)',
-                          color: scene.wasmSceneId !== null ? '#34d399' : '#7dd3fc',
-                          border:
-                            scene.wasmSceneId !== null
-                              ? '1px solid rgba(52, 211, 153, 0.35)'
-                              : '1px solid rgba(56, 189, 248, 0.28)',
+                          background: 'rgba(56, 189, 248, 0.14)',
+                          color: '#7dd3fc',
+                          border: '1px solid rgba(56, 189, 248, 0.28)',
                         }}
                       >
                         {scene.eraBadge}
@@ -382,7 +404,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                             flexShrink: 0,
                           }}
                         >
-                          ● LIVE
+                          LIVE
                         </span>
                       )}
                     </div>

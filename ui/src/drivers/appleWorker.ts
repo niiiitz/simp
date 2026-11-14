@@ -13,10 +13,13 @@ import {
  */
 export function useAppleMusicWorker(): void {
   const mkRef = useRef<any>(null);
+  const configuringPromiseRef = useRef<Promise<any | null> | null>(null);
   const listenersBoundRef = useRef(false);
   const loadSeqRef = useRef(0);
   const isLoadingRef = useRef(false);
   const lastEndedSeqRef = useRef(-1);
+  const lastLoadedUriRef = useRef<string | null>(null);
+  const lastLoadedPosMsRef = useRef<number>(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -103,38 +106,52 @@ export function useAppleMusicWorker(): void {
         window.location.pathname.startsWith('/apple-worker'));
 
     const ensureInstance = async (fromCommand = false): Promise<any | null> => {
-      const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
-      if (!cfg.configured || !cfg.developer_token || cancelled) return null;
-
-      if (cfg.headless_worker_active && !isDedicatedWorker) {
-        if (mkRef.current) {
-          try {
-            await mkRef.current.stop();
-          } catch {
-            // ignore
-          }
-          mkRef.current = null;
-        }
-        return null;
-      }
-
       if (mkRef.current) return mkRef.current;
-
-      const hasWidevine = await checkWidevineDrm();
-      if (!hasWidevine && !isDedicatedWorker && cfg.headless_worker_active) {
-        console.info(
-          '[SIMP AppleMusicDriver] Browser lacks Widevine CDM (steamwebhelper); delegating audio to headless Widevine worker.'
-        );
-        return null;
+      if (configuringPromiseRef.current) {
+        return configuringPromiseRef.current;
       }
 
-      const mk = await ensureMusicKitConfigured(cfg.developer_token, cfg.music_user_token);
-      mkRef.current = mk;
-      bindMusicKitEvents(mk);
-      if (!fromCommand) {
-        defaultSimpClient.reportAppleWorkerEvent('worker_ready', 0, null, null);
-      }
-      return mk;
+      const initPromise = (async () => {
+        try {
+          const cfg = await defaultSimpClient.getAppleMusicAuthConfig();
+          if (!cfg.configured || !cfg.developer_token || cancelled) return null;
+
+          if (cfg.headless_worker_active && !isDedicatedWorker) {
+            if (mkRef.current) {
+              try {
+                await mkRef.current.stop();
+              } catch {
+                // ignore
+              }
+              mkRef.current = null;
+            }
+            return null;
+          }
+
+          if (mkRef.current) return mkRef.current;
+
+          const hasWidevine = await checkWidevineDrm();
+          if (!hasWidevine && !isDedicatedWorker && cfg.headless_worker_active) {
+            console.info(
+              '[SIMP AppleMusicDriver] Browser lacks Widevine CDM (steamwebhelper); delegating audio to headless Widevine worker.'
+            );
+            return null;
+          }
+
+          const mk = await ensureMusicKitConfigured(cfg.developer_token, cfg.music_user_token);
+          mkRef.current = mk;
+          bindMusicKitEvents(mk);
+          if (!fromCommand) {
+            defaultSimpClient.reportAppleWorkerEvent('worker_ready', 0, null, null);
+          }
+          return mk;
+        } finally {
+          configuringPromiseRef.current = null;
+        }
+      })();
+
+      configuringPromiseRef.current = initPromise;
+      return initPromise;
     };
 
     defaultSimpClient
@@ -179,6 +196,8 @@ export function useAppleMusicWorker(): void {
         switch (cmd.action) {
           case 'load_and_play': {
             if (!cmd.uri) return;
+            lastLoadedUriRef.current = cmd.uri;
+            lastLoadedPosMsRef.current = cmd.position_ms || 0;
             const mySeq = ++loadSeqRef.current;
             isLoadingRef.current = true;
 
@@ -356,6 +375,25 @@ export function useAppleMusicWorker(): void {
             break;
           }
           case 'play': {
+            if (!mk.nowPlayingItem && (cmd.uri || lastLoadedUriRef.current)) {
+              const fallbackUri = cmd.uri || lastLoadedUriRef.current!;
+              const fallbackPos = cmd.position_ms ?? lastLoadedPosMsRef.current ?? 0;
+              let rawId = fallbackUri
+                .replace(/^applemusic:(song|track):/, '')
+                .replace(/^applemusic:/, '');
+              if (rawId.startsWith('i.')) {
+                const resolved = await resolveReplacementCatalogSongId(rawId);
+                if (resolved) rawId = resolved;
+              }
+              await mk.setQueue(
+                rawId.startsWith('i.')
+                  ? { librarySong: rawId, startPlaying: true }
+                  : { song: rawId, startPlaying: true }
+              );
+              if (fallbackPos > 0) {
+                await mk.seekToTime(fallbackPos / 1000).catch(() => {});
+              }
+            }
             await mk.play();
             const audioEl = document.getElementById('apple-music-player') as HTMLAudioElement | null;
             if (audioEl && audioEl.paused) {

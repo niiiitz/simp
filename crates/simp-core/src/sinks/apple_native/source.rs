@@ -923,161 +923,173 @@ pub fn spawn_progressive_apple_music_rodio_source(
                 return;
             }
 
-            // Check if this track was already prefetched while the previous track was playing!
-            let prefetched = if start_pos_ms == 0 {
-                take_prefetched_track(&song_uri)
-            } else {
-                None
-            };
+            // Check if this track was already prefetched at boot/idle-wake or while the previous track was playing!
+            let prefetched = take_prefetched_track(&song_uri);
 
             // Fast-path (`0ms` network + `0ms` DRM!): If `prefetch_apple_music_track` already negotiated
-            // the Widevine license and pre-decoded Segment #0 into PCM, start audio immediately!
+            // the Widevine license and pre-decoded Segment #0 into PCM (and `start_pos_ms` falls within Segment #0),
+            // start audio immediately! Otherwise, if `start_pos_ms` is further into the track, still reuse
+            // the prefetched `manifest`, `playlist`, `init_bytes`, `tenc`, and licensed CDM session below!
             if let Some(pf) = prefetched {
-                if let (Some(dec_seg0), Some(initial_pcm)) =
-                    (pf.decrypted_first_segment, pf.decoded_initial_pcm)
-                {
-                    let total_dur_secs: f64 =
-                        pf.playlist.segments.iter().map(|s| s.duration_secs).sum();
-                    let is_already_complete = pf.playlist.segments.len() <= 1;
-                    let mut decoded_pcm_len = initial_pcm.len();
-                    if let Ok(mut g) = state.lock() {
-                        g.total_expected_samples =
-                            ((total_dur_secs * 44_100.0).round() as usize) * 2;
-                        g.samples = initial_pcm;
-                        if is_already_complete {
-                            g.is_complete = true;
-                        }
-                    }
-                    if active_epoch.load(Ordering::SeqCst) == epoch {
-                        if let Ok(mut tr) = tracker.lock() {
-                            tr.reset();
-                            tr.seek(start_pos_ms);
-                            if !user_paused_flag.load(Ordering::SeqCst) {
-                                tr.play();
+                let target_initial_sample =
+                    (((start_pos_ms as f64 / 1000.0) * 44_100.0).round() as usize) * 2;
+                let can_use_seg0_fast_path = start_pos_ms == 0
+                    || pf
+                        .decoded_initial_pcm
+                        .as_ref()
+                        .map(|pcm| pcm.len() > target_initial_sample)
+                        .unwrap_or(false);
+                if can_use_seg0_fast_path {
+                    if let (Some(dec_seg0), Some(initial_pcm)) =
+                        (pf.decrypted_first_segment, pf.decoded_initial_pcm)
+                    {
+                        let total_dur_secs: f64 =
+                            pf.playlist.segments.iter().map(|s| s.duration_secs).sum();
+                        let is_already_complete = pf.playlist.segments.len() <= 1;
+                        let mut decoded_pcm_len = initial_pcm.len();
+                        if let Ok(mut g) = state.lock() {
+                            g.total_expected_samples =
+                                ((total_dur_secs * 44_100.0).round() as usize) * 2;
+                            g.samples = initial_pcm;
+                            if is_already_complete {
+                                g.is_complete = true;
                             }
                         }
-                        if let Some(next_uri) = next_track_uri {
-                            prefetch_apple_music_track(settings.clone(), next_uri);
-                        }
-                    }
-                    if is_already_complete {
-                        return;
-                    }
-
-                    let clear_init = rewrite_init_segment_enca_to_clear(&pf.init_bytes);
-                    let mut all_decrypted_segs =
-                        Vec::with_capacity(pf.playlist.segments.len());
-                    all_decrypted_segs.push(dec_seg0);
-
-                    let mut idx = 1usize;
-                    while idx < pf.playlist.segments.len() {
-                        if active_epoch.load(Ordering::SeqCst) != epoch {
-                            mark_aborted(&state);
-                            return;
-                        }
-                        let requested_sample =
-                            state.lock().map(|g| g.requested_seek_sample).unwrap_or(0);
-                        let mut step = if idx == 1 { 3usize } else { 5usize };
-                        if requested_sample > decoded_pcm_len {
-                            let missing_secs =
-                                ((requested_sample - decoded_pcm_len) as f64) / (44_100.0 * 2.0);
-                            let mut accum_secs = 0.0;
-                            let mut needed_segs = 0usize;
-                            for seg in &pf.playlist.segments[idx..] {
-                                accum_secs += seg.duration_secs.max(5.0);
-                                needed_segs += 1;
-                                if accum_secs >= missing_secs + 6.0 {
-                                    break;
+                        if active_epoch.load(Ordering::SeqCst) == epoch {
+                            if let Ok(mut tr) = tracker.lock() {
+                                tr.reset();
+                                tr.seek(start_pos_ms);
+                                if !user_paused_flag.load(Ordering::SeqCst) {
+                                    tr.play();
                                 }
                             }
-                            step = step.max(needed_segs);
+                            if let Some(next_uri) = next_track_uri {
+                                prefetch_apple_music_track(settings.clone(), next_uri);
+                            }
                         }
-                        let end_idx = (idx + step).min(pf.playlist.segments.len());
-                        let Ok(batch_segs) =
-                            download_hls_segment_slice(&pf.playlist.segments[idx..end_idx])
-                        else {
-                            break;
-                        };
-                        if active_epoch.load(Ordering::SeqCst) != epoch {
-                            mark_aborted(&state);
+                        if is_already_complete {
                             return;
                         }
-                        let dec_batch = match decrypt_segments_for_epoch(
-                            epoch,
-                            &pf.manifest.song_id,
-                            batch_segs.clone(),
-                            pf.tenc.clone(),
-                        ) {
-                            Ok(s) => s,
-                            Err(_) => {
-                                // Re-negotiate license if the prefetched CDM session was evicted
-                                let pssh_opt = if !pf.playlist.widevine_pssh_bytes.is_empty() {
-                                    Some(pf.playlist.widevine_pssh_bytes.clone())
-                                } else {
-                                    find_widevine_pssh_in_mp4(&pf.init_bytes)
-                                };
-                                let lic_url = pf.manifest.key_server_url.clone().unwrap_or_else(|| {
-                                    "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense"
-                                        .to_string()
-                                });
-                                if let Some(pssh_bytes) = pssh_opt {
-                                    if negotiate_apple_license_for_epoch(
-                                        &cdm_lib.library_path,
-                                        epoch,
-                                        &active_epoch,
-                                        &lic_url,
-                                        &dev_token,
-                                        &user_token,
-                                        &pf.manifest.song_id,
-                                        &pf.playlist,
-                                        &pssh_bytes,
-                                    )
-                                    .is_ok()
-                                    {
-                                        if let Ok(s2) = decrypt_segments_for_epoch(
+
+                        let clear_init = rewrite_init_segment_enca_to_clear(&pf.init_bytes);
+                        let mut all_decrypted_segs =
+                            Vec::with_capacity(pf.playlist.segments.len());
+                        all_decrypted_segs.push(dec_seg0);
+
+                        let mut idx = 1usize;
+                        while idx < pf.playlist.segments.len() {
+                            if active_epoch.load(Ordering::SeqCst) != epoch {
+                                mark_aborted(&state);
+                                return;
+                            }
+                            let requested_sample =
+                                state.lock().map(|g| g.requested_seek_sample).unwrap_or(0);
+                            let mut step = if idx == 1 { 3usize } else { 5usize };
+                            if requested_sample > decoded_pcm_len {
+                                let missing_secs = ((requested_sample - decoded_pcm_len) as f64)
+                                    / (44_100.0 * 2.0);
+                                let mut accum_secs = 0.0;
+                                let mut needed_segs = 0usize;
+                                for seg in &pf.playlist.segments[idx..] {
+                                    accum_secs += seg.duration_secs.max(5.0);
+                                    needed_segs += 1;
+                                    if accum_secs >= missing_secs + 6.0 {
+                                        break;
+                                    }
+                                }
+                                step = step.max(needed_segs);
+                            }
+                            let end_idx = (idx + step).min(pf.playlist.segments.len());
+                            let Ok(batch_segs) =
+                                download_hls_segment_slice(&pf.playlist.segments[idx..end_idx])
+                            else {
+                                break;
+                            };
+                            if active_epoch.load(Ordering::SeqCst) != epoch {
+                                mark_aborted(&state);
+                                return;
+                            }
+                            let dec_batch = match decrypt_segments_for_epoch(
+                                epoch,
+                                &pf.manifest.song_id,
+                                batch_segs.clone(),
+                                pf.tenc.clone(),
+                            ) {
+                                Ok(s) => s,
+                                Err(_) => {
+                                    // Re-negotiate license if the prefetched CDM session was evicted
+                                    let pssh_opt = if !pf.playlist.widevine_pssh_bytes.is_empty() {
+                                        Some(pf.playlist.widevine_pssh_bytes.clone())
+                                    } else {
+                                        find_widevine_pssh_in_mp4(&pf.init_bytes)
+                                    };
+                                    let lic_url =
+                                        pf.manifest.key_server_url.clone().unwrap_or_else(|| {
+                                            "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense"
+                                                .to_string()
+                                        });
+                                    if let Some(pssh_bytes) = pssh_opt {
+                                        if negotiate_apple_license_for_epoch(
+                                            &cdm_lib.library_path,
                                             epoch,
+                                            &active_epoch,
+                                            &lic_url,
+                                            &dev_token,
+                                            &user_token,
                                             &pf.manifest.song_id,
-                                            batch_segs,
-                                            pf.tenc.clone(),
-                                        ) {
-                                            s2
+                                            &pf.playlist,
+                                            &pssh_bytes,
+                                        )
+                                        .is_ok()
+                                        {
+                                            if let Ok(s2) = decrypt_segments_for_epoch(
+                                                epoch,
+                                                &pf.manifest.song_id,
+                                                batch_segs,
+                                                pf.tenc.clone(),
+                                            ) {
+                                                s2
+                                            } else {
+                                                break;
+                                            }
                                         } else {
                                             break;
                                         }
                                     } else {
                                         break;
                                     }
-                                } else {
-                                    break;
+                                }
+                            };
+                            all_decrypted_segs.extend(dec_batch);
+                            if let Ok((full_pcm, _, _)) = decode_clear_init_and_segments_to_pcm(
+                                &clear_init,
+                                &all_decrypted_segs,
+                            ) {
+                                if full_pcm.len() > decoded_pcm_len {
+                                    if let Ok(mut g) = state.lock() {
+                                        g.samples
+                                            .extend_from_slice(&full_pcm[decoded_pcm_len..]);
+                                    }
+                                    decoded_pcm_len = full_pcm.len();
                                 }
                             }
-                        };
-                        all_decrypted_segs.extend(dec_batch);
-                        if let Ok((full_pcm, _, _)) = decode_clear_init_and_segments_to_pcm(
-                            &clear_init,
-                            &all_decrypted_segs,
-                        ) {
-                            if full_pcm.len() > decoded_pcm_len {
-                                if let Ok(mut g) = state.lock() {
-                                    g.samples
-                                        .extend_from_slice(&full_pcm[decoded_pcm_len..]);
-                                }
-                                decoded_pcm_len = full_pcm.len();
-                            }
+                            idx = end_idx;
                         }
-                        idx = end_idx;
+                        if let Ok(mut g) = state.lock() {
+                            g.is_complete = true;
+                        }
+                        return;
                     }
-                    if let Ok(mut g) = state.lock() {
-                        g.is_complete = true;
-                    }
-                    return;
                 }
 
-                // Partial prefetch fallback (manifest + playlist + init + seg0 downloaded, license not yet negotiated)
+                // Partial prefetch or non-zero seek fallback: reuse prefetched manifest + playlist + CDM session
                 let manifest = pf.manifest;
                 let mut playlist = pf.playlist;
-                let mut preloaded_init_and_seg0 =
-                    Some(((pf.init_bytes, pf.tenc), vec![pf.first_segment]));
+                let mut preloaded_init_and_seg0 = if start_pos_ms == 0 {
+                    Some(((pf.init_bytes, pf.tenc), vec![pf.first_segment]))
+                } else {
+                    None
+                };
                 stream_cold_or_partial_track(
                     settings,
                     song_uri,
@@ -1098,7 +1110,10 @@ pub fn spawn_progressive_apple_music_rodio_source(
                 return;
             }
 
-            let manifest = match fetch_web_playback_manifest(&settings, &song_uri) {
+            let manifest = match fetch_web_playback_manifest(&settings, &song_uri).or_else(|_| {
+                std::thread::sleep(Duration::from_millis(120));
+                fetch_web_playback_manifest(&settings, &song_uri)
+            }) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::warn!("Apple webPlayback manifest failed for {song_uri}: {e}");
