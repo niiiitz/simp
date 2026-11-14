@@ -913,7 +913,7 @@ export const LibraryTracklistRightPane: React.FC<LibraryTracklistRightPaneProps>
                   }}
                   onClick={() => {
                     if (t.source === 'local_video' || t.uri.startsWith('video://local/')) {
-                      openLocalVideoFile(t);
+                      openLocalVideoFile(t, displayedBrowserTracks, currentCtxKey);
                       return;
                     }
                     if (

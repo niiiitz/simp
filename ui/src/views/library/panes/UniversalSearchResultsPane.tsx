@@ -252,11 +252,13 @@ export const UniversalSearchResultsPane: React.FC<UniversalSearchResultsPaneProp
                                   {filteredLocalSearchTracks.map((s) =>
                                     renderSingleSongRow(
                                       s,
-                                      filteredLocalSearchTracks.filter(
-                                        (tr) =>
-                                          tr.source !== 'local_video' &&
-                                          !tr.uri.startsWith('video://local/')
-                                      ),
+                                      isUiVideoTrack(s)
+                                        ? filteredLocalSearchTracks.filter((tr) =>
+                                            isUiVideoTrack(tr)
+                                          )
+                                        : filteredLocalSearchTracks.filter(
+                                            (tr) => !isUiVideoTrack(tr)
+                                          ),
                                       'local_search'
                                     )
                                   )}

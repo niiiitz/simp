@@ -1664,17 +1664,33 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   };
 
   const openLocalVideoFile = useCallback(
-    (t: TrackMetadata) => {
-      const videoUri = t.uri.startsWith('video://local/')
-        ? t.uri
-        : `video://local/${encodeURIComponent(t.uri)}`;
-      const meta: TrackMetadata = {
-        ...t,
-        uri: videoUri,
-        source: 'local_video',
+    (t: TrackMetadata, peerTracks?: TrackMetadata[], ctxId?: string) => {
+      const normalizeVideoTrack = (tr: TrackMetadata): TrackMetadata => {
+        if (tr.source === 'local_video' || tr.uri.startsWith('video://local/')) {
+          const vUri = tr.uri.startsWith('video://local/')
+            ? tr.uri
+            : `video://local/${encodeURIComponent(tr.uri)}`;
+          return {
+            ...tr,
+            uri: vUri,
+            source: 'local_video',
+          };
+        }
+        return tr;
       };
-      setPlayingContextId(`local_video:${videoUri}`);
-      defaultSimpClient.loadQueue([videoUri], 0, [meta]);
+      const meta = normalizeVideoTrack({ ...t, source: 'local_video' });
+      const rawPeers = peerTracks && peerTracks.length > 0 ? peerTracks : [meta];
+      const normalizedPeers = rawPeers.map(normalizeVideoTrack);
+      const startIndex = Math.max(
+        0,
+        normalizedPeers.findIndex((p) => p.uri === meta.uri || p.uri === t.uri)
+      );
+      setPlayingContextId(ctxId || `local_video:${meta.uri}`);
+      defaultSimpClient.loadQueue(
+        normalizedPeers.map((p) => p.uri),
+        startIndex,
+        normalizedPeers
+      );
       setView('lock');
     },
     [setPlayingContextId, setView]

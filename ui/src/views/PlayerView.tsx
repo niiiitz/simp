@@ -1491,6 +1491,23 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         };
       });
     }
+    if (snap?.queue && snap.queue.length === 1) {
+      const qt = snap.queue[0];
+      return [
+        {
+          key: `0:${qt.uri}`,
+          index: 0,
+          title: qt.title || 'Track 1',
+          subtitle: qt.artists?.join(', ') || qt.album || '',
+          durationMs: qt.duration_ms || 0,
+          badgeLabel: '#1',
+          isCurrent: true,
+          onSelect: () => {
+            setPlayerActionsOpen(false);
+          },
+        },
+      ];
+    }
     return [];
   }, [snap?.queue, snap?.queue_index, isVideoTrack, iaDetail, dvdTitles, opticalDisc, track?.uri]);
 
@@ -1873,6 +1890,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         >
           <div
             ref={artBoxRef}
+            data-video-enter-theatre={isVideoTrack && !videoTheatreExpanded ? 'true' : undefined}
             title={!isVideoTrack && track ? 'Click to open collection in Library' : undefined}
             onClick={() => {
               if (isVideoTrack && !videoTheatreExpanded) {

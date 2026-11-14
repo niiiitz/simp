@@ -588,9 +588,7 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    {mountTracks.some(
-                      (t) => t.source !== 'local_video' && !t.uri.startsWith('video://local/')
-                    ) && (
+                    {mountTracks.length > 0 && (
                       <>
                         <button
                           data-right-tile="true"
@@ -599,11 +597,13 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                               (t) =>
                                 t.source !== 'local_video' && !t.uri.startsWith('video://local/')
                             );
+                            const playableMountTracks =
+                              audioOnly.length > 0 ? audioOnly : mountTracks;
                             setPlayingContextId(`mount:${activeMountPlaceObj.mount_root}`);
                             defaultSimpClient.loadQueue(
-                              audioOnly.map((t) => t.uri),
+                              playableMountTracks.map((t) => t.uri),
                               0,
-                              audioOnly
+                              playableMountTracks
                             );
                             setView('lock');
                           }}
@@ -620,12 +620,15 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                           }}
                         >
                           ▶ Play All (
-                          {
-                            mountTracks.filter(
-                              (t) =>
-                                t.source !== 'local_video' && !t.uri.startsWith('video://local/')
-                            ).length
-                          }
+                          {mountTracks.some(
+                            (t) =>
+                              t.source !== 'local_video' && !t.uri.startsWith('video://local/')
+                          )
+                            ? mountTracks.filter(
+                                (t) =>
+                                  t.source !== 'local_video' && !t.uri.startsWith('video://local/')
+                              ).length
+                            : mountTracks.length}
                           )
                         </button>
                         <button
@@ -634,10 +637,11 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                               (t) =>
                                 t.source !== 'local_video' && !t.uri.startsWith('video://local/')
                             );
+                            const targetTracks = audioOnly.length > 0 ? audioOnly : mountTracks;
                             handleAddTracksToPlaylist(
-                              audioOnly.map((t) => t.uri),
-                              `all ${audioOnly.length} tracks from ${activeMountPlaceObj.label}`,
-                              audioOnly
+                              targetTracks.map((t) => t.uri),
+                              `all ${targetTracks.length} tracks from ${activeMountPlaceObj.label}`,
+                              targetTracks
                             );
                           }}
                           style={{
@@ -689,11 +693,14 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                       )
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      {mountTracks
-                        .filter(
+                      {(() => {
+                        const mountVideos = mountTracks.filter(
                           (t) => t.source === 'local_video' || t.uri.startsWith('video://local/')
-                        )
-                        .map((v) => renderSingleSongRow(v, [], 'mount_video'))}
+                        );
+                        return mountVideos.map((v) =>
+                          renderSingleSongRow(v, mountVideos, 'mount_video')
+                        );
+                      })()}
                     </div>
                   </>
                 )}
@@ -1109,7 +1116,9 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                             ).map((rTrack) =>
                               renderSingleSongRow(
                                 rTrack,
-                                filteredRecentlyPlayed.filter((tr) => !isUiVideoTrack(tr)),
+                                isUiVideoTrack(rTrack)
+                                  ? filteredRecentlyPlayed.filter((tr) => isUiVideoTrack(tr))
+                                  : filteredRecentlyPlayed.filter((tr) => !isUiVideoTrack(tr)),
                                 'recent_played'
                               )
                             )}
@@ -1177,7 +1186,7 @@ export const LibraryBrowseRightPane: React.FC<LibraryBrowseRightPaneProps> = ({
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                             {localVideos.map((v) =>
-                              renderSingleSongRow(v, [], 'local_video_hub')
+                              renderSingleSongRow(v, localVideos, 'local_video_hub')
                             )}
                           </div>
                         </>

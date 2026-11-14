@@ -1211,6 +1211,13 @@ export function useGamepadNavigation({
               videoExitTheatre.click();
               break;
             }
+            const videoEnterTheatre = document.querySelector<HTMLElement>(
+              '[data-video-enter-theatre="true"]:not([disabled])'
+            );
+            if (videoEnterTheatre) {
+              videoEnterTheatre.click();
+              break;
+            }
             if (document.fullscreenElement) {
               document.exitFullscreen().catch(() => {});
               break;

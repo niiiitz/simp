@@ -12,7 +12,11 @@ export interface SingleSongRowProps {
   snap: SimpStateSnapshot | null;
   favoritedUris: string[];
   scLikedTracks: TrackMetadata[];
-  openLocalVideoFile: (videoTrack: TrackMetadata) => void;
+  openLocalVideoFile: (
+    videoTrack: TrackMetadata,
+    peerTracks?: TrackMetadata[],
+    ctxId?: string
+  ) => void;
   showToast: (msg: string) => void;
   setPlayingContextId: (ctxId: string) => void;
   setView: (view: 'lock' | 'browser') => void;
@@ -100,7 +104,7 @@ export const SingleSongRow: React.FC<SingleSongRowProps> = ({
         data-single-song-play="true"
         onClick={() => {
           if (s.source === 'local_video' || s.uri.startsWith('video://local/')) {
-            openLocalVideoFile(s);
+            openLocalVideoFile(s, peerList, `${ctxPrefix}:${s.uri}`);
             return;
           }
           if (isScPreview) {
