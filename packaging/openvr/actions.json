@@ -1,0 +1,102 @@
+{
+  "default_bindings": [
+    {
+      "controller_type": "valve_roy",
+      "binding_url": "bindings_valve_roy.json"
+    },
+    {
+      "controller_type": "knuckles",
+      "binding_url": "bindings_knuckles.json"
+    },
+    {
+      "controller_type": "oculus_touch",
+      "binding_url": "bindings_oculus_touch.json"
+    }
+  ],
+  "actions": [
+    {
+      "name": "/actions/player/in/Navigate2D",
+      "type": "vector2",
+      "requirement": "mandatory"
+    },
+    {
+      "name": "/actions/player/in/VolumeScrub",
+      "type": "vector2",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/player/in/Activate",
+      "type": "boolean",
+      "requirement": "mandatory"
+    },
+    {
+      "name": "/actions/player/in/BackCancel",
+      "type": "boolean",
+      "requirement": "mandatory"
+    },
+    {
+      "name": "/actions/player/in/ShuffleViz",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/player/in/QueueLyrics",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/player/in/PrevTab",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/player/in/NextTab",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/player/in/SeekBackward",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/player/in/SeekForward",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/player/in/ContextMenu",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/player/in/OpenSettings",
+      "type": "boolean",
+      "requirement": "optional"
+    }
+  ],
+  "action_sets": [
+    {
+      "name": "/actions/player",
+      "usage": "leftright"
+    }
+  ],
+  "localization": [
+    {
+      "language_tag": "en_US",
+      "/actions/player": "IMP Console & Spatial VR Controls",
+      "/actions/player/in/Navigate2D": "2D Spatial Focus Navigation (Thumbstick)",
+      "/actions/player/in/VolumeScrub": "Volume Adjust (Right Thumbstick)",
+      "/actions/player/in/Activate": "Select / Play / Pause (A / Trigger)",
+      "/actions/player/in/BackCancel": "Back / Toggle Theatre Stage (B)",
+      "/actions/player/in/ShuffleViz": "Shuffle / Cycle Visualizer (X)",
+      "/actions/player/in/QueueLyrics": "Pin / Queue & Synced Lyrics (Y)",
+      "/actions/player/in/PrevTab": "Switch to Player View (Left Grip / L1)",
+      "/actions/player/in/NextTab": "Switch to Library View (Right Grip / R1)",
+      "/actions/player/in/SeekBackward": "Seek Backward -10s (Left Trigger / L2)",
+      "/actions/player/in/SeekForward": "Seek Forward +10s (Right Trigger / R2)",
+      "/actions/player/in/ContextMenu": "SELECT Menu & Visualizer Drawer",
+      "/actions/player/in/OpenSettings": "START Menu & Settings"
+    }
+  ]
+}

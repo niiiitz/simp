@@ -261,19 +261,55 @@ if command -v update-desktop-database >/dev/null 2>&1; then
 fi
 echo "✓ Installed launcher:   ${DESKTOP_DEST}"
 
-# 5b. Install OpenVR / SteamVR Application Manifest (`org.simp.player.vrmanifest`) for Steam Frame & VR
+# 5b. Install OpenVR / SteamVR Application Manifest (`org.simp.player.vrmanifest`) + Action Bindings for Steam Frame & VR
 OPENVR_DEST_DIR="${INSTALL_ROOT}/openvr"
 mkdir -p "${OPENVR_DEST_DIR}"
 if [[ -f "${PRIMARY_ICON}" ]]; then
   cp "${PRIMARY_ICON}" "${OPENVR_DEST_DIR}/simp-icon-256.png"
   cp "${PRIMARY_ICON}" "${OPENVR_DEST_DIR}/simp-icon-dark.png"
 fi
+VRMANIFEST_DIR="$(dirname "${VRMANIFEST_SRC}")"
+for vr_json in "${VRMANIFEST_DIR}"/*.json; do
+  if [[ -f "${vr_json}" ]]; then
+    cp "${vr_json}" "${OPENVR_DEST_DIR}/"
+    chmod 0644 "${OPENVR_DEST_DIR}/$(basename "${vr_json}")"
+  fi
+done
 if [[ -f "${VRMANIFEST_SRC}" ]]; then
   sed \
     -e "s|__SIMP_BIN__|${BIN_DEST}/simp|g" \
+    -e "s|__SIMP_ACTIONS__|${OPENVR_DEST_DIR}/actions.json|g" \
     -e "s|__SIMP_ICON__|${OPENVR_DEST_DIR}/simp-icon-256.png|g" \
     "${VRMANIFEST_SRC}" > "${OPENVR_DEST_DIR}/org.simp.player.vrmanifest"
   chmod 0644 "${OPENVR_DEST_DIR}/org.simp.player.vrmanifest"
+  # Register SIMP's `.vrmanifest` in SteamVR's `appconfig.json` when present so SteamVR loads VR controller bindings automatically
+  for steam_cfg_dir in "${HOME}/.steam/steam/config" "${HOME}/.local/share/Steam/config"; do
+    if [[ -d "${steam_cfg_dir}" ]] && command -v python3 >/dev/null 2>&1; then
+      APPCONFIG_PATH="${steam_cfg_dir}/appconfig.json" \
+      MANIFEST_PATH="${OPENVR_DEST_DIR}/org.simp.player.vrmanifest" \
+      python3 - <<'PY' >/dev/null 2>&1 || true
+import json, os
+p = os.environ["APPCONFIG_PATH"]
+m = os.environ["MANIFEST_PATH"]
+data = {}
+if os.path.isfile(p):
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+paths = data.get("manifest_paths")
+if not isinstance(paths, list):
+    paths = []
+if m not in paths:
+    paths.append(m)
+    data["manifest_paths"] = paths
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=3)
+        f.write("\n")
+PY
+    fi
+  done
   echo "✓ Installed OpenVR:     ${OPENVR_DEST_DIR}/org.simp.player.vrmanifest"
 fi
 

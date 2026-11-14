@@ -84,38 +84,45 @@ export function useGamepadNavigation({
 
   // Adaptive Input Modality (`data-simp-input="pointer" | "gamepad"`):
   // Default to `gamepad` inside SteamUI's `/simp-console` iframe and `pointer` in standalone desktop windows,
-  // then switch dynamically whenever the user moves the mouse vs presses a controller button.
+  // then switch dynamically whenever the user moves the mouse/VR laser vs presses a controller button/thumbstick.
+  // Anti-Thrash for 6DoF VR Controllers (Steam Frame / SteamVR Theater):
+  // Holding a 6DoF VR controller causes continuous sub-pixel/multi-pixel laser-pointer hand tremor even while
+  // the user is pushing the thumbstick. We anchor the pointer position whenever gamepad input occurs and require
+  // a deliberate >= 36px sweep away from the anchor (after the 1.8s guard window) to switch back to `pointer`.
   useEffect(() => {
     if (!document.documentElement.dataset.simpInput) {
       document.documentElement.dataset.simpInput =
         window.parent !== window ? 'gamepad' : 'pointer';
     }
-    let lastMouseX: number | null = null;
-    let lastMouseY: number | null = null;
+    let anchorX: number | null = null;
+    let anchorY: number | null = null;
     const onPointerMove = (e: PointerEvent) => {
-      if (e.pointerType && e.pointerType !== 'mouse') return;
+      if (e.pointerType && e.pointerType !== 'mouse' && e.pointerType !== 'pen') return;
       // Ignore small pointer micro-jitter in SteamVR desktop view for 1.8s after controller input
       if (performance.now() - lastGamepadInputTsRef.current < 1800) {
-        lastMouseX = e.clientX;
-        lastMouseY = e.clientY;
+        anchorX = e.clientX;
+        anchorY = e.clientY;
         return;
       }
-      if (lastMouseX === null || lastMouseY === null) {
-        lastMouseX = e.clientX;
-        lastMouseY = e.clientY;
+      if (anchorX === null || anchorY === null) {
+        anchorX = e.clientX;
+        anchorY = e.clientY;
         return;
       }
-      const dist = Math.hypot(e.clientX - lastMouseX, e.clientY - lastMouseY);
-      if (dist > 14) {
-        lastMouseX = e.clientX;
-        lastMouseY = e.clientY;
+      const dist = Math.hypot(e.clientX - anchorX, e.clientY - anchorY);
+      const threshold = document.documentElement.dataset.simpInput === 'gamepad' ? 36 : 14;
+      if (dist > threshold) {
+        anchorX = e.clientX;
+        anchorY = e.clientY;
         if (document.documentElement.dataset.simpInput !== 'pointer') {
           document.documentElement.dataset.simpInput = 'pointer';
         }
       }
     };
     const onPointerDown = (e: PointerEvent) => {
-      if (!e.pointerType || e.pointerType === 'mouse') {
+      if (!e.pointerType || e.pointerType === 'mouse' || e.pointerType === 'pen') {
+        anchorX = e.clientX;
+        anchorY = e.clientY;
         if (document.documentElement.dataset.simpInput !== 'pointer') {
           document.documentElement.dataset.simpInput = 'pointer';
         }
@@ -285,8 +292,14 @@ export function useGamepadNavigation({
         (document.querySelector<HTMLElement>('[data-simp-active-focus="true"]') as HTMLElement | null) ||
         (document.activeElement as HTMLElement | null);
       if (!active || !nodes.includes(active)) {
+        // Hybrid VR Laser-Pointer + Thumbstick Handoff:
+        // If the user is hovering over an interactive node with a VR laser pointer / mouse when they deflect
+        // the thumbstick, seed spatial focus directly on that hovered element so focus continues seamlessly.
+        const hoveredNode = nodes.find((el) => el.matches(':hover'));
         const preferred =
-          nodes.find((el) => el.dataset.defaultFocus === 'true') || nodes[0];
+          hoveredNode ||
+          nodes.find((el) => el.dataset.defaultFocus === 'true') ||
+          nodes[0];
         applyFocusMarker(preferred);
         return;
       }
@@ -1006,9 +1019,11 @@ export function useGamepadNavigation({
             );
             return;
           case 'vol_up':
+          case 'volume_up':
             applyVolume(currentVolume + 0.05);
             return;
           case 'vol_down':
+          case 'volume_down':
             applyVolume(currentVolume - 0.05);
             return;
         }
@@ -1343,9 +1358,11 @@ export function useGamepadNavigation({
           setSourceModalOpen((v) => !v);
           break;
         case 'vol_up':
+        case 'volume_up':
           applyVolume(currentVolume + 0.05);
           break;
         case 'vol_down':
+        case 'volume_down':
           applyVolume(currentVolume - 0.05);
           break;
       }
@@ -1785,23 +1802,56 @@ export function useGamepadNavigation({
           gamepadActionRef.current(action, 'web');
         };
 
+        const isXrPad =
+          (pad.mapping as string) === 'xr-standard' ||
+          /openvr|openxr|oculus|quest|index|knuckles|roy|steam frame|xr/i.test(pad.id || '');
+        const xrHand: 'left' | 'right' | null =
+          ((pad as unknown as { hand?: string }).hand === 'left'
+            ? 'left'
+            : (pad as unknown as { hand?: string }).hand === 'right'
+            ? 'right'
+            : /left/i.test(pad.id || '')
+            ? 'left'
+            : /right/i.test(pad.id || '')
+            ? 'right'
+            : null);
+
         if (!bridgeActive) {
-          if (pressed(0)) fireWebPad('activate'); // A
-          if (pressed(1)) fireWebPad('back'); // B
-          if (pressed(2)) fireWebPad('shuffle'); // X
-          if (pressed(3)) fireWebPad('repeat'); // Y
-          if (pressed(4)) fireWebPad('l1'); // L1
-          if (pressed(5)) fireWebPad('r1'); // R1
-          if (pressed(6)) fireWebPad(pad.mapping === 'standard' ? 'l2' : 'sources'); // L2 or raw Linux Select
-          if (pressed(7)) fireWebPad(pad.mapping === 'standard' ? 'r2' : 'power'); // R2 or raw Linux Start
-          if (pressed(8)) fireWebPad('sources'); // Select
-          if (pressed(9)) fireWebPad('power'); // Start
+          if (isXrPad) {
+            // W3C `xr-standard` VR Controller Mapping (Steam Frame / Valve Roy / Index / Quest Touch):
+            // buttons[0] = Trigger, buttons[1] = Squeeze/Grip, buttons[3] = Thumbstick Click,
+            // buttons[4] = A (Right) / X (Left), buttons[5] = B (Right) / Y (Left)
+            if (xrHand === 'left') {
+              if (pressed(0)) fireWebPad('l2');
+              if (pressed(1)) fireWebPad('l1');
+              if (pressed(3)) fireWebPad('sources');
+              if (pressed(4)) fireWebPad('shuffle');
+              if (pressed(5)) fireWebPad('repeat');
+            } else {
+              if (pressed(0)) fireWebPad('activate');
+              if (pressed(1)) fireWebPad('r1');
+              if (pressed(3)) fireWebPad('power');
+              if (pressed(4)) fireWebPad('activate');
+              if (pressed(5)) fireWebPad('back');
+            }
+          } else {
+            if (pressed(0)) fireWebPad('activate'); // A
+            if (pressed(1)) fireWebPad('back'); // B
+            if (pressed(2)) fireWebPad('shuffle'); // X
+            if (pressed(3)) fireWebPad('repeat'); // Y
+            if (pressed(4)) fireWebPad('l1'); // L1
+            if (pressed(5)) fireWebPad('r1'); // R1
+            if (pressed(6)) fireWebPad(pad.mapping === 'standard' ? 'l2' : 'sources'); // L2 or raw Linux Select
+            if (pressed(7)) fireWebPad(pad.mapping === 'standard' ? 'r2' : 'power'); // R2 or raw Linux Start
+            if (pressed(8)) fireWebPad('sources'); // Select
+            if (pressed(9)) fireWebPad('power'); // Start
+          }
         }
 
-        // Unified Directional Input (D-Pad Buttons + Linux Hat Axes + Left Stick)
+        // Unified Directional Input (D-Pad Buttons + Linux Hat Axes + Left Stick + XR Thumbstick `axes[2..3]`)
         // Fires immediately on initial press, then repeats every ~115ms after a 380ms hold buffer
         let activeDir: 'up' | 'down' | 'left' | 'right' | null = null;
-        if (!bridgeActive) {
+        if (!bridgeActive && !isXrPad) {
           if (pad.buttons[12]?.pressed) activeDir = 'up';
           else if (pad.buttons[13]?.pressed) activeDir = 'down';
           else if (pad.buttons[14]?.pressed) activeDir = 'left';
@@ -1817,12 +1867,26 @@ export function useGamepadNavigation({
           }
         }
         if (!activeDir) {
-          const lx = pad.axes[0] ?? 0;
-          const ly = pad.axes[1] ?? 0;
-          if (ly < -0.55) activeDir = 'up';
-          else if (ly > 0.55) activeDir = 'down';
-          else if (lx < -0.55) activeDir = 'left';
-          else if (lx > 0.55) activeDir = 'right';
+          // In `xr-standard`, `axes[2], axes[3]` are the primary thumbstick while `axes[0], axes[1]` are touchpad
+          const lx = isXrPad
+            ? Math.abs(pad.axes[2] ?? 0) >= Math.abs(pad.axes[0] ?? 0)
+              ? (pad.axes[2] ?? 0)
+              : (pad.axes[0] ?? 0)
+            : (pad.axes[0] ?? 0);
+          const ly = isXrPad
+            ? Math.abs(pad.axes[3] ?? 0) >= Math.abs(pad.axes[1] ?? 0)
+              ? (pad.axes[3] ?? 0)
+              : (pad.axes[1] ?? 0)
+            : (pad.axes[1] ?? 0);
+          if (isXrPad && xrHand === 'right') {
+            if (lx < -0.55) activeDir = 'left';
+            else if (lx > 0.55) activeDir = 'right';
+          } else {
+            if (ly < -0.55) activeDir = 'up';
+            else if (ly > 0.55) activeDir = 'down';
+            else if (lx < -0.55) activeDir = 'left';
+            else if (lx > 0.55) activeDir = 'right';
+          }
         }
 
         const prevHeld = heldDirByPad.get(pad.index);
@@ -1842,8 +1906,12 @@ export function useGamepadNavigation({
           heldDirByPad.delete(pad.index);
         }
 
-        // Right Stick Y-Axis Volume Adjustment
-        const ry = (pad.mapping === 'standard' ? pad.axes[3] : pad.axes[4] ?? pad.axes[3]) ?? 0;
+        // Right Stick Y-Axis Volume Adjustment (Standard Gamepad Right Stick or Right-Hand XR Controller Thumbstick)
+        const ry = isXrPad
+          ? xrHand === 'right'
+            ? (pad.axes[3] ?? pad.axes[1] ?? 0)
+            : 0
+          : ((pad.mapping === 'standard' ? pad.axes[3] : pad.axes[4] ?? pad.axes[3]) ?? 0);
         if (Math.abs(ry) > 0.6) {
           lastWebGamepadTsRef.current = performance.now();
           applyVolume(currentVolume + (ry < 0 ? 0.02 : -0.02));

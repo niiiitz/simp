@@ -99,8 +99,8 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
 
 ## 6. SteamOS, Gamescope, OpenVR, macOS, Windows & Cross-Compilation Ecosystem
 
-* **Valve Corporation ([`SteamOS`](https://store.steampowered.com/steamos), [`Gamescope`](https://github.com/ValveSoftware/gamescope), and [`OpenVR`](https://github.com/ValveSoftware/openvr))**:
-  * Reference for Valve Data Format (`libraryfolders.vdf`, `appmanifest_*.acf`, and binary `shortcuts.vdf`) parsing, native Linux `/dev/hidraw*` Valve Steam Controller (`0x28de`) lizard-mode & gamepad packet decoding (`crates/simp-core/src/gamepad.rs`), and SIMP's zero-dependency `libopenvr_api.so` `IVROverlay` C ABI bridge (`crates/simp-core/src/vr_overlay.rs`) for SteamVR / Steam Frame dashboard overlays.
+* **Valve Corporation ([`SteamOS`](https://store.steampowered.com/steamos), [`Gamescope`](https://github.com/ValveSoftware/gamescope), and [`OpenVR`](https://github.com/ValveSoftware/openvr)) & The Khronos Group ([`OpenXR`](https://www.khronos.org/openxr/) & W3C [`xr-standard` Gamepad Mapping](https://immersive-web.github.io/webxr-gamepads-module/))**:
+  * Reference for Valve Data Format (`libraryfolders.vdf`, `appmanifest_*.acf`, and binary `shortcuts.vdf`) parsing, native Linux `/dev/hidraw*` Valve Steam Controller (`0x28de`) lizard-mode & gamepad packet decoding (`crates/simp-core/src/gamepad.rs`), zero-dependency `libopenvr_api.so` `IVRSystem` background VR controller polling (`VRControllerState001_t`), OpenVR/SteamVR action manifests (`packaging/openvr/actions.json`) for Steam Frame (Valve Roy), Valve Index (Knuckles), and Oculus Touch controllers, and W3C `xr-standard` WebXR thumbstick/button + 6DoF laser-pointer anti-thrash handoff (`ui/src/hooks/useGamepadNavigation.ts`).
 * **[`SteamDeckHomebrew / Decky Loader`](https://github.com/SteamDeckHomebrew/decky-loader)**:
   * Reference and plugin host ecosystem for SIMP's optional Quick Access Menu (`decky-plugin`) companion drawer.
 * **freedesktop.org (`org.mpris.MediaPlayer2`) & KDE (`org.kde.StatusNotifierItem`)**:

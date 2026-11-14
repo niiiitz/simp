@@ -298,7 +298,7 @@ fi
 cp -r "${REPO_ROOT}/ui/dist/"* "${OUT_DIR}/ui/"
 cp "${REPO_ROOT}/packaging/systemd/simp.service" "${OUT_DIR}/systemd/simp.service"
 cp "${REPO_ROOT}/packaging/desktop/org.simp.player.desktop" "${OUT_DIR}/desktop/org.simp.player.desktop"
-cp "${REPO_ROOT}/packaging/openvr/org.simp.player.vrmanifest" "${OUT_DIR}/openvr/org.simp.player.vrmanifest"
+cp "${REPO_ROOT}/packaging/openvr/"* "${OUT_DIR}/openvr/"
 
 # On x86_64 (Steam Deck / gamescope), bundle `simp-decky/` (~65 KB) inside `simp-steamos-userland`
 # so both `install-steamos.sh` and 1-touch `simp update` install/update the Decky QAM plugin automatically!

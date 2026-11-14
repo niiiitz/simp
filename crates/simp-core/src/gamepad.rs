@@ -141,6 +141,7 @@ pub fn spawn_linux_gamepad_reader(broadcast_tx: broadcast::Sender<PlaybackEvent>
         let active_js: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
         let active_ev: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
         let active_hidraw: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
+        spawn_linux_openvr_controller_reader(broadcast_tx.clone());
         let _ = std::thread::Builder::new()
             .name("simp-linux-gamepad-discovery".to_string())
             .spawn(move || loop {
@@ -1228,6 +1229,328 @@ mod macos_iokit {
     }
 }
 
+/// OpenVR (`openvr_capi.h`) `VRControllerAxis_t` layout (`[f32; 2]`)
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct VrControllerAxis {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// OpenVR (`openvr_capi.h`) `VRControllerState001_t` layout (64-byte packet on 64-bit Linux)
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct VrControllerState001 {
+    pub un_packet_num: u32,
+    pub ul_button_pressed: u64,
+    pub ul_button_touched: u64,
+    pub r_axis: [VrControllerAxis; 5],
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct VrHandDecodedState {
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+    pub activate: bool,
+    pub back: bool,
+    pub shuffle: bool,
+    pub repeat: bool,
+    pub l1: bool,
+    pub r1: bool,
+    pub l2: bool,
+    pub r2: bool,
+    pub sources: bool,
+    pub power: bool,
+    pub volume_up: bool,
+    pub volume_down: bool,
+}
+
+/// Decodes an OpenVR `VRControllerState001_t` packet for either Left Hand (`is_right_hand == false`)
+/// or Right Hand (`is_right_hand == true`) across Valve Roy (Steam Frame), Valve Index (Knuckles),
+/// and Meta Quest / Oculus Touch controllers.
+pub fn decode_openvr_controller_state(
+    state: &VrControllerState001,
+    is_right_hand: bool,
+) -> VrHandDecodedState {
+    const BTN_APPLICATION_MENU: u64 = 1u64 << 1; // B (Right) / Y (Left)
+    const BTN_GRIP: u64 = 1u64 << 2; // Grip -> L1 (Left) / R1 (Right)
+    const BTN_A: u64 = 1u64 << 7; // A (Right) / X (Left)
+    const BTN_TOUCHPAD_OR_STICK_CLICK: u64 = 1u64 << 32; // Thumbstick Click -> SELECT (Left) / START (Right)
+    const BTN_TRIGGER: u64 = 1u64 << 33; // Trigger Click -> L2 (Left) / Activate (Right)
+
+    let btns = state.ul_button_pressed;
+    // Choose the thumbstick axis with larger deflection between r_axis[0] (Touch/Roy joystick)
+    // and r_axis[2] (Valve Index Knuckles thumbstick when r_axis[0] is trackpad).
+    let a0 = state.r_axis[0];
+    let a2 = state.r_axis[2];
+    let (sx, sy) = if (a2.x * a2.x + a2.y * a2.y) > (a0.x * a0.x + a0.y * a0.y) {
+        (a2.x, a2.y)
+    } else {
+        (a0.x, a0.y)
+    };
+    let trig_pull = state.r_axis[1].x > 0.72;
+
+    if !is_right_hand {
+        VrHandDecodedState {
+            up: sy > 0.55,
+            down: sy < -0.55,
+            left: sx < -0.55,
+            right: sx > 0.55,
+            activate: false,
+            back: false,
+            shuffle: (btns & BTN_A) != 0,
+            repeat: (btns & BTN_APPLICATION_MENU) != 0,
+            l1: (btns & BTN_GRIP) != 0,
+            r1: false,
+            l2: (btns & BTN_TRIGGER) != 0 || trig_pull,
+            r2: false,
+            sources: (btns & BTN_TOUCHPAD_OR_STICK_CLICK) != 0,
+            power: false,
+            volume_up: false,
+            volume_down: false,
+        }
+    } else {
+        VrHandDecodedState {
+            up: false,
+            down: false,
+            left: sx < -0.55,
+            right: sx > 0.55,
+            activate: (btns & BTN_A) != 0 || (btns & BTN_TRIGGER) != 0 || trig_pull,
+            back: (btns & BTN_APPLICATION_MENU) != 0,
+            shuffle: false,
+            repeat: false,
+            l1: false,
+            r1: (btns & BTN_GRIP) != 0,
+            l2: false,
+            r2: false,
+            sources: false,
+            power: (btns & BTN_TOUCHPAD_OR_STICK_CLICK) != 0,
+            volume_up: sy > 0.58,
+            volume_down: sy < -0.58,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_steamvr_server_running() -> bool {
+    if Path::new("/tmp/openvr").exists() {
+        return true;
+    }
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let comm_path = entry.path().join("comm");
+            if let Ok(comm) = std::fs::read_to_string(comm_path) {
+                if comm.trim() == "vrserver" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_linux_openvr_controller_reader(broadcast_tx: broadcast::Sender<PlaybackEvent>) {
+    let _ = std::thread::Builder::new()
+        .name("simp-linux-openvr-gamepad".to_string())
+        .spawn(move || {
+            use std::ffi::{c_char, c_int, c_void, CString};
+
+            type VrInitInternalFn = unsafe extern "C" fn(*mut c_int, c_int) -> u32;
+            type VrShutdownInternalFn = unsafe extern "C" fn();
+            type VrGetGenericInterfaceFn =
+                unsafe extern "C" fn(*const c_char, *mut c_int) -> *const *const c_void;
+            type GetTrackedDeviceIndexForControllerRoleFn = unsafe extern "C" fn(c_int) -> u32;
+            type GetControllerStateFn =
+                unsafe extern "C" fn(u32, *mut VrControllerState001, u32) -> bool;
+
+            const VR_APPLICATION_BACKGROUND: c_int = 3;
+            const ROLE_LEFT_HAND: c_int = 1;
+            const ROLE_RIGHT_HAND: c_int = 2;
+            // In OpenVR `IVRSystem_022` / `IVRSystem_021` C FnTable:
+            // index 18 = `GetTrackedDeviceIndexForControllerRole`
+            // index 34 = `GetControllerState`
+            const FN_IDX_GET_ROLE_DEVICE: usize = 18;
+            const FN_IDX_GET_CONTROLLER_STATE: usize = 34;
+
+            loop {
+                if !is_steamvr_server_running() {
+                    std::thread::sleep(Duration::from_secs(4));
+                    continue;
+                }
+
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/home/deck".to_string());
+                let mut candidates = Vec::new();
+                if let Ok(custom) = std::env::var("SIMP_OPENVR_LIB") {
+                    if !custom.trim().is_empty() {
+                        candidates.push(custom);
+                    }
+                }
+                candidates.push(format!(
+                    "{home}/.local/share/Steam/steamapps/common/SteamVR/bin/linuxarm64/libopenvr_api.so"
+                ));
+                candidates.push(format!(
+                    "{home}/.steam/steam/steamapps/common/SteamVR/bin/linuxarm64/libopenvr_api.so"
+                ));
+                candidates.push(format!(
+                    "{home}/.local/share/Steam/steamapps/common/SteamVR/bin/linux64/libopenvr_api.so"
+                ));
+                candidates.push(format!(
+                    "{home}/.steam/steam/steamapps/common/SteamVR/bin/linux64/libopenvr_api.so"
+                ));
+                candidates.push("libopenvr_api.so".to_string());
+
+                let mut handle: *mut c_void = std::ptr::null_mut();
+                for cand in &candidates {
+                    if let Ok(c_str) = CString::new(cand.as_str()) {
+                        let h = unsafe { libc::dlopen(c_str.as_ptr(), libc::RTLD_LAZY) };
+                        if !h.is_null() {
+                            handle = h;
+                            break;
+                        }
+                    }
+                }
+                if handle.is_null() {
+                    std::thread::sleep(Duration::from_secs(6));
+                    continue;
+                }
+
+                unsafe {
+                    let sym_init = CString::new("VR_InitInternal").unwrap();
+                    let sym_shutdown = CString::new("VR_ShutdownInternal").unwrap();
+                    let sym_iface = CString::new("VR_GetGenericInterface").unwrap();
+
+                    let p_init = libc::dlsym(handle, sym_init.as_ptr());
+                    let p_shutdown = libc::dlsym(handle, sym_shutdown.as_ptr());
+                    let p_iface = libc::dlsym(handle, sym_iface.as_ptr());
+
+                    if p_init.is_null() || p_shutdown.is_null() || p_iface.is_null() {
+                        libc::dlclose(handle);
+                        std::thread::sleep(Duration::from_secs(6));
+                        continue;
+                    }
+
+                    let vr_init: VrInitInternalFn = std::mem::transmute(p_init);
+                    let vr_shutdown: VrShutdownInternalFn = std::mem::transmute(p_shutdown);
+                    let vr_get_iface: VrGetGenericInterfaceFn = std::mem::transmute(p_iface);
+
+                    let mut init_err: c_int = 0;
+                    let _token = vr_init(&mut init_err, VR_APPLICATION_BACKGROUND);
+                    if init_err != 0 {
+                        libc::dlclose(handle);
+                        std::thread::sleep(Duration::from_secs(5));
+                        continue;
+                    }
+
+                    let mut fn_table: *const *const c_void = std::ptr::null();
+                    for ver in [
+                        "FnTable:IVRSystem_022",
+                        "FnTable:IVRSystem_021",
+                        "FnTable:IVRSystem_020",
+                    ] {
+                        let c_ver = CString::new(ver).unwrap();
+                        let mut iface_err: c_int = 0;
+                        let ptr = vr_get_iface(c_ver.as_ptr(), &mut iface_err);
+                        if !ptr.is_null() && iface_err == 0 {
+                            fn_table = ptr;
+                            break;
+                        }
+                    }
+
+                    if fn_table.is_null() {
+                        vr_shutdown();
+                        libc::dlclose(handle);
+                        std::thread::sleep(Duration::from_secs(5));
+                        continue;
+                    }
+
+                    let get_role_dev: GetTrackedDeviceIndexForControllerRoleFn =
+                        std::mem::transmute(*fn_table.add(FN_IDX_GET_ROLE_DEVICE));
+                    let get_ctrl_state: GetControllerStateFn =
+                        std::mem::transmute(*fn_table.add(FN_IDX_GET_CONTROLLER_STATE));
+
+                    tracing::info!(
+                        "Linux OpenVR background controller bridge active (Steam Frame / Valve Roy / Index / Touch)"
+                    );
+
+                    let mut prev_left = VrHandDecodedState::default();
+                    let mut prev_right = VrHandDecodedState::default();
+                    let mut last_vol_tick = Instant::now();
+
+                    while is_steamvr_server_running() {
+                        for (role, is_right, prev) in [
+                            (ROLE_LEFT_HAND, false, &mut prev_left),
+                            (ROLE_RIGHT_HAND, true, &mut prev_right),
+                        ] {
+                            let dev_idx = get_role_dev(role);
+                            if dev_idx < 64 {
+                                let mut raw_state = VrControllerState001::default();
+                                let ok = get_ctrl_state(
+                                    dev_idx,
+                                    &mut raw_state,
+                                    std::mem::size_of::<VrControllerState001>() as u32,
+                                );
+                                if ok {
+                                    let cur = decode_openvr_controller_state(&raw_state, is_right);
+                                    let transitions: &[(&str, bool, bool)] = &[
+                                        ("up", cur.up, prev.up),
+                                        ("down", cur.down, prev.down),
+                                        ("left", cur.left, prev.left),
+                                        ("right", cur.right, prev.right),
+                                        ("activate", cur.activate, prev.activate),
+                                        ("back", cur.back, prev.back),
+                                        ("shuffle", cur.shuffle, prev.shuffle),
+                                        ("repeat", cur.repeat, prev.repeat),
+                                        ("l1", cur.l1, prev.l1),
+                                        ("r1", cur.r1, prev.r1),
+                                        ("l2", cur.l2, prev.l2),
+                                        ("r2", cur.r2, prev.r2),
+                                        ("sources", cur.sources, prev.sources),
+                                        ("power", cur.power, prev.power),
+                                    ];
+                                    for &(act, now_on, was_on) in transitions {
+                                        if now_on && !was_on {
+                                            let _ = broadcast_tx.send(PlaybackEvent::GamepadInput {
+                                                action: act.to_string(),
+                                            });
+                                        } else if !now_on
+                                            && was_on
+                                            && matches!(act, "up" | "down" | "left" | "right")
+                                        {
+                                            let _ = broadcast_tx.send(PlaybackEvent::GamepadInput {
+                                                action: "dir_release".to_string(),
+                                            });
+                                        }
+                                    }
+                                    if (cur.volume_up || cur.volume_down)
+                                        && last_vol_tick.elapsed() >= Duration::from_millis(90)
+                                    {
+                                        last_vol_tick = Instant::now();
+                                        let _ = broadcast_tx.send(PlaybackEvent::GamepadInput {
+                                            action: if cur.volume_up {
+                                                "volume_up".to_string()
+                                            } else {
+                                                "volume_down".to_string()
+                                            },
+                                        });
+                                    }
+                                    *prev = cur;
+                                }
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+
+                    vr_shutdown();
+                    libc::dlclose(handle);
+                }
+                std::thread::sleep(Duration::from_secs(3));
+            }
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1297,5 +1620,22 @@ mod tests {
         assert_eq!(map_hid_hat_switch_to_dir(4, 0, 7), (0, 1));
         assert_eq!(map_hid_hat_switch_to_dir(6, 0, 7), (-1, 0));
         assert_eq!(map_hid_hat_switch_to_dir(8, 0, 7), (0, 0));
+
+        // Verify OpenVR / Steam Frame (Valve Roy / Index / Touch) Left & Right Controller decoding
+        let mut left_vr = VrControllerState001::default();
+        left_vr.ul_button_pressed = (1u64 << 7) | (1u64 << 1) | (1u64 << 2) | (1u64 << 32);
+        left_vr.r_axis[0] = VrControllerAxis { x: -0.8, y: 0.75 };
+        left_vr.r_axis[1] = VrControllerAxis { x: 0.85, y: 0.0 };
+        let dec_left = decode_openvr_controller_state(&left_vr, false);
+        assert!(dec_left.left && dec_left.up && !dec_left.right && !dec_left.down);
+        assert!(dec_left.shuffle && dec_left.repeat && dec_left.l1 && dec_left.l2 && dec_left.sources);
+
+        let mut right_vr = VrControllerState001::default();
+        right_vr.ul_button_pressed = (1u64 << 7) | (1u64 << 1) | (1u64 << 2) | (1u64 << 32);
+        right_vr.r_axis[2] = VrControllerAxis { x: 0.7, y: -0.8 };
+        let dec_right = decode_openvr_controller_state(&right_vr, true);
+        assert!(dec_right.right && !dec_right.left);
+        assert!(dec_right.activate && dec_right.back && dec_right.r1 && dec_right.power);
+        assert!(dec_right.volume_down && !dec_right.volume_up);
     }
 }

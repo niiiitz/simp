@@ -12,6 +12,11 @@
 					"title" "#Action_Navigate2D"
 					"input_mode" "joystick_move"
 				}
+				"VolumeScrub"
+				{
+					"title" "#Action_VolumeScrub"
+					"input_mode" "joystick_move"
+				}
 			}
 			"Button"
 			{
@@ -34,6 +39,7 @@
 		{
 			"Set_PlayerControls" "IMP Console & Visualizer Controls"
 			"Action_Navigate2D" "2D Spatial Focus Navigation"
+			"Action_VolumeScrub" "Volume Adjust (Right Stick)"
 			"Action_PlayPause" "Select / Play / Pause (A)"
 			"Action_BackCancel" "Back / Dismiss Drawer (B)"
 			"Action_ShuffleVisualizer" "Shuffle / Cycle Visualizer (X)"
