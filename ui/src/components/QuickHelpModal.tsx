@@ -208,7 +208,7 @@ export const QuickHelpModal: React.FC<QuickHelpModalProps> = ({
           <div style={tipCardStyle}>
             <div style={{ fontSize: 13, fontWeight: 800, color: '#fdba74', display: 'flex', alignItems: 'center', gap: 6 }}>
               <span>2.</span>
-              <ImpIcon name="settings" size={13} color="#fdba74" />
+              <ImpIcon name="gamepad-select" size={14} color="#fdba74" />
               <span>[SELECT] Context Actions</span>
             </div>
             <div style={tipBodyStyle}>

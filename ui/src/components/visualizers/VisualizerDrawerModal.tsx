@@ -1,7 +1,6 @@
 import React, { useEffect } from 'react';
 import { ImpIcon } from '../icons/ImpIcon';
 import {
-  VISUALIZER_ENGINES,
   VISUALIZER_SCENES,
   type VisualizerEngine,
   type VisualizerMode,
@@ -15,7 +14,7 @@ interface VisualizerDrawerModalProps {
   enabledScenes: VisualizerEngine[];
   onSelectMode: (mode: VisualizerMode) => void;
   onToggleSceneInRotation: (engine: VisualizerEngine) => void;
-  onSetAllScenesInRotation: (engines: VisualizerEngine[]) => void;
+  onSetAllScenesInRotation?: (engines: VisualizerEngine[]) => void;
 }
 
 export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
@@ -26,7 +25,6 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
   enabledScenes,
   onSelectMode,
   onToggleSceneInRotation,
-  onSetAllScenesInRotation,
 }) => {
   useEffect(() => {
     if (!open) return;
@@ -106,7 +104,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
                 Visualizer Scene Queue & Rotation
               </div>
               <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
-                Lock a single scene or toggle which scenes cycle/shuffle on track change
+                Lock a scene or choose which scenes rotate on track change
               </div>
             </div>
           </div>
@@ -225,7 +223,7 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
           </button>
         </div>
 
-        {/* Rotation Quick Actions */}
+        {/* Rotation Legend */}
         <div
           style={{
             display: 'flex',
@@ -235,48 +233,11 @@ export const VisualizerDrawerModal: React.FC<VisualizerDrawerModalProps> = ({
             padding: '0 2px',
             fontSize: 11,
             color: '#94a3b8',
-            flexWrap: 'wrap',
           }}
         >
           <span>
             <strong>Left toggle</strong> = rotation • <strong>Row</strong> = lock scene
           </span>
-          <div style={{ display: 'flex', gap: 5, flexShrink: 0, flexWrap: 'wrap' }}>
-            <button
-              type="button"
-              onClick={() =>
-                onSetAllScenesInRotation(['glyph', 'avs_v2', 'demoscene', 'vertigo', 'trapper'])
-              }
-              style={{
-                padding: '4px 8px',
-                borderRadius: 7,
-                background: '#161926',
-                border: '1px solid #2a2f45',
-                color: '#67e8f9',
-                fontSize: 10.5,
-                fontWeight: 700,
-                cursor: 'pointer',
-              }}
-            >
-              Core (5)
-            </button>
-            <button
-              type="button"
-              onClick={() => onSetAllScenesInRotation([...VISUALIZER_ENGINES])}
-              style={{
-                padding: '4px 8px',
-                borderRadius: 7,
-                background: '#161926',
-                border: '1px solid #2a2f45',
-                color: '#cbd5e1',
-                fontSize: 10.5,
-                fontWeight: 700,
-                cursor: 'pointer',
-              }}
-            >
-              All ({VISUALIZER_ENGINES.length})
-            </button>
-          </div>
         </div>
 
         {/* Scrollable Scene Roster */}

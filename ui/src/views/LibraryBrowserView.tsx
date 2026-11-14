@@ -283,8 +283,8 @@ function computeLibraryViewportScale(): number {
   // Steam Deck / 800p baseline (1280x800) stays at 1.0x
   if (vw <= 1340 && vh <= 840) return 1;
   const minRatio = Math.min(vw / 1280, vh / 800);
-  const scaled = 1 + (minRatio - 1) * 0.72;
-  return Math.round(Math.min(1.8, Math.max(1, scaled)) * 100) / 100;
+  const scaled = 1 + (minRatio - 1) * 0.38;
+  return Math.round(Math.min(1.35, Math.max(1, scaled)) * 100) / 100;
 }
 
 export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
@@ -2517,7 +2517,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       style={{
         flex: 1,
         display: hidden ? 'none' : 'grid',
-        gridTemplateColumns: 'clamp(250px, 24%, 315px) minmax(0, 1fr)',
+        gridTemplateColumns: 'clamp(285px, 26%, 340px) minmax(0, 1fr)',
         gridTemplateRows: 'auto minmax(0, 1fr)',
         overflow: 'hidden',
         boxSizing: 'border-box',

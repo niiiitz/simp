@@ -81,7 +81,16 @@ export const LibraryArtistProfilePane: React.FC<LibraryArtistProfilePaneProps> =
           gap: 10,
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            minWidth: 260,
+            flex: '1 1 260px',
+            overflow: 'hidden',
+          }}
+        >
           <button
             data-right-back-grid="true"
             onClick={handleWalkBack}

@@ -166,7 +166,16 @@ export const LibraryTracklistRightPane: React.FC<LibraryTracklistRightPaneProps>
                 width: '100%',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  minWidth: 260,
+                  flex: '1 1 260px',
+                  overflow: 'hidden',
+                }}
+              >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                   <button
                     data-right-back-grid="true"
@@ -951,7 +960,16 @@ export const LibraryTracklistRightPane: React.FC<LibraryTracklistRightPaneProps>
                     boxSizing: 'border-box',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
+                  <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  minWidth: 260,
+                  flex: '1 1 260px',
+                  overflow: 'hidden',
+                }}
+              >
                     <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#71717a', flexShrink: 0 }}>
                       {String(t.track_number ?? i + 1).padStart(2, '0')}
                     </span>

@@ -65,7 +65,8 @@ export type ImpIconName =
   | 'shield'
   | 'eject'
   | 'alert'
-  | 'cpu';
+  | 'cpu'
+  | 'gamepad-select';
 
 export interface ImpIconProps {
   name: ImpIconName;
@@ -570,6 +571,15 @@ export const ImpIcon: React.FC<ImpIconProps> = ({
             <line x1="1" y1="9" x2="4" y2="9" />
             <line x1="1" y1="14" x2="4" y2="14" />
           </>
+        );
+      case 'gamepad-select':
+        return (
+          <g stroke="none" fill={color}>
+            {/* Top-left L-shaped back window outline */}
+            <path d="M4 3.5h9.5a2 2 0 0 1 2 2V7.2h-2.3V5.8H4.3v6.4H6.2v2.3H4a2 2 0 0 1-2-2V5.5a2 2 0 0 1 2-2z" />
+            {/* Bottom-right solid filled front window */}
+            <rect x="8.2" y="9.2" width="13.8" height="11" rx="2.2" />
+          </g>
         );
       default:
         return <circle cx="12" cy="12" r="6" />;

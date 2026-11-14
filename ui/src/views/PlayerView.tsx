@@ -218,7 +218,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     try {
       const explicit = window.localStorage.getItem('simp_lyrics_viz_enabled');
       if (explicit !== null) return explicit !== '0';
-      return window.localStorage.getItem('simp_lyrics_enabled') !== '0';
+      window.localStorage.setItem('simp_lyrics_viz_enabled', '1');
+      return true;
     } catch {
       return true;
     }
@@ -1698,6 +1699,12 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                 flexShrink: 0,
               }}
             >
+              <ImpIcon
+                name="gamepad-select"
+                size={12}
+                color="#71717a"
+                style={{ marginRight: 4, verticalAlign: '-1px' }}
+              />
               SELECT • Actions
             </span>
           </div>
@@ -1797,7 +1804,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               </span>
             ) : (
               <>
-                Select a track from Library & Queue<span className="simp-gp-badge"> (R1)</span>
+                Select a track from Library<span className="simp-gp-badge"> (R1)</span>
               </>
             )}
             {track?.album ? ` • ${track.album}` : ''}
@@ -2163,6 +2170,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         )}
                         <button
                           type="button"
+                          data-video-exit-theatre="true"
                           onClick={() => {
                             setVideoTheatreExpanded(false);
                             if (document.fullscreenElement) {
@@ -2182,7 +2190,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                             cursor: 'pointer',
                           }}
                         >
-                          🗗 Card View<span className="simp-gp-badge"> B</span>
+                          ↙ Card View<span className="simp-gp-badge"> B</span>
                         </button>
                       </div>
                     </div>
@@ -2769,8 +2777,18 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               }}
             >
               <div style={{ minWidth: 0, flex: 1, marginRight: 10 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 800, color: '#bfeaf5' }}>
-                  ⚙ SELECT Menu
+                <div
+                  style={{
+                    fontSize: 13.5,
+                    fontWeight: 800,
+                    color: '#bfeaf5',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <ImpIcon name="gamepad-select" size={14} color="#67e8f9" />
+                  <span>SELECT Menu</span>
                 </div>
                 <div
                   style={{
@@ -3596,10 +3614,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                               size={14}
                               color="#34d399"
                             />
-                            Karaoke Mode (Vocal Remover + Synced Lyrics)
+                            Karaoke Mode
                           </span>
                           <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
-                            Band-limited 130 Hz – 4.5 kHz center vocal suppression + foreground lyrics
+                            Vocal remover + foreground synced lyrics
                           </span>
                         </div>
                         <span
@@ -3651,8 +3669,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                             {lyricsData?.synced_lines?.length
                               ? `${lyricsData.synced_lines.length} synced lines (${lyricsData.source})`
                               : lyricsData?.instrumental
-                                ? 'Instrumental track detected'
-                                : 'Synced teleprompter lyrics pill for Karaoke & sing-along'}
+                                ? 'Instrumental track'
+                                : 'Synced teleprompter lyrics overlay'}
                           </span>
                         </div>
                         <span
@@ -3697,8 +3715,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                           </span>
                           <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
                             {!lyricsKaraokeEnabled && !lyricsVizEnabled
-                              ? 'Both lyrics modes OFF — lyrics network/DB lookup disabled'
-                              : 'Pass synced lyrics into visualizer scenes (CRT/marquee/reactive text)'}
+                              ? 'Lyrics lookup disabled'
+                              : 'Show synced lyrics inside visualizer scenes'}
                           </span>
                         </div>
                         <span
@@ -3939,7 +3957,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                         >
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                             <span style={{ fontSize: 12.5, fontWeight: 800, color: '#67e8f9' }}>
-                              {videoTheatreExpanded ? '🗗 Exit Theatre Stage' : '⛶ Theatre Stage'}
+                              {videoTheatreExpanded ? '↙ Exit Theatre Stage' : '⛶ Theatre Stage'}
                             </span>
                             <span style={{ fontSize: 10.5, color: '#8e8e99' }}>
                               Fill window with video stage & 4s auto-hide HUD

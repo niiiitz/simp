@@ -204,9 +204,11 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
           return (
             <div
               style={{
-                display: 'grid',
-                gridTemplateColumns: `repeat(${sourceTabs.length}, minmax(0, 1fr))`,
-                gap: 5,
+                display: 'flex',
+                alignItems: 'stretch',
+                gap: 4,
+                width: '100%',
+                minWidth: 0,
               }}
             >
               {sourceTabs.map((tab) => {
@@ -287,9 +289,13 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
                       }
                     }}
                     style={{
+                      flex: '1 1 auto',
+                      minWidth: 0,
                       minHeight: 34,
-                      padding: '0 4px',
+                      padding: '0 6px',
                       borderRadius: 8,
+                      overflow: 'hidden',
+                      whiteSpace: 'nowrap',
                       background: active
                         ? tab.accent === 'apple'
                           ? '#28111b'
@@ -317,17 +323,25 @@ export const LibraryXmbLeftColumn: React.FC<LibraryXmbLeftColumnProps> = ({
                           ? '#fde68a'
                           : '#bfeaf5'
                         : '#9ca3af',
-                      fontSize: 11,
+                      fontSize: 10.5,
                       fontWeight: 800,
                       cursor: 'pointer',
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      gap: 4,
+                      gap: 3.5,
                     }}
                   >
-                    <ImpIcon name={tab.icon} size={11} />
-                    <span>{tab.label}</span>
+                    <ImpIcon name={tab.icon} size={tab.icon === 'soundcloud' ? 9.5 : 11} />
+                    <span
+                      style={{
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {tab.label}
+                    </span>
                   </button>
                 );
               })}

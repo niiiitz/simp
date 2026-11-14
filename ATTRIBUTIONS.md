@@ -52,10 +52,7 @@ SIMP's native Rust Internet Archive client (`crates/simp-core/src/sinks/internet
   * *Cosmic Warp & 50s Saucer (`VIZ: COSMOS`, `cosmosScene.ts`)*: Homage to 1950s sci-fi practical-effect flying saucers (*Plan 9 from Outer Space*) and volumetric gravitational-lensing space odysseys.
   * *Coral Reef (`VIZ: REEF`, `reefScene.ts`)* & *Y2K Vaporwave Odyssey (`VIZ: VAPORWAVE`, `vaporwaveScene.ts`)*: Homage to Novotrade/Sega's *Ecco the Dolphin*, Sega AM2's *OutRun* & *Space Harrier* super-scaler horizons, Windows 95 *Solitaire* (Wes Cherry) bouncing card cascades, classic *AOL Instant Messenger* chat windows, and Macintosh Plus *Floral Shoppe* vaporwave aesthetics.
   * *Retro Arcade Remix (`VIZ: ARCADE`, `arcadeScene.ts`)*: Homage to Namco (*Pac-Man*), Williams Electronics (*Joust*), Atari (*Pong*, *Breakout*, *Missile Command*), Nintendo (*Donkey Kong*), and Taito (*Space Invaders*, *Arkanoid*).
-* **Y2K Cyber-Malware, Algorave Live-Coding & Low-Poly Hyperpop CGI Visual Direction**:
-  * **DJ_Dave & Computer Art, LLC (Viola He & Jame Coyne)** — [*Give it 2 me* (`Hardcore Software`)](https://www.youtube.com/watch?v=03lKVs-ZZMA): Inspired SIMP's algorave live-coding terminal overlays, simulated Y2K desktop malware pop-ups, and high-contrast retro-OS visual synthesis across `avsScene.ts`, `demosceneScene.ts`, and `vaporwaveScene.ts`.
-  * **JACKIE EXTREME** — [*THAT*](https://www.youtube.com/watch?v=sOJtEyTisDE) & [*DARKWEB*](https://www.youtube.com/watch?v=VHHfIR69IXU): Inspired SIMP's chunky PS1/Y2K low-poly 3D wireframe/flat-shaded geometry, uncanny cyber-avatars, and VHS datamosh crunch across `trapperScene.ts`, `vertigoScene.ts`, and `sanctumScene.ts`.
-  * **Ninajirachi, Porter Robinson & Dylan Brady (with visual artists Aria Z, safehaven, Ratio & Gnomeh)** — [*WannaCry*](https://www.youtube.com/watch?v=Ob_EDY9Eiis) & [*CSIRAC (Dylan Brady Remix)*](https://www.youtube.com/watch?v=J6feH_r5Y4g) ( plus [`youtu.be/RODSWQBsbkE`](https://www.youtube.com/watch?v=RODSWQBsbkE)): Inspired SIMP's vintage computing hardware motifs (clamshell iBook / CRT desktop monitors), cascading Windows 95/98 dialog boxes, chrome wireframe geometry, and low-poly 3D projection pipelines.
+
 
 ---
 

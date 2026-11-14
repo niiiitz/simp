@@ -1203,6 +1203,21 @@ export function useGamepadNavigation({
             setPowerModalOpen(false);
           } else if (sourceModalOpen) {
             setSourceModalOpen(false);
+          } else if (view !== 'browser') {
+            const videoExitTheatre = document.querySelector<HTMLElement>(
+              '[data-video-exit-theatre="true"]:not([disabled])'
+            );
+            if (videoExitTheatre) {
+              videoExitTheatre.click();
+              break;
+            }
+            if (document.fullscreenElement) {
+              document.exitFullscreen().catch(() => {});
+              break;
+            }
+            if (window.parent && window.parent !== window) {
+              window.parent.postMessage({ type: 'SIMP_EXIT_CONSOLE' }, '*');
+            }
           } else if (view === 'browser') {
             // Hierarchical Back ('B') Navigation inside the Library Browser:
             // 1. If viewing a Collection Tracklist on the Right Pane -> return to Right-Pane Tile Grid

@@ -131,9 +131,13 @@ export const LibraryContextLegendBar: React.FC<LibraryContextLegendBarProps> = (
         fontSize: 10,
         fontWeight: 800,
         marginRight: 5,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 3,
       }}
     >
-      SELECT
+      <ImpIcon name="gamepad-select" size={10} color="#67e8f9" />
+      <span>SELECT</span>
     </span>
   );
 

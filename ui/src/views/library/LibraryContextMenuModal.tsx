@@ -153,11 +153,17 @@ export const LibraryContextMenuModal: React.FC<LibraryContextMenuModalProps> = (
                 color: '#2aa3c4',
                 textTransform: 'uppercase',
                 letterSpacing: 0.6,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
               }}
             >
-              {libraryContextTarget.type === 'track'
-                ? '🎵 Track Actions (SELECT)'
-                : '💿 Collection Actions (SELECT)'}
+              <ImpIcon name="gamepad-select" size={11} color="#2aa3c4" />
+              <span>
+                {libraryContextTarget.type === 'track'
+                  ? 'Track Actions (SELECT)'
+                  : 'Collection Actions (SELECT)'}
+              </span>
             </div>
             <div
               style={{

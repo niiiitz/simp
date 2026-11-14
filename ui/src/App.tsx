@@ -2200,7 +2200,7 @@ const ConsoleMainApp: React.FC = () => {
             minWidth: 0,
           }}
         >
-          <span style={{ fontSize: 15, lineHeight: 1, color: '#9ca3af', flexShrink: 0 }}>⚙</span>
+          <ImpIcon name="gamepad-select" size={14} color="#9ca3af" />
           <span
             className="simp-gp-badge"
             style={{
@@ -2293,7 +2293,7 @@ const ConsoleMainApp: React.FC = () => {
               color: view === 'browser' ? '#bfeaf5' : '#8e8e99',
             }}
           >
-            📚 Library & Queue
+            📚 Library
           </button>
           <span
             className="simp-gp-badge"
