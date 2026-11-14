@@ -36,6 +36,8 @@ pub struct TrackMetadata {
     pub duration_ms: u32,
     pub source: String, // "local" | "steam_ost" | "apple_music" | "cdda"
     pub mount_root: Option<String>,
+    #[serde(default)]
+    pub content_rating: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,6 +49,8 @@ pub struct AlbumRecord {
     pub steam_app_id: Option<u32>,
     pub art_url: Option<String>,
     pub track_count: usize,
+    #[serde(default)]
+    pub content_rating: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -171,6 +175,8 @@ pub struct ArchiveItemSummary {
     pub runtime_label: Option<String>,
     #[serde(default)]
     pub item_count: Option<u32>,
+    #[serde(default)]
+    pub content_rating: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

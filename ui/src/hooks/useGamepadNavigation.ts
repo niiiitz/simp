@@ -725,9 +725,7 @@ export function useGamepadNavigation({
           if (getCol(candidate) !== curCol) continue;
           const r = candidate.getBoundingClientRect();
           const tx = r.left + r.width / 2;
-          const ty = r.top + r.height / 2;
           const dx = tx - cx;
-          const dy = ty - cy;
 
           const overlapsY = r.bottom > cur.top + 6 && r.top < cur.bottom - 6;
           if (!overlapsY) continue;

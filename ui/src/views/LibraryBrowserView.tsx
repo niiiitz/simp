@@ -21,33 +21,22 @@ import {
   AppleRadioStationSummary,
   AppleRecommendationShelf,
   fetchAppleArtistProfile,
-  fetchAppleCloudPlaylists,
   fetchAppleLibraryRecentlyAdded,
-  fetchAppleNewFeed,
   fetchApplePlaylistTracks,
-  fetchAppleRadioAndForYou,
   fetchFullAppleAlbum,
   fetchLocalArtistProfile,
   LocalArtistProfileResponse,
 } from '../drivers/AppleMusicDriver';
 import {
-  fetchSoundCloudDiscover,
   fetchSoundCloudFollowings,
-  fetchSoundCloudLikesAndPlaylists,
   fetchSoundCloudNextPage,
   fetchSoundCloudPlaylistTracks,
-  fetchSoundCloudStreamAndRadio,
   fetchSoundCloudUserTracks,
-  likeSoundCloudTrack,
   SoundCloudCatalogSearchResults,
   SoundCloudPlaylistSummary,
   SoundCloudUserProfileResponse,
   SoundCloudUserSummary,
-  toggleFollowSoundCloudUser,
-  unlikeSoundCloudTrack,
 } from '../drivers/SoundCloudDriver';
-import { SoundCloudAttributionLink, SoundCloudLogo } from '../components/SoundCloudLogo';
-import { AppleMusicAttributionLink } from '../components/AppleMusicLogo';
 import { ImpIcon } from '../components/icons/ImpIcon';
 import { getSourceThemeForLibraryFilter, getSourceThemeCssVars } from '../theme/sourceTheme';
 import { LibraryMiniPlayerBar } from './library/LibraryMiniPlayerBar';
@@ -61,16 +50,14 @@ import {
   AlphaBucket,
   cleanCollectionTitle,
   CLOUD_PAGE_SIZE,
-  extractAudioFormat,
-  formatPlaylistSourceBadge,
   iaItemCountCache,
   iaItemCountPending,
+  iaItemRatingCache,
   matchesAlphaBucket,
   tileGridStyle,
 } from './library/libraryHelpers';
 import {
   failedPlaylistCoverLookupIds,
-  ResilientTileArtwork,
   resolvedPlaylistCoverMemoryCache,
 } from './library/ResilientTileArtwork';
 import {
@@ -421,23 +408,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       return true;
     }
   });
-  const [albumsOpen, setAlbumsOpen] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem('simp_sec_albums') !== '0';
-    } catch {
-      return true;
-    }
-  });
-  const [storageOpen, setStorageOpen] = useState<boolean>(() => {
-    try {
-      const saved = window.localStorage.getItem('simp_sec_storage');
-      if (saved === '1') return true;
-      if (saved === '0') return false;
-      return false;
-    } catch {
-      return false;
-    }
-  });
 
   const [activeDvdPlayback, setActiveDvdPlayback] = useState<{
     titleInfo: DvdTitleInfo;
@@ -487,24 +457,6 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       return next;
     });
   };
-  const toggleAlbumsOpen = () => {
-    setAlbumsOpen((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem('simp_sec_albums', next ? '1' : '0');
-      } catch {}
-      return next;
-    });
-  };
-  const toggleStorageOpen = () => {
-    setStorageOpen((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem('simp_sec_storage', next ? '1' : '0');
-      } catch {}
-      return next;
-    });
-  };
 
   // Right Pane State: 'browse' (4-Column-Max Visual Card Grid for the active Place), 'tracks' (Selected Collection Tracklist), or 'artist' (Dedicated Artist Profile View)
   const [rightPaneMode, setRightPaneMode] = useState<'browse' | 'tracks' | 'artist'>('browse');
@@ -521,6 +473,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
   } | null>(null);
   const [mediaTypeFilter, setMediaTypeFilter] = useState<'all' | 'video' | 'audio'>('all');
   const [iaResolvedCounts, setIaResolvedCounts] = useState<Record<string, number>>({});
+  const [iaResolvedRatings, setIaResolvedRatings] = useState<Record<string, string>>({});
   const [activeMountRoot, setActiveMountRoot] = useState<string | null>(null);
   const [mountAlbums, setMountAlbums] = useState<AlbumRecord[]>([]);
   const [mountTracks, setMountTracks] = useState<TrackMetadata[]>([]);
@@ -800,15 +753,15 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       .finally(() => setScLoadingMore(false));
   }, [scCatalogSearchResults.next_tracks_href, scLoadingMore, setScCatalogSearchResults]);
 
-  // Lazy background item/episode count resolver for visible Internet Archive tiles
+  // Lazy background item/episode count & content rating resolver for visible Internet Archive tiles
   useEffect(() => {
     const visibleList = browserSearch.trim() ? iaSearchResults : iaItems;
     if (visibleList.length === 0) return;
     const candidates = visibleList.filter(
       (it) =>
-        it.item_count === undefined &&
-        it.item_count !== null &&
+        (it.item_count == null || !it.content_rating) &&
         !iaItemCountCache.has(it.identifier) &&
+        !iaItemRatingCache.has(it.identifier) &&
         !iaItemCountPending.has(it.identifier)
     );
     if (candidates.length === 0) return;
@@ -833,6 +786,11 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
                 : 1;
             iaItemCountCache.set(it.identifier, count);
             setIaResolvedCounts((prev) => ({ ...prev, [it.identifier]: count }));
+            if (detail.summary?.content_rating) {
+              iaItemRatingCache.set(it.identifier, detail.summary.content_rating);
+              const rating = detail.summary.content_rating;
+              setIaResolvedRatings((prev) => ({ ...prev, [it.identifier]: rating }));
+            }
           }
         } catch {
           // Ignore individual metadata failures
@@ -1720,6 +1678,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
             detail.summary.year ? ` • ${detail.summary.year}` : ''
           }`,
           art_url: detail.summary.art_url,
+          content_rating: detail.summary.content_rating ?? null,
         });
         setBrowserTracks(itemTracks);
         setRightPaneMode('tracks');
@@ -2477,6 +2436,7 @@ export const LibraryBrowserView: React.FC<LibraryBrowserViewProps> = ({
       playlists={playlists}
       browserTarget={browserTarget}
       iaResolvedCounts={iaResolvedCounts}
+      iaResolvedRatings={iaResolvedRatings}
       openIaItem={openIaItem}
       openLibraryContextMenu={openLibraryContextMenu}
       handleAddArchiveItemToHybrid={handleAddArchiveItemToHybrid}

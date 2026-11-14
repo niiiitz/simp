@@ -863,6 +863,7 @@ pub fn scan_optical_disc(
                 duration_ms,
                 source: "cdda".to_string(),
                 mount_root: Some(device_path.clone()),
+                content_rating: None,
             }
         })
         .collect();

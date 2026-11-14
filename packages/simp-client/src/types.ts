@@ -13,6 +13,7 @@ export interface TrackMetadata {
   duration_ms: number;
   source: string;
   mount_root?: string | null;
+  content_rating?: string | null;
 }
 
 export interface AlbumRecord {
@@ -23,6 +24,7 @@ export interface AlbumRecord {
   steam_app_id?: number | null;
   art_url?: string | null;
   track_count: number;
+  content_rating?: string | null;
 }
 
 export interface PlaylistRecord {
@@ -118,6 +120,7 @@ export interface ArchiveItemSummary {
   views_30d: number;
   runtime_label?: string | null;
   item_count?: number | null;
+  content_rating?: string | null;
 }
 
 export interface ArchiveItemDetail {

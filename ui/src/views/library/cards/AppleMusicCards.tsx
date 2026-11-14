@@ -9,6 +9,7 @@ import {
 } from '../../../drivers/AppleMusicDriver';
 import { BrowserTarget } from '../../PlayerView';
 import { LibraryContextTarget } from '../../LibraryBrowserView';
+import { ContentRatingBadge } from '../ContentRatingBadge';
 import { ResilientTileArtwork } from '../ResilientTileArtwork';
 
 export interface CloudPlaylistCardProps {
@@ -524,6 +525,7 @@ export const CloudAlbumCard: React.FC<CloudAlbumCardProps> = ({
             overflowWrap: 'anywhere',
           }}
         >
+          <ContentRatingBadge rating={alb.content_rating} style={{ marginRight: 5 }} />
           {alb.kind === 'library' ? `☁️ Your Library • ${alb.artist}` : alb.artist}
           {alb.release_year ? ` • ${alb.release_year}` : ''}
           {alb.track_count ? ` • ${alb.track_count} trk` : ''}

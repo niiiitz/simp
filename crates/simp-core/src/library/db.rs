@@ -102,7 +102,8 @@ impl LibraryDatabase {
                 duration_ms     INTEGER NOT NULL DEFAULT 0,
                 art_url         TEXT,
                 file_mtime      INTEGER,
-                file_size       INTEGER
+                file_size       INTEGER,
+                content_rating  TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_tracks_mount ON tracks(mount_root);
@@ -203,6 +204,8 @@ impl LibraryDatabase {
             WHERE uri NOT IN (SELECT uri FROM track_properties);
             ",
         )?;
+
+        let _ = conn.execute("ALTER TABLE tracks ADD COLUMN content_rating TEXT", []);
 
         // Self-heal temporary 24-hour iCloud Music Library `blobstore.apple.com` presigned artwork URLs
         // whenever another track from the same album already has a permanent `mzstatic.com` catalog URL!
@@ -421,8 +424,8 @@ impl LibraryDatabase {
         conn.execute(
             "INSERT INTO tracks (
                 uri, source, mount_root, album_id, title, artists_json,
-                album_title, track_number, disc_number, duration_ms, art_url, file_mtime, file_size
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                album_title, track_number, disc_number, duration_ms, art_url, file_mtime, file_size, content_rating
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(uri) DO UPDATE SET
                 album_id = COALESCE(excluded.album_id, tracks.album_id),
                 title = excluded.title,
@@ -437,7 +440,8 @@ impl LibraryDatabase {
                   ELSE NULL
                 END,
                 file_mtime = excluded.file_mtime,
-                file_size = excluded.file_size",
+                file_size = excluded.file_size,
+                content_rating = COALESCE(excluded.content_rating, tracks.content_rating)",
             params![
                 meta.uri,
                 meta.source,
@@ -451,7 +455,8 @@ impl LibraryDatabase {
                 meta.duration_ms,
                 meta.art_url,
                 file_mtime,
-                file_size
+                file_size,
+                meta.content_rating
             ],
         )?;
         Ok(())
@@ -461,7 +466,7 @@ impl LibraryDatabase {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT uri, title, artists_json, album_title, album_id, track_number,
-                    disc_number, art_url, duration_ms, source, mount_root
+                    disc_number, art_url, duration_ms, source, mount_root, content_rating
              FROM tracks WHERE uri = ?1",
         )?;
         let res = stmt
@@ -480,6 +485,7 @@ impl LibraryDatabase {
                     duration_ms: row.get(8)?,
                     source: row.get(9)?,
                     mount_root: row.get(10)?,
+                    content_rating: row.get(11)?,
                 })
             })
             .optional()?;
@@ -509,7 +515,8 @@ impl LibraryDatabase {
         let mut stmt = conn.prepare(
             "SELECT a.id, a.title, a.album_artist, a.release_year, a.steam_app_id, a.art_cache_path,
                     COUNT(t.uri) as track_count,
-                    GROUP_CONCAT(t.uri, '|') as uri_list
+                    GROUP_CONCAT(t.uri, '|') as uri_list,
+                    MAX(CASE WHEN LOWER(t.content_rating) IN ('explicit', 'e') THEN 'explicit' WHEN LOWER(t.content_rating) = 'clean' THEN 'clean' ELSE t.content_rating END) as content_rating
              FROM albums a
              JOIN tracks t ON t.album_id = a.id
              LEFT JOIN storage_mounts m ON t.mount_root = m.mount_root
@@ -529,6 +536,7 @@ impl LibraryDatabase {
             |row| {
                 let mut album_artist: String = row.get(2)?;
                 let uri_list: Option<String> = row.get(7).ok();
+                let content_rating: Option<String> = row.get(8).unwrap_or(None);
                 if let Some(uris) = uri_list {
                     let mut exts: Vec<&'static str> = Vec::new();
                     for u in uris.split('|') {
@@ -569,6 +577,7 @@ impl LibraryDatabase {
                     steam_app_id: row.get(4)?,
                     art_url: row.get(5)?,
                     track_count: row.get::<_, i64>(6)? as usize,
+                    content_rating,
                 })
             },
         )?;
@@ -579,7 +588,7 @@ impl LibraryDatabase {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT uri, title, artists_json, album_title, album_id, track_number,
-                    disc_number, art_url, duration_ms, source, mount_root
+                    disc_number, art_url, duration_ms, source, mount_root, content_rating
              FROM tracks
              WHERE album_id = ?1
              ORDER BY COALESCE(disc_number, 1) ASC, COALESCE(track_number, 999) ASC, title ASC",
@@ -599,6 +608,7 @@ impl LibraryDatabase {
                 duration_ms: row.get(8)?,
                 source: row.get(9)?,
                 mount_root: row.get(10)?,
+                content_rating: row.get(11)?,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -626,7 +636,7 @@ impl LibraryDatabase {
         let search_pattern = search.map(|s| format!("%{}%", s)).unwrap_or_else(|| "%".to_string());
         let mut stmt = conn.prepare(
             "SELECT t.uri, t.title, t.artists_json, t.album_title, t.album_id, t.track_number,
-                    t.disc_number, t.art_url, t.duration_ms, t.source, t.mount_root
+                    t.disc_number, t.art_url, t.duration_ms, t.source, t.mount_root, t.content_rating
              FROM tracks t
              LEFT JOIN storage_mounts m ON t.mount_root = m.mount_root
              WHERE (t.mount_root IS NULL OR m.is_online = 1)
@@ -656,6 +666,7 @@ impl LibraryDatabase {
                     duration_ms: row.get(8)?,
                     source: row.get(9)?,
                     mount_root: row.get(10)?,
+                    content_rating: row.get(11)?,
                 })
             },
         )?;
@@ -708,7 +719,7 @@ impl LibraryDatabase {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT t.uri, t.title, t.artists_json, t.album_title, t.album_id, t.track_number,
-                    t.disc_number, t.art_url, t.duration_ms, t.source, t.mount_root
+                    t.disc_number, t.art_url, t.duration_ms, t.source, t.mount_root, t.content_rating
              FROM playlist_items pi
              JOIN tracks t ON t.uri = pi.track_uri
              WHERE pi.playlist_id = ?1
@@ -730,6 +741,7 @@ impl LibraryDatabase {
                 duration_ms: row.get(8)?,
                 source: row.get(9)?,
                 mount_root: row.get(10)?,
+                content_rating: row.get(11)?,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())

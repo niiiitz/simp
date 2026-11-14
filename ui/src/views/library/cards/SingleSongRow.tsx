@@ -3,6 +3,7 @@ import { defaultSimpClient, SimpStateSnapshot, TrackMetadata } from '@simp/clien
 import { AppleMusicAttributionLink } from '../../../components/AppleMusicLogo';
 import { LibraryContextTarget } from '../../LibraryBrowserView';
 import { extractAudioFormat, getTrackLyricsBadge } from '../libraryHelpers';
+import { ContentRatingBadge } from '../ContentRatingBadge';
 
 export interface SingleSongRowProps {
   song: TrackMetadata;
@@ -191,6 +192,7 @@ export const SingleSongRow: React.FC<SingleSongRowProps> = ({
             }}
           >
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>▶ {s.title}</span>
+            <ContentRatingBadge rating={s.content_rating} />
             {(() => {
               const lyrBadge = getTrackLyricsBadge(s.uri);
               if (!lyrBadge) return null;

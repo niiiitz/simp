@@ -6,7 +6,8 @@ import {
 } from '../../../drivers/SoundCloudDriver';
 import { BrowserTarget } from '../../PlayerView';
 import { LibraryContextTarget } from '../../LibraryBrowserView';
-import { iaItemCountCache } from '../libraryHelpers';
+import { iaItemCountCache, iaItemRatingCache } from '../libraryHelpers';
+import { ContentRatingBadge } from '../ContentRatingBadge';
 import { ResilientTileArtwork } from '../ResilientTileArtwork';
 
 export interface SoundCloudPlaylistCardProps {
@@ -338,6 +339,7 @@ export interface ArchiveItemCardProps {
   playlists: PlaylistRecord[];
   browserTarget: BrowserTarget | null;
   iaResolvedCounts: Record<string, number>;
+  iaResolvedRatings?: Record<string, string>;
   openIaItem: (item: ArchiveItemSummary, autoPlayFirst?: boolean) => void;
   openLibraryContextMenu: (target: LibraryContextTarget) => void;
   handleAddArchiveItemToHybrid: (item: ArchiveItemSummary) => void;
@@ -350,6 +352,7 @@ export const ArchiveItemCard: React.FC<ArchiveItemCardProps> = ({
   playlists,
   browserTarget,
   iaResolvedCounts,
+  iaResolvedRatings,
   openIaItem,
   openLibraryContextMenu,
   handleAddArchiveItemToHybrid,
@@ -567,6 +570,14 @@ export const ArchiveItemCard: React.FC<ArchiveItemCardProps> = ({
             overflowWrap: 'anywhere',
           }}
         >
+          <ContentRatingBadge
+            rating={
+              item.content_rating ||
+              iaResolvedRatings?.[item.identifier] ||
+              iaItemRatingCache.get(item.identifier)
+            }
+            style={{ marginRight: 5 }}
+          />
           {item.creator}
           {item.year ? ` • ${item.year}` : ''}
         </div>

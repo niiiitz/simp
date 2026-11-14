@@ -443,6 +443,7 @@ fn parse_local_video_file(
         duration_ms: 0,
         source: "local_video".to_string(),
         mount_root: Some(mount_root.to_string()),
+        content_rating: None,
     })
 }
 
@@ -482,6 +483,7 @@ fn parse_audio_file(
     let mut disc_number = Some(1);
     let mut year = None;
     let mut duration_ms = 0u32;
+    let mut content_rating: Option<String> = None;
 
     if let Ok(probe) = Probe::open(path) {
         if let Ok(tagged) = probe.read() {
@@ -512,6 +514,14 @@ fn parse_audio_file(
                 }
                 disc_number = tag.disk().or(Some(1));
                 year = tag.year().map(|y| y as i32);
+                if let Some(adv) = tag.get_string(&lofty::tag::ItemKey::ParentalAdvisory) {
+                    let norm = adv.trim().to_ascii_lowercase();
+                    if matches!(norm.as_str(), "1" | "4" | "explicit" | "yes" | "true") {
+                        content_rating = Some("explicit".to_string());
+                    } else if matches!(norm.as_str(), "2" | "clean") {
+                        content_rating = Some("clean".to_string());
+                    }
+                }
             }
         }
     }
@@ -559,6 +569,7 @@ fn parse_audio_file(
         duration_ms,
         source: source.to_string(),
         mount_root: Some(mount_root.to_string()),
+        content_rating,
     })
 }
 

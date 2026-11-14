@@ -890,6 +890,7 @@ mod tests {
             duration_ms: 506_000,
             source: "local".to_string(),
             mount_root: Some(usb_root.to_string()),
+            content_rating: None,
         };
 
         db.upsert_track(&track, Some(1700000000), Some(42_000_000))

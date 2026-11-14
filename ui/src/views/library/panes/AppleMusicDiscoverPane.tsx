@@ -1,19 +1,9 @@
 import React from "react";
 import {
-  AlbumRecord,
-  ArchiveItemDetail,
-  ArchiveItemSummary,
-  defaultSimpClient,
-  DvdTitleInfo,
-  OpticalDiscStatus,
-  PlaylistRecord,
   SimpStateSnapshot,
   TrackMetadata,
-  VideoEpisodeItem,
 } from "@simp/client";
 import {
-  AppleArtistSummary,
-  AppleCatalogSearchResults,
   AppleCloudAlbumSummary,
   AppleCloudPlaylistSummary,
   AppleRadioStationSummary,
@@ -24,26 +14,10 @@ import {
   fetchAppleRadioAndForYou,
 } from "../../../drivers/AppleMusicDriver";
 import {
-  fetchSoundCloudDiscover,
-  fetchSoundCloudFollowings,
-  fetchSoundCloudLikesAndPlaylists,
-  fetchSoundCloudStreamAndRadio,
-  SoundCloudCatalogSearchResults,
-  SoundCloudPlaylistSummary,
-  SoundCloudUserSummary,
-} from "../../../drivers/SoundCloudDriver";
-import { SoundCloudAttributionLink, SoundCloudLogo } from "../../../components/SoundCloudLogo";
-import { AppleMusicAttributionLink } from "../../../components/AppleMusicLogo";
-import { isUiVideoTrack } from "../../PlayerView";
-import {
   AlphaBucket,
-  cleanCollectionTitle,
   CLOUD_PAGE_SIZE,
-  extractAudioFormat,
-  formatPlaylistSourceBadge,
   tileGridStyle,
 } from "../libraryHelpers";
-import { ResilientTileArtwork } from "../ResilientTileArtwork";
 
 export interface AppleMusicDiscoverPaneProps {
   appleRadioFilter: "all" | "genre" | "live" | "shows" | "mixes";

@@ -3,6 +3,7 @@ import { AlbumRecord, PlaylistRecord } from '@simp/client';
 import { BrowserTarget } from '../../PlayerView';
 import { LibraryContextTarget } from '../../LibraryBrowserView';
 import { cleanCollectionTitle, formatPlaylistSourceBadge } from '../libraryHelpers';
+import { ContentRatingBadge } from '../ContentRatingBadge';
 import { ResilientTileArtwork } from '../ResilientTileArtwork';
 
 export interface SimpPlaylistCardProps {
@@ -534,6 +535,7 @@ export const SimpAlbumCard: React.FC<SimpAlbumCardProps> = ({
             overflowWrap: 'anywhere',
           }}
         >
+          <ContentRatingBadge rating={alb.content_rating} style={{ marginRight: 5 }} />
           {alb.album_artist} • {alb.track_count} tracks
         </div>
       </div>

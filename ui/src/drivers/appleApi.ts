@@ -28,6 +28,7 @@ export interface AppleCloudAlbumSummary {
   release_year: number | null;
   kind: 'catalog' | 'library';
   date_added?: string | null;
+  content_rating?: string | null;
 }
 
 export interface AppleRadioStationSummary {
@@ -111,6 +112,15 @@ export function mapAppleItemToTrack(item: any): TrackMetadata | null {
       : attrArt || relCatalogArt || null;
   const artUrl = formatAppleArtUrl(rawArt, 400);
 
+  const rawContentRating =
+    attrs.contentRating ||
+    item.relationships?.catalog?.data?.[0]?.attributes?.contentRating ||
+    item.contentRating ||
+    null;
+  const content_rating = rawContentRating
+    ? String(rawContentRating).trim().toLowerCase() || null
+    : null;
+
   return {
     uri: `applemusic:song:${trackId}`,
     title,
@@ -123,6 +133,7 @@ export function mapAppleItemToTrack(item: any): TrackMetadata | null {
     duration_ms: durationMs,
     source: 'apple_music',
     mount_root: null,
+    content_rating,
   };
 }
 
@@ -423,6 +434,7 @@ export async function pinAppleAlbumToSimp(
     steam_app_id: null,
     art_url: album.art_url,
     track_count: tracks.length,
+    content_rating: album.content_rating ?? null,
   };
   defaultSimpClient.importCatalogTracks({
     source: 'apple_music',

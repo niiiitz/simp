@@ -34,8 +34,6 @@ export function renderReef3dScene(s: SceneRenderContext): void {
     bpm,
     beat,
     subBass,
-    midEnergy,
-    highEnergy,
     drop,
     sb,
     palette,

@@ -1714,6 +1714,7 @@ impl AudioOrchestrator {
                 "local".to_string()
             },
             mount_root: None,
+            content_rating: None,
         }
     }
 

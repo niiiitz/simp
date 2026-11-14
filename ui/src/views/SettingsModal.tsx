@@ -14,7 +14,6 @@ import {
 } from '../drivers/AppleMusicDriver';
 import {
   disconnectSoundCloudCleanSlate,
-  enableSoundCloudPublicMode,
   startSoundCloudOAuthLogin,
 } from '../drivers/SoundCloudDriver';
 import { SoundCloudLogo } from '../components/SoundCloudLogo';
@@ -184,8 +183,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const [iaUsername, setIaUsername] = useState('');
-  const [iaAccessKey, setIaAccessKey] = useState('');
-  const [iaSecretKey, setIaSecretKey] = useState('');
+  const [iaAccessKey] = useState('');
+  const [iaSecretKey] = useState('');
   const [iaEnabledLocal, setIaEnabledLocal] = useState(
     snap?.internet_archive_authenticated ?? true
   );
@@ -343,22 +342,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }, 35);
   };
 
-  const closeFoldersAccountsPanel = () => {
-    setConfirmHardReset(false);
-    setAddPathOpen(false);
-    setIaAuthOpen(false);
-    setAppleAuthOpen(false);
-    setScAuthOpen(false);
-    setFoldersAccountsOpen(false);
-    window.setTimeout(() => {
-      const triggerBtn = document.querySelector<HTMLElement>(
-        '[data-settings-folders-trigger="true"]:not([disabled])'
-      );
-      if (triggerBtn && applyFocusMarker) {
-        applyFocusMarker(triggerBtn);
-      }
-    }, 35);
-  };
 
   // Determine if a sub-level inside Folders & Accounts or Brightness scrub is open so `B` / `ESC` walks back cleanly
   const hasNestedChildOpen =

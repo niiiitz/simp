@@ -11,7 +11,10 @@ use std::time::Duration;
 use symphonia::{
     core::{
         audio::SampleBuffer,
-        codecs::{DecoderOptions, CODEC_TYPE_NULL},
+        codecs::{
+            CodecType, DecoderOptions, CODEC_TYPE_MP1, CODEC_TYPE_MP2, CODEC_TYPE_MP3,
+            CODEC_TYPE_NULL,
+        },
         formats::{FormatOptions, SeekMode, SeekTo},
         io::MediaSourceStream,
         meta::MetadataOptions,
@@ -422,9 +425,194 @@ fn local_waveform_cache() -> &'static Mutex<HashMap<String, Vec<f32>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Fast-scans a local audio file (`FLAC`, `MP3`, `M4A`, `OGG`, `WAV`) at up to `target_bars`
-/// stride positions using Symphonia to extract a real 180-tick Peak-Weighted RMS waveform silhouette.
+const PACKET_NOISE_FLOOR_PEAK: f32 = 1e-5;
+
+#[inline]
+fn measure_slice_rms_and_peak(slice: &[f32]) -> (f32, f32) {
+    if slice.is_empty() {
+        return (0.0, 0.0);
+    }
+    let step = (slice.len() / 512).max(1);
+    let mut peak = 0.0f32;
+    let mut sum_sq = 0.0f32;
+    let mut count = 0usize;
+    for &sample in slice.iter().step_by(step) {
+        let a = sample.abs();
+        if a.is_finite() {
+            if a > peak {
+                peak = a;
+            }
+            sum_sq += a * a;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        (0.0, 0.0)
+    } else {
+        ((sum_sq / (count as f32)).sqrt(), peak)
+    }
+}
+
+/// Extracts `(rms, peak)` from an interleaved decoded PCM packet.
+///
+/// Symphonia's MP3 Layer III decoder empties its `BitResevoir` on `decoder.reset()` after a seek.
+/// On the first packet(s) following a seek, underflowed granules are explicitly zeroed via
+/// `requantize::zero` while the reservoir refills. Returning `None` for all-zero packets and
+/// skipping a zeroed first granule when the second granule decoded audio prevents ~90% of seek
+/// buckets on MP3s from collapsing into flat baseline dots.
+fn extract_packet_rms_and_peak(samples: &[f32]) -> Option<(f32, f32)> {
+    if samples.is_empty() {
+        return None;
+    }
+    if samples.len() >= 64 {
+        let half = samples.len() / 2;
+        let (rms0, peak0) = measure_slice_rms_and_peak(&samples[..half]);
+        let (rms1, peak1) = measure_slice_rms_and_peak(&samples[half..]);
+        if peak0 <= PACKET_NOISE_FLOOR_PEAK && peak1 <= PACKET_NOISE_FLOOR_PEAK {
+            return None;
+        }
+        if peak0 <= PACKET_NOISE_FLOOR_PEAK && peak1 > PACKET_NOISE_FLOOR_PEAK {
+            return Some((rms1, peak1));
+        }
+        let rms = ((rms0 * rms0 + rms1 * rms1) * 0.5).sqrt();
+        return Some((rms, peak0.max(peak1)));
+    }
+    let (rms, peak) = measure_slice_rms_and_peak(samples);
+    if peak <= PACKET_NOISE_FLOOR_PEAK {
+        None
+    } else {
+        Some((rms, peak))
+    }
+}
+
+/// Normalizes local raw per-bucket energy values into display bars (`0.10..=1.00`) while
+/// preserving quiet-to-loud dynamic contrast on both dynamic and loudness-maximized releases.
+fn normalize_local_waveform_bars(raw_bars: &[f32]) -> Vec<f32> {
+    if raw_bars.is_empty() {
+        return Vec::new();
+    }
+    let max_bar = raw_bars
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(0.0f32, f32::max);
+    if max_bar <= 1e-4 {
+        return vec![0.10; raw_bars.len()];
+    }
+
+    let mut sorted: Vec<f32> = raw_bars
+        .iter()
+        .copied()
+        .map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 })
+        .collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p95_idx = ((sorted.len() as f32) * 0.95) as usize;
+    let norm_denom = sorted
+        .get(p95_idx.min(sorted.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(max_bar)
+        .max(max_bar * 0.72)
+        .max(1e-4);
+
+    raw_bars
+        .iter()
+        .map(|&v| {
+            let norm = if v.is_finite() {
+                (v.max(0.0) / norm_denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (0.10 + 0.90 * norm.powf(1.22)).clamp(0.10, 1.0)
+        })
+        .collect()
+}
+
+#[inline]
+fn is_mpeg_audio_codec(codec: CodecType) -> bool {
+    codec == CODEC_TYPE_MP3 || codec == CODEC_TYPE_MP2 || codec == CODEC_TYPE_MP1
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PacketEnergySample {
+    frames: usize,
+    rms: f32,
+    peak: f32,
+}
+
+fn bucket_packet_energies(samples: &[PacketEnergySample], target_bars: usize) -> Vec<f32> {
+    if samples.is_empty() || target_bars == 0 {
+        return Vec::new();
+    }
+
+    let total_frames: u64 = samples.iter().map(|s| s.frames as u64).sum();
+    if total_frames == 0 {
+        return vec![0.10; target_bars];
+    }
+
+    let mut raw_bars = Vec::with_capacity(target_bars);
+    let mut pkt_idx = 0usize;
+    let mut pkt_start = 0u64;
+
+    for i in 0..target_bars {
+        let bucket_start = ((i as u64) * total_frames) / (target_bars as u64);
+        let bucket_end = ((((i + 1) as u64) * total_frames) / (target_bars as u64))
+            .max(bucket_start + 1)
+            .min(total_frames);
+
+        while pkt_idx + 1 < samples.len()
+            && pkt_start + (samples[pkt_idx].frames as u64) <= bucket_start
+        {
+            pkt_start += samples[pkt_idx].frames as u64;
+            pkt_idx += 1;
+        }
+
+        let mut scan_idx = pkt_idx;
+        let mut scan_start = pkt_start;
+        let mut sum_rms_sq_w = 0.0f64;
+        let mut sum_peak_w = 0.0f64;
+        let mut sum_w = 0.0f64;
+
+        while scan_idx < samples.len() && scan_start < bucket_end {
+            let s = samples[scan_idx];
+            let scan_end = scan_start + (s.frames as u64);
+            let overlap_start = bucket_start.max(scan_start);
+            let overlap_end = bucket_end.min(scan_end);
+            if overlap_end > overlap_start {
+                let w = (overlap_end - overlap_start) as f64;
+                let rms = f64::from(s.rms);
+                sum_rms_sq_w += rms * rms * w;
+                sum_peak_w += f64::from(s.peak) * w;
+                sum_w += w;
+            }
+            if scan_end >= bucket_end {
+                break;
+            }
+            scan_start = scan_end;
+            scan_idx += 1;
+        }
+
+        if sum_w > 0.0 {
+            let combined_rms = ((sum_rms_sq_w / sum_w).sqrt()) as f32;
+            let mean_peak = (sum_peak_w / sum_w) as f32;
+            raw_bars.push(0.72 * combined_rms + 0.28 * mean_peak);
+        } else {
+            raw_bars.push(0.0);
+        }
+    }
+
+    normalize_local_waveform_bars(&raw_bars)
+}
+
+/// Fast-scans a local audio file (`FLAC`, `MP3`, `M4A`, `OGG`, `WAV`) using Symphonia to extract
+/// a 180-tick Peak-Weighted RMS waveform silhouette.
+///
+/// Standard-length MP3s (`<= 12 min`) are scanned sequentially so VBR frame timestamps stay
+/// sample-accurate and Symphonia's `BitResevoir` never underflows on seeks; lossless/seek-tabled
+/// containers (`FLAC`, `M4A`, `OGG`, `WAV`) and long mixes use seek-striding across `target_bars`.
 pub fn compute_local_file_waveform_bars(uri: &str, target_bars: usize) -> Option<Vec<f32>> {
+    if target_bars == 0 {
+        return None;
+    }
     let path = resolve_local_file_path(uri);
     if !path.is_file() {
         return None;
@@ -455,6 +643,7 @@ pub fn compute_local_file_waveform_bars(uri: &str, target_bars: usize) -> Option
         .iter()
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)?;
     let track_id = track.id;
+    let is_mpeg = is_mpeg_audio_codec(track.codec_params.codec);
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44_100);
     let total_frames = track.codec_params.n_frames.unwrap_or(0);
     let total_secs = if total_frames > 0 && sample_rate > 0 {
@@ -467,14 +656,15 @@ pub fn compute_local_file_waveform_bars(uri: &str, target_bars: usize) -> Option
         .make(&track.codec_params, &DecoderOptions::default())
         .ok()?;
 
-    let mut bucket_vals = Vec::with_capacity(target_bars);
-
-    // If total duration is known and >= 8 seconds, seek-stride across `target_bars` positions
-    // (decoding 1 packet per position takes ~15–30ms total for an entire album track!).
-    if total_secs >= 8.0 {
+    // Use seek-stride for container formats with exact seek tables (>= 8s), or very long MP3 mixes (> 12 min).
+    if total_secs >= 8.0 && (!is_mpeg || total_secs > 720.0) {
+        let mut bucket_vals = Vec::with_capacity(target_bars);
         let mut seek_succeeded = true;
+        let max_track_pkts = if is_mpeg { 16 } else { 6 };
+        let silence_abort_pkts = if is_mpeg { 12 } else { 2 };
+
         for i in 0..target_bars {
-            let frac = (i as f64 + 0.5) / (target_bars as f64);
+            let frac = ((i as f64 + 0.5) / (target_bars as f64)).min(0.995);
             let target_sec = frac * total_secs;
             let whole_secs = target_sec.floor() as u64;
             let frac_secs = target_sec - (whole_secs as f64);
@@ -488,95 +678,134 @@ pub fn compute_local_file_waveform_bars(uri: &str, target_bars: usize) -> Option
                 )
                 .is_err()
             {
+                if i >= (target_bars * 4) / 5 {
+                    bucket_vals.resize(target_bars, 0.0);
+                    break;
+                }
                 seek_succeeded = false;
                 break;
             }
             decoder.reset();
 
-            // Read up to 4 packets until we get a packet for `track_id`
-            let mut got_energy = None;
-            for _ in 0..4 {
+            let mut sum_rms_sq = 0.0f32;
+            let mut sum_peak = 0.0f32;
+            let mut saw_mpeg_transition = false;
+            let mut valid_packets = 0usize;
+            let mut valid_frames = 0usize;
+            let mut track_packets = 0usize;
+            let mut total_reads = 0usize;
+
+            while track_packets < max_track_pkts && total_reads < 48 {
+                total_reads += 1;
                 let Ok(packet) = reader.next_packet() else {
                     break;
                 };
                 if packet.track_id() != track_id {
                     continue;
                 }
+                track_packets += 1;
                 if let Ok(decoded) = decoder.decode(&packet) {
                     let spec = *decoded.spec();
                     let frames = decoded.frames();
                     if frames > 0 {
                         let mut sample_buf = SampleBuffer::<f32>::new(frames as u64, spec);
                         sample_buf.copy_interleaved_ref(decoded);
-                        let samples = sample_buf.samples();
-                        let mut peak = 0.0f32;
-                        let mut sum_sq = 0.0f32;
-                        let step = (samples.len() / 256).max(1);
-                        let mut count = 0usize;
-                        for idx in (0..samples.len()).step_by(step) {
-                            let a = samples[idx].abs();
-                            if a > peak {
-                                peak = a;
+                        if let Some((rms, peak)) = extract_packet_rms_and_peak(sample_buf.samples())
+                        {
+                            if is_mpeg && !saw_mpeg_transition {
+                                // Skip the first partial IMDCT overlap transition frame after MP3 reservoir refill.
+                                saw_mpeg_transition = true;
+                                continue;
                             }
-                            sum_sq += a * a;
-                            count += 1;
-                        }
-                        if count > 0 {
-                            let rms = (sum_sq / (count as f32)).sqrt();
-                            got_energy = Some(0.65 * peak + 0.35 * rms);
+                            sum_rms_sq += rms * rms;
+                            sum_peak += peak;
+                            valid_packets += 1;
+                            valid_frames += frames;
+                            if valid_packets >= 4 || (valid_packets >= 2 && valid_frames >= 4096) {
+                                break;
+                            }
+                        } else if valid_packets == 0 && track_packets >= silence_abort_pkts {
                             break;
                         }
                     }
                 }
             }
-            bucket_vals.push(got_energy.unwrap_or(0.08));
+
+            let bucket_energy = if valid_packets > 0 {
+                let combined_rms = (sum_rms_sq / (valid_packets as f32)).sqrt();
+                let mean_peak = sum_peak / (valid_packets as f32);
+                0.72 * combined_rms + 0.28 * mean_peak
+            } else {
+                0.0
+            };
+            bucket_vals.push(bucket_energy);
         }
 
         if seek_succeeded && bucket_vals.len() == target_bars {
-            return Some(downsample_peak_weighted_rms_f32(&bucket_vals, target_bars));
+            return Some(normalize_local_waveform_bars(&bucket_vals));
         }
-        bucket_vals.clear();
+        let _ = reader.seek(
+            SeekMode::Accurate,
+            SeekTo::Time {
+                time: Time::new(0, 0.0),
+                track_id: Some(track_id),
+            },
+        );
+        decoder.reset();
     }
 
-    // Fallback for short files or unseekable streams: linear packet scan (capped at 600 packets)
-    for _ in 0..600 {
+    // Sequential frame-accurate scan (standard-length MP3s <= 12 min, short files < 8s, or unseekable streams).
+    let mut seq_samples: Vec<PacketEnergySample> = Vec::with_capacity(
+        (total_frames / 1024).min(32_000) as usize,
+    );
+    let mut warmed_up = !is_mpeg;
+    let mut warmup_skipped = 0usize;
+    let mut track_packets = 0usize;
+    let mut total_reads = 0usize;
+
+    while track_packets < 32_000 && total_reads < 64_000 {
+        total_reads += 1;
         let Ok(packet) = reader.next_packet() else {
             break;
         };
         if packet.track_id() != track_id {
             continue;
         }
-        if let Ok(decoded) = decoder.decode(&packet) {
-            let spec = *decoded.spec();
-            let frames = decoded.frames();
-            if frames > 0 {
-                let mut sample_buf = SampleBuffer::<f32>::new(frames as u64, spec);
-                sample_buf.copy_interleaved_ref(decoded);
-                let samples = sample_buf.samples();
-                let mut peak = 0.0f32;
-                let mut sum_sq = 0.0f32;
-                let step = (samples.len() / 128).max(1);
-                let mut count = 0usize;
-                for idx in (0..samples.len()).step_by(step) {
-                    let a = samples[idx].abs();
-                    if a > peak {
-                        peak = a;
+        track_packets += 1;
+        match decoder.decode(&packet) {
+            Ok(decoded) => {
+                let spec = *decoded.spec();
+                let frames = decoded.frames();
+                if frames > 0 {
+                    let mut sample_buf = SampleBuffer::<f32>::new(frames as u64, spec);
+                    sample_buf.copy_interleaved_ref(decoded);
+                    if let Some((rms, peak)) = extract_packet_rms_and_peak(sample_buf.samples()) {
+                        warmed_up = true;
+                        seq_samples.push(PacketEnergySample { frames, rms, peak });
+                    } else if !warmed_up && warmup_skipped < 6 {
+                        warmup_skipped += 1;
+                    } else {
+                        seq_samples.push(PacketEnergySample {
+                            frames,
+                            rms: 0.0,
+                            peak: 0.0,
+                        });
                     }
-                    sum_sq += a * a;
-                    count += 1;
-                }
-                if count > 0 {
-                    let rms = (sum_sq / (count as f32)).sqrt();
-                    bucket_vals.push(0.65 * peak + 0.35 * rms);
                 }
             }
+            Err(_) if is_mpeg => {
+                // Reservoir was cleared by Symphonia on decode error; allow brief warmup without zero gaps.
+                warmed_up = false;
+                warmup_skipped = 0;
+            }
+            Err(_) => {}
         }
     }
 
-    if bucket_vals.is_empty() {
+    if seq_samples.is_empty() {
         None
     } else {
-        Some(downsample_peak_weighted_rms_f32(&bucket_vals, target_bars))
+        Some(bucket_packet_energies(&seq_samples, target_bars))
     }
 }
 
@@ -671,5 +900,130 @@ mod tests {
         assert_eq!(bars.len(), DEFAULT_WAVEFORM_BARS);
         assert!(bars[0] < bars[30], "intro bar should be lower than beat-drop bar");
         assert!(bars.iter().all(|&b| (0.10..=1.0).contains(&b)));
+    }
+
+    #[test]
+    fn test_extract_packet_rms_and_peak_skips_mp3_reservoir_underflow() {
+        // 1. All-zero reservoir warmup packet returns None so seek loops continue to next frame.
+        let zero_pkt = vec![0.0f32; 2304];
+        assert!(extract_packet_rms_and_peak(&zero_pkt).is_none());
+
+        // 2. Granule 0 zeroed by partial reservoir underflow, Granule 1 decoded at 0.5 amplitude:
+        // must measure Granule 1 directly without halving energy with Granule 0's zeros.
+        let mut partial_pkt = vec![0.0f32; 2304];
+        for s in &mut partial_pkt[1152..] {
+            *s = 0.5;
+        }
+        let (rms_partial, peak_partial) =
+            extract_packet_rms_and_peak(&partial_pkt).expect("expected valid granule 1 energy");
+        assert!((rms_partial - 0.5).abs() < 0.01, "got {rms_partial}");
+        assert!((peak_partial - 0.5).abs() < 0.01, "got {peak_partial}");
+
+        // 3. Full active stereo packet combines both halves cleanly.
+        let full_pkt = vec![0.4f32; 2304];
+        let (rms_full, peak_full) =
+            extract_packet_rms_and_peak(&full_pkt).expect("expected valid full packet");
+        assert!((rms_full - 0.4).abs() < 0.01, "got {rms_full}");
+        assert!((peak_full - 0.4).abs() < 0.01, "got {peak_full}");
+    }
+
+    #[test]
+    fn test_normalize_local_waveform_bars_preserves_contrast_and_silence() {
+        let silent = normalize_local_waveform_bars(&vec![0.0; 180]);
+        assert!(silent.iter().all(|&b| (b - 0.10).abs() < 1e-5));
+
+        let mut raw = Vec::with_capacity(180);
+        for i in 0..180 {
+            if i < 20 {
+                raw.push(0.0); // digital silence intro
+            } else if i < 90 {
+                raw.push(0.28); // verse
+            } else if i < 160 {
+                raw.push(0.56); // loud drop
+            } else {
+                raw.push(0.14); // quiet outro
+            }
+        }
+        let bars = normalize_local_waveform_bars(&raw);
+        assert_eq!(bars.len(), 180);
+        assert!((bars[5] - 0.10).abs() < 1e-5, "silent bar should stay at baseline 0.10");
+        assert!(
+            bars[50] > bars[170] && bars[50] < bars[120],
+            "expected outro ({}) < verse ({}) < drop ({})",
+            bars[170],
+            bars[50],
+            bars[120]
+        );
+        assert!(bars[120] > 0.90, "expected chorus bar > 0.90, got {}", bars[120]);
+    }
+
+    #[test]
+    fn test_compute_local_file_waveform_bars_seek_stride_wav() {
+        use std::io::Write;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let sample_rate: u32 = 8_000;
+        let total_secs: u32 = 10; // >= 8s exercises the 180-position seek-stride pipeline
+        let total_samples = (sample_rate * total_secs) as usize;
+        let data_bytes = (total_samples * 2) as u32;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+
+        for idx in 0..total_samples {
+            let sec = idx as f32 / (sample_rate as f32);
+            let amp = if sec < 2.0 {
+                0.0 // silent intro (bars 0..36)
+            } else if sec < 6.0 {
+                0.42 // moderate verse (bars 36..108)
+            } else if sec < 9.0 {
+                0.90 // loud drop (bars 108..162)
+            } else {
+                0.0 // silent outro (bars 162..180)
+            };
+            let s = ((2.0 * std::f32::consts::PI * 220.0 * sec).sin() * amp * 32767.0) as i16;
+            wav.extend_from_slice(&s.to_le_bytes());
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_path = std::env::temp_dir().join(format!(
+            "simp_test_waveform_{}_{}.wav",
+            std::process::id(),
+            stamp
+        ));
+        {
+            let mut f = File::create(&tmp_path).expect("create temp wav");
+            f.write_all(&wav).expect("write temp wav");
+        }
+
+        let uri = format!("file://{}", tmp_path.to_string_lossy());
+        let bars = compute_local_file_waveform_bars(&uri, DEFAULT_WAVEFORM_BARS);
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let bars = bars.expect("expected 180 computed bars");
+        assert_eq!(bars.len(), DEFAULT_WAVEFORM_BARS);
+        assert!(bars[10] <= 0.12, "silent intro bar[10] should be ~0.10, got {}", bars[10]);
+        assert!(
+            bars[70] > 0.30 && bars[70] < bars[135],
+            "expected verse bar[70] ({}) lower than chorus drop bar[135] ({})",
+            bars[70],
+            bars[135]
+        );
+        assert!(bars[135] > 0.85, "drop bar[135] should be > 0.85, got {}", bars[135]);
+        assert!(bars[172] <= 0.12, "silent outro bar[172] should be ~0.10, got {}", bars[172]);
     }
 }

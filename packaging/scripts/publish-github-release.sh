@@ -49,6 +49,15 @@ notes = f"SIMP {tag}"
 if notes_file and os.path.isfile(notes_file):
     with open(notes_file, "r", encoding="utf-8") as f:
         notes = f.read()
+else:
+    try:
+        commit_msg = subprocess.check_output(
+            ["git", "log", "-1", "--format=## %s%n%n%b", tag], text=True
+        ).strip()
+        if commit_msg:
+            notes = commit_msg
+    except Exception:
+        pass
 
 token = os.environ.get("GH_TOKEN", "").strip()
 if not token:

@@ -221,6 +221,241 @@ fn parse_year_field(v: Option<&Value>) -> Option<i32> {
     None
 }
 
+fn normalize_ia_certification_token(raw: &str, allow_bare: bool) -> Option<String> {
+    let cleaned = raw
+        .trim()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '.' | ',' | ';'));
+    if cleaned.is_empty() {
+        return None;
+    }
+    let lower = cleaned.to_ascii_lowercase();
+    let stripped = lower
+        .strip_prefix("mpaa rating:")
+        .or_else(|| lower.strip_prefix("mpaa:"))
+        .or_else(|| lower.strip_prefix("mpaa "))
+        .or_else(|| lower.strip_prefix("content rating:"))
+        .or_else(|| lower.strip_prefix("film rating:"))
+        .or_else(|| lower.strip_prefix("certificate:"))
+        .or_else(|| lower.strip_prefix("rating:"))
+        .or_else(|| lower.strip_prefix("rated "))
+        .map(str::trim);
+
+    let token = match stripped {
+        Some(s) => s,
+        None if allow_bare => lower.as_str(),
+        None => {
+            // Even when bare words aren't accepted, explicit prefixed standards like TV-PG or Pre-Code are safe.
+            if matches!(
+                lower.as_str(),
+                "pg-13"
+                    | "nc-17"
+                    | "tv-y"
+                    | "tv-y7"
+                    | "tv-g"
+                    | "tv-pg"
+                    | "tv-14"
+                    | "tv-ma"
+                    | "not rated"
+                    | "unrated"
+                    | "pre-code"
+                    | "precode"
+                    | "18+"
+                    | "explicit"
+            ) {
+                lower.as_str()
+            } else {
+                return None;
+            }
+        }
+    };
+
+    match token {
+        "g" => Some("G".to_string()),
+        "pg" => Some("PG".to_string()),
+        "pg-13" | "pg13" => Some("PG-13".to_string()),
+        "r" => Some("R".to_string()),
+        "nc-17" | "nc17" => Some("NC-17".to_string()),
+        "x" => Some("X".to_string()),
+        "tv-y" | "tvy" => Some("TV-Y".to_string()),
+        "tv-y7" | "tvy7" => Some("TV-Y7".to_string()),
+        "tv-g" | "tvg" => Some("TV-G".to_string()),
+        "tv-pg" | "tvpg" => Some("TV-PG".to_string()),
+        "tv-14" | "tv14" => Some("TV-14".to_string()),
+        "tv-ma" | "tvma" => Some("TV-MA".to_string()),
+        "nr" | "not rated" | "unrated" => Some("NR".to_string()),
+        "passed" => Some("PASSED".to_string()),
+        "approved" => Some("APPROVED".to_string()),
+        "pre-code" | "precode" => Some("PRE-CODE".to_string()),
+        "18+" | "mature" | "adult" => Some("18+".to_string()),
+        "explicit" => Some("explicit".to_string()),
+        _ => None,
+    }
+}
+
+fn scan_text_for_certification(text: &str) -> Option<String> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    let prefixes = [
+        "mpaa rating:",
+        "mpaa:",
+        "mpaa ",
+        "content rating:",
+        "film rating:",
+        "certificate:",
+        "rated ",
+    ];
+    let candidates: &[(&str, &str)] = &[
+        ("pg-13", "PG-13"),
+        ("pg13", "PG-13"),
+        ("nc-17", "NC-17"),
+        ("nc17", "NC-17"),
+        ("tv-y7", "TV-Y7"),
+        ("tv-y", "TV-Y"),
+        ("tv-g", "TV-G"),
+        ("tv-pg", "TV-PG"),
+        ("tv-14", "TV-14"),
+        ("tv-ma", "TV-MA"),
+        ("approved", "APPROVED"),
+        ("passed", "PASSED"),
+        ("pg", "PG"),
+        ("nr", "NR"),
+        ("g", "G"),
+        ("r", "R"),
+        ("x", "X"),
+    ];
+    let is_boundary = |b: Option<u8>| -> bool {
+        matches!(
+            b,
+            None | Some(b' ')
+                | Some(b'.')
+                | Some(b',')
+                | Some(b';')
+                | Some(b':')
+                | Some(b')')
+                | Some(b']')
+                | Some(b'-')
+                | Some(b'/')
+                | Some(b'\n')
+                | Some(b'\r')
+                | Some(b'\t')
+        )
+    };
+    let bytes = lower.as_bytes();
+    for prefix in prefixes {
+        let mut search_from = 0;
+        while let Some(rel) = lower[search_from..].find(prefix) {
+            let match_start = search_from + rel;
+            let prev_ok = match_start == 0
+                || !bytes[match_start - 1].is_ascii_alphanumeric();
+            let after_prefix = match_start + prefix.len();
+            if prev_ok && after_prefix < lower.len() {
+                let rest = lower[after_prefix..].trim_start();
+                let rest_bytes = rest.as_bytes();
+                for &(pat, norm) in candidates {
+                    if rest.starts_with(pat)
+                        && is_boundary(rest_bytes.get(pat.len()).copied())
+                    {
+                        return Some(norm.to_string());
+                    }
+                }
+            }
+            search_from = after_prefix;
+        }
+    }
+    if lower.contains("not rated") {
+        return Some("NR".to_string());
+    }
+    if lower.contains("pre-code") {
+        return Some("PRE-CODE".to_string());
+    }
+    None
+}
+
+fn parse_rating_number(v: Option<&Value>) -> Option<f64> {
+    match v {
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(Value::String(s)) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+    .filter(|&val| (0.5..=5.0).contains(&val))
+}
+
+/// Extracts film/content certification ratings (`PG`, `PG-13`, `R`, `TV-PG`, `NR`, `APPROVED`,
+/// `PRE-CODE`, etc.) or community review scores (`★ 4.5`) from Internet Archive metadata.
+pub fn extract_ia_content_rating(
+    meta_or_doc: &Value,
+    description: &str,
+    root: Option<&Value>,
+) -> Option<String> {
+    for key in [
+        "mpaa",
+        "mpaa_rating",
+        "content_rating",
+        "certification",
+        "age-appropriate",
+        "age_rating",
+        "ccc",
+    ] {
+        let val = value_as_first_string(meta_or_doc.get(key));
+        if let Some(norm) = normalize_ia_certification_token(&val, true) {
+            return Some(norm);
+        }
+    }
+
+    let rating_val = value_as_first_string(meta_or_doc.get("rating"));
+    if !rating_val.is_empty() && rating_val.trim().parse::<f64>().is_err() {
+        if let Some(norm) = normalize_ia_certification_token(&rating_val, true) {
+            return Some(norm);
+        }
+    }
+
+    if let Some(subj) = meta_or_doc.get("subject") {
+        let mut tags: Vec<&str> = Vec::new();
+        match subj {
+            Value::Array(arr) => {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        for part in s.split([';', ',']) {
+                            tags.push(part);
+                        }
+                    }
+                }
+            }
+            Value::String(s) => {
+                for part in s.split([';', ',']) {
+                    tags.push(part);
+                }
+            }
+            _ => {}
+        }
+        for tag in tags {
+            if let Some(norm) = normalize_ia_certification_token(tag, false) {
+                return Some(norm);
+            }
+        }
+    }
+
+    if let Some(norm) = scan_text_for_certification(description) {
+        return Some(norm);
+    }
+    let notes = strip_html_tags(&value_as_first_string(meta_or_doc.get("notes")));
+    if let Some(norm) = scan_text_for_certification(&notes) {
+        return Some(norm);
+    }
+
+    let avg = parse_rating_number(meta_or_doc.get("avg_rating")).or_else(|| {
+        root.and_then(|r| {
+            parse_rating_number(
+                r.pointer("/reviews/info/avg_rating")
+                    .or_else(|| r.pointer("/reviews/avg_rating")),
+            )
+        })
+    });
+    avg.map(|score| format!("★ {score:.1}"))
+}
+
 pub fn build_advancedsearch_url(query: &str, sort: &str, rows: usize, page: usize) -> String {
     let encoded_q = url_encode_component(query);
     let encoded_sort = url_encode_component(sort);
@@ -229,6 +464,7 @@ pub fn build_advancedsearch_url(query: &str, sort: &str, rows: usize, page: usiz
          &fl%5B%5D=identifier&fl%5B%5D=title&fl%5B%5D=creator&fl%5B%5D=mediatype&fl%5B%5D=description\
          &fl%5B%5D=year&fl%5B%5D=date&fl%5B%5D=downloads&fl%5B%5D=week&fl%5B%5D=month&fl%5B%5D=runtime\
          &fl%5B%5D=item_count&fl%5B%5D=files_count\
+         &fl%5B%5D=subject&fl%5B%5D=mpaa&fl%5B%5D=content_rating&fl%5B%5D=rating&fl%5B%5D=avg_rating\
          &sort%5B%5D={encoded_sort}&rows={rows}&page={page}&output=json"
     )
 }
@@ -288,6 +524,7 @@ fn parse_search_doc(doc: &Value) -> Option<ArchiveItemSummary> {
         .and_then(|v| v.as_u64())
         .map(|n| n as u32)
         .filter(|&n| n > 0);
+    let content_rating = extract_ia_content_rating(doc, &description, None);
 
     Some(ArchiveItemSummary {
         art_url: Some(format!(
@@ -305,6 +542,7 @@ fn parse_search_doc(doc: &Value) -> Option<ArchiveItemSummary> {
         views_30d,
         runtime_label,
         item_count,
+        content_rating,
     })
 }
 
@@ -557,6 +795,7 @@ pub fn fetch_user_favorites(
             views_30d: 0,
             runtime_label: None,
             item_count: None,
+            content_rating: None,
         });
     }
     Ok(out)
@@ -705,6 +944,7 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
     };
     let year = parse_year_field(meta.get("year")).or_else(|| parse_year_field(meta.get("date")));
     let description = strip_html_tags(&value_as_first_string(meta.get("description")));
+    let content_rating = extract_ia_content_rating(meta, &description, Some(root));
     let runtime_raw = value_as_first_string(meta.get("runtime"));
     let art_url = Some(format!(
         "https://archive.org/services/img/{}",
@@ -1118,6 +1358,7 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
                 duration_ms,
                 source: "internet_archive".to_string(),
                 mount_root: None,
+                content_rating: content_rating.clone(),
             },
         });
     }
@@ -1176,6 +1417,7 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
                 duration_ms: ep.duration_ms,
                 source: "ia_video".to_string(),
                 mount_root: None,
+                content_rating: content_rating.clone(),
             })
             .collect();
     }
@@ -1206,6 +1448,7 @@ pub fn parse_ia_metadata_json(identifier: &str, root: &Value) -> Result<ArchiveI
                 Some(runtime_raw)
             },
             item_count: resolved_count,
+            content_rating,
         },
         episodes,
         tracks,
@@ -1450,5 +1693,68 @@ mod tests {
         assert!(vtt.starts_with("WEBVTT\n\n"));
         assert!(vtt.contains("00:00:01.250 --> 00:00:04.500"));
         assert!(vtt.contains("00:00:05.000 --> 00:00:08.125"));
+    }
+
+    #[test]
+    fn test_extract_ia_content_rating_handles_certifications_subjects_and_avg_rating() {
+        let doc_mpaa = json!({
+            "identifier": "sample_film_pg13",
+            "title": "Sample Feature Film",
+            "mediatype": "movies",
+            "mpaa": "Rated PG-13"
+        });
+        assert_eq!(
+            parse_search_doc(&doc_mpaa)
+                .expect("doc")
+                .content_rating
+                .as_deref(),
+            Some("PG-13")
+        );
+
+        let doc_subject = json!({
+            "identifier": "sample_classic_precode",
+            "title": "Sample Archival Film",
+            "mediatype": "movies",
+            "subject": ["Feature Film", "Pre-Code", "Drama"]
+        });
+        assert_eq!(
+            parse_search_doc(&doc_subject)
+                .expect("subject doc")
+                .content_rating
+                .as_deref(),
+            Some("PRE-CODE")
+        );
+
+        let meta_desc = json!({
+            "metadata": {
+                "identifier": "sample_desc_rated",
+                "title": "Sample Midnight Reel",
+                "mediatype": "movies",
+                "description": "An archival print, rated R for dramatic intensity. Originally rated great by critics."
+            },
+            "files": []
+        });
+        let detail_desc = parse_ia_metadata_json("sample_desc_rated", &meta_desc).expect("parse");
+        assert_eq!(detail_desc.summary.content_rating.as_deref(), Some("R"));
+
+        let meta_false_pos = json!({
+            "metadata": {
+                "identifier": "sample_unrated_star",
+                "title": "Sample Documentary",
+                "mediatype": "movies",
+                "description": "Critics rated great cinematography and rated rare archival sound."
+            },
+            "reviews": {
+                "info": {
+                    "avg_rating": "4.6"
+                }
+            },
+            "files": []
+        });
+        let detail_stars = parse_ia_metadata_json("sample_unrated_star", &meta_false_pos).expect("parse");
+        assert_eq!(
+            detail_stars.summary.content_rating.as_deref(),
+            Some("★ 4.6")
+        );
     }
 }

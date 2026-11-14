@@ -2,51 +2,25 @@ import React from "react";
 import {
   AlbumRecord,
   ArchiveItemDetail,
-  ArchiveItemSummary,
   defaultSimpClient,
-  DvdTitleInfo,
   OpticalDiscStatus,
   PlaylistRecord,
   SimpStateSnapshot,
   TrackMetadata,
-  VideoEpisodeItem,
 } from "@simp/client";
 import {
-  AppleArtistSummary,
-  AppleCatalogSearchResults,
-  AppleCloudAlbumSummary,
-  AppleCloudPlaylistSummary,
-  AppleRadioStationSummary,
-  AppleRecommendationShelf,
-  fetchAppleCloudPlaylists,
-  fetchAppleLibraryRecentlyAdded,
-  fetchAppleNewFeed,
-  fetchAppleRadioAndForYou,
-} from "../../../drivers/AppleMusicDriver";
-import {
-  fetchSoundCloudDiscover,
-  fetchSoundCloudFollowings,
-  fetchSoundCloudLikesAndPlaylists,
-  fetchSoundCloudStreamAndRadio,
-  SoundCloudCatalogSearchResults,
   SoundCloudPlaylistSummary,
-  SoundCloudUserSummary,
 } from "../../../drivers/SoundCloudDriver";
-import { SoundCloudAttributionLink, SoundCloudLogo } from "../../../components/SoundCloudLogo";
+import { SoundCloudAttributionLink } from "../../../components/SoundCloudLogo";
 import { AppleMusicAttributionLink } from "../../../components/AppleMusicLogo";
-import { isUiVideoTrack } from "../../PlayerView";
 import {
-  AlphaBucket,
-  cleanCollectionTitle,
-  CLOUD_PAGE_SIZE,
   extractAudioFormat,
-  formatPlaylistSourceBadge,
   getTrackLyricsBadge,
-  tileGridStyle,
+  iaItemRatingCache,
   useLibraryLyricsStatus,
 } from "../libraryHelpers";
+import { ContentRatingBadge } from "../ContentRatingBadge";
 import { ImpIcon } from "../../../components/icons/ImpIcon";
-import { ResilientTileArtwork } from "../ResilientTileArtwork";
 
 export interface LibraryTracklistRightPaneProps {
   activeHubLabel: string;
@@ -266,23 +240,40 @@ export const LibraryTracklistRightPane: React.FC<LibraryTracklistRightPaneProps>
                       ? `💾 ${selectedMountObj.label}`
                       : browserTarget?.title || 'Tracks'}
                   </div>
-                  <div style={{ fontSize: 12, color: '#8e8e99' }}>
-                    {browserTarget?.kind === 'ia_item' &&
-                    activeIaDetail &&
-                    activeIaDetail.episodes.length > 0
-                      ? `${activeIaDetail.episodes.length} video ${
-                          activeIaDetail.episodes.length === 1 ? 'part' : 'parts'
-                        }${
-                          browserTracks.length > 0 ? ` • ${browserTracks.length} audio tracks` : ''
-                        }`
-                      : `${browserTracks.length} tracks`}
-                    {selectedAlbumObj ? ` • ${selectedAlbumObj.album_artist}` : ''}
-                    {selectedMountObj ? ` in ${selectedMountObj.mount_root}` : ''}
-                    {!selectedAlbumObj &&
-                    !selectedMountObj &&
-                    browserTarget?.subtitle
-                      ? ` • ${browserTarget.subtitle}`
-                      : ''}
+                  <div style={{ fontSize: 12, color: '#8e8e99', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                    <ContentRatingBadge
+                      rating={
+                        selectedAlbumObj?.content_rating ||
+                        (browserTarget?.kind === 'ia_item'
+                          ? activeIaDetail?.summary.content_rating ||
+                            browserTarget?.content_rating ||
+                            iaItemRatingCache.get(browserTarget.id)
+                          : browserTarget?.content_rating) ||
+                        (browserTracks.some(
+                          (tr) => tr.content_rating?.toLowerCase() === 'explicit'
+                        )
+                          ? 'explicit'
+                          : null)
+                      }
+                    />
+                    <span>
+                      {browserTarget?.kind === 'ia_item' &&
+                      activeIaDetail &&
+                      activeIaDetail.episodes.length > 0
+                        ? `${activeIaDetail.episodes.length} video ${
+                            activeIaDetail.episodes.length === 1 ? 'part' : 'parts'
+                          }${
+                            browserTracks.length > 0 ? ` • ${browserTracks.length} audio tracks` : ''
+                          }`
+                        : `${browserTracks.length} tracks`}
+                      {selectedAlbumObj ? ` • ${selectedAlbumObj.album_artist}` : ''}
+                      {selectedMountObj ? ` in ${selectedMountObj.mount_root}` : ''}
+                      {!selectedAlbumObj &&
+                      !selectedMountObj &&
+                      browserTarget?.subtitle
+                        ? ` • ${browserTarget.subtitle}`
+                        : ''}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -989,6 +980,7 @@ export const LibraryTracklistRightPane: React.FC<LibraryTracklistRightPaneProps>
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {t.title}
                         </span>
+                        <ContentRatingBadge rating={t.content_rating} />
                         {(() => {
                           const lyrBadge = getTrackLyricsBadge(t.uri);
                           if (!lyrBadge) return null;

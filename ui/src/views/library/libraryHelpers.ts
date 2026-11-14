@@ -21,6 +21,36 @@ export function matchesAlphaBucket(name: string, bucket: AlphaBucket): boolean {
 
 export const iaItemCountCache = new Map<string, number>();
 export const iaItemCountPending = new Set<string>();
+export const iaItemRatingCache = new Map<string, string>();
+
+export interface FormattedContentRating {
+  label: string;
+  title: string;
+  tone: 'explicit' | 'clean' | 'mature' | 'film' | 'stars';
+}
+
+export function formatContentRatingBadge(raw?: string | null): FormattedContentRating | null {
+  const cleaned = (raw || '').trim();
+  if (!cleaned) return null;
+  const upper = cleaned.toUpperCase();
+  if (upper === 'EXPLICIT' || upper === 'E') {
+    return { label: 'E', title: 'Explicit Content', tone: 'explicit' };
+  }
+  if (upper === 'CLEAN') {
+    return { label: 'CLEAN', title: 'Clean Edition', tone: 'clean' };
+  }
+  if (upper === 'R' || upper === 'NC-17' || upper === 'X' || upper === 'TV-MA' || upper === '18+') {
+    return { label: upper, title: `Content Rating: ${upper}`, tone: 'mature' };
+  }
+  if (upper.startsWith('★')) {
+    return {
+      label: upper,
+      title: `Internet Archive Community Rating (${upper})`,
+      tone: 'stars',
+    };
+  }
+  return { label: upper, title: `Content Rating: ${upper}`, tone: 'film' };
+}
 
 export function extractAudioFormat(uri?: string | null): string | null {
   if (!uri || !uri.startsWith('file://')) return null;
